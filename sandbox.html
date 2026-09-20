@@ -1,0 +1,2456 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>SCS Sandbox - Editor</title>
+<style>
+body{margin:0;padding:10px;background:#0f1115;color:#e6e6e6;font-family:monospace;display:flex;flex-direction:column;align-items:center;}
+#canvas-container{border:2px solid #3a3f4b;border-radius:8px;background:#000;overflow:hidden;}
+canvas{display:block;background:black;}
+#controls{margin-top:12px;width:1050px;max-width:98vw;}
+textarea{width:100%;height:400px;background:#1a1d24;color:#d6deeb;border:1px solid #3a3f4b;border-radius:6px;padding:12px;font-family:monospace;font-size:11px;}
+button{background:#4c6ef5;color:white;border:0;padding:10px 18px;border-radius:6px;cursor:pointer;font-weight:600;margin-right:8px;}
+#log{margin-top:10px;background:#1a1d24;border:1px solid #3a3f4b;border-radius:6px;padding:10px;min-height:80px;white-space:pre-wrap;font-size:11px;max-height:300px;overflow:auto;}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython_stdlib.js"></script>
+</head>
+<body onload="brython({debug:1})">
+<div id="canvas-container"><canvas id="cmu-canvas" width="1050" height="700"></canvas></div>
+<div id="controls">
+<textarea id="code-input">from scs import *
+from math import sin, cos, atan2, sqrt, pi
+
+
+# ==============================================================
+# THE EXACT METHOD OF AEROFOIL DESIGN
+# JOUKOWSKI CONFORMAL-MAPPING WIND TUNNEL
+#
+# CMU CS Academy CPCS Mode
+# Canvas: 1050 x 700
+#
+# VISUAL CONVENTION
+# --------------------------------------------------------------
+# The wind remains horizontal, moving left to right.
+# The aerofoil and mapped flow geometry visibly rotate.
+# The rotation angle is the displayed angle of attack alpha.
+#
+# CONTROLS
+# --------------------------------------------------------------
+# Drag gold handle : Move generating circle / change camber
+# W / S            : Increase / decrease circulation
+# A / D            : Rotate aerofoil down / up
+# Q / E            : Make generating circle smaller / larger
+# 1                : Symmetric preset
+# 2                : Cambered preset
+# 3                : High-lift preset
+# SPACE            : Pause / resume tracer particles
+# R                : Reset
+# H                : Help
+# ==============================================================
+
+
+# --------------------------------------------------------------
+# Utility functions
+# --------------------------------------------------------------
+
+def clamp(value, low, high):
+    if value < low:
+        return low
+    elif value > high:
+        return high
+    return value
+
+
+def distanceBetween(x1, y1, x2, y2):
+    return sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+
+
+def sourceToScreen(app, x, y):
+    return (
+        app.sourceCenterX + x * app.sourceScale,
+        app.sourceCenterY - y * app.sourceScale
+    )
+
+
+def mappedToScreen(app, x, y):
+    return (
+        app.mappedCenterX + x * app.mappedScale,
+        app.mappedCenterY - y * app.mappedScale
+    )
+
+
+def screenToSource(app, screenX, screenY):
+    return (
+        (screenX - app.sourceCenterX) / app.sourceScale,
+        (app.sourceCenterY - screenY) / app.sourceScale
+    )
+
+
+def rotatePoint(x, y, pivotX, pivotY, angleRadians):
+    dx = x - pivotX
+    dy = y - pivotY
+
+    rotatedX = pivotX + dx * cos(angleRadians) - dy * sin(angleRadians)
+    rotatedY = pivotY + dx * sin(angleRadians) + dy * cos(angleRadians)
+
+    return (rotatedX, rotatedY)
+
+
+def joukowskiMap(x, y):
+    # w = z + 1/z
+    denominator = x * x + y * y
+
+    if denominator < 0.0001:
+        denominator = 0.0001
+
+    return (
+        x + x / denominator,
+        y - y / denominator
+    )
+
+
+# --------------------------------------------------------------
+# Fast cached source and mapped geometry
+# --------------------------------------------------------------
+
+def getBaseStreamlinePoint(app, level, theta):
+    radius = app.circleRadius
+
+    radialOffset = 0.22 + abs(level) * 0.46
+    noseBend = 0.46 * (1 - cos(theta))
+    sideBend = 0.16 * sin(theta) * sin(theta)
+
+    radialDistance = radius + radialOffset + noseBend + sideBend
+
+    x = app.circleX + radialDistance * cos(theta)
+    y = app.circleY + radialDistance * sin(theta)
+
+    # A qualitative circulation asymmetry.
+    circulationShift = app.circulation * 0.13 * sin(theta)
+
+    if level > 0:
+        y += circulationShift
+    else:
+        y += circulationShift * 0.72
+
+    return (x, y)
+
+
+def buildOneStreamline(app, level):
+    points = []
+
+    if level > 0:
+        startTheta = pi + 0.98
+        endTheta = -0.98
+    else:
+        startTheta = pi - 0.98
+        endTheta = 0.98
+
+    startX = -3.45
+    startY = level * 0.69 + app.circleY * 0.10
+    points.append((startX, startY))
+
+    steps = 50
+
+    for step in range(steps + 1):
+        fraction = step / steps
+        theta = startTheta + (endTheta - startTheta) * fraction
+
+        x, y = getBaseStreamlinePoint(app, level, theta)
+        points.append((x, y))
+
+    endX = 3.45
+    endY = level * 0.69 + app.circleY * 0.10
+    endY += app.circulation * 0.10
+    points.append((endX, endY))
+
+    return points
+
+
+def rebuildCachedGeometry(app):
+    # This runs only after an input change, never every onStep.
+
+    app.sourceStreamlines = []
+    app.mappedStreamlines = []
+
+    levels = [
+        -2.15, -1.72, -1.36, -1.04, -0.78, -0.54, -0.33,
+         0.33,  0.54,  0.78,  1.04,  1.36,  1.72,  2.15
+    ]
+
+    for level in levels:
+        sourceLine = buildOneStreamline(app, level)
+        mappedLine = []
+
+        for x, y in sourceLine:
+            mappedX, mappedY = joukowskiMap(x, y)
+            mappedLine.append((mappedX, mappedY))
+
+        app.sourceStreamlines.append(sourceLine)
+        app.mappedStreamlines.append(mappedLine)
+
+    app.mappedAirfoilPoints = []
+
+    pointCount = 180
+
+    for index in range(pointCount + 1):
+        theta = 2 * pi * index / pointCount
+
+        sourceX = app.circleX + app.circleRadius * cos(theta)
+        sourceY = app.circleY + app.circleRadius * sin(theta)
+
+        mappedX, mappedY = joukowskiMap(sourceX, sourceY)
+        app.mappedAirfoilPoints.append((mappedX, mappedY))
+
+    # Cache leading and trailing edge coordinates in mapped world space.
+    app.leadingEdge = app.mappedAirfoilPoints[0]
+    app.trailingEdge = app.mappedAirfoilPoints[0]
+
+    for point in app.mappedAirfoilPoints:
+        if point[0] < app.leadingEdge[0]:
+            app.leadingEdge = point
+
+        if point[0] > app.trailingEdge[0]:
+            app.trailingEdge = point
+
+    # Rotation pivot: a point partway from leading to trailing edge.
+    # Approximately a quarter-chord pivot works well visually.
+    app.aerofoilPivotX = (
+        app.leadingEdge[0] +
+        0.28 * (app.trailingEdge[0] - app.leadingEdge[0])
+    )
+
+    app.aerofoilPivotY = (
+        app.leadingEdge[1] +
+        0.28 * (app.trailingEdge[1] - app.leadingEdge[1])
+    )
+
+
+# --------------------------------------------------------------
+# Aerofoil display rotation
+# --------------------------------------------------------------
+
+def getRotatedMappedPoint(app, x, y):
+    # In math coordinates, positive alpha should make the nose rise.
+    # Screen y is inverted later by mappedToScreen, so use -alpha.
+    angleRadians = -app.angleOfAttack * pi / 180
+
+    return rotatePoint(
+        x,
+        y,
+        app.aerofoilPivotX,
+        app.aerofoilPivotY,
+        angleRadians
+    )
+
+
+def getRotatedMappedScreenPoint(app, x, y):
+    rotatedX, rotatedY = getRotatedMappedPoint(app, x, y)
+    return mappedToScreen(app, rotatedX, rotatedY)
+
+
+# --------------------------------------------------------------
+# Statistics
+# --------------------------------------------------------------
+
+def getDesignStats(app):
+    camber = app.circleY * 32
+    thickness = max(1.5, (app.circleRadius - 0.87) * 58)
+
+    liftIndex = (
+        app.circulation * 0.62 +
+        app.angleOfAttack * 0.065 +
+        camber * 0.085
+    )
+
+    if liftIndex >= 1.85:
+        rating = 'ELITE LIFT'
+        ratingColor = 'springGreen'
+    elif liftIndex >= 1.25:
+        rating = 'MISSION READY'
+        ratingColor = 'gold'
+    elif liftIndex >= 0.45:
+        rating = 'LIFTING'
+        ratingColor = 'lightGreen'
+    elif liftIndex >= -0.20:
+        rating = 'NEAR NEUTRAL'
+        ratingColor = 'lightSteelBlue'
+    else:
+        rating = 'DOWNFORCE'
+        ratingColor = 'tomato'
+
+    return (camber, thickness, liftIndex, rating, ratingColor)
+
+
+def getKuttaStatus(app):
+    targetX = 1.0 - app.circleRadius
+    targetY = 0
+
+    error = distanceBetween(
+        app.circleX,
+        app.circleY,
+        targetX,
+        targetY
+    )
+
+    if error < 0.12:
+        return ('TRAILING EDGE ALIGNED', 'springGreen')
+    elif error < 0.30:
+        return ('NEAR EDGE SETUP', 'gold')
+    else:
+        return ('EXPERIMENTAL PROFILE', 'tomato')
+
+
+# --------------------------------------------------------------
+# Setup
+# --------------------------------------------------------------
+
+def resetApp(app):
+    app.circleX = -0.10
+    app.circleY = 0.13
+    app.circleRadius = 1.10
+
+    app.circulation = 0.55
+    app.angleOfAttack = 0
+
+    app.running = True
+    app.showHelp = True
+    app.draggingHandle = False
+
+    app.particleOffset = 0
+
+    app.message = 'Mission: rotate the aerofoil and study its mapped flow.'
+    app.messageTimer = 180
+
+    rebuildCachedGeometry(app)
+
+
+def onAppStart(app):
+    print("[DEBUG onAppStart] >>> ENTER")
+    app.width = 1050
+    app.height = 700
+    app.stepsPerSecond = 30
+
+    app.sourceCenterX = 265
+    app.sourceCenterY = 365
+    app.sourceScale = 97
+
+    app.mappedCenterX = 786
+    app.mappedCenterY = 365
+    app.mappedScale = 130
+
+    resetApp(app)
+
+
+# --------------------------------------------------------------
+# Drawing helpers
+# --------------------------------------------------------------
+
+def drawPanel(x, y, width, height, fillColor, borderColor):
+    drawRect(
+        x, y, width, height,
+        fill=fillColor,
+        border=borderColor,
+        borderWidth=2
+    )
+
+
+def drawArrow(x1, y1, x2, y2, color, opacity, lineWidth=2):
+    drawLine(
+        x1, y1, x2, y2,
+        fill=color,
+        lineWidth=lineWidth,
+        opacity=opacity
+    )
+
+    angle = atan2(y2 - y1, x2 - x1)
+    arrowSize = 7
+
+    drawLine(
+        x2, y2,
+        x2 - arrowSize * cos(angle - 0.55),
+        y2 - arrowSize * sin(angle - 0.55),
+        fill=color,
+        lineWidth=lineWidth,
+        opacity=opacity
+    )
+
+    drawLine(
+        x2, y2,
+        x2 - arrowSize * cos(angle + 0.55),
+        y2 - arrowSize * sin(angle + 0.55),
+        fill=color,
+        lineWidth=lineWidth,
+        opacity=opacity
+    )
+
+
+def drawGrid(centerX, centerY, scale, width, height, color):
+    for value in range(-3, 4):
+        x = centerX + value * scale
+        y = centerY - value * scale
+
+        drawLine(
+            x, centerY - height / 2,
+            x, centerY + height / 2,
+            fill=color,
+            opacity=14
+        )
+
+        drawLine(
+            centerX - width / 2, y,
+            centerX + width / 2, y,
+            fill=color,
+            opacity=14
+        )
+
+    drawLine(
+        centerX - width / 2, centerY,
+        centerX + width / 2, centerY,
+        fill='white',
+        opacity=27
+    )
+
+    drawLine(
+        centerX, centerY - height / 2,
+        centerX, centerY + height / 2,
+        fill='white',
+        opacity=27
+    )
+
+
+def drawGlow(x, y, radius, color):
+    drawCircle(x, y, radius + 12, fill=color, opacity=6)
+    drawCircle(x, y, radius + 7, fill=color, opacity=10)
+    drawCircle(x, y, radius + 3, fill=color, opacity=16)
+
+
+def drawButton(x, y, width, height, text, fillColor):
+    drawRect(
+        x, y, width, height,
+        fill=fillColor,
+        border='white',
+        borderWidth=1,
+        opacity=95
+    )
+
+    drawLabel(
+        text,
+        x + width / 2,
+        y + height / 2,
+        fill='white',
+        bold=True,
+        size=10
+    )
+
+
+def drawProgressBar(x, y, width, height, ratio, fillColor):
+    drawRect(
+        x, y, width, height,
+        fill='black',
+        border='lightSteelBlue',
+        borderWidth=1
+    )
+
+    fillWidth = clamp(ratio, 0, 1) * width
+
+    if fillWidth > 0.5:
+        drawRect(
+            x, y, fillWidth, height,
+            fill=fillColor
+        )
+
+
+# --------------------------------------------------------------
+# Header and controls
+# --------------------------------------------------------------
+
+def drawHeader(app):
+    drawRect(0, 0, app.width, app.height, fill='black')
+
+    drawRect(0, 0, app.width, 87, fill='midnightBlue')
+    drawRect(0, 87, app.width, 5, fill='slateBlue')
+    drawRect(0, 92, app.width, 3, fill='gold', opacity=75)
+
+    drawLabel(
+        'THE EXACT METHOD OF AEROFOIL DESIGN',
+        525, 26,
+        fill='white',
+        bold=True,
+        size=23
+    )
+
+    drawLabel(
+        'Joukowski Conformal-Mapping Wind Tunnel',
+        525, 50,
+        fill='lightSteelBlue',
+        size=14
+    )
+
+    drawLabel(
+        'Hold the wind fixed. Rotate the aerofoil. Transform the flow.',
+        525, 71,
+        fill='gold',
+        bold=True,
+        size=12
+    )
+
+    drawLabel(
+        'w = z + 1/z',
+        937, 47,
+        fill='aqua',
+        bold=True,
+        size=15
+    )
+
+
+def drawControls(app):
+    drawButton(24, 99, 55, 24, 'W +Γ', 'darkGreen')
+    drawButton(84, 99, 55, 24, 'S -Γ', 'darkRed')
+
+    drawButton(147, 99, 55, 24, 'A -α', 'darkSlateBlue')
+    drawButton(207, 99, 55, 24, 'D +α', 'darkSlateBlue')
+
+    drawButton(270, 99, 58, 24, 'Q thin', 'darkSlateGray')
+    drawButton(333, 99, 62, 24, 'E thick', 'darkSlateGray')
+
+    if app.running:
+        flowText = 'PAUSE'
+        flowColor = 'darkOrange'
+    else:
+        flowText = 'PLAY'
+        flowColor = 'darkGreen'
+
+    drawButton(404, 99, 68, 24, flowText, flowColor)
+
+    drawButton(644, 99, 67, 24, '1 SYMM', 'darkSlateBlue')
+    drawButton(717, 99, 70, 24, '2 CAMBER', 'darkSlateBlue')
+    drawButton(793, 99, 65, 24, '3 LIFT', 'darkGreen')
+
+    drawButton(880, 99, 62, 24, 'RESET', 'darkRed')
+    drawButton(948, 99, 74, 24, 'HELP H', 'darkSlateBlue')
+
+
+# --------------------------------------------------------------
+# Source plane
+# --------------------------------------------------------------
+
+def drawSourceWindVectors():
+    # Wind stays horizontal in both panes in this visual convention.
+    for y in range(230, 514, 48):
+        drawArrow(44, y, 85, y, 'aqua', 65)
+
+
+def drawSourcePlane(app):
+    drawPanel(22, 132, 470, 458, 'midnightBlue', 'slateBlue')
+
+    drawLabel(
+        '1. SOURCE PLANE: SOLVE THE CIRCLE',
+        257, 158,
+        fill='white',
+        bold=True,
+        size=15
+    )
+
+    drawLabel(
+        'Circle flow is the mathematical starting point',
+        257, 178,
+        fill='lightSteelBlue',
+        size=11
+    )
+
+    drawGrid(
+        app.sourceCenterX,
+        app.sourceCenterY,
+        app.sourceScale,
+        430,
+        348,
+        'lightCyan'
+    )
+
+    drawSourceWindVectors()
+
+    for streamline in app.sourceStreamlines:
+        previous = None
+
+        for x, y in streamline:
+            screenX, screenY = sourceToScreen(app, x, y)
+
+            if previous != None:
+                drawLine(
+                    previous[0], previous[1],
+                    screenX, screenY,
+                    fill='aqua',
+                    lineWidth=1.5,
+                    opacity=67
+                )
+
+            previous = (screenX, screenY)
+
+    circleX, circleY = sourceToScreen(
+        app,
+        app.circleX,
+        app.circleY
+    )
+
+    circleRadius = app.circleRadius * app.sourceScale
+
+    drawGlow(circleX, circleY, circleRadius, 'dodgerBlue')
+
+    drawCircle(
+        circleX, circleY, circleRadius,
+        fill='dodgerBlue',
+        opacity=63,
+        border='white',
+        borderWidth=2
+    )
+
+    drawGlow(circleX, circleY, 10, 'gold')
+
+    drawCircle(
+        circleX, circleY, 10,
+        fill='gold',
+        border='white',
+        borderWidth=1
+    )
+
+    drawLine(
+        circleX - 13, circleY,
+        circleX + 13, circleY,
+        fill='white',
+        opacity=70
+    )
+
+    drawLine(
+        circleX, circleY - 13,
+        circleX, circleY + 13,
+        fill='white',
+        opacity=70
+    )
+
+    drawLabel(
+        'DRAG',
+        circleX,
+        circleY - 22,
+        fill='gold',
+        bold=True,
+        size=10
+    )
+
+    drawLabel(
+        'z-plane',
+        65, 564,
+        fill='lightCyan',
+        bold=True,
+        size=12
+    )
+
+    drawLabel(
+        'fixed generating geometry',
+        257, 564,
+        fill='lightCyan',
+        size=11
+    )
+
+
+# --------------------------------------------------------------
+# Mapped aerofoil plane
+# --------------------------------------------------------------
+
+def getFlowColor(index, total):
+    middle = total / 2
+    relativeDistance = abs(index - middle) / middle
+
+    if relativeDistance < 0.22:
+        return 'tomato'
+    elif relativeDistance < 0.48:
+        return 'gold'
+    return 'springGreen'
+
+
+def drawMappedStreamlines(app):
+    lineCount = len(app.mappedStreamlines)
+
+    for index in range(lineCount):
+        streamline = app.mappedStreamlines[index]
+        color = getFlowColor(index, lineCount)
+        previous = None
+
+        for x, y in streamline:
+            screenX, screenY = getRotatedMappedScreenPoint(app, x, y)
+
+            if previous != None:
+                currentInside = (
+                    514 <= screenX <= 1012 and
+                    197 <= screenY <= 545
+                )
+
+                previousInside = (
+                    514 <= previous[0] <= 1012 and
+                    197 <= previous[1] <= 545
+                )
+
+                if currentInside and previousInside:
+                    drawLine(
+                        previous[0], previous[1],
+                        screenX, screenY,
+                        fill=color,
+                        lineWidth=1.5,
+                        opacity=68
+                    )
+
+            previous = (screenX, screenY)
+
+
+def drawMappedAirfoil(app):
+    screenPoints = []
+
+    for x, y in app.mappedAirfoilPoints:
+        screenX, screenY = getRotatedMappedScreenPoint(app, x, y)
+        screenPoints.append((screenX, screenY))
+
+    # Golden atmospheric glow.
+    for index in range(len(screenPoints) - 1):
+        x1, y1 = screenPoints[index]
+        x2, y2 = screenPoints[index + 1]
+
+        drawLine(
+            x1, y1, x2, y2,
+            fill='gold',
+            lineWidth=8,
+            opacity=13
+        )
+
+    # White aerofoil boundary.
+    for index in range(len(screenPoints) - 1):
+        x1, y1 = screenPoints[index]
+        x2, y2 = screenPoints[index + 1]
+
+        drawLine(
+            x1, y1, x2, y2,
+            fill='white',
+            lineWidth=2
+        )
+
+    leadingX, leadingY = getRotatedMappedScreenPoint(
+        app,
+        app.leadingEdge[0],
+        app.leadingEdge[1]
+    )
+
+    trailingX, trailingY = getRotatedMappedScreenPoint(
+        app,
+        app.trailingEdge[0],
+        app.trailingEdge[1]
+    )
+
+    pivotX, pivotY = getRotatedMappedScreenPoint(
+        app,
+        app.aerofoilPivotX,
+        app.aerofoilPivotY
+    )
+
+    drawGlow(pivotX, pivotY, 4, 'gold')
+
+    drawCircle(
+        pivotX, pivotY, 4,
+        fill='gold',
+        border='white',
+        borderWidth=1
+    )
+
+    drawLabel(
+        'PIVOT',
+        pivotX,
+        pivotY + 16,
+        fill='gold',
+        bold=True,
+        size=8
+    )
+
+    drawCircle(leadingX, leadingY, 4, fill='orange')
+    drawCircle(trailingX, trailingY, 4, fill='tomato')
+
+    drawLabel(
+        'LE',
+        leadingX + 16,
+        leadingY + 15,
+        fill='orange',
+        bold=True,
+        size=10
+    )
+
+    drawLabel(
+        'TE',
+        trailingX - 16,
+        trailingY - 17,
+        fill='tomato',
+        bold=True,
+        size=10
+    )
+
+
+def drawFlowParticles(app):
+    if not app.running:
+        return
+
+    particleLines = [1, 3, 5, 8, 10, 12]
+
+    for lineIndex in particleLines:
+        if lineIndex < len(app.mappedStreamlines):
+            streamline = app.mappedStreamlines[lineIndex]
+
+            if len(streamline) > 4:
+                pointIndex = int(
+                    (app.particleOffset + lineIndex * 11)
+                    % len(streamline)
+                )
+
+                x, y = streamline[pointIndex]
+
+                screenX, screenY = getRotatedMappedScreenPoint(
+                    app,
+                    x,
+                    y
+                )
+
+                if (
+                    514 <= screenX <= 1012 and
+                    197 <= screenY <= 545
+                ):
+                    drawCircle(
+                        screenX, screenY, 7,
+                        fill='springGreen',
+                        opacity=13
+                    )
+
+                    drawCircle(
+                        screenX, screenY, 3,
+                        fill='white',
+                        border='springGreen',
+                        borderWidth=1
+                    )
+
+
+def drawMappedWindVectors():
+    # The wind is fixed and horizontal.
+    for y in range(230, 514, 49):
+        drawArrow(963, y, 1001, y, 'springGreen', 62)
+
+
+def drawAngleIndicator(app):
+    pivotX, pivotY = getRotatedMappedScreenPoint(
+        app,
+        app.aerofoilPivotX,
+        app.aerofoilPivotY
+    )
+
+    # The dashed baseline represents alpha = 0.
+    drawLine(
+        pivotX - 48, pivotY,
+        pivotX + 48, pivotY,
+        fill='lightSteelBlue',
+        lineWidth=1,
+        opacity=60,
+        dashes=True
+    )
+
+    # Direction of rotated aerofoil chord.
+    angle = -app.angleOfAttack * pi / 180
+
+    tipX = pivotX + 58 * cos(angle)
+    tipY = pivotY + 58 * sin(angle)
+
+    drawArrow(
+        pivotX,
+        pivotY,
+        tipX,
+        tipY,
+        'gold',
+        100,
+        3
+    )
+
+    drawLabel(
+        'α = ' + str(app.angleOfAttack) + '°',
+        pivotX + 38,
+        pivotY - 26,
+        fill='gold',
+        bold=True,
+        size=11
+    )
+
+
+def drawMappedPlane(app):
+    drawPanel(558, 132, 470, 458, 'darkSlateGray', 'seaGreen')
+
+    drawLabel(
+        '2. MAPPED PLANE: ROTATE THE AEROFOIL',
+        793, 158,
+        fill='white',
+        bold=True,
+        size=15
+    )
+
+    drawLabel(
+        'Wind stays horizontal; A/D rotates wing and transformed flow',
+        793, 178,
+        fill='paleGreen',
+        size=10
+    )
+
+    drawGrid(
+        app.mappedCenterX,
+        app.mappedCenterY,
+        app.mappedScale,
+        430,
+        348,
+        'paleGreen'
+    )
+
+    drawMappedWindVectors()
+    drawMappedStreamlines(app)
+    drawMappedAirfoil(app)
+    drawAngleIndicator(app)
+    drawFlowParticles(app)
+
+    drawLabel(
+        'w-plane',
+        602, 564,
+        fill='paleGreen',
+        bold=True,
+        size=12
+    )
+
+    drawLabel(
+        'rotated aerofoil + transformed ideal flow',
+        793, 564,
+        fill='paleGreen',
+        size=11
+    )
+
+
+# --------------------------------------------------------------
+# Dashboard
+# --------------------------------------------------------------
+
+def drawDashboard(app):
+    drawPanel(22, 601, 1006, 84, 'midnightBlue', 'slateBlue')
+
+    camber, thickness, liftIndex, rating, ratingColor = getDesignStats(app)
+    kuttaText, kuttaColor = getKuttaStatus(app)
+
+    drawLabel(
+        'DESIGN TELEMETRY',
+        100, 621,
+        fill='gold',
+        bold=True,
+        size=13
+    )
+
+    drawLabel(
+        'Camber',
+        230, 620,
+        fill='lightSteelBlue',
+        size=10
+    )
+
+    drawLabel(
+        str(round(camber, 1)) + '%',
+        230, 646,
+        fill='white',
+        bold=True,
+        size=17
+    )
+
+    drawLabel(
+        'Thickness',
+        355, 620,
+        fill='lightSteelBlue',
+        size=10
+    )
+
+    drawLabel(
+        str(round(thickness, 1)) + '%',
+        355, 646,
+        fill='white',
+        bold=True,
+        size=17
+    )
+
+    drawLabel(
+        'Aerofoil angle α',
+        483, 620,
+        fill='lightSteelBlue',
+        size=10
+    )
+
+    drawLabel(
+        str(app.angleOfAttack) + '°',
+        483, 646,
+        fill='gold',
+        bold=True,
+        size=17
+    )
+
+    drawLabel(
+        'Circulation Γ',
+        590, 620,
+        fill='lightSteelBlue',
+        size=10
+    )
+
+    drawLabel(
+        str(round(app.circulation, 2)),
+        590, 646,
+        fill='white',
+        bold=True,
+        size=17
+    )
+
+    drawLabel(
+        'Ideal lift index',
+        710, 620,
+        fill='lightSteelBlue',
+        size=10
+    )
+
+    drawLabel(
+        str(round(liftIndex, 2)),
+        710, 646,
+        fill=ratingColor,
+        bold=True,
+        size=17
+    )
+
+    drawLabel(
+        rating,
+        819, 620,
+        fill=ratingColor,
+        bold=True,
+        size=11
+    )
+
+    drawLabel(
+        kuttaText,
+        908, 620,
+        fill=kuttaColor,
+        bold=True,
+        size=9
+    )
+
+    drawLabel(
+        'TARGET 1.25',
+        819, 643,
+        fill='lightSteelBlue',
+        size=9
+    )
+
+    drawProgressBar(
+        875, 638,
+        128, 13,
+        liftIndex / 1.25,
+        ratingColor
+    )
+
+    drawLabel(
+        'Wind fixed → wing rotates about quarter-chord pivot',
+        257, 671,
+        fill='gold',
+        size=10
+    )
+
+    drawLabel(
+        'Model: 2D, inviscid, ideal potential flow',
+        740, 671,
+        fill='lightSteelBlue',
+        size=10
+    )
+
+
+# --------------------------------------------------------------
+# Messages and help
+# --------------------------------------------------------------
+
+def drawMessage(app):
+    if app.messageTimer > 0:
+        drawRect(
+            288, 133, 474, 29,
+            fill='darkSlateBlue',
+            border='gold',
+            borderWidth=1,
+            opacity=95
+        )
+
+        drawLabel(
+            app.message,
+            525, 147,
+            fill='gold',
+            bold=True,
+            size=11
+        )
+
+
+def drawHelpOverlay(app):
+    if not app.showHelp:
+        return
+
+    drawRect(
+        0, 0, app.width, app.height,
+        fill='black',
+        opacity=72
+    )
+
+    drawPanel(
+        212, 132, 626, 437,
+        'midnightBlue',
+        'gold'
+    )
+
+    drawLabel(
+        'AEROFOIL DESIGN MISSION',
+        525, 168,
+        fill='gold',
+        bold=True,
+        size=21
+    )
+
+    drawLabel(
+        'Turn a solved circle-flow problem into a rotating wing.',
+        525, 198,
+        fill='white',
+        bold=True,
+        size=13
+    )
+
+    instructions = [
+        'The left panel starts with a solvable ideal-flow problem:',
+        'flow around a generating circle in the z-plane.',
+        '',
+        'The Joukowski map w = z + 1/z transforms that circle',
+        'and its flow curves into a wing-like aerofoil in the w-plane.',
+        '',
+        'Drag the gold circle handle to alter mapped camber.',
+        'Use Q/E to alter thickness-like geometry.',
+        'Use W/S to alter circulation and flow asymmetry.',
+        '',
+        'Use A/D to rotate the aerofoil about its quarter-chord pivot.',
+        'The incoming wind remains horizontal, like a wind tunnel.',
+        '',
+        'Try preset 3, then press D repeatedly to visibly pitch the wing.'
+    ]
+
+    y = 229
+
+    for line in instructions:
+        drawLabel(
+            line,
+            525, y,
+            fill='lightCyan',
+            size=12
+        )
+
+        y += 20
+
+    drawLabel(
+        'CLICK ANYWHERE OR PRESS H TO START',
+        525, 538,
+        fill='springGreen',
+        bold=True,
+        size=13
+    )
+
+
+# --------------------------------------------------------------
+# Main view
+# --------------------------------------------------------------
+
+def redrawAll(app):
+    drawHeader(app)
+    drawControls(app)
+    drawSourcePlane(app)
+    drawMappedPlane(app)
+    drawDashboard(app)
+    drawMessage(app)
+    drawHelpOverlay(app)
+
+
+# --------------------------------------------------------------
+# Controller helpers
+# --------------------------------------------------------------
+
+def setMessage(app, text):
+    app.message = text
+    app.messageTimer = 100
+
+
+def changeCirculation(app, amount):
+    app.circulation = clamp(
+        app.circulation + amount,
+        -2.5,
+        2.5
+    )
+
+    if amount > 0:
+        setMessage(
+            app,
+            'Circulation increased: transformed flow becomes more asymmetric.'
+        )
+    else:
+        setMessage(
+            app,
+            'Circulation decreased.'
+        )
+
+    rebuildCachedGeometry(app)
+
+
+def changeAngle(app, amount):
+    app.angleOfAttack = clamp(
+        app.angleOfAttack + amount,
+        -18,
+        18
+    )
+
+    setMessage(
+        app,
+        'Aerofoil pitched to ' +
+        str(app.angleOfAttack) +
+        '°. Wind remains horizontal.'
+    )
+
+
+def changeRadius(app, amount):
+    app.circleRadius = clamp(
+        app.circleRadius + amount,
+        0.94,
+        1.30
+    )
+
+    if amount > 0:
+        setMessage(
+            app,
+            'Generating circle enlarged: mapped profile becomes thicker.'
+        )
+    else:
+        setMessage(
+            app,
+            'Generating circle reduced: mapped profile becomes thinner.'
+        )
+
+    rebuildCachedGeometry(app)
+
+
+def toggleFlow(app):
+    app.running = not app.running
+
+    if app.running:
+        setMessage(app, 'Tracer particles resumed.')
+    else:
+        setMessage(app, 'Tracer particles paused.')
+
+
+def applyPreset(app, preset):
+    if preset == 1:
+        app.circleX = -0.10
+        app.circleY = 0.00
+        app.circleRadius = 1.10
+        app.circulation = 0.00
+        app.angleOfAttack = 0
+
+        setMessage(
+            app,
+            'Preset 1: symmetric aerofoil, neutral angle, no circulation.'
+        )
+
+    elif preset == 2:
+        app.circleX = -0.10
+        app.circleY = 0.17
+        app.circleRadius = 1.10
+        app.circulation = 0.60
+        app.angleOfAttack = 3
+
+        setMessage(
+            app,
+            'Preset 2: cambered aerofoil at moderate positive angle.'
+        )
+
+    elif preset == 3:
+        app.circleX = -0.12
+        app.circleY = 0.24
+        app.circleRadius = 1.14
+        app.circulation = 1.20
+        app.angleOfAttack = 7
+
+        setMessage(
+            app,
+            'Preset 3: high-lift aerofoil. Press A/D to pitch the wing.'
+        )
+
+    rebuildCachedGeometry(app)
+
+
+# --------------------------------------------------------------
+# Events
+# --------------------------------------------------------------
+
+def onStep(app):
+    # Geometry is cached. Animation only advances particle locations.
+    if app.running:
+        app.particleOffset += 0.45
+
+    if app.messageTimer > 0:
+        app.messageTimer -= 1
+
+
+def onMousePress(app, mouseX, mouseY):
+    if app.showHelp:
+        app.showHelp = False
+        return
+
+    if 24 <= mouseX <= 79 and 99 <= mouseY <= 123:
+        changeCirculation(app, 0.20)
+
+    elif 84 <= mouseX <= 139 and 99 <= mouseY <= 123:
+        changeCirculation(app, -0.20)
+
+    elif 147 <= mouseX <= 202 and 99 <= mouseY <= 123:
+        changeAngle(app, -1)
+
+    elif 207 <= mouseX <= 262 and 99 <= mouseY <= 123:
+        changeAngle(app, 1)
+
+    elif 270 <= mouseX <= 328 and 99 <= mouseY <= 123:
+        changeRadius(app, -0.04)
+
+    elif 333 <= mouseX <= 395 and 99 <= mouseY <= 123:
+        changeRadius(app, 0.04)
+
+    elif 404 <= mouseX <= 472 and 99 <= mouseY <= 123:
+        toggleFlow(app)
+
+    elif 644 <= mouseX <= 711 and 99 <= mouseY <= 123:
+        applyPreset(app, 1)
+
+    elif 717 <= mouseX <= 787 and 99 <= mouseY <= 123:
+        applyPreset(app, 2)
+
+    elif 793 <= mouseX <= 858 and 99 <= mouseY <= 123:
+        applyPreset(app, 3)
+
+    elif 880 <= mouseX <= 942 and 99 <= mouseY <= 123:
+        resetApp(app)
+
+    elif 948 <= mouseX <= 1022 and 99 <= mouseY <= 123:
+        app.showHelp = True
+
+    else:
+        handleX, handleY = sourceToScreen(
+            app,
+            app.circleX,
+            app.circleY
+        )
+
+        if distanceBetween(mouseX, mouseY, handleX, handleY) <= 18:
+            app.draggingHandle = True
+
+            setMessage(
+                app,
+                'Handle engaged: drag to reshape the mapped aerofoil.'
+            )
+
+
+def onMouseDrag(app, mouseX, mouseY):
+    if app.draggingHandle:
+        sourceX, sourceY = screenToSource(app, mouseX, mouseY)
+
+        app.circleX = clamp(sourceX, -0.38, 0.28)
+        app.circleY = clamp(sourceY, -0.43, 0.43)
+
+        rebuildCachedGeometry(app)
+
+
+def onMouseRelease(app, mouseX, mouseY):
+    app.draggingHandle = False
+
+
+def onKeyPress(app, key):
+    if key == 'h':
+        app.showHelp = not app.showHelp
+
+    elif key == 'r':
+        resetApp(app)
+
+    elif key == 'space':
+        toggleFlow(app)
+
+    elif key == 'w':
+        changeCirculation(app, 0.20)
+
+    elif key == 's':
+        changeCirculation(app, -0.20)
+
+    elif key == 'a':
+        changeAngle(app, -1)
+
+    elif key == 'd':
+        changeAngle(app, 1)
+
+    elif key == 'q':
+        changeRadius(app, -0.04)
+
+    elif key == 'e':
+        changeRadius(app, 0.04)
+
+    elif key == '1':
+        applyPreset(app, 1)
+
+    elif key == '2':
+        applyPreset(app, 2)
+
+    elif key == '3':
+        applyPreset(app, 3)
+
+
+def main():
+    print("[DEBUG main] runApp 1050x700")
+    runApp(width=1050, height=700)
+    print("[DEBUG main] runApp done")
+
+print("[DEBUG] calling main")
+main()
+print("[DEBUG] main done")
+
+</textarea>
+<div style="margin-top:8px;"><button id="run-btn">▶ Run</button><button id="stop-btn">■ Stop</button></div>
+<div id="log"></div>
+</div>
+
+<script type="text/python" id="scs">
+
+# scs.py - SANDBOX CMU_Graphics API EXACT (Brython)
+# Based on CMU Graphics Guide v2 + sandbox docs
+# No property decorator to avoid Brython bug, file:// safe
+
+from browser import document, window, timer
+import math
+
+_canvas = None
+_ctx = None
+_app = None
+_timer_id = None
+_all_shapes = []
+_user_funcs_global = {}
+_mouse_is_down = False
+
+def _ensure_canvas():
+    global _canvas, _ctx
+    if _canvas is None:
+        _canvas = document.getElementById('cmu-canvas')
+        if _canvas is None:
+            _canvas = document.createElement('canvas')
+            _canvas.id = 'cmu-canvas'
+            _canvas.width = 400
+            _canvas.height = 400
+            document.body.appendChild(_canvas)
+        _ctx = _canvas.getContext('2d')
+    return _ctx
+
+def _get_ctx():
+    if _ctx is None:
+        _ensure_canvas()
+    return _ctx
+
+def _clear_all_shapes():
+    global _all_shapes
+    _all_shapes = []
+
+# ---------- Color ----------
+def rgb(r,g,b):
+    r = max(0, min(255, int(r)))
+    g = max(0, min(255, int(g)))
+    b = max(0, min(255, int(b)))
+    return f"rgb({r},{g},{b})"
+
+def gradient(*colors, start='center'):
+    if len(colors)==0:
+        return 'black'
+    if len(colors)==1:
+        return colors[0]
+    return {'_is_gradient': True, 'colors': list(colors), 'start': start}
+
+def _resolve_fill(ctx, fill, x, y, w, h):
+    if fill is None:
+        return None
+    if isinstance(fill, dict) and fill.get('_is_gradient'):
+        colors = fill['colors']
+        start = fill.get('start','center')
+        try:
+            if start=='center':
+                grad = ctx.createRadialGradient(x+w/2, y+h/2, 0, x+w/2, y+h/2, max(w,h)/2)
+            elif start=='top':
+                grad = ctx.createLinearGradient(x, y, x, y+h)
+            elif start=='left':
+                grad = ctx.createLinearGradient(x, y, x+w, y)
+            elif start=='bottom':
+                grad = ctx.createLinearGradient(x, y+h, x, y)
+            elif start=='right':
+                grad = ctx.createLinearGradient(x+w, y, x, y)
+            else:
+                grad = ctx.createLinearGradient(x, y, x+w, y+h)
+            for i,c in enumerate(colors):
+                off = i/(len(colors)-1) if len(colors)>1 else 0
+                grad.addColorStop(off, c)
+            return grad
+        except:
+            return colors[0]
+    return fill
+
+def _apply_dashes(ctx, dashes):
+    try:
+        if dashes is True:
+            ctx.setLineDash([6,4])
+        elif isinstance(dashes, (list,tuple)):
+            ctx.setLineDash(list(dashes))
+        elif isinstance(dashes, int):
+            ctx.setLineDash([dashes, dashes])
+        elif dashes is False or dashes is None:
+            ctx.setLineDash([])
+        else:
+            ctx.setLineDash([])
+    except:
+        pass
+
+# ---------- Utils - sandbox exact ----------
+def distance(x1,y1,x2,y2):
+    return math.sqrt((x2-x1)**2 + (y2-y1)**2)
+
+def angleTo(x1,y1,x2,y2):
+    # 0 = straight up, clockwise - per guide
+    dx = x2-x1
+    dy = y1-y2
+    ang = math.degrees(math.atan2(dx, dy))
+    if ang < 0:
+        ang += 360
+    return ang
+
+def getPointInDir(x1,y1,angle,length):
+    rad = math.radians(angle)
+    x2 = x1 + length * math.sin(rad)
+    y2 = y1 - length * math.cos(rad)
+    return (x2, y2)
+
+def rounded(n):
+    return round(n)
+
+def makeList(rows, cols=None):
+    if cols is None:
+        return [None]*rows
+    return [[None]*cols for _ in range(rows)]
+
+def getImageSize(url):
+    try:
+        img = window.Image.new()
+        img.src = url
+        w = getattr(img, 'width', 0)
+        h = getattr(img, 'height', 0)
+        if w and h:
+            return (w, h)
+    except:
+        pass
+    return (100, 100)
+
+# ---------- Shape base - no property decorator ----------
+class Shape:
+    def __init__(self, **kwargs):
+        object.__setattr__(self, 'fill', kwargs.get('fill', 'black'))
+        object.__setattr__(self, 'border', kwargs.get('border', None))
+        object.__setattr__(self, 'borderWidth', kwargs.get('borderWidth', 2))
+        object.__setattr__(self, 'opacity', kwargs.get('opacity', 100))
+        object.__setattr__(self, 'rotateAngle', kwargs.get('rotateAngle', 0))
+        object.__setattr__(self, 'visible', kwargs.get('visible', True))
+        object.__setattr__(self, 'dashes', kwargs.get('dashes', False))
+        object.__setattr__(self, 'align', kwargs.get('align', 'center'))
+        object.__setattr__(self, 'lineWidth', kwargs.get('lineWidth', kwargs.get('borderWidth', 2)))
+        object.__setattr__(self, 'arrowStart', kwargs.get('arrowStart', False))
+        object.__setattr__(self, 'arrowEnd', kwargs.get('arrowEnd', False))
+        object.__setattr__(self, 'roundness', kwargs.get('roundness', 0))
+        _all_shapes.append(self)
+    def toFront(self):
+        if self in _all_shapes:
+            _all_shapes.remove(self)
+            _all_shapes.append(self)
+    def toBack(self):
+        if self in _all_shapes:
+            _all_shapes.remove(self)
+            _all_shapes.insert(0, self)
+    def contains(self, x, y):
+        return self.hits(x,y)
+    def hits(self, x, y):
+        return False
+    def hitsShape(self, other):
+        return False
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, value)
+
+# ---------- Rect - sandbox: left, top, width, height ----------
+class Rect(Shape):
+    def __init__(self, left, top, width, height, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, dashes=False, align='leftTop', roundness=0, **kw):
+        object.__setattr__(self, 'left', left)
+        object.__setattr__(self, 'top', top)
+        object.__setattr__(self, 'width', width)
+        object.__setattr__(self, 'height', height)
+        object.__setattr__(self, 'align', align)
+        object.__setattr__(self, 'roundness', roundness)
+        Shape.__init__(self, fill=fill if fill is not None else 'black', border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, dashes=dashes, **kw)
+        self._sync()
+    def _sync(self):
+        # derive center, right, bottom
+        object.__setattr__(self, 'centerX', self.left + self.width/2)
+        object.__setattr__(self, 'centerY', self.top + self.height/2)
+        object.__setattr__(self, 'right', self.left + self.width)
+        object.__setattr__(self, 'bottom', self.top + self.height)
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, value)
+        if name in ('left','top','width','height','centerX','centerY','right','bottom'):
+            # keep in sync
+            try:
+                if name == 'centerX':
+                    object.__setattr__(self, 'left', value - self.width/2)
+                elif name == 'centerY':
+                    object.__setattr__(self, 'top', value - self.height/2)
+                elif name == 'right':
+                    object.__setattr__(self, 'left', value - self.width)
+                elif name == 'bottom':
+                    object.__setattr__(self, 'top', value - self.height)
+                # re-sync derived
+                if hasattr(self, 'width'):
+                    object.__setattr__(self, 'centerX', self.left + self.width/2)
+                    object.__setattr__(self, 'centerY', self.top + self.height/2)
+                    object.__setattr__(self, 'right', self.left + self.width)
+                    object.__setattr__(self, 'bottom', self.top + self.height)
+            except:
+                pass
+    def hits(self, x, y):
+        return self.left <= x <= self.left+self.width and self.top <= y <= self.top+self.height
+    def draw(self, ctx):
+        if not getattr(self, 'visible', True):
+            return
+        ctx.save()
+        if self.opacity != 100:
+            ctx.globalAlpha = self.opacity/100
+        if self.rotateAngle:
+            ctx.translate(self.centerX, self.centerY)
+            ctx.rotate(self.rotateAngle*math.pi/180)
+            ctx.translate(-self.centerX, -self.centerY)
+        _apply_dashes(ctx, self.dashes)
+        fill = _resolve_fill(ctx, self.fill, self.left, self.top, self.width, self.height)
+        if fill:
+            ctx.fillStyle = fill
+            r = getattr(self, 'roundness', 0)
+            if r:
+                # simple rounded rect
+                try:
+                    rr = min(r, self.width/2, self.height/2)
+                    ctx.beginPath()
+                    ctx.roundRect(self.left, self.top, self.width, self.height, rr)
+                    ctx.fill()
+                except:
+                    ctx.fillRect(self.left, self.top, self.width, self.height)
+            else:
+                ctx.fillRect(self.left, self.top, self.width, self.height)
+        if self.border:
+            ctx.strokeStyle = self.border
+            ctx.lineWidth = self.borderWidth
+            ctx.strokeRect(self.left, self.top, self.width, self.height)
+        ctx.restore()
+        _apply_dashes(ctx, False)
+
+class Oval(Shape):
+    def __init__(self, centerX, centerY, width, height, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, dashes=False, align='center', **kw):
+        object.__setattr__(self, 'centerX', centerX)
+        object.__setattr__(self, 'centerY', centerY)
+        object.__setattr__(self, 'width', width)
+        object.__setattr__(self, 'height', height)
+        object.__setattr__(self, 'align', align)
+        Shape.__init__(self, fill=fill if fill is not None else 'black', border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, dashes=dashes, **kw)
+    def hits(self, x, y):
+        dx = (x-self.centerX)/(self.width/2) if self.width else 0
+        dy = (y-self.centerY)/(self.height/2) if self.height else 0
+        return dx*dx+dy*dy <= 1
+    def draw(self, ctx):
+        if not self.visible:
+            return
+        ctx.save()
+        if self.opacity != 100:
+            ctx.globalAlpha = self.opacity/100
+        if self.rotateAngle:
+            ctx.translate(self.centerX, self.centerY)
+            ctx.rotate(self.rotateAngle*math.pi/180)
+            ctx.translate(-self.centerX, -self.centerY)
+        _apply_dashes(ctx, self.dashes)
+        ctx.beginPath()
+        ctx.ellipse(self.centerX, self.centerY, self.width/2, self.height/2, 0, 0, 2*math.pi)
+        fill = _resolve_fill(ctx, self.fill, self.centerX-self.width/2, self.centerY-self.height/2, self.width, self.height)
+        if fill:
+            ctx.fillStyle = fill
+            ctx.fill()
+        if self.border:
+            ctx.strokeStyle = self.border
+            ctx.lineWidth = self.borderWidth
+            ctx.stroke()
+        ctx.restore()
+        _apply_dashes(ctx, False)
+
+class Circle(Oval):
+    def __init__(self, centerX, centerY, radius, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, dashes=False, align='center', **kw):
+        super().__init__(centerX, centerY, radius*2, radius*2, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, dashes=dashes, align=align, **kw)
+        object.__setattr__(self, 'radius', radius)
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, value)
+        if name == 'radius':
+            object.__setattr__(self, 'width', value*2)
+            object.__setattr__(self, 'height', value*2)
+
+class Line(Shape):
+    def __init__(self, x1, y1, x2, y2, fill=None, border=None, lineWidth=1, opacity=100, rotateAngle=0, visible=True, dashes=False, arrowStart=False, arrowEnd=False, **kw):
+        object.__setattr__(self, 'x1', x1)
+        object.__setattr__(self, 'y1', y1)
+        object.__setattr__(self, 'x2', x2)
+        object.__setattr__(self, 'y2', y2)
+        object.__setattr__(self, 'lineWidth', lineWidth)
+        object.__setattr__(self, 'dashes', dashes)
+        object.__setattr__(self, 'arrowStart', arrowStart)
+        object.__setattr__(self, 'arrowEnd', arrowEnd)
+        Shape.__init__(self, fill=fill if fill is not None else 'black', border=border, borderWidth=lineWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, **kw)
+    def draw(self, ctx):
+        if not self.visible:
+            return
+        ctx.save()
+        if self.opacity != 100:
+            ctx.globalAlpha = self.opacity/100
+        _apply_dashes(ctx, self.dashes)
+        ctx.beginPath()
+        ctx.moveTo(self.x1, self.y1)
+        ctx.lineTo(self.x2, self.y2)
+        ctx.strokeStyle = self.fill if self.fill else 'black'
+        ctx.lineWidth = self.lineWidth
+        ctx.stroke()
+        # arrows
+        def draw_arrow(x, y, angle):
+            size=8
+            ctx.beginPath()
+            ctx.moveTo(x, y)
+            ctx.lineTo(x-size*math.cos(angle-0.4), y-size*math.sin(angle-0.4))
+            ctx.lineTo(x-size*math.cos(angle+0.4), y-size*math.sin(angle+0.4))
+            ctx.closePath()
+            ctx.fillStyle = ctx.strokeStyle
+            ctx.fill()
+        ang = math.atan2(self.y2-self.y1, self.x2-self.x1)
+        if self.arrowEnd:
+            draw_arrow(self.x2, self.y2, ang)
+        if self.arrowStart:
+            draw_arrow(self.x1, self.y1, ang+math.pi)
+        ctx.restore()
+        _apply_dashes(ctx, False)
+
+class Polygon(Shape):
+    def __init__(self, *points, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, dashes=False, **kw):
+        # points as x1,y1,x2,y2,...
+        object.__setattr__(self, 'points', list(points))
+        Shape.__init__(self, fill=fill if fill is not None else 'black', border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, dashes=dashes, **kw)
+    def draw(self, ctx):
+        if not self.visible or len(self.points)<4:
+            return
+        ctx.save()
+        if self.opacity != 100:
+            ctx.globalAlpha = self.opacity/100
+        _apply_dashes(ctx, self.dashes)
+        ctx.beginPath()
+        ctx.moveTo(self.points[0], self.points[1])
+        for i in range(2, len(self.points), 2):
+            ctx.lineTo(self.points[i], self.points[i+1])
+        ctx.closePath()
+        fill = _resolve_fill(ctx, self.fill, 0,0,100,100)
+        if fill:
+            ctx.fillStyle = fill
+            ctx.fill()
+        if self.border:
+            ctx.strokeStyle = self.border
+            ctx.lineWidth = self.borderWidth
+            ctx.stroke()
+        ctx.restore()
+        _apply_dashes(ctx, False)
+
+class RegularPolygon(Polygon):
+    def __init__(self, centerX, centerY, radius, points, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, **kw):
+        pts=[]
+        for i in range(points):
+            ang = math.radians(rotateAngle + i*360/points - 90)
+            pts.append(centerX+radius*math.cos(ang))
+            pts.append(centerY+radius*math.sin(ang))
+        object.__setattr__(self, 'centerX', centerX)
+        object.__setattr__(self, 'centerY', centerY)
+        object.__setattr__(self, 'radius', radius)
+        object.__setattr__(self, 'points_count', points)
+        super().__init__(*pts, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=0, visible=visible, **kw)
+
+class Star(Shape):
+    def __init__(self, centerX, centerY, radius, points, roundness=0, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, **kw):
+        object.__setattr__(self, 'centerX', centerX)
+        object.__setattr__(self, 'centerY', centerY)
+        object.__setattr__(self, 'radius', radius)
+        object.__setattr__(self, 'points', points)
+        object.__setattr__(self, 'roundness', roundness)
+        Shape.__init__(self, fill=fill if fill is not None else 'black', border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, **kw)
+    def draw(self, ctx):
+        if not self.visible:
+            return
+        ctx.save()
+        if self.opacity != 100:
+            ctx.globalAlpha = self.opacity/100
+        ctx.beginPath()
+        outer = self.radius
+        inner = outer*(1-self.roundness/100*0.5) if self.roundness<100 else outer*0.5
+        # if roundness 100, star looks like polygon with points*2 sides
+        if self.roundness>=100:
+            inner = outer
+        for i in range(self.points*2):
+            r = outer if i%2==0 else inner
+            ang = math.radians(self.rotateAngle + i*180/self.points - 90)
+            x = self.centerX + r*math.cos(ang)
+            y = self.centerY + r*math.sin(ang)
+            if i==0:
+                ctx.moveTo(x,y)
+            else:
+                ctx.lineTo(x,y)
+        ctx.closePath()
+        fill = _resolve_fill(ctx, self.fill, self.centerX-outer, self.centerY-outer, outer*2, outer*2)
+        if fill:
+            ctx.fillStyle = fill
+            ctx.fill()
+        if self.border:
+            ctx.strokeStyle = self.border
+            ctx.lineWidth = self.borderWidth
+            ctx.stroke()
+        ctx.restore()
+
+class Label(Shape):
+    def __init__(self, text, centerX, centerY, fill=None, border=None, borderWidth=1, opacity=100, rotateAngle=0, visible=True, size=12, font='arial', bold=False, italic=False, align='center', **kw):
+        object.__setattr__(self, 'text', str(text))
+        object.__setattr__(self, 'centerX', centerX)
+        object.__setattr__(self, 'centerY', centerY)
+        object.__setattr__(self, 'size', size)
+        object.__setattr__(self, 'font', font)
+        object.__setattr__(self, 'bold', bold)
+        object.__setattr__(self, 'italic', italic)
+        object.__setattr__(self, 'align', align)
+        Shape.__init__(self, fill=fill if fill is not None else 'black', border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, **kw)
+    def draw(self, ctx):
+        if not self.visible:
+            return
+        ctx.save()
+        if self.opacity != 100:
+            ctx.globalAlpha = self.opacity/100
+        if self.rotateAngle:
+            ctx.translate(self.centerX, self.centerY)
+            ctx.rotate(self.rotateAngle*math.pi/180)
+            ctx.translate(-self.centerX, -self.centerY)
+        style=''
+        if self.italic:
+            style+='italic '
+        if self.bold:
+            style+='bold '
+        ctx.font = f"{style}{self.size}px {self.font}"
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        if self.fill:
+            ctx.fillStyle = self.fill
+            ctx.fillText(self.text, self.centerX, self.centerY)
+        if self.border:
+            ctx.strokeStyle = self.border
+            ctx.lineWidth = self.borderWidth
+            ctx.strokeText(self.text, self.centerX, self.centerY)
+        ctx.restore()
+
+class Arc(Shape):
+    def __init__(self, centerX, centerY, width, height, startAngle, sweepAngle, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, **kw):
+        object.__setattr__(self, 'centerX', centerX)
+        object.__setattr__(self, 'centerY', centerY)
+        object.__setattr__(self, 'width', width)
+        object.__setattr__(self, 'height', height)
+        object.__setattr__(self, 'startAngle', startAngle)
+        object.__setattr__(self, 'sweepAngle', sweepAngle)
+        Shape.__init__(self, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, **kw)
+    def draw(self, ctx):
+        if not self.visible:
+            return
+        ctx.save()
+        if self.opacity != 100:
+            ctx.globalAlpha = self.opacity/100
+        ctx.beginPath()
+        # arc angles anticlockwise per guide, but canvas is clockwise, so invert
+        start = math.radians(-self.startAngle + self.rotateAngle)
+        end = math.radians(-(self.startAngle+self.sweepAngle) + self.rotateAngle)
+        ctx.ellipse(self.centerX, self.centerY, self.width/2, self.height/2, 0, start, end, True)
+        if self.sweepAngle%360!=0:
+            ctx.lineTo(self.centerX, self.centerY)
+            ctx.closePath()
+        fill = _resolve_fill(ctx, self.fill, self.centerX-self.width/2, self.centerY-self.height/2, self.width, self.height)
+        if fill:
+            ctx.fillStyle = fill
+            ctx.fill()
+        if self.border:
+            ctx.strokeStyle = self.border
+            ctx.lineWidth = self.borderWidth
+            ctx.stroke()
+        ctx.restore()
+
+class Group(Shape):
+    def __init__(self, *shapes, **kw):
+        object.__setattr__(self, 'shapes', list(shapes))
+        Shape.__init__(self, **kw)
+    def draw(self, ctx):
+        for s in self.shapes:
+            if hasattr(s, 'draw'):
+                s.draw(ctx)
+
+class SCSImage(Shape):
+    def __init__(self, url, left, top, width=None, height=None, opacity=100, rotateAngle=0, visible=True, align='leftTop', **kw):
+        object.__setattr__(self, 'url', url)
+        object.__setattr__(self, 'left', left)
+        object.__setattr__(self, 'top', top)
+        object.__setattr__(self, 'width', width)
+        object.__setattr__(self, 'height', height)
+        Shape.__init__(self, opacity=opacity, rotateAngle=rotateAngle, visible=visible, align=align, **kw)
+        self._img = None
+        try:
+            self._img = window.Image.new()
+            self._img.src = url
+        except:
+            pass
+    def draw(self, ctx):
+        if not self.visible or self._img is None:
+            return
+        ctx.save()
+        if self.opacity != 100:
+            ctx.globalAlpha = self.opacity/100
+        w = self.width or getattr(self._img, 'width', 100)
+        h = self.height or getattr(self._img, 'height', 100)
+        ctx.drawImage(self._img, self.left, self.top, w, h)
+        ctx.restore()
+
+Image = SCSImage
+
+class Sound:
+    def __init__(self, url):
+        self.url = url
+        self._audio = None
+        try:
+            self._audio = window.Audio.new(url)
+        except:
+            pass
+    def play(self, loop=False, restart=False):
+        try:
+            if restart and self._audio:
+                self._audio.currentTime = 0
+            if self._audio:
+                self._audio.loop = loop
+                self._audio.play()
+        except Exception as e:
+            print(f"Sound play error {e}")
+    def pause(self):
+        try:
+            if self._audio:
+                self._audio.pause()
+        except:
+            pass
+
+# ---------- Drawing functions - sandbox exact signatures ----------
+def drawRect(left, top, width, height, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+    ctx = _get_ctx()
+    ctx.save()
+    if opacity!=100:
+        ctx.globalAlpha = opacity/100
+    if rotateAngle:
+        cx = left+width/2
+        cy = top+height/2
+        ctx.translate(cx,cy)
+        ctx.rotate(rotateAngle*math.pi/180)
+        ctx.translate(-cx,-cy)
+    f = _resolve_fill(ctx, fill if fill is not None else 'black', left, top, width, height)
+    if f:
+        ctx.fillStyle = f
+        ctx.fillRect(left, top, width, height)
+    if border:
+        ctx.strokeStyle = border
+        ctx.lineWidth = borderWidth
+        ctx.strokeRect(left, top, width, height)
+    ctx.restore()
+
+def drawOval(centerX, centerY, width, height, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+    ctx = _get_ctx()
+    ctx.save()
+    if opacity!=100:
+        ctx.globalAlpha = opacity/100
+    if rotateAngle:
+        ctx.translate(centerX, centerY)
+        ctx.rotate(rotateAngle*math.pi/180)
+        ctx.translate(-centerX, -centerY)
+    ctx.beginPath()
+    ctx.ellipse(centerX, centerY, width/2, height/2, 0, 0, 2*math.pi)
+    f = _resolve_fill(ctx, fill if fill is not None else 'black', centerX-width/2, centerY-height/2, width, height)
+    if f:
+        ctx.fillStyle = f
+        ctx.fill()
+    if border:
+        ctx.strokeStyle = border
+        ctx.lineWidth = borderWidth
+        ctx.stroke()
+    ctx.restore()
+
+def drawCircle(centerX, centerY, radius, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+    drawOval(centerX, centerY, radius*2, radius*2, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle)
+
+def drawLine(x1, y1, x2, y2, fill=None, border=None, lineWidth=1, opacity=100, dashes=False, arrowStart=False, arrowEnd=False):
+    ctx = _get_ctx()
+    ctx.save()
+    if opacity!=100:
+        ctx.globalAlpha = opacity/100
+    _apply_dashes(ctx, dashes)
+    ctx.beginPath()
+    ctx.moveTo(x1,y1)
+    ctx.lineTo(x2,y2)
+    ctx.strokeStyle = fill if fill is not None else 'black'
+    ctx.lineWidth = lineWidth
+    ctx.stroke()
+    ctx.restore()
+    _apply_dashes(ctx, False)
+
+def drawPolygon(*points, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+    if len(points)<4:
+        return
+    ctx = _get_ctx()
+    ctx.save()
+    if opacity!=100:
+        ctx.globalAlpha = opacity/100
+    ctx.beginPath()
+    ctx.moveTo(points[0], points[1])
+    for i in range(2, len(points), 2):
+        ctx.lineTo(points[i], points[i+1])
+    ctx.closePath()
+    f = _resolve_fill(ctx, fill if fill is not None else 'black', 0,0,100,100)
+    if f:
+        ctx.fillStyle = f
+        ctx.fill()
+    if border:
+        ctx.strokeStyle = border
+        ctx.lineWidth = borderWidth
+        ctx.stroke()
+    ctx.restore()
+
+def drawRegularPolygon(centerX, centerY, radius, points, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+    pts=[]
+    for i in range(points):
+        ang = math.radians(rotateAngle + i*360/points -90)
+        pts.append(centerX+radius*math.cos(ang))
+        pts.append(centerY+radius*math.sin(ang))
+    drawPolygon(*pts, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity)
+
+def drawStar(centerX, centerY, radius, points, roundness=0, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+    ctx = _get_ctx()
+    ctx.save()
+    if opacity!=100:
+        ctx.globalAlpha = opacity/100
+    outer=radius
+    inner=outer*(1-roundness/100*0.5) if roundness<100 else outer*0.5
+    ctx.beginPath()
+    for i in range(points*2):
+        r = outer if i%2==0 else inner
+        ang = math.radians(rotateAngle + i*180/points -90)
+        x = centerX+r*math.cos(ang)
+        y = centerY+r*math.sin(ang)
+        if i==0:
+            ctx.moveTo(x,y)
+        else:
+            ctx.lineTo(x,y)
+    ctx.closePath()
+    f = _resolve_fill(ctx, fill if fill is not None else 'black', centerX-outer, centerY-outer, outer*2, outer*2)
+    if f:
+        ctx.fillStyle = f
+        ctx.fill()
+    if border:
+        ctx.strokeStyle = border
+        ctx.lineWidth = borderWidth
+        ctx.stroke()
+    ctx.restore()
+
+def drawLabel(text, centerX, centerY, fill=None, border=None, borderWidth=1, opacity=100, rotateAngle=0, size=12, font='arial', bold=False, italic=False):
+    ctx = _get_ctx()
+    ctx.save()
+    if opacity!=100:
+        ctx.globalAlpha = opacity/100
+    if rotateAngle:
+        ctx.translate(centerX, centerY)
+        ctx.rotate(rotateAngle*math.pi/180)
+        ctx.translate(-centerX, -centerY)
+    style=''
+    if italic:
+        style+='italic '
+    if bold:
+        style+='bold '
+    ctx.font = f"{style}{size}px {font}"
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    if fill:
+        ctx.fillStyle = fill
+        ctx.fillText(str(text), centerX, centerY)
+    else:
+        ctx.fillStyle = 'black'
+        ctx.fillText(str(text), centerX, centerY)
+    if border:
+        ctx.strokeStyle = border
+        ctx.lineWidth = borderWidth
+        ctx.strokeText(str(text), centerX, centerY)
+    ctx.restore()
+
+def drawArc(centerX, centerY, width, height, startAngle, sweepAngle, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+    ctx = _get_ctx()
+    ctx.save()
+    if opacity!=100:
+        ctx.globalAlpha = opacity/100
+    ctx.beginPath()
+    start = math.radians(-startAngle + rotateAngle)
+    end = math.radians(-(startAngle+sweepAngle) + rotateAngle)
+    ctx.ellipse(centerX, centerY, width/2, height/2, 0, start, end, True)
+    if sweepAngle%360!=0:
+        ctx.lineTo(centerX, centerY)
+        ctx.closePath()
+    f = _resolve_fill(ctx, fill, centerX-width/2, centerY-height/2, width, height)
+    if f:
+        ctx.fillStyle = f
+        ctx.fill()
+    if border:
+        ctx.strokeStyle = border
+        ctx.lineWidth = borderWidth
+        ctx.stroke()
+    ctx.restore()
+
+def drawImage(url, left, top, width=None, height=None, opacity=100, rotateAngle=0):
+    ctx = _get_ctx()
+    try:
+        img = window.Image.new()
+        img.src = url
+        w = width or getattr(img, 'width', 100)
+        h = height or getattr(img, 'height', 100)
+        ctx.save()
+        if opacity!=100:
+            ctx.globalAlpha = opacity/100
+        if rotateAngle:
+            ctx.translate(left+w/2, top+h/2)
+            ctx.rotate(rotateAngle*math.pi/180)
+            ctx.translate(-(left+w/2), -(top+h/2))
+        ctx.drawImage(img, left, top, w, h)
+        ctx.restore()
+    except Exception as e:
+        print(f"drawImage error {e}")
+
+# ---------- App ----------
+class App:
+    def __init__(self, width=400, height=400):
+        object.__setattr__(self, 'width', width)
+        object.__setattr__(self, 'height', height)
+        object.__setattr__(self, 'stepsPerSecond', 30)
+        object.__setattr__(self, 'background', 'white')
+        object.__setattr__(self, 'paused', False)
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, value)
+        if name in ('width','height'):
+            _resize_if_needed()
+    def setMaxShapeCount(self, n):
+        pass
+    def getTextInput(self, prompt=''):
+        return window.prompt(prompt)
+    def showMessage(self, msg):
+        window.alert(msg)
+
+def _resize_if_needed():
+    global _app, _canvas, _ctx
+    if _app is None or _canvas is None:
+        return
+    if _canvas.width!=_app.width or _canvas.height!=_app.height:
+        _canvas.width=_app.width
+        _canvas.height=_app.height
+        _canvas.style.width=f"{_app.width}px"
+        _canvas.style.height=f"{_app.height}px"
+        _ctx=_canvas.getContext('2d')
+
+def _draw_all_shapes():
+    ctx = _get_ctx()
+    for shape in list(_all_shapes):
+        try:
+            if hasattr(shape, 'draw'):
+                shape.draw(ctx)
+        except Exception as e:
+            print(f"draw error {e}")
+
+def runApp(width=400, height=400, stepsPerSecond=30):
+    global _app, _canvas, _ctx, _timer_id
+    _ensure_canvas()
+    _canvas.width=width
+    _canvas.height=height
+    _canvas.style.width=f"{width}px"
+    _canvas.style.height=f"{height}px"
+    _ctx=_canvas.getContext('2d')
+    _app=App(width, height)
+    _app.stepsPerSecond=stepsPerSecond
+    return _app
+
+def _start_app(user_funcs):
+    global _app, _timer_id, _user_funcs_global, _mouse_is_down
+    _user_funcs_global=user_funcs
+    if _app is None:
+        _app=App()
+    # onAppStart
+    starter = None
+    if 'onAppStart' in user_funcs:
+        starter = user_funcs['onAppStart']
+    elif 'appStarted' in user_funcs:
+        starter = user_funcs['appStarted']
+    if starter is not None:
+        try:
+            starter(_app)
+        except Exception as e:
+            print(f"onAppStart error {e}")
+            import traceback
+            traceback.print_exc()
+            return
+    _resize_if_needed()
+    sps=getattr(_app,'stepsPerSecond',30)
+    try:
+        sps=int(sps)
+    except:
+        sps=30
+    canvas=document['cmu-canvas']
+    def _get_mouse_pos(ev):
+        rect=canvas.getBoundingClientRect()
+        x=ev.clientX-rect.left
+        y=ev.clientY-rect.top
+        scaleX=_app.width/rect.width if rect.width else 1
+        scaleY=_app.height/rect.height if rect.height else 1
+        return (x*scaleX, y*scaleY)
+    def on_mousedown(ev):
+        global _mouse_is_down
+        _mouse_is_down=True
+        for name in ('onMousePress','onMousePressed'):
+            if name in _user_funcs_global:
+                x,y=_get_mouse_pos(ev)
+                try:
+                    _user_funcs_global[name](_app, x, y)
+                except Exception as e:
+                    print(f"{name} error {e}")
+    def on_mouseup(ev):
+        global _mouse_is_down
+        _mouse_is_down=False
+        for name in ('onMouseRelease','onMouseReleased'):
+            if name in _user_funcs_global:
+                x,y=_get_mouse_pos(ev)
+                try:
+                    _user_funcs_global[name](_app, x, y)
+                except Exception as e:
+                    print(f"{name} error {e}")
+    def on_mousemove(ev):
+        x,y=_get_mouse_pos(ev)
+        if _mouse_is_down:
+            for name in ('onMouseDrag','onMouseDragged'):
+                if name in _user_funcs_global:
+                    try:
+                        _user_funcs_global[name](_app, x, y)
+                    except Exception as e:
+                        print(f"{name} error {e}")
+        else:
+            for name in ('onMouseMove','onMouseMoved'):
+                if name in _user_funcs_global:
+                    try:
+                        _user_funcs_global[name](_app, x, y)
+                    except Exception as e:
+                        print(f"{name} error {e}")
+    canvas.bind('mousedown', on_mousedown)
+    canvas.bind('mouseup', on_mouseup)
+    canvas.bind('mousemove', on_mousemove)
+    canvas.bind('mouseleave', on_mouseup)
+    def on_keydown(ev):
+        key=ev.key
+        if key==' ':
+            key='space'
+        else:
+            key=key.lower()
+        for name in ('onKeyPress','onKeyPressed'):
+            if name in _user_funcs_global:
+                try:
+                    _user_funcs_global[name](_app, key)
+                except Exception as e:
+                    print(f"{name} error {e}")
+    def on_keyup(ev):
+        key=ev.key
+        if key==' ':
+            key='space'
+        else:
+            key=key.lower()
+        for name in ('onKeyRelease','onKeyReleased'):
+            if name in _user_funcs_global:
+                try:
+                    _user_funcs_global[name](_app, key)
+                except Exception as e:
+                    print(f"{name} error {e}")
+    window.bind('keydown', on_keydown)
+    window.bind('keyup', on_keyup)
+    _keys_held=set()
+    def on_keydown_hold(ev):
+        k=ev.key.lower()
+        if k==' ':
+            k='space'
+        _keys_held.add(k)
+    def on_keyup_hold(ev):
+        k=ev.key.lower()
+        if k==' ':
+            k='space'
+        _keys_held.discard(k)
+    window.bind('keydown', on_keydown_hold)
+    window.bind('keyup', on_keyup_hold)
+    _loop_counter={'n':0}
+    def loop():
+        global _timer_id
+        try:
+            _loop_counter['n']+=1
+            _resize_if_needed()
+            if 'onKeyHold' in _user_funcs_global and _keys_held:
+                try:
+                    _user_funcs_global['onKeyHold'](_app, list(_keys_held))
+                except Exception as e:
+                    print(f"onKeyHold error {e}")
+            if 'onStep' in _user_funcs_global:
+                if not getattr(_app, 'paused', False):
+                    _user_funcs_global['onStep'](_app)
+            _ctx.clearRect(0,0,_app.width,_app.height)
+            if _app.background:
+                bg=_app.background
+                if isinstance(bg, dict) and bg.get('_is_gradient'):
+                    grad=_ctx.createLinearGradient(0,0,0,_app.height)
+                    colors=bg['colors']
+                    for i,c in enumerate(colors):
+                        grad.addColorStop(i/(len(colors)-1) if len(colors)>1 else 0, c)
+                    _ctx.fillStyle=grad
+                else:
+                    _ctx.fillStyle=bg
+                _ctx.fillRect(0,0,_app.width,_app.height)
+            if 'redrawAll' in _user_funcs_global:
+                _user_funcs_global['redrawAll'](_app)
+            _draw_all_shapes()
+        except Exception as e:
+            print(f"Loop error {e}")
+            import traceback
+            traceback.print_exc()
+            if _timer_id is not None:
+                timer.clear_interval(_timer_id)
+                _timer_id=None
+    # immediate first frame
+    try:
+        loop()
+    except Exception as e:
+        print(f"first loop error {e}")
+    if _timer_id is not None:
+        timer.clear_interval(_timer_id)
+    interval=int(1000/sps) if sps>0 else 33
+    _timer_id=timer.set_interval(loop, interval)
+
+__all__ = [
+    'Rect','Oval','Circle','Line','Polygon','RegularPolygon','Star','Label','Arc','Group','SCSImage','Image','Sound',
+    'rgb','gradient','distance','angleTo','getPointInDir','rounded','makeList','getImageSize',
+    'drawRect','drawOval','drawCircle','drawLine','drawPolygon','drawRegularPolygon','drawStar','drawLabel','drawArc','drawImage',
+    'App','runApp','_start_app','_clear_all_shapes','_ensure_canvas'
+]
+
+def run(*args, **kwargs):
+    return runApp(*args, **kwargs)
+def loop(*args, **kwargs):
+    return runApp(*args, **kwargs)
+
+
+import sys
+sys.modules['scs'] = sys.modules[__name__]
+print("[scs] SANDBOX API EXACT v3 - sandbox.html")
+</script>
+
+<script type="text/python" id="main">
+from browser import document, window, timer
+import sys
+import scs
+from scs import _ensure_canvas, _clear_all_shapes, _start_app, App
+
+_log_el=document['log']
+_user_funcs={}
+_code_area=document['code-input']
+
+def log(msg):
+    _log_el.text+=str(msg)+"\n"
+    print(msg)
+def clear_log():
+    _log_el.text=""
+
+def exec_user_code():
+    global _user_funcs
+    clear_log()
+    log("=== RUN ===")
+    code=_code_area.value
+    scs._clear_all_shapes()
+    user_ns={}
+    for name in scs.__all__:
+        if hasattr(scs, name):
+            user_ns[name]=getattr(scs, name)
+    import math
+    user_ns['sin']=math.sin
+    user_ns['cos']=math.cos
+    user_ns['atan2']=math.atan2
+    user_ns['sqrt']=math.sqrt
+    user_ns['pi']=math.pi
+    user_ns['__builtins__']=__builtins__
+    def custom_runApp(width=400, height=400, stepsPerSecond=30):
+        global _user_funcs
+        _user_funcs={}
+        for n in ['onAppStart','appStarted','onAppStopped','appStopped','redrawAll','onStep','onMousePress','onMouseRelease','onMouseMove','onMouseDrag','onKeyPress','onKeyRelease','onKeyHold','onResize']:
+            if n in user_ns and callable(user_ns[n]):
+                _user_funcs[n]=user_ns[n]
+        scs._app=None
+        scs._ensure_canvas()
+        canvas=document['cmu-canvas']
+        canvas.width=width
+        canvas.height=height
+        canvas.style.width=f"{width}px"
+        canvas.style.height=f"{height}px"
+        scs._ctx = canvas.getContext('2d')
+        scs._app=App(width, height)
+        scs._app.stepsPerSecond=stepsPerSecond
+        scs._start_app(_user_funcs)
+        log(f"Running {width}x{height}")
+    user_ns['runApp']=custom_runApp
+    user_ns['run']=custom_runApp
+    user_ns['loop']=custom_runApp
+    scs.runApp=custom_runApp
+    scs.run=custom_runApp
+    scs.loop=custom_runApp
+    try:
+        exec(code, user_ns)
+        log(f"exec done timer={scs._timer_id}")
+    except Exception as e:
+        import traceback
+        log(f"Error {e}\n{traceback.format_exc()}")
+
+document['run-btn'].bind('click', lambda ev: exec_user_code())
+def stop_loop(ev):
+    if scs._timer_id is not None:
+        timer.clear_interval(scs._timer_id)
+        scs._timer_id=None
+        log("Stopped")
+document['stop-btn'].bind('click', stop_loop)
+log("Sandbox ready - edit code and click Run")
+</script>
+</body></html>

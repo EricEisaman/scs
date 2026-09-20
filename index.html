@@ -1,0 +1,1071 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Joukowski Aerofoil - Wind Tunnel</title>
+<style>
+body{margin:0;padding:0;background:#0f1115;color:#e6e6e6;font-family:monospace;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;}
+#canvas-container{border:2px solid #3a3f4b;border-radius:8px;background:#000;overflow:hidden;box-shadow:0 0 30px rgba(0,0,0,0.6);}
+canvas{display:block;background:black;}
+#log{margin-top:12px;background:#1a1d24;border:1px solid #3a3f4b;border-radius:6px;padding:10px;width:1050px;max-width:95vw;min-height:40px;white-space:pre-wrap;font-size:11px;max-height:160px;overflow:auto;display:none;}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython_stdlib.js"></script>
+</head>
+<body onload="brython({debug:1})">
+<div id="canvas-container"><canvas id="cmu-canvas" width="1050" height="700"></canvas></div>
+<div id="log"></div>
+
+<script type="text/python" id="scs">
+
+# scs.py - SANDBOX CMU_Graphics API EXACT (Brython)
+# Based on CMU Graphics Guide v2 + sandbox docs
+# No property decorator to avoid Brython bug, file:// safe
+
+from browser import document, window, timer
+import math
+
+_canvas = None
+_ctx = None
+_app = None
+_timer_id = None
+_all_shapes = []
+_user_funcs_global = {}
+_mouse_is_down = False
+
+def _ensure_canvas():
+    global _canvas, _ctx
+    if _canvas is None:
+        _canvas = document.getElementById('cmu-canvas')
+        if _canvas is None:
+            _canvas = document.createElement('canvas')
+            _canvas.id = 'cmu-canvas'
+            _canvas.width = 400
+            _canvas.height = 400
+            document.body.appendChild(_canvas)
+        _ctx = _canvas.getContext('2d')
+    return _ctx
+
+def _get_ctx():
+    if _ctx is None:
+        _ensure_canvas()
+    return _ctx
+
+def _clear_all_shapes():
+    global _all_shapes
+    _all_shapes = []
+
+# ---------- Color ----------
+def rgb(r,g,b):
+    r = max(0, min(255, int(r)))
+    g = max(0, min(255, int(g)))
+    b = max(0, min(255, int(b)))
+    return f"rgb({r},{g},{b})"
+
+def gradient(*colors, start='center'):
+    if len(colors)==0:
+        return 'black'
+    if len(colors)==1:
+        return colors[0]
+    return {'_is_gradient': True, 'colors': list(colors), 'start': start}
+
+def _resolve_fill(ctx, fill, x, y, w, h):
+    if fill is None:
+        return None
+    if isinstance(fill, dict) and fill.get('_is_gradient'):
+        colors = fill['colors']
+        start = fill.get('start','center')
+        try:
+            if start=='center':
+                grad = ctx.createRadialGradient(x+w/2, y+h/2, 0, x+w/2, y+h/2, max(w,h)/2)
+            elif start=='top':
+                grad = ctx.createLinearGradient(x, y, x, y+h)
+            elif start=='left':
+                grad = ctx.createLinearGradient(x, y, x+w, y)
+            elif start=='bottom':
+                grad = ctx.createLinearGradient(x, y+h, x, y)
+            elif start=='right':
+                grad = ctx.createLinearGradient(x+w, y, x, y)
+            else:
+                grad = ctx.createLinearGradient(x, y, x+w, y+h)
+            for i,c in enumerate(colors):
+                off = i/(len(colors)-1) if len(colors)>1 else 0
+                grad.addColorStop(off, c)
+            return grad
+        except:
+            return colors[0]
+    return fill
+
+def _apply_dashes(ctx, dashes):
+    try:
+        if dashes is True:
+            ctx.setLineDash([6,4])
+        elif isinstance(dashes, (list,tuple)):
+            ctx.setLineDash(list(dashes))
+        elif isinstance(dashes, int):
+            ctx.setLineDash([dashes, dashes])
+        elif dashes is False or dashes is None:
+            ctx.setLineDash([])
+        else:
+            ctx.setLineDash([])
+    except:
+        pass
+
+# ---------- Utils - sandbox exact ----------
+def distance(x1,y1,x2,y2):
+    return math.sqrt((x2-x1)**2 + (y2-y1)**2)
+
+def angleTo(x1,y1,x2,y2):
+    # 0 = straight up, clockwise - per guide
+    dx = x2-x1
+    dy = y1-y2
+    ang = math.degrees(math.atan2(dx, dy))
+    if ang < 0:
+        ang += 360
+    return ang
+
+def getPointInDir(x1,y1,angle,length):
+    rad = math.radians(angle)
+    x2 = x1 + length * math.sin(rad)
+    y2 = y1 - length * math.cos(rad)
+    return (x2, y2)
+
+def rounded(n):
+    return round(n)
+
+def makeList(rows, cols=None):
+    if cols is None:
+        return [None]*rows
+    return [[None]*cols for _ in range(rows)]
+
+def getImageSize(url):
+    try:
+        img = window.Image.new()
+        img.src = url
+        w = getattr(img, 'width', 0)
+        h = getattr(img, 'height', 0)
+        if w and h:
+            return (w, h)
+    except:
+        pass
+    return (100, 100)
+
+# ---------- Shape base - no property decorator ----------
+class Shape:
+    def __init__(self, **kwargs):
+        object.__setattr__(self, 'fill', kwargs.get('fill', 'black'))
+        object.__setattr__(self, 'border', kwargs.get('border', None))
+        object.__setattr__(self, 'borderWidth', kwargs.get('borderWidth', 2))
+        object.__setattr__(self, 'opacity', kwargs.get('opacity', 100))
+        object.__setattr__(self, 'rotateAngle', kwargs.get('rotateAngle', 0))
+        object.__setattr__(self, 'visible', kwargs.get('visible', True))
+        object.__setattr__(self, 'dashes', kwargs.get('dashes', False))
+        object.__setattr__(self, 'align', kwargs.get('align', 'center'))
+        object.__setattr__(self, 'lineWidth', kwargs.get('lineWidth', kwargs.get('borderWidth', 2)))
+        object.__setattr__(self, 'arrowStart', kwargs.get('arrowStart', False))
+        object.__setattr__(self, 'arrowEnd', kwargs.get('arrowEnd', False))
+        object.__setattr__(self, 'roundness', kwargs.get('roundness', 0))
+        _all_shapes.append(self)
+    def toFront(self):
+        if self in _all_shapes:
+            _all_shapes.remove(self)
+            _all_shapes.append(self)
+    def toBack(self):
+        if self in _all_shapes:
+            _all_shapes.remove(self)
+            _all_shapes.insert(0, self)
+    def contains(self, x, y):
+        return self.hits(x,y)
+    def hits(self, x, y):
+        return False
+    def hitsShape(self, other):
+        return False
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, value)
+
+# ---------- Rect - sandbox: left, top, width, height ----------
+class Rect(Shape):
+    def __init__(self, left, top, width, height, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, dashes=False, align='leftTop', roundness=0, **kw):
+        object.__setattr__(self, 'left', left)
+        object.__setattr__(self, 'top', top)
+        object.__setattr__(self, 'width', width)
+        object.__setattr__(self, 'height', height)
+        object.__setattr__(self, 'align', align)
+        object.__setattr__(self, 'roundness', roundness)
+        Shape.__init__(self, fill=fill if fill is not None else 'black', border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, dashes=dashes, **kw)
+        self._sync()
+    def _sync(self):
+        # derive center, right, bottom
+        object.__setattr__(self, 'centerX', self.left + self.width/2)
+        object.__setattr__(self, 'centerY', self.top + self.height/2)
+        object.__setattr__(self, 'right', self.left + self.width)
+        object.__setattr__(self, 'bottom', self.top + self.height)
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, value)
+        if name in ('left','top','width','height','centerX','centerY','right','bottom'):
+            # keep in sync
+            try:
+                if name == 'centerX':
+                    object.__setattr__(self, 'left', value - self.width/2)
+                elif name == 'centerY':
+                    object.__setattr__(self, 'top', value - self.height/2)
+                elif name == 'right':
+                    object.__setattr__(self, 'left', value - self.width)
+                elif name == 'bottom':
+                    object.__setattr__(self, 'top', value - self.height)
+                # re-sync derived
+                if hasattr(self, 'width'):
+                    object.__setattr__(self, 'centerX', self.left + self.width/2)
+                    object.__setattr__(self, 'centerY', self.top + self.height/2)
+                    object.__setattr__(self, 'right', self.left + self.width)
+                    object.__setattr__(self, 'bottom', self.top + self.height)
+            except:
+                pass
+    def hits(self, x, y):
+        return self.left <= x <= self.left+self.width and self.top <= y <= self.top+self.height
+    def draw(self, ctx):
+        if not getattr(self, 'visible', True):
+            return
+        ctx.save()
+        if self.opacity != 100:
+            ctx.globalAlpha = self.opacity/100
+        if self.rotateAngle:
+            ctx.translate(self.centerX, self.centerY)
+            ctx.rotate(self.rotateAngle*math.pi/180)
+            ctx.translate(-self.centerX, -self.centerY)
+        _apply_dashes(ctx, self.dashes)
+        fill = _resolve_fill(ctx, self.fill, self.left, self.top, self.width, self.height)
+        if fill:
+            ctx.fillStyle = fill
+            r = getattr(self, 'roundness', 0)
+            if r:
+                # simple rounded rect
+                try:
+                    rr = min(r, self.width/2, self.height/2)
+                    ctx.beginPath()
+                    ctx.roundRect(self.left, self.top, self.width, self.height, rr)
+                    ctx.fill()
+                except:
+                    ctx.fillRect(self.left, self.top, self.width, self.height)
+            else:
+                ctx.fillRect(self.left, self.top, self.width, self.height)
+        if self.border:
+            ctx.strokeStyle = self.border
+            ctx.lineWidth = self.borderWidth
+            ctx.strokeRect(self.left, self.top, self.width, self.height)
+        ctx.restore()
+        _apply_dashes(ctx, False)
+
+class Oval(Shape):
+    def __init__(self, centerX, centerY, width, height, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, dashes=False, align='center', **kw):
+        object.__setattr__(self, 'centerX', centerX)
+        object.__setattr__(self, 'centerY', centerY)
+        object.__setattr__(self, 'width', width)
+        object.__setattr__(self, 'height', height)
+        object.__setattr__(self, 'align', align)
+        Shape.__init__(self, fill=fill if fill is not None else 'black', border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, dashes=dashes, **kw)
+    def hits(self, x, y):
+        dx = (x-self.centerX)/(self.width/2) if self.width else 0
+        dy = (y-self.centerY)/(self.height/2) if self.height else 0
+        return dx*dx+dy*dy <= 1
+    def draw(self, ctx):
+        if not self.visible:
+            return
+        ctx.save()
+        if self.opacity != 100:
+            ctx.globalAlpha = self.opacity/100
+        if self.rotateAngle:
+            ctx.translate(self.centerX, self.centerY)
+            ctx.rotate(self.rotateAngle*math.pi/180)
+            ctx.translate(-self.centerX, -self.centerY)
+        _apply_dashes(ctx, self.dashes)
+        ctx.beginPath()
+        ctx.ellipse(self.centerX, self.centerY, self.width/2, self.height/2, 0, 0, 2*math.pi)
+        fill = _resolve_fill(ctx, self.fill, self.centerX-self.width/2, self.centerY-self.height/2, self.width, self.height)
+        if fill:
+            ctx.fillStyle = fill
+            ctx.fill()
+        if self.border:
+            ctx.strokeStyle = self.border
+            ctx.lineWidth = self.borderWidth
+            ctx.stroke()
+        ctx.restore()
+        _apply_dashes(ctx, False)
+
+class Circle(Oval):
+    def __init__(self, centerX, centerY, radius, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, dashes=False, align='center', **kw):
+        super().__init__(centerX, centerY, radius*2, radius*2, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, dashes=dashes, align=align, **kw)
+        object.__setattr__(self, 'radius', radius)
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, value)
+        if name == 'radius':
+            object.__setattr__(self, 'width', value*2)
+            object.__setattr__(self, 'height', value*2)
+
+class Line(Shape):
+    def __init__(self, x1, y1, x2, y2, fill=None, border=None, lineWidth=1, opacity=100, rotateAngle=0, visible=True, dashes=False, arrowStart=False, arrowEnd=False, **kw):
+        object.__setattr__(self, 'x1', x1)
+        object.__setattr__(self, 'y1', y1)
+        object.__setattr__(self, 'x2', x2)
+        object.__setattr__(self, 'y2', y2)
+        object.__setattr__(self, 'lineWidth', lineWidth)
+        object.__setattr__(self, 'dashes', dashes)
+        object.__setattr__(self, 'arrowStart', arrowStart)
+        object.__setattr__(self, 'arrowEnd', arrowEnd)
+        Shape.__init__(self, fill=fill if fill is not None else 'black', border=border, borderWidth=lineWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, **kw)
+    def draw(self, ctx):
+        if not self.visible:
+            return
+        ctx.save()
+        if self.opacity != 100:
+            ctx.globalAlpha = self.opacity/100
+        _apply_dashes(ctx, self.dashes)
+        ctx.beginPath()
+        ctx.moveTo(self.x1, self.y1)
+        ctx.lineTo(self.x2, self.y2)
+        ctx.strokeStyle = self.fill if self.fill else 'black'
+        ctx.lineWidth = self.lineWidth
+        ctx.stroke()
+        # arrows
+        def draw_arrow(x, y, angle):
+            size=8
+            ctx.beginPath()
+            ctx.moveTo(x, y)
+            ctx.lineTo(x-size*math.cos(angle-0.4), y-size*math.sin(angle-0.4))
+            ctx.lineTo(x-size*math.cos(angle+0.4), y-size*math.sin(angle+0.4))
+            ctx.closePath()
+            ctx.fillStyle = ctx.strokeStyle
+            ctx.fill()
+        ang = math.atan2(self.y2-self.y1, self.x2-self.x1)
+        if self.arrowEnd:
+            draw_arrow(self.x2, self.y2, ang)
+        if self.arrowStart:
+            draw_arrow(self.x1, self.y1, ang+math.pi)
+        ctx.restore()
+        _apply_dashes(ctx, False)
+
+class Polygon(Shape):
+    def __init__(self, *points, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, dashes=False, **kw):
+        # points as x1,y1,x2,y2,...
+        object.__setattr__(self, 'points', list(points))
+        Shape.__init__(self, fill=fill if fill is not None else 'black', border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, dashes=dashes, **kw)
+    def draw(self, ctx):
+        if not self.visible or len(self.points)<4:
+            return
+        ctx.save()
+        if self.opacity != 100:
+            ctx.globalAlpha = self.opacity/100
+        _apply_dashes(ctx, self.dashes)
+        ctx.beginPath()
+        ctx.moveTo(self.points[0], self.points[1])
+        for i in range(2, len(self.points), 2):
+            ctx.lineTo(self.points[i], self.points[i+1])
+        ctx.closePath()
+        fill = _resolve_fill(ctx, self.fill, 0,0,100,100)
+        if fill:
+            ctx.fillStyle = fill
+            ctx.fill()
+        if self.border:
+            ctx.strokeStyle = self.border
+            ctx.lineWidth = self.borderWidth
+            ctx.stroke()
+        ctx.restore()
+        _apply_dashes(ctx, False)
+
+class RegularPolygon(Polygon):
+    def __init__(self, centerX, centerY, radius, points, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, **kw):
+        pts=[]
+        for i in range(points):
+            ang = math.radians(rotateAngle + i*360/points - 90)
+            pts.append(centerX+radius*math.cos(ang))
+            pts.append(centerY+radius*math.sin(ang))
+        object.__setattr__(self, 'centerX', centerX)
+        object.__setattr__(self, 'centerY', centerY)
+        object.__setattr__(self, 'radius', radius)
+        object.__setattr__(self, 'points_count', points)
+        super().__init__(*pts, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=0, visible=visible, **kw)
+
+class Star(Shape):
+    def __init__(self, centerX, centerY, radius, points, roundness=0, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, **kw):
+        object.__setattr__(self, 'centerX', centerX)
+        object.__setattr__(self, 'centerY', centerY)
+        object.__setattr__(self, 'radius', radius)
+        object.__setattr__(self, 'points', points)
+        object.__setattr__(self, 'roundness', roundness)
+        Shape.__init__(self, fill=fill if fill is not None else 'black', border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, **kw)
+    def draw(self, ctx):
+        if not self.visible:
+            return
+        ctx.save()
+        if self.opacity != 100:
+            ctx.globalAlpha = self.opacity/100
+        ctx.beginPath()
+        outer = self.radius
+        inner = outer*(1-self.roundness/100*0.5) if self.roundness<100 else outer*0.5
+        # if roundness 100, star looks like polygon with points*2 sides
+        if self.roundness>=100:
+            inner = outer
+        for i in range(self.points*2):
+            r = outer if i%2==0 else inner
+            ang = math.radians(self.rotateAngle + i*180/self.points - 90)
+            x = self.centerX + r*math.cos(ang)
+            y = self.centerY + r*math.sin(ang)
+            if i==0:
+                ctx.moveTo(x,y)
+            else:
+                ctx.lineTo(x,y)
+        ctx.closePath()
+        fill = _resolve_fill(ctx, self.fill, self.centerX-outer, self.centerY-outer, outer*2, outer*2)
+        if fill:
+            ctx.fillStyle = fill
+            ctx.fill()
+        if self.border:
+            ctx.strokeStyle = self.border
+            ctx.lineWidth = self.borderWidth
+            ctx.stroke()
+        ctx.restore()
+
+class Label(Shape):
+    def __init__(self, text, centerX, centerY, fill=None, border=None, borderWidth=1, opacity=100, rotateAngle=0, visible=True, size=12, font='arial', bold=False, italic=False, align='center', **kw):
+        object.__setattr__(self, 'text', str(text))
+        object.__setattr__(self, 'centerX', centerX)
+        object.__setattr__(self, 'centerY', centerY)
+        object.__setattr__(self, 'size', size)
+        object.__setattr__(self, 'font', font)
+        object.__setattr__(self, 'bold', bold)
+        object.__setattr__(self, 'italic', italic)
+        object.__setattr__(self, 'align', align)
+        Shape.__init__(self, fill=fill if fill is not None else 'black', border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, **kw)
+    def draw(self, ctx):
+        if not self.visible:
+            return
+        ctx.save()
+        if self.opacity != 100:
+            ctx.globalAlpha = self.opacity/100
+        if self.rotateAngle:
+            ctx.translate(self.centerX, self.centerY)
+            ctx.rotate(self.rotateAngle*math.pi/180)
+            ctx.translate(-self.centerX, -self.centerY)
+        style=''
+        if self.italic:
+            style+='italic '
+        if self.bold:
+            style+='bold '
+        ctx.font = f"{style}{self.size}px {self.font}"
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        if self.fill:
+            ctx.fillStyle = self.fill
+            ctx.fillText(self.text, self.centerX, self.centerY)
+        if self.border:
+            ctx.strokeStyle = self.border
+            ctx.lineWidth = self.borderWidth
+            ctx.strokeText(self.text, self.centerX, self.centerY)
+        ctx.restore()
+
+class Arc(Shape):
+    def __init__(self, centerX, centerY, width, height, startAngle, sweepAngle, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, **kw):
+        object.__setattr__(self, 'centerX', centerX)
+        object.__setattr__(self, 'centerY', centerY)
+        object.__setattr__(self, 'width', width)
+        object.__setattr__(self, 'height', height)
+        object.__setattr__(self, 'startAngle', startAngle)
+        object.__setattr__(self, 'sweepAngle', sweepAngle)
+        Shape.__init__(self, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, **kw)
+    def draw(self, ctx):
+        if not self.visible:
+            return
+        ctx.save()
+        if self.opacity != 100:
+            ctx.globalAlpha = self.opacity/100
+        ctx.beginPath()
+        # arc angles anticlockwise per guide, but canvas is clockwise, so invert
+        start = math.radians(-self.startAngle + self.rotateAngle)
+        end = math.radians(-(self.startAngle+self.sweepAngle) + self.rotateAngle)
+        ctx.ellipse(self.centerX, self.centerY, self.width/2, self.height/2, 0, start, end, True)
+        if self.sweepAngle%360!=0:
+            ctx.lineTo(self.centerX, self.centerY)
+            ctx.closePath()
+        fill = _resolve_fill(ctx, self.fill, self.centerX-self.width/2, self.centerY-self.height/2, self.width, self.height)
+        if fill:
+            ctx.fillStyle = fill
+            ctx.fill()
+        if self.border:
+            ctx.strokeStyle = self.border
+            ctx.lineWidth = self.borderWidth
+            ctx.stroke()
+        ctx.restore()
+
+class Group(Shape):
+    def __init__(self, *shapes, **kw):
+        object.__setattr__(self, 'shapes', list(shapes))
+        Shape.__init__(self, **kw)
+    def draw(self, ctx):
+        for s in self.shapes:
+            if hasattr(s, 'draw'):
+                s.draw(ctx)
+
+class SCSImage(Shape):
+    def __init__(self, url, left, top, width=None, height=None, opacity=100, rotateAngle=0, visible=True, align='leftTop', **kw):
+        object.__setattr__(self, 'url', url)
+        object.__setattr__(self, 'left', left)
+        object.__setattr__(self, 'top', top)
+        object.__setattr__(self, 'width', width)
+        object.__setattr__(self, 'height', height)
+        Shape.__init__(self, opacity=opacity, rotateAngle=rotateAngle, visible=visible, align=align, **kw)
+        self._img = None
+        try:
+            self._img = window.Image.new()
+            self._img.src = url
+        except:
+            pass
+    def draw(self, ctx):
+        if not self.visible or self._img is None:
+            return
+        ctx.save()
+        if self.opacity != 100:
+            ctx.globalAlpha = self.opacity/100
+        w = self.width or getattr(self._img, 'width', 100)
+        h = self.height or getattr(self._img, 'height', 100)
+        ctx.drawImage(self._img, self.left, self.top, w, h)
+        ctx.restore()
+
+Image = SCSImage
+
+class Sound:
+    def __init__(self, url):
+        self.url = url
+        self._audio = None
+        try:
+            self._audio = window.Audio.new(url)
+        except:
+            pass
+    def play(self, loop=False, restart=False):
+        try:
+            if restart and self._audio:
+                self._audio.currentTime = 0
+            if self._audio:
+                self._audio.loop = loop
+                self._audio.play()
+        except Exception as e:
+            print(f"Sound play error {e}")
+    def pause(self):
+        try:
+            if self._audio:
+                self._audio.pause()
+        except:
+            pass
+
+# ---------- Drawing functions - sandbox exact signatures ----------
+def drawRect(left, top, width, height, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+    ctx = _get_ctx()
+    ctx.save()
+    if opacity!=100:
+        ctx.globalAlpha = opacity/100
+    if rotateAngle:
+        cx = left+width/2
+        cy = top+height/2
+        ctx.translate(cx,cy)
+        ctx.rotate(rotateAngle*math.pi/180)
+        ctx.translate(-cx,-cy)
+    f = _resolve_fill(ctx, fill if fill is not None else 'black', left, top, width, height)
+    if f:
+        ctx.fillStyle = f
+        ctx.fillRect(left, top, width, height)
+    if border:
+        ctx.strokeStyle = border
+        ctx.lineWidth = borderWidth
+        ctx.strokeRect(left, top, width, height)
+    ctx.restore()
+
+def drawOval(centerX, centerY, width, height, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+    ctx = _get_ctx()
+    ctx.save()
+    if opacity!=100:
+        ctx.globalAlpha = opacity/100
+    if rotateAngle:
+        ctx.translate(centerX, centerY)
+        ctx.rotate(rotateAngle*math.pi/180)
+        ctx.translate(-centerX, -centerY)
+    ctx.beginPath()
+    ctx.ellipse(centerX, centerY, width/2, height/2, 0, 0, 2*math.pi)
+    f = _resolve_fill(ctx, fill if fill is not None else 'black', centerX-width/2, centerY-height/2, width, height)
+    if f:
+        ctx.fillStyle = f
+        ctx.fill()
+    if border:
+        ctx.strokeStyle = border
+        ctx.lineWidth = borderWidth
+        ctx.stroke()
+    ctx.restore()
+
+def drawCircle(centerX, centerY, radius, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+    drawOval(centerX, centerY, radius*2, radius*2, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle)
+
+def drawLine(x1, y1, x2, y2, fill=None, border=None, lineWidth=1, opacity=100, dashes=False, arrowStart=False, arrowEnd=False):
+    ctx = _get_ctx()
+    ctx.save()
+    if opacity!=100:
+        ctx.globalAlpha = opacity/100
+    _apply_dashes(ctx, dashes)
+    ctx.beginPath()
+    ctx.moveTo(x1,y1)
+    ctx.lineTo(x2,y2)
+    ctx.strokeStyle = fill if fill is not None else 'black'
+    ctx.lineWidth = lineWidth
+    ctx.stroke()
+    ctx.restore()
+    _apply_dashes(ctx, False)
+
+def drawPolygon(*points, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+    if len(points)<4:
+        return
+    ctx = _get_ctx()
+    ctx.save()
+    if opacity!=100:
+        ctx.globalAlpha = opacity/100
+    ctx.beginPath()
+    ctx.moveTo(points[0], points[1])
+    for i in range(2, len(points), 2):
+        ctx.lineTo(points[i], points[i+1])
+    ctx.closePath()
+    f = _resolve_fill(ctx, fill if fill is not None else 'black', 0,0,100,100)
+    if f:
+        ctx.fillStyle = f
+        ctx.fill()
+    if border:
+        ctx.strokeStyle = border
+        ctx.lineWidth = borderWidth
+        ctx.stroke()
+    ctx.restore()
+
+def drawRegularPolygon(centerX, centerY, radius, points, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+    pts=[]
+    for i in range(points):
+        ang = math.radians(rotateAngle + i*360/points -90)
+        pts.append(centerX+radius*math.cos(ang))
+        pts.append(centerY+radius*math.sin(ang))
+    drawPolygon(*pts, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity)
+
+def drawStar(centerX, centerY, radius, points, roundness=0, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+    ctx = _get_ctx()
+    ctx.save()
+    if opacity!=100:
+        ctx.globalAlpha = opacity/100
+    outer=radius
+    inner=outer*(1-roundness/100*0.5) if roundness<100 else outer*0.5
+    ctx.beginPath()
+    for i in range(points*2):
+        r = outer if i%2==0 else inner
+        ang = math.radians(rotateAngle + i*180/points -90)
+        x = centerX+r*math.cos(ang)
+        y = centerY+r*math.sin(ang)
+        if i==0:
+            ctx.moveTo(x,y)
+        else:
+            ctx.lineTo(x,y)
+    ctx.closePath()
+    f = _resolve_fill(ctx, fill if fill is not None else 'black', centerX-outer, centerY-outer, outer*2, outer*2)
+    if f:
+        ctx.fillStyle = f
+        ctx.fill()
+    if border:
+        ctx.strokeStyle = border
+        ctx.lineWidth = borderWidth
+        ctx.stroke()
+    ctx.restore()
+
+def drawLabel(text, centerX, centerY, fill=None, border=None, borderWidth=1, opacity=100, rotateAngle=0, size=12, font='arial', bold=False, italic=False):
+    ctx = _get_ctx()
+    ctx.save()
+    if opacity!=100:
+        ctx.globalAlpha = opacity/100
+    if rotateAngle:
+        ctx.translate(centerX, centerY)
+        ctx.rotate(rotateAngle*math.pi/180)
+        ctx.translate(-centerX, -centerY)
+    style=''
+    if italic:
+        style+='italic '
+    if bold:
+        style+='bold '
+    ctx.font = f"{style}{size}px {font}"
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    if fill:
+        ctx.fillStyle = fill
+        ctx.fillText(str(text), centerX, centerY)
+    else:
+        ctx.fillStyle = 'black'
+        ctx.fillText(str(text), centerX, centerY)
+    if border:
+        ctx.strokeStyle = border
+        ctx.lineWidth = borderWidth
+        ctx.strokeText(str(text), centerX, centerY)
+    ctx.restore()
+
+def drawArc(centerX, centerY, width, height, startAngle, sweepAngle, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+    ctx = _get_ctx()
+    ctx.save()
+    if opacity!=100:
+        ctx.globalAlpha = opacity/100
+    ctx.beginPath()
+    start = math.radians(-startAngle + rotateAngle)
+    end = math.radians(-(startAngle+sweepAngle) + rotateAngle)
+    ctx.ellipse(centerX, centerY, width/2, height/2, 0, start, end, True)
+    if sweepAngle%360!=0:
+        ctx.lineTo(centerX, centerY)
+        ctx.closePath()
+    f = _resolve_fill(ctx, fill, centerX-width/2, centerY-height/2, width, height)
+    if f:
+        ctx.fillStyle = f
+        ctx.fill()
+    if border:
+        ctx.strokeStyle = border
+        ctx.lineWidth = borderWidth
+        ctx.stroke()
+    ctx.restore()
+
+def drawImage(url, left, top, width=None, height=None, opacity=100, rotateAngle=0):
+    ctx = _get_ctx()
+    try:
+        img = window.Image.new()
+        img.src = url
+        w = width or getattr(img, 'width', 100)
+        h = height or getattr(img, 'height', 100)
+        ctx.save()
+        if opacity!=100:
+            ctx.globalAlpha = opacity/100
+        if rotateAngle:
+            ctx.translate(left+w/2, top+h/2)
+            ctx.rotate(rotateAngle*math.pi/180)
+            ctx.translate(-(left+w/2), -(top+h/2))
+        ctx.drawImage(img, left, top, w, h)
+        ctx.restore()
+    except Exception as e:
+        print(f"drawImage error {e}")
+
+# ---------- App ----------
+class App:
+    def __init__(self, width=400, height=400):
+        object.__setattr__(self, 'width', width)
+        object.__setattr__(self, 'height', height)
+        object.__setattr__(self, 'stepsPerSecond', 30)
+        object.__setattr__(self, 'background', 'white')
+        object.__setattr__(self, 'paused', False)
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, value)
+        if name in ('width','height'):
+            _resize_if_needed()
+    def setMaxShapeCount(self, n):
+        pass
+    def getTextInput(self, prompt=''):
+        return window.prompt(prompt)
+    def showMessage(self, msg):
+        window.alert(msg)
+
+def _resize_if_needed():
+    global _app, _canvas, _ctx
+    if _app is None or _canvas is None:
+        return
+    if _canvas.width!=_app.width or _canvas.height!=_app.height:
+        _canvas.width=_app.width
+        _canvas.height=_app.height
+        _canvas.style.width=f"{_app.width}px"
+        _canvas.style.height=f"{_app.height}px"
+        _ctx=_canvas.getContext('2d')
+
+def _draw_all_shapes():
+    ctx = _get_ctx()
+    for shape in list(_all_shapes):
+        try:
+            if hasattr(shape, 'draw'):
+                shape.draw(ctx)
+        except Exception as e:
+            print(f"draw error {e}")
+
+def runApp(width=400, height=400, stepsPerSecond=30):
+    global _app, _canvas, _ctx, _timer_id
+    _ensure_canvas()
+    _canvas.width=width
+    _canvas.height=height
+    _canvas.style.width=f"{width}px"
+    _canvas.style.height=f"{height}px"
+    _ctx=_canvas.getContext('2d')
+    _app=App(width, height)
+    _app.stepsPerSecond=stepsPerSecond
+    return _app
+
+def _start_app(user_funcs):
+    global _app, _timer_id, _user_funcs_global, _mouse_is_down
+    _user_funcs_global=user_funcs
+    if _app is None:
+        _app=App()
+    # onAppStart
+    starter = None
+    if 'onAppStart' in user_funcs:
+        starter = user_funcs['onAppStart']
+    elif 'appStarted' in user_funcs:
+        starter = user_funcs['appStarted']
+    if starter is not None:
+        try:
+            starter(_app)
+        except Exception as e:
+            print(f"onAppStart error {e}")
+            import traceback
+            traceback.print_exc()
+            return
+    _resize_if_needed()
+    sps=getattr(_app,'stepsPerSecond',30)
+    try:
+        sps=int(sps)
+    except:
+        sps=30
+    canvas=document['cmu-canvas']
+    def _get_mouse_pos(ev):
+        rect=canvas.getBoundingClientRect()
+        x=ev.clientX-rect.left
+        y=ev.clientY-rect.top
+        scaleX=_app.width/rect.width if rect.width else 1
+        scaleY=_app.height/rect.height if rect.height else 1
+        return (x*scaleX, y*scaleY)
+    def on_mousedown(ev):
+        global _mouse_is_down
+        _mouse_is_down=True
+        for name in ('onMousePress','onMousePressed'):
+            if name in _user_funcs_global:
+                x,y=_get_mouse_pos(ev)
+                try:
+                    _user_funcs_global[name](_app, x, y)
+                except Exception as e:
+                    print(f"{name} error {e}")
+    def on_mouseup(ev):
+        global _mouse_is_down
+        _mouse_is_down=False
+        for name in ('onMouseRelease','onMouseReleased'):
+            if name in _user_funcs_global:
+                x,y=_get_mouse_pos(ev)
+                try:
+                    _user_funcs_global[name](_app, x, y)
+                except Exception as e:
+                    print(f"{name} error {e}")
+    def on_mousemove(ev):
+        x,y=_get_mouse_pos(ev)
+        if _mouse_is_down:
+            for name in ('onMouseDrag','onMouseDragged'):
+                if name in _user_funcs_global:
+                    try:
+                        _user_funcs_global[name](_app, x, y)
+                    except Exception as e:
+                        print(f"{name} error {e}")
+        else:
+            for name in ('onMouseMove','onMouseMoved'):
+                if name in _user_funcs_global:
+                    try:
+                        _user_funcs_global[name](_app, x, y)
+                    except Exception as e:
+                        print(f"{name} error {e}")
+    canvas.bind('mousedown', on_mousedown)
+    canvas.bind('mouseup', on_mouseup)
+    canvas.bind('mousemove', on_mousemove)
+    canvas.bind('mouseleave', on_mouseup)
+    def on_keydown(ev):
+        key=ev.key
+        if key==' ':
+            key='space'
+        else:
+            key=key.lower()
+        for name in ('onKeyPress','onKeyPressed'):
+            if name in _user_funcs_global:
+                try:
+                    _user_funcs_global[name](_app, key)
+                except Exception as e:
+                    print(f"{name} error {e}")
+    def on_keyup(ev):
+        key=ev.key
+        if key==' ':
+            key='space'
+        else:
+            key=key.lower()
+        for name in ('onKeyRelease','onKeyReleased'):
+            if name in _user_funcs_global:
+                try:
+                    _user_funcs_global[name](_app, key)
+                except Exception as e:
+                    print(f"{name} error {e}")
+    window.bind('keydown', on_keydown)
+    window.bind('keyup', on_keyup)
+    _keys_held=set()
+    def on_keydown_hold(ev):
+        k=ev.key.lower()
+        if k==' ':
+            k='space'
+        _keys_held.add(k)
+    def on_keyup_hold(ev):
+        k=ev.key.lower()
+        if k==' ':
+            k='space'
+        _keys_held.discard(k)
+    window.bind('keydown', on_keydown_hold)
+    window.bind('keyup', on_keyup_hold)
+    _loop_counter={'n':0}
+    def loop():
+        global _timer_id
+        try:
+            _loop_counter['n']+=1
+            _resize_if_needed()
+            if 'onKeyHold' in _user_funcs_global and _keys_held:
+                try:
+                    _user_funcs_global['onKeyHold'](_app, list(_keys_held))
+                except Exception as e:
+                    print(f"onKeyHold error {e}")
+            if 'onStep' in _user_funcs_global:
+                if not getattr(_app, 'paused', False):
+                    _user_funcs_global['onStep'](_app)
+            _ctx.clearRect(0,0,_app.width,_app.height)
+            if _app.background:
+                bg=_app.background
+                if isinstance(bg, dict) and bg.get('_is_gradient'):
+                    grad=_ctx.createLinearGradient(0,0,0,_app.height)
+                    colors=bg['colors']
+                    for i,c in enumerate(colors):
+                        grad.addColorStop(i/(len(colors)-1) if len(colors)>1 else 0, c)
+                    _ctx.fillStyle=grad
+                else:
+                    _ctx.fillStyle=bg
+                _ctx.fillRect(0,0,_app.width,_app.height)
+            if 'redrawAll' in _user_funcs_global:
+                _user_funcs_global['redrawAll'](_app)
+            _draw_all_shapes()
+        except Exception as e:
+            print(f"Loop error {e}")
+            import traceback
+            traceback.print_exc()
+            if _timer_id is not None:
+                timer.clear_interval(_timer_id)
+                _timer_id=None
+    # immediate first frame
+    try:
+        loop()
+    except Exception as e:
+        print(f"first loop error {e}")
+    if _timer_id is not None:
+        timer.clear_interval(_timer_id)
+    interval=int(1000/sps) if sps>0 else 33
+    _timer_id=timer.set_interval(loop, interval)
+
+__all__ = [
+    'Rect','Oval','Circle','Line','Polygon','RegularPolygon','Star','Label','Arc','Group','SCSImage','Image','Sound',
+    'rgb','gradient','distance','angleTo','getPointInDir','rounded','makeList','getImageSize',
+    'drawRect','drawOval','drawCircle','drawLine','drawPolygon','drawRegularPolygon','drawStar','drawLabel','drawArc','drawImage',
+    'App','runApp','_start_app','_clear_all_shapes','_ensure_canvas'
+]
+
+def run(*args, **kwargs):
+    return runApp(*args, **kwargs)
+def loop(*args, **kwargs):
+    return runApp(*args, **kwargs)
+
+
+import sys
+sys.modules['scs'] = sys.modules[__name__]
+</script>
+
+<script type="text/python" id="main">
+from browser import document, window, timer, ajax
+import sys
+import scs
+from scs import _ensure_canvas, _clear_all_shapes, _start_app, App
+
+_log_el = document['log']
+_user_funcs = {}
+
+def log(msg):
+    # show log div only if there is content
+    _log_el.style.display = 'block'
+    _log_el.text += str(msg) + "\n"
+    print(msg)
+
+def exec_user_code(code):
+    global _user_funcs
+    _log_el.text = ""
+    scs._clear_all_shapes()
+    user_ns = {}
+    for name in scs.__all__:
+        if hasattr(scs, name):
+            user_ns[name] = getattr(scs, name)
+    import math
+    user_ns['sin']=math.sin
+    user_ns['cos']=math.cos
+    user_ns['atan2']=math.atan2
+    user_ns['sqrt']=math.sqrt
+    user_ns['pi']=math.pi
+    user_ns['__builtins__']=__builtins__
+
+    def custom_runApp(width=400, height=400, stepsPerSecond=30):
+        global _user_funcs
+        _user_funcs={}
+        for n in ['onAppStart','appStarted','onAppStopped','appStopped','redrawAll','onStep','onMousePress','onMouseRelease','onMouseMove','onMouseDrag','onKeyPress','onKeyRelease','onKeyHold','onResize']:
+            if n in user_ns and callable(user_ns[n]):
+                _user_funcs[n]=user_ns[n]
+        scs._app=None
+        scs._ensure_canvas()
+        canvas=document['cmu-canvas']
+        canvas.width=width
+        canvas.height=height
+        canvas.style.width=f"{width}px"
+        canvas.style.height=f"{height}px"
+        scs._ctx = canvas.getContext('2d')
+        scs._app=App(width, height)
+        scs._app.stepsPerSecond=stepsPerSecond
+        scs._start_app(_user_funcs)
+        log(f"Loaded app.py - {width}x{height} @ {stepsPerSecond}fps - running")
+
+    user_ns['runApp']=custom_runApp
+    user_ns['run']=custom_runApp
+    user_ns['loop']=custom_runApp
+    scs.runApp=custom_runApp
+    scs.run=custom_runApp
+    scs.loop=custom_runApp
+
+    try:
+        exec(code, user_ns)
+    except Exception as e:
+        import traceback
+        log(f"Error in app.py: {e}\n{traceback.format_exc()}")
+
+def load_app_py():
+    # Try to load app.py via ajax - works for http:// and file:// (if CORS allows)
+    def on_complete(req):
+        if req.status==200 or req.status==0:  # 0 for file://
+            code = req.text
+            if code:
+                exec_user_code(code)
+            else:
+                log("app.py loaded but empty")
+        else:
+            log(f"Failed to load app.py - HTTP {req.status}.\nRun via: python -m http.server and open http://localhost:8000/index.html")
+
+    def on_error(err):
+        log(f"Could not fetch app.py ({err}).\nIf you opened via file://, Chrome blocks fetch.\nPlease run: python -m http.server\nThen open http://localhost:8000/index.html")
+
+    try:
+        req = ajax.ajax()
+        req.bind('complete', on_complete)
+        # req.bind('error', on_error) - Brython ajax doesn't have error, use try
+        req.open('GET', 'app.py', True)
+        req.set_header('content-type','text/plain')
+        req.send()
+    except Exception as e:
+        # Fallback: try window.fetch
+        try:
+            def fetch_then(response):
+                # response.text() returns promise
+                def text_then(txt):
+                    exec_user_code(txt)
+                response.text().then(text_then)
+            window.fetch('app.py').then(fetch_then)
+        except Exception as e2:
+            log(f"Load failed: {e} / {e2}")
+
+# auto-run on load
+load_app_py()
+</script>
+</body></html>
