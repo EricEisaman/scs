@@ -9,8 +9,18 @@
 [![License](https://img.shields.io/badge/license-MIT-black)](LICENSE)
 [![Apps](https://img.shields.io/badge/apps-4-green)](#apps-included)
 
-Live demo: `https://ericeisaman.github.io/scs/` → loads `apps/app.py`  
-Try: `?app=rabbit_sim` → `https://ericeisaman.github.io/scs/?app=rabbit_sim`
+Live demo:
+<a href="https://ericeisaman.github.io/scs/" target="_blank" rel="noopener noreferrer">
+  https://ericeisaman.github.io/scs/
+</a>
+— loads <code>apps/app.py</code>
+
+<br>
+
+Try: <code>?app=rabbit_sim</code> →
+<a href="https://ericeisaman.github.io/scs/?app=rabbit_sim" target="_blank" rel="noopener noreferrer">
+  https://ericeisaman.github.io/scs/?app=rabbit_sim
+</a>
 
 ---
 
