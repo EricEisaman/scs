@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>Joukowski Aerofoil - Wind Tunnel</title>
+<html><head><meta charset="UTF-8"><title>SCS - Apps</title>
 <style>
 body{margin:0;padding:0;background:#0f1115;color:#e6e6e6;font-family:monospace;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;}
 #canvas-container{border:2px solid #3a3f4b;border-radius:8px;background:#000;overflow:hidden;box-shadow:0 0 30px rgba(0,0,0,0.6);}
@@ -959,7 +959,6 @@ def run(*args, **kwargs):
 def loop(*args, **kwargs):
     return runApp(*args, **kwargs)
 
-
 import sys
 sys.modules['scs'] = sys.modules[__name__]
 </script>
@@ -974,12 +973,60 @@ _log_el = document['log']
 _user_funcs = {}
 
 def log(msg):
-    # show log div only if there is content
     _log_el.style.display = 'block'
-    _log_el.text += str(msg) + "\n"
+    _log_el.text += str(msg) + chr(10)
     print(msg)
 
-def exec_user_code(code):
+def get_requested_app_filename():
+    default = "apps/app.py"
+    try:
+        search = window.location.search
+        if not search:
+            return default
+        app_val = None
+        try:
+            params = window.URLSearchParams.new(search)
+            app_val = params.get("app")
+        except Exception:
+            qs = search.lstrip("?")
+            for part in qs.split("&"):
+                if part.startswith("app="):
+                    app_val = part[4:]
+                    break
+        if not app_val:
+            return default
+        try:
+            app_val = window.decodeURIComponent(app_val)
+        except:
+            pass
+        app_val = app_val.strip()
+        if app_val == "":
+            return default
+        if ".." in app_val or app_val.startswith("/") or "\\" in app_val:
+            log("Blocked unsafe app param")
+            return default
+        if app_val.endswith(".py"):
+            app_val = app_val[:-3]
+        if app_val.startswith("apps/"):
+            base = app_val[5:]
+            if "/" in base:
+                base = base.split("/")[-1]
+            return "apps/" + base + ".py"
+        else:
+            if "/" in app_val:
+                app_val = app_val.split("/")[-1]
+            safe = "".join(c for c in app_val if c.isalnum() or c in "_-")
+            if safe != app_val and app_val != "":
+                log("Sanitized app param")
+                app_val = safe
+            if app_val == "":
+                return default
+            return "apps/" + app_val + ".py"
+    except Exception as e:
+        print("get_requested_app_filename error")
+        return default
+
+def exec_user_code(code, filename):
     global _user_funcs
     _log_el.text = ""
     scs._clear_all_shapes()
@@ -1006,13 +1053,13 @@ def exec_user_code(code):
         canvas=document['cmu-canvas']
         canvas.width=width
         canvas.height=height
-        canvas.style.width=f"{width}px"
-        canvas.style.height=f"{height}px"
+        canvas.style.width=str(width)+"px"
+        canvas.style.height=str(height)+"px"
         scs._ctx = canvas.getContext('2d')
         scs._app=App(width, height)
         scs._app.stepsPerSecond=stepsPerSecond
         scs._start_app(_user_funcs)
-        log(f"Loaded app.py - {width}x{height} @ {stepsPerSecond}fps - running")
+        log("Loaded " + filename)
 
     user_ns['runApp']=custom_runApp
     user_ns['run']=custom_runApp
@@ -1025,43 +1072,70 @@ def exec_user_code(code):
         exec(code, user_ns)
     except Exception as e:
         import traceback
-        log(f"Error in app.py: {e}\n{traceback.format_exc()}")
+        log("Error in " + filename + ": " + str(e))
+        log(traceback.format_exc())
 
 def load_app_py():
-    # Try to load app.py via ajax - works for http:// and file:// (if CORS allows)
+    target = get_requested_app_filename()
+    log("Requesting " + target + " ...")
+
     def on_complete(req):
-        if req.status==200 or req.status==0:  # 0 for file://
+        if req.status==200 or req.status==0:
             code = req.text
             if code:
-                exec_user_code(code)
+                exec_user_code(code, target)
             else:
-                log("app.py loaded but empty")
+                log(target + " empty")
+                if target != "apps/app.py":
+                    _load_fallback()
         else:
-            log(f"Failed to load app.py - HTTP {req.status}.\nRun via: python -m http.server and open http://localhost:8000/index.html")
+            log("Failed to load " + target + " HTTP " + str(req.status))
+            if target != "apps/app.py":
+                _load_fallback()
 
-    def on_error(err):
-        log(f"Could not fetch app.py ({err}).\nIf you opened via file://, Chrome blocks fetch.\nPlease run: python -m http.server\nThen open http://localhost:8000/index.html")
+    def _load_fallback():
+        def on_fallback_complete(req2):
+            if req2.status==200 or req2.status==0:
+                if req2.text:
+                    exec_user_code(req2.text, "apps/app.py")
+                else:
+                    log("apps/app.py empty")
+            else:
+                log("apps/app.py not found HTTP " + str(req2.status))
+        try:
+            req2 = ajax.ajax()
+            req2.bind('complete', on_fallback_complete)
+            req2.open('GET', 'apps/app.py', True)
+            req2.set_header('content-type','text/plain')
+            req2.send()
+        except Exception as e:
+            log("Fallback failed")
 
     try:
         req = ajax.ajax()
         req.bind('complete', on_complete)
-        # req.bind('error', on_error) - Brython ajax doesn't have error, use try
-        req.open('GET', 'app.py', True)
+        req.open('GET', target, True)
         req.set_header('content-type','text/plain')
         req.send()
     except Exception as e:
-        # Fallback: try window.fetch
         try:
             def fetch_then(response):
-                # response.text() returns promise
                 def text_then(txt):
-                    exec_user_code(txt)
-                response.text().then(text_then)
-            window.fetch('app.py').then(fetch_then)
+                    if txt:
+                        exec_user_code(txt, target)
+                    else:
+                        if target != "apps/app.py":
+                            _load_fallback()
+                try:
+                    response.text().then(text_then)
+                except:
+                    text_then(response.text)
+            window.fetch(target).then(fetch_then)
         except Exception as e2:
-            log(f"Load failed: {e} / {e2}")
+            log("Load failed")
+            if target != "apps/app.py":
+                _load_fallback()
 
-# auto-run on load
 load_app_py()
 </script>
 </body></html>
