@@ -1,4 +1,4 @@
-[SCS : Sigma Computer Science](scs.jpg)
+![SCS : Sigma Computer Science](scs.jpg)
 
 # SCS : Sigma Computer Science
 
