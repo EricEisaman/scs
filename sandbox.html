@@ -1426,9 +1426,9 @@ print("[DEBUG] main done")
 
 <script type="text/python" id="scs">
 
-# scs.py - SANDBOX CMU_Graphics API EXACT (Brython)
-# Based on CMU Graphics Guide v2 + sandbox docs
-# No property decorator to avoid Brython bug, file:// safe
+# scs.py - SANDBOX CMU_Graphics API EXACT (Brython) - SIGMA FIX
+# align is general property for all shapes + all draw functions accept it
+# No property decorator
 
 from browser import document, window, timer
 import math
@@ -1463,7 +1463,6 @@ def _clear_all_shapes():
     global _all_shapes
     _all_shapes = []
 
-# ---------- Color ----------
 def rgb(r,g,b):
     r = max(0, min(255, int(r)))
     g = max(0, min(255, int(g)))
@@ -1512,19 +1511,15 @@ def _apply_dashes(ctx, dashes):
             ctx.setLineDash(list(dashes))
         elif isinstance(dashes, int):
             ctx.setLineDash([dashes, dashes])
-        elif dashes is False or dashes is None:
-            ctx.setLineDash([])
         else:
             ctx.setLineDash([])
     except:
         pass
 
-# ---------- Utils - sandbox exact ----------
 def distance(x1,y1,x2,y2):
     return math.sqrt((x2-x1)**2 + (y2-y1)**2)
 
 def angleTo(x1,y1,x2,y2):
-    # 0 = straight up, clockwise - per guide
     dx = x2-x1
     dy = y1-y2
     ang = math.degrees(math.atan2(dx, dy))
@@ -1558,7 +1553,6 @@ def getImageSize(url):
         pass
     return (100, 100)
 
-# ---------- Shape base - no property decorator ----------
 class Shape:
     def __init__(self, **kwargs):
         object.__setattr__(self, 'fill', kwargs.get('fill', 'black'))
@@ -1591,19 +1585,17 @@ class Shape:
     def __setattr__(self, name, value):
         object.__setattr__(self, name, value)
 
-# ---------- Rect - sandbox: left, top, width, height ----------
 class Rect(Shape):
     def __init__(self, left, top, width, height, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, dashes=False, align='leftTop', roundness=0, **kw):
         object.__setattr__(self, 'left', left)
         object.__setattr__(self, 'top', top)
         object.__setattr__(self, 'width', width)
         object.__setattr__(self, 'height', height)
-        object.__setattr__(self, 'align', align)
         object.__setattr__(self, 'roundness', roundness)
+        kw['align']=align
         Shape.__init__(self, fill=fill if fill is not None else 'black', border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, dashes=dashes, **kw)
         self._sync()
     def _sync(self):
-        # derive center, right, bottom
         object.__setattr__(self, 'centerX', self.left + self.width/2)
         object.__setattr__(self, 'centerY', self.top + self.height/2)
         object.__setattr__(self, 'right', self.left + self.width)
@@ -1611,7 +1603,6 @@ class Rect(Shape):
     def __setattr__(self, name, value):
         object.__setattr__(self, name, value)
         if name in ('left','top','width','height','centerX','centerY','right','bottom'):
-            # keep in sync
             try:
                 if name == 'centerX':
                     object.__setattr__(self, 'left', value - self.width/2)
@@ -1621,7 +1612,6 @@ class Rect(Shape):
                     object.__setattr__(self, 'left', value - self.width)
                 elif name == 'bottom':
                     object.__setattr__(self, 'top', value - self.height)
-                # re-sync derived
                 if hasattr(self, 'width'):
                     object.__setattr__(self, 'centerX', self.left + self.width/2)
                     object.__setattr__(self, 'centerY', self.top + self.height/2)
@@ -1647,7 +1637,6 @@ class Rect(Shape):
             ctx.fillStyle = fill
             r = getattr(self, 'roundness', 0)
             if r:
-                # simple rounded rect
                 try:
                     rr = min(r, self.width/2, self.height/2)
                     ctx.beginPath()
@@ -1670,7 +1659,7 @@ class Oval(Shape):
         object.__setattr__(self, 'centerY', centerY)
         object.__setattr__(self, 'width', width)
         object.__setattr__(self, 'height', height)
-        object.__setattr__(self, 'align', align)
+        kw['align']=align
         Shape.__init__(self, fill=fill if fill is not None else 'black', border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, dashes=dashes, **kw)
     def hits(self, x, y):
         dx = (x-self.centerX)/(self.width/2) if self.width else 0
@@ -1711,7 +1700,7 @@ class Circle(Oval):
             object.__setattr__(self, 'height', value*2)
 
 class Line(Shape):
-    def __init__(self, x1, y1, x2, y2, fill=None, border=None, lineWidth=1, opacity=100, rotateAngle=0, visible=True, dashes=False, arrowStart=False, arrowEnd=False, **kw):
+    def __init__(self, x1, y1, x2, y2, fill=None, border=None, lineWidth=1, opacity=100, rotateAngle=0, visible=True, dashes=False, arrowStart=False, arrowEnd=False, align=None, **kw):
         object.__setattr__(self, 'x1', x1)
         object.__setattr__(self, 'y1', y1)
         object.__setattr__(self, 'x2', x2)
@@ -1720,6 +1709,7 @@ class Line(Shape):
         object.__setattr__(self, 'dashes', dashes)
         object.__setattr__(self, 'arrowStart', arrowStart)
         object.__setattr__(self, 'arrowEnd', arrowEnd)
+        kw['align']=align if align is not None else 'center'
         Shape.__init__(self, fill=fill if fill is not None else 'black', border=border, borderWidth=lineWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, **kw)
     def draw(self, ctx):
         if not self.visible:
@@ -1734,7 +1724,6 @@ class Line(Shape):
         ctx.strokeStyle = self.fill if self.fill else 'black'
         ctx.lineWidth = self.lineWidth
         ctx.stroke()
-        # arrows
         def draw_arrow(x, y, angle):
             size=8
             ctx.beginPath()
@@ -1753,9 +1742,9 @@ class Line(Shape):
         _apply_dashes(ctx, False)
 
 class Polygon(Shape):
-    def __init__(self, *points, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, dashes=False, **kw):
-        # points as x1,y1,x2,y2,...
+    def __init__(self, *points, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, dashes=False, align='center', **kw):
         object.__setattr__(self, 'points', list(points))
+        kw['align']=align
         Shape.__init__(self, fill=fill if fill is not None else 'black', border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, dashes=dashes, **kw)
     def draw(self, ctx):
         if not self.visible or len(self.points)<4:
@@ -1781,7 +1770,7 @@ class Polygon(Shape):
         _apply_dashes(ctx, False)
 
 class RegularPolygon(Polygon):
-    def __init__(self, centerX, centerY, radius, points, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, **kw):
+    def __init__(self, centerX, centerY, radius, points, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, align='center', **kw):
         pts=[]
         for i in range(points):
             ang = math.radians(rotateAngle + i*360/points - 90)
@@ -1791,15 +1780,17 @@ class RegularPolygon(Polygon):
         object.__setattr__(self, 'centerY', centerY)
         object.__setattr__(self, 'radius', radius)
         object.__setattr__(self, 'points_count', points)
-        super().__init__(*pts, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=0, visible=visible, **kw)
+        kw['align']=align
+        super().__init__(*pts, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=0, visible=visible, align=align, **kw)
 
 class Star(Shape):
-    def __init__(self, centerX, centerY, radius, points, roundness=0, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, **kw):
+    def __init__(self, centerX, centerY, radius, points, roundness=0, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, align='center', **kw):
         object.__setattr__(self, 'centerX', centerX)
         object.__setattr__(self, 'centerY', centerY)
         object.__setattr__(self, 'radius', radius)
         object.__setattr__(self, 'points', points)
         object.__setattr__(self, 'roundness', roundness)
+        kw['align']=align
         Shape.__init__(self, fill=fill if fill is not None else 'black', border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, **kw)
     def draw(self, ctx):
         if not self.visible:
@@ -1810,7 +1801,6 @@ class Star(Shape):
         ctx.beginPath()
         outer = self.radius
         inner = outer*(1-self.roundness/100*0.5) if self.roundness<100 else outer*0.5
-        # if roundness 100, star looks like polygon with points*2 sides
         if self.roundness>=100:
             inner = outer
         for i in range(self.points*2):
@@ -1842,7 +1832,7 @@ class Label(Shape):
         object.__setattr__(self, 'font', font)
         object.__setattr__(self, 'bold', bold)
         object.__setattr__(self, 'italic', italic)
-        object.__setattr__(self, 'align', align)
+        kw['align']=align
         Shape.__init__(self, fill=fill if fill is not None else 'black', border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, **kw)
     def draw(self, ctx):
         if not self.visible:
@@ -1872,13 +1862,14 @@ class Label(Shape):
         ctx.restore()
 
 class Arc(Shape):
-    def __init__(self, centerX, centerY, width, height, startAngle, sweepAngle, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, **kw):
+    def __init__(self, centerX, centerY, width, height, startAngle, sweepAngle, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, visible=True, align='center', **kw):
         object.__setattr__(self, 'centerX', centerX)
         object.__setattr__(self, 'centerY', centerY)
         object.__setattr__(self, 'width', width)
         object.__setattr__(self, 'height', height)
         object.__setattr__(self, 'startAngle', startAngle)
         object.__setattr__(self, 'sweepAngle', sweepAngle)
+        kw['align']=align
         Shape.__init__(self, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, visible=visible, **kw)
     def draw(self, ctx):
         if not self.visible:
@@ -1887,7 +1878,6 @@ class Arc(Shape):
         if self.opacity != 100:
             ctx.globalAlpha = self.opacity/100
         ctx.beginPath()
-        # arc angles anticlockwise per guide, but canvas is clockwise, so invert
         start = math.radians(-self.startAngle + self.rotateAngle)
         end = math.radians(-(self.startAngle+self.sweepAngle) + self.rotateAngle)
         ctx.ellipse(self.centerX, self.centerY, self.width/2, self.height/2, 0, start, end, True)
@@ -1905,8 +1895,9 @@ class Arc(Shape):
         ctx.restore()
 
 class Group(Shape):
-    def __init__(self, *shapes, **kw):
+    def __init__(self, *shapes, align='center', **kw):
         object.__setattr__(self, 'shapes', list(shapes))
+        kw['align']=align
         Shape.__init__(self, **kw)
     def draw(self, ctx):
         for s in self.shapes:
@@ -1920,6 +1911,7 @@ class SCSImage(Shape):
         object.__setattr__(self, 'top', top)
         object.__setattr__(self, 'width', width)
         object.__setattr__(self, 'height', height)
+        kw['align']=align
         Shape.__init__(self, opacity=opacity, rotateAngle=rotateAngle, visible=visible, align=align, **kw)
         self._img = None
         try:
@@ -1964,8 +1956,8 @@ class Sound:
         except:
             pass
 
-# ---------- Drawing functions - sandbox exact signatures ----------
-def drawRect(left, top, width, height, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+# ---------- Drawing functions - ALL accept align + **kwargs (SIGMA FIX) ----------
+def drawRect(left, top, width, height, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, align='leftTop', roundness=0, dashes=False, **kwargs):
     ctx = _get_ctx()
     ctx.save()
     if opacity!=100:
@@ -1986,7 +1978,7 @@ def drawRect(left, top, width, height, fill=None, border=None, borderWidth=2, op
         ctx.strokeRect(left, top, width, height)
     ctx.restore()
 
-def drawOval(centerX, centerY, width, height, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+def drawOval(centerX, centerY, width, height, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, align='center', dashes=False, **kwargs):
     ctx = _get_ctx()
     ctx.save()
     if opacity!=100:
@@ -2007,10 +1999,10 @@ def drawOval(centerX, centerY, width, height, fill=None, border=None, borderWidt
         ctx.stroke()
     ctx.restore()
 
-def drawCircle(centerX, centerY, radius, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
-    drawOval(centerX, centerY, radius*2, radius*2, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle)
+def drawCircle(centerX, centerY, radius, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, align='center', dashes=False, **kwargs):
+    drawOval(centerX, centerY, radius*2, radius*2, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle, align=align, dashes=dashes, **kwargs)
 
-def drawLine(x1, y1, x2, y2, fill=None, border=None, lineWidth=1, opacity=100, dashes=False, arrowStart=False, arrowEnd=False):
+def drawLine(x1, y1, x2, y2, fill=None, border=None, lineWidth=1, opacity=100, dashes=False, arrowStart=False, arrowEnd=False, align=None, **kwargs):
     ctx = _get_ctx()
     ctx.save()
     if opacity!=100:
@@ -2025,7 +2017,7 @@ def drawLine(x1, y1, x2, y2, fill=None, border=None, lineWidth=1, opacity=100, d
     ctx.restore()
     _apply_dashes(ctx, False)
 
-def drawPolygon(*points, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+def drawPolygon(*points, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, align='center', dashes=False, **kwargs):
     if len(points)<4:
         return
     ctx = _get_ctx()
@@ -2047,15 +2039,15 @@ def drawPolygon(*points, fill=None, border=None, borderWidth=2, opacity=100, rot
         ctx.stroke()
     ctx.restore()
 
-def drawRegularPolygon(centerX, centerY, radius, points, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+def drawRegularPolygon(centerX, centerY, radius, points, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, align='center', **kwargs):
     pts=[]
     for i in range(points):
         ang = math.radians(rotateAngle + i*360/points -90)
         pts.append(centerX+radius*math.cos(ang))
         pts.append(centerY+radius*math.sin(ang))
-    drawPolygon(*pts, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity)
+    drawPolygon(*pts, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity, align=align, **kwargs)
 
-def drawStar(centerX, centerY, radius, points, roundness=0, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+def drawStar(centerX, centerY, radius, points, roundness=0, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, align='center', **kwargs):
     ctx = _get_ctx()
     ctx.save()
     if opacity!=100:
@@ -2083,7 +2075,7 @@ def drawStar(centerX, centerY, radius, points, roundness=0, fill=None, border=No
         ctx.stroke()
     ctx.restore()
 
-def drawLabel(text, centerX, centerY, fill=None, border=None, borderWidth=1, opacity=100, rotateAngle=0, size=12, font='arial', bold=False, italic=False):
+def drawLabel(text, centerX, centerY, fill=None, border=None, borderWidth=1, opacity=100, rotateAngle=0, size=12, font='arial', bold=False, italic=False, align='center', **kwargs):
     ctx = _get_ctx()
     ctx.save()
     if opacity!=100:
@@ -2098,7 +2090,16 @@ def drawLabel(text, centerX, centerY, fill=None, border=None, borderWidth=1, opa
     if bold:
         style+='bold '
     ctx.font = f"{style}{size}px {font}"
-    ctx.textAlign = 'center'
+    # align handling: map align string to textAlign for simplicity
+    try:
+        if 'left' in str(align).lower():
+            ctx.textAlign = 'left'
+        elif 'right' in str(align).lower():
+            ctx.textAlign = 'right'
+        else:
+            ctx.textAlign = 'center'
+    except:
+        ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
     if fill:
         ctx.fillStyle = fill
@@ -2112,7 +2113,7 @@ def drawLabel(text, centerX, centerY, fill=None, border=None, borderWidth=1, opa
         ctx.strokeText(str(text), centerX, centerY)
     ctx.restore()
 
-def drawArc(centerX, centerY, width, height, startAngle, sweepAngle, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0):
+def drawArc(centerX, centerY, width, height, startAngle, sweepAngle, fill=None, border=None, borderWidth=2, opacity=100, rotateAngle=0, align='center', **kwargs):
     ctx = _get_ctx()
     ctx.save()
     if opacity!=100:
@@ -2134,7 +2135,7 @@ def drawArc(centerX, centerY, width, height, startAngle, sweepAngle, fill=None, 
         ctx.stroke()
     ctx.restore()
 
-def drawImage(url, left, top, width=None, height=None, opacity=100, rotateAngle=0):
+def drawImage(url, left, top, width=None, height=None, opacity=100, rotateAngle=0, align='leftTop', **kwargs):
     ctx = _get_ctx()
     try:
         img = window.Image.new()
@@ -2153,7 +2154,6 @@ def drawImage(url, left, top, width=None, height=None, opacity=100, rotateAngle=
     except Exception as e:
         print(f"drawImage error {e}")
 
-# ---------- App ----------
 class App:
     def __init__(self, width=400, height=400):
         object.__setattr__(self, 'width', width)
@@ -2209,7 +2209,6 @@ def _start_app(user_funcs):
     _user_funcs_global=user_funcs
     if _app is None:
         _app=App()
-    # onAppStart
     starter = None
     if 'onAppStart' in user_funcs:
         starter = user_funcs['onAppStart']
@@ -2316,11 +2315,9 @@ def _start_app(user_funcs):
         _keys_held.discard(k)
     window.bind('keydown', on_keydown_hold)
     window.bind('keyup', on_keyup_hold)
-    _loop_counter={'n':0}
     def loop():
         global _timer_id
         try:
-            _loop_counter['n']+=1
             _resize_if_needed()
             if 'onKeyHold' in _user_funcs_global and _keys_held:
                 try:
@@ -2352,7 +2349,6 @@ def _start_app(user_funcs):
             if _timer_id is not None:
                 timer.clear_interval(_timer_id)
                 _timer_id=None
-    # immediate first frame
     try:
         loop()
     except Exception as e:
@@ -2377,7 +2373,6 @@ def loop(*args, **kwargs):
 
 import sys
 sys.modules['scs'] = sys.modules[__name__]
-print("[scs] SANDBOX API EXACT v3 - sandbox.html")
 </script>
 
 <script type="text/python" id="main">
