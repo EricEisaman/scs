@@ -22,6 +22,12 @@ Try: <code>?app=rabbit_sim</code> →
   https://ericeisaman.github.io/scs/?app=rabbit_sim
 </a>
 
+<br>
+
+Sandbox: <code>/sandbox</code> →
+<a href="https://ericeisaman.github.io/scs/sandbox" target="_blank" rel="noopener noreferrer">
+  https://ericeisaman.github.io/scs/sandbox
+</a>
 ---
 
 ### What is this?
