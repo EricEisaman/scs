@@ -25,30 +25,11 @@ This repo includes:
 - **`sandbox.html`** — live editor. Edit code in a textarea and hit Run
 - **`apps/`** — all runnable apps. No root duplication.
 
-### ✨ Why it's different
-
-**1. `align` is a general property (as per reference)**
-Every shape and every `draw*` accepts `align`. Not just `Label`.
-
-```python
-Rect(0,0,100,100, align='leftTop')
-Label('Score', 10, 10, align='left')
-drawLabel('RABBITS', x, y, align='left')
-drawRect(x,y,w,h, align='center', opacity=80)
-```
-
-**2. No duplication, URL-routed**
-All apps live in `apps/`. The viewer never looks at root.
-
-```
-?app=app          → apps/app.py
-?app=rabbit_sim   → apps/rabbit_sim.py
-?app=anything     → apps/anything.py
-```
+### ✨ Catalog Your Creations in the apps Directory
 
 Default: `apps/app.py`
 
-**3. Safe loader**
+**Safe loader**
 - Blocks `..` and absolute paths
 - Sanitizes to `[a-zA-Z0-9_-]`
 - Graceful fallback to `apps/app.py`
