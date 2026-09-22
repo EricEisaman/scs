@@ -1,4 +1,4 @@
-from cmu_graphics import *
+from scs import *
 import math
 import random
 
