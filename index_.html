@@ -10,7 +10,7 @@ canvas{display:block;background:black;}
 <script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython_stdlib.js"></script>
 <link rel="icon" type="image/png" href="/scs/favicon.png">
 </head>
-<body onload="brython({debug:1, pythonpath:['.']})">
+<body onload="brython({debug:1})">
 <div id="canvas-container"><canvas id="cmu-canvas" width="1050" height="700"></canvas></div>
 <div id="log"></div>
 
@@ -1029,9 +1029,7 @@ def get_requested_app_filename():
 
 def exec_user_code(code, filename):
     global _user_funcs
-    log(f"exec_user_code start for {filename}, code len {len(code)}")
-    # Don't clear previous logs completely for debugging - keep Requesting/Got logs
-    # _log_el.text = ""  # disabled for debug
+    _log_el.text = ""
     scs._clear_all_shapes()
     user_ns = {}
     for name in scs.__all__:
@@ -1044,16 +1042,13 @@ def exec_user_code(code, filename):
     user_ns['sqrt']=math.sqrt
     user_ns['pi']=math.pi
     user_ns['__builtins__']=__builtins__
-    log("user_ns prepared")
 
     def custom_runApp(width=400, height=400, stepsPerSecond=30):
         global _user_funcs
-        log(f"custom_runApp called {width}x{height}")
         _user_funcs={}
         for n in ['onAppStart','appStarted','onAppStopped','appStopped','redrawAll','onStep','onMousePress','onMouseRelease','onMouseMove','onMouseDrag','onKeyPress','onKeyRelease','onKeyHold','onResize']:
             if n in user_ns and callable(user_ns[n]):
                 _user_funcs[n]=user_ns[n]
-        log(f"Found funcs: {list(_user_funcs.keys())}")
         scs._app=None
         scs._ensure_canvas()
         canvas=document['cmu-canvas']
@@ -1064,13 +1059,8 @@ def exec_user_code(code, filename):
         scs._ctx = canvas.getContext('2d')
         scs._app=App(width, height)
         scs._app.stepsPerSecond=stepsPerSecond
-        try:
-            scs._start_app(_user_funcs)
-            log("Loaded " + filename)
-        except Exception as e:
-            import traceback
-            log(f"start_app failed: {e}")
-            log(traceback.format_exc())
+        scs._start_app(_user_funcs)
+        log("Loaded " + filename)
 
     user_ns['runApp']=custom_runApp
     user_ns['run']=custom_runApp
@@ -1081,27 +1071,6 @@ def exec_user_code(code, filename):
 
     try:
         exec(code, user_ns)
-        log(f"exec done, _user_funcs before: {list(_user_funcs.keys()) if _user_funcs else 'empty'}")
-        # Auto-start if user didn't call runApp() - CMU Graphics style
-        # Note: don't check for 'run(' substring because aio.run() contains it!
-        if not _user_funcs:
-            tmp = {}
-            for n in ['onAppStart','appStarted','onAppStopped','appStopped','redrawAll','onStep','onMousePress','onMouseRelease','onMouseMove','onMouseDrag','onKeyPress','onKeyRelease','onKeyHold','onResize']:
-                if n in user_ns and callable(user_ns[n]):
-                    tmp[n]=user_ns[n]
-            log(f"tmp funcs found: {list(tmp.keys())}")
-            if tmp:
-                _user_funcs = tmp
-                # Always auto-start if we found funcs and user didn't explicitly call runApp
-                # The old check 'run(' in code was false positive for aio.run()
-                w = 1050
-                h = 700
-                log(f"Auto-starting {filename} (no runApp call found)")
-                custom_runApp(width=w, height=h)
-            else:
-                log("No app functions found in user_ns!")
-        else:
-            log(f"_user_funcs already set: {list(_user_funcs.keys())}")
     except Exception as e:
         import traceback
         log("Error in " + filename + ": " + str(e))
@@ -1111,61 +1080,62 @@ def load_app_py():
     target = get_requested_app_filename()
     log("Requesting " + target + " ...")
 
-    def _load_fallback():
-        log("Trying fallback apps/app.py ...")
-        def on_fallback_text(txt):
-            if txt:
-                exec_user_code(txt, "apps/app.py")
+    def on_complete(req):
+        if req.status==200 or req.status==0:
+            code = req.text
+            if code:
+                exec_user_code(code, target)
             else:
-                log("apps/app.py empty")
-        def on_fallback_fail(err):
-            log(f"apps/app.py failed: {err}")
-        try:
-            window.fetch("apps/app.py").then(lambda r: r.text().then(on_fallback_text)).catch(on_fallback_fail)
-        except Exception as e:
-            log(f"Fallback fetch failed: {e}")
-
-    def on_text(txt):
-        log(f"Got {len(txt)} chars from {target}")
-        if txt:
-            exec_user_code(txt, target)
+                log(target + " empty")
+                if target != "apps/app.py":
+                    _load_fallback()
         else:
-            log(target + " empty")
+            log("Failed to load " + target + " HTTP " + str(req.status))
             if target != "apps/app.py":
                 _load_fallback()
 
-    def on_fail(err):
-        log(f"Failed to load {target}: {err}")
-        if target != "apps/app.py":
-            _load_fallback()
+    def _load_fallback():
+        def on_fallback_complete(req2):
+            if req2.status==200 or req2.status==0:
+                if req2.text:
+                    exec_user_code(req2.text, "apps/app.py")
+                else:
+                    log("apps/app.py empty")
+            else:
+                log("apps/app.py not found HTTP " + str(req2.status))
+        try:
+            req2 = ajax.ajax()
+            req2.bind('complete', on_fallback_complete)
+            req2.open('GET', 'apps/app.py', True)
+            req2.set_header('content-type','text/plain')
+            req2.send()
+        except Exception as e:
+            log("Fallback failed")
 
     try:
-        # Use window.fetch - most reliable in Brython 3.11
-        window.fetch(target).then(lambda resp: resp.text().then(on_text)).catch(on_fail)
+        req = ajax.ajax()
+        req.bind('complete', on_complete)
+        req.open('GET', target, True)
+        req.set_header('content-type','text/plain')
+        req.send()
     except Exception as e:
-        log(f"Fetch exception {e}, trying ajax")
         try:
-            def on_complete(req):
-                if req.status==200 or req.status==0:
-                    code = req.text
-                    if code:
-                        exec_user_code(code, target)
+            def fetch_then(response):
+                def text_then(txt):
+                    if txt:
+                        exec_user_code(txt, target)
                     else:
-                        log(target + " empty")
                         if target != "apps/app.py":
                             _load_fallback()
-                else:
-                    log(f"Failed to load {target} HTTP {req.status}")
-                    if target != "apps/app.py":
-                        _load_fallback()
-            req = ajax.ajax()
-            req.bind('complete', on_complete)
-            req.open('GET', target, True)
-            req.set_header('content-type','text/plain')
-            req.send()
+                try:
+                    response.text().then(text_then)
+                except:
+                    text_then(response.text)
+            window.fetch(target).then(fetch_then)
         except Exception as e2:
-            log(f"Both fetch and ajax failed: {e2}")
-            _load_fallback()
+            log("Load failed")
+            if target != "apps/app.py":
+                _load_fallback()
 
 load_app_py()
 </script>
