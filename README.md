@@ -1,14 +1,13 @@
-[SCS : Sigma Computer Science](scs.jpg)
+![SCS : Sigma Computer Science](scs.jpg)
 
 # SCS : Sigma Computer Science
 
 > A fast, faithful, Brython-powered implementation of the **CMU Graphics** API that runs natively in the browser. No install. No Python backend. Just open `index.html`.
 
-[[Brython](https://img.shields.io/badge/Brython-3.11.3-blue)](https://brython.info/)
-[[CMU Graphics](https://img.shields.io/badge/API-CMU%20Graphics-red)](https://academy.cs.cmu.edu/)
-[[Extensions](https://img.shields.io/badge/Extensions-Browser%20Fetch%20API-ff6b6b)](https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API)
-[[License](https://img.shields.io/badge/license-MIT-black)](LICENSE)
-[[Apps](https://img.shields.io/badge/apps-5-green)](#apps-included)
+[![Brython](https://img.shields.io/badge/Brython-3.11.3-blue)](https://brython.info/)
+[![CMU Graphics](https://img.shields.io/badge/API-CMU%20Graphics-red)](https://academy.cs.cmu.edu/)
+[![License](https://img.shields.io/badge/license-MIT-black)](LICENSE)
+[![Apps](https://img.shields.io/badge/apps-4-green)](#apps-included)
 
 Live demo:
 <a href="https://ericeisaman.github.io/scs/" target="_blank" rel="noopener noreferrer">
@@ -22,14 +21,6 @@ Try: <code>?app=rabbit_sim</code> →
 <a href="https://ericeisaman.github.io/scs/?app=rabbit_sim" target="_blank" rel="noopener noreferrer">
   https://ericeisaman.github.io/scs/?app=rabbit_sim
 </a>
-
-<br>
-
-Try Extensions: <code>?app=fetch_demo</code> →
-<a href="https://ericeisaman.github.io/scs/?app=fetch_demo" target="_blank" rel="noopener noreferrer">
-  https://ericeisaman.github.io/scs/?app=fetch_demo
-</a>
-— live PoetryDB via <code>extensions.fetch</code>
 
 <br>
 
