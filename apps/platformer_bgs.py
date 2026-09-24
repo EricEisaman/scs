@@ -9,25 +9,97 @@ from browser import window, aio
 import math
 import random
 
-# ---------- Multiplayer Imports - FIXED FOR BRYTHON ----------
-# Brython fails on 'from extensions.multiplayer import MultiplayerClient' with
-# 'extensions.multiplayer is not a package' - must import module then attr
-# CharacterState is compat stub per your screenshot - wire shape is dict
+# ---------- FIXED IMPORT WITH INLINE FALLBACK ----------
+# If extensions/multiplayer.py is stale/broken on Pages (no MultiplayerClient attr),
+# define our own client inline - no external deps
+import json as py_json
 try:
     import extensions.multiplayer as mp_ext
     import extensions.datastar as ds_ext
+    if not hasattr(mp_ext, 'MultiplayerClient'):
+        raise AttributeError("cached mp_ext has no MultiplayerClient - using fallback")
     MultiplayerClient = mp_ext.MultiplayerClient
     get_signal = ds_ext.get_signal
     is_datastar_connected = ds_ext.is_datastar_connected
     HAS_MP = True
-    print("[BGS] MP imports OK - CharacterState exists as stub")
+    print("[BGS] MP imports OK from extensions/")
 except Exception as e:
-    import traceback
-    print(f"[BGS] MP import failed: {e}")
-    traceback.print_exc()
-    HAS_MP = False
-    def get_signal(n,d=None): return d
-    def is_datastar_connected(): return False
+    print(f"[BGS] MP import failed ({e}) - using inline fallback client - THIS FIXES YOUR ERROR")
+    HAS_MP = True
+    try:
+        import extensions.datastar as ds_ext
+        get_signal = ds_ext.get_signal
+        is_datastar_connected = ds_ext.is_datastar_connected
+        _has_ds = True
+    except:
+        _has_ds = False
+        _fallback_signals = {}
+        def get_signal(n,d=None):
+            return _fallback_signals.get(n,d)
+        def is_datastar_connected():
+            return hasattr(window, '_scs_es') and window._scs_es is not None
+    class MultiplayerClient:
+        def __init__(self, base_url="https://scs-207.onrender.com", environment="level1", environment_name=None, character_name="Player", **kw):
+            self.base_url = base_url.rstrip("/")
+            self.environment_name = environment_name or environment or "level1"
+            self.character_name = kw.get("character_name", character_name) or "Player"
+            self.client_id = None
+            self.session_id = None
+            self._es = None
+        async def join(self, retries=3):
+            for attempt in range(retries):
+                try:
+                    url = f"{self.base_url}/api/multiplayer/join"
+                    payload = {"environment_name": self.environment_name, "character_name": self.character_name}
+                    body = window.JSON.stringify(payload)
+                    print(f"[BGS] Joining {url} attempt {attempt+1}")
+                    resp = await window.fetch(url, {"method":"POST","headers":{"Content-Type":"application/json"},"body":body,"mode":"cors"})
+                    js_data = await resp.json()
+                    data = py_json.loads(window.JSON.stringify(js_data))
+                    self.client_id = data.get("client_id")
+                    self.session_id = data.get("session_id")
+                    print(f"[BGS] Joined {self.client_id} sid={self.session_id} - MP connection registered")
+                    try:
+                        import extensions.datastar as ds
+                        ds.connect_sse(f"{self.base_url}/api/multiplayer/stream?sid={self.session_id}")
+                    except:
+                        self._es = window.EventSource.new(f"{self.base_url}/api/multiplayer/stream?sid={self.session_id}")
+                        window._scs_es = self._es
+                        def _on_signal(evt):
+                            raw = evt.data
+                            if isinstance(raw, str) and raw.startswith("signals "):
+                                raw = raw[8:]
+                            try:
+                                d = py_json.loads(raw)
+                                if _has_ds:
+                                    try:
+                                        ds_ext._signals.update(d)
+                                    except:
+                                        pass
+                                else:
+                                    _fallback_signals.update(d)
+                            except:
+                                pass
+                        self._es.addEventListener("datastar-patch-signals", _on_signal)
+                    return data
+                except Exception as ex:
+                    print(f"[BGS] join fail {ex}")
+                    await aio.sleep(2*(attempt+1))
+            raise Exception("join failed")
+        async def send_character_state(self, position, velocity, animationState="idle", onGround=True, **kw):
+            if not self.client_id:
+                return
+            try:
+                pos = [position[0], position[1], 0] if len(position)==2 else list(position)
+                vel = [velocity[0], velocity[1], 0] if len(velocity)==2 else list(velocity)
+                char = {"clientId": self.client_id, "characterModelId": "platformer_default", "position": pos, "rotation": [0,0,0], "velocity": vel, "animationState": animationState, "animationFrame": 0, "isJumping": not onGround, "isBoosting": False, "boostTimeRemaining": 0, "timestamp": int(window.Date.now())}
+                url = f"{self.base_url}/api/multiplayer/character-state"
+                body = window.JSON.stringify({"updates":[char],"timestamp":char["timestamp"]})
+                await window.fetch(url, {"method":"PATCH","headers":{"Content-Type":"application/json","X-Client-ID": self.client_id},"body":body,"mode":"cors"})
+            except Exception as e:
+                print(f"[BGS] send fail {e}")
+    class CharacterState:
+        pass
 
 # ---------- Physics Helpers ----------
 def clamp(v, lo, hi):
