@@ -353,7 +353,6 @@ def onAppStart(app):
     
     # Add initial players
     app.world.add_player("player_0", "You", PLAYER_COLORS[0], KEYSETS[0])
-    app.world.add_player("player_1", "P2", PLAYER_COLORS[1], KEYSETS[1])
     
     app.background = gradient(rgb(15, 15, 30), rgb(30, 25, 50), start='top')
     

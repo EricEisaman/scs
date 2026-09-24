@@ -121,7 +121,6 @@ def onAppStart(app):
 
     # Add local players
     app.world.add_player("local_0","You",COLORS[0],KEYSETS[0])
-    app.world.add_player("local_1","P2",COLORS[1],KEYSETS[1])
 
     # Setup BGS multiplayer if available
     if HAS_MP:
