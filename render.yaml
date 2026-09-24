@@ -12,6 +12,6 @@ services:
       - key: PORT
         value: "10000"
       - key: ALLOWED_ORIGINS
-        value: "https://ericeisaman.github.io,https://sigma-cs.onrender.com,http://localhost:8000,https://scs-2qah.onrender.com"
+        value: "https://ericeisaman.github.io,https://scs-207.onrender.com,http://localhost:8000,https://scs-2qah.onrender.com"
       - key: SESSION_SECRET
         generateValue: true
