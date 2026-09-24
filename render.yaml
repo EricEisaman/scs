@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: scs-datastar-extension
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /healthz
+    autoDeploy: false
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PORT
+        value: "10000"
+      - key: ALLOWED_ORIGINS
+        value: "https://ericeisaman.github.io,https://sigma-cs.onrender.com,http://localhost:8000,https://scs-2qah.onrender.com"
+      - key: SESSION_SECRET
+        generateValue: true

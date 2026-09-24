@@ -307,7 +307,6 @@ def resetApp(app):
 
 
 def onAppStart(app):
-    print("[DEBUG onAppStart] >>> ENTER")
     app.width = 1050
     app.height = 700
     app.stepsPerSecond = 30
@@ -1394,11 +1393,7 @@ def onKeyPress(app, key):
 
 
 def main():
-    print("[DEBUG main] runApp 1050x700")
     runApp(width=1050, height=700)
-    print("[DEBUG main] runApp done")
 
-print("[DEBUG] calling main")
+
 main()
-print("[DEBUG] main done")
-
