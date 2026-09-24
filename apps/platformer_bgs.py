@@ -10,24 +10,38 @@ window._bgs_signals = {}
 window._bgs_es = None
 
 def _bgs_on_datastar_patch(evt):
-    # flat global handler - no closure, no py_json capture from outer class
     try:
         raw = evt.data
         if isinstance(raw, str) and raw.startswith("signals "):
             raw = raw[8:]
-        # use window.JSON directly to avoid Python json import in handler
         try:
             import json as _jj
             parsed = _jj.loads(raw)
         except:
-            # fallback JS parse
-            parsed = window.JSON.parse(raw)
-            # convert JS object to py dict via JSON stringify/parse
-            import json as _jj2
-            parsed = _jj2.loads(window.JSON.stringify(parsed))
+            try:
+                parsed = window.JSON.parse(raw)
+                import json as _jj2
+                parsed = _jj2.loads(window.JSON.stringify(parsed))
+            except Exception as e2:
+                print(f"[BGS] SSE JSON fail {e2}")
+                return
         if isinstance(parsed, dict):
             for kk, vv in parsed.items():
                 window._bgs_signals[kk] = vv
+            # PEER DEBUG: log any signal
+            try:
+                keys = list(parsed.keys())
+                if keys:
+                    print(f"[BGS] SSE got keys {keys}")
+                if "character-state-update" in parsed:
+                    upd = parsed.get("character-state-update")
+                    if isinstance(upd, dict):
+                        ups = upd.get("updates",[])
+                        print(f"[BGS] PEER UPDATE {len(ups)} clients: {[u.get('clientId','?')[:4] for u in ups]}")
+                    else:
+                        print(f"[BGS] PEER UPDATE non-dict {type(upd)}")
+            except Exception as e3:
+                print(f"[BGS] SSE log err {e3}")
     except Exception as ex:
         print(f"[BGS] SSE parse err {ex}")
 
@@ -63,7 +77,7 @@ try:
     HAS_MP = True
     print("[BGS] MP imports OK from extensions/ - using V4 handlers")
 except Exception as e:
-    print(f"[BGS] MP import failed ({e}) - using inline fallback client V8 FINAL - 600 LINES V8 FIXED")
+    print(f"[BGS] MP import failed ({e}) - using inline fallback client V9 FINAL PEER DEBUG - 600 LINES V9 FIXED")
     HAS_MP = True
 
     class MultiplayerClient:
@@ -93,22 +107,22 @@ except Exception as e:
                     sid = data.get("session_id")
                     self.client_id = cid
                     self.session_id = sid
-                    print(f"[BGS] Joined {cid} sid={sid} - MP connection registered V8 FINAL")
+                    print(f"[BGS] Joined {cid} sid={sid} - MP connection registered V9 FINAL PEER DEBUG")
 
-                    # --- V8 JS EVAL SSE - bypass Brython .new() + resolve_local bug ---
+                    # --- V9 JS EVAL SSE - bypass Brython .new() + resolve_local bug ---
                     try:
                         stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
                         # create EventSource via JS eval to avoid Brython new() + local index bug
                         es_obj = window.eval("new EventSource('" + stream_url + "')")
                         window._bgs_es = es_obj
                         es_obj.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
-                        print(f"[BGS] SSE OPEN V8 {stream_url}")
+                        print(f"[BGS] SSE OPEN V9 {stream_url}")
                     except Exception as sse_e:
-                        print(f"[BGS] SSE connect fail V8 {sse_e}")
+                        print(f"[BGS] SSE connect fail V9 {sse_e}")
 
                     return data
                 except Exception as ex:
-                    print(f"[BGS] join fail V8 {ex}")
+                    print(f"[BGS] join fail V9 {ex}")
                     await aio.sleep(1)
             raise Exception("join failed after retries")
 
@@ -119,9 +133,15 @@ except Exception as e:
                 pos = [position[0], position[1], 0] if len(position)==2 else list(position)
                 vel = [velocity[0], velocity[1], 0] if len(velocity)==2 else list(velocity)
                 char = {"clientId": self.client_id, "characterModelId": "platformer_default", "position": pos, "rotation": [0,0,0], "velocity": vel, "animationState": animationState, "animationFrame": 0, "isJumping": not onGround, "isBoosting": False, "boostTimeRemaining": 0, "timestamp": int(window.Date.now())}
-                url = f"{self.base_url}/api/multiplayer/character-state"
+                url = self.base_url + "/api/multiplayer/character-state"
                 body = window.JSON.stringify({"updates":[char],"timestamp":char["timestamp"]})
-                await window.fetch(url, {"method":"PATCH","headers":{"Content-Type":"application/json","X-Client-ID": self.client_id},"body":body,"mode":"cors"})
+                resp = await window.fetch(url, {"method":"PATCH","headers":{"Content-Type":"application/json","X-Client-ID": self.client_id},"body":body,"mode":"cors"})
+                # log send occasionally
+                try:
+                    if char["timestamp"] % 1000 < 60:
+                        print(f"[BGS] sent pos {pos} vel {vel} state {animationState}")
+                except:
+                    pass
             except Exception as e:
                 print(f"[BGS] send fail {e}")
 
@@ -439,12 +459,23 @@ def onStep(app):
     if HAS_MP:
         try:
             sig=get_signal("character-state-update")
-            if sig and isinstance(sig, dict):
-                updates=sig.get("updates",[])
-                for u in updates:
-                    cid=u.get("clientId")
-                    if cid and cid!=app.client_id:
-                        app.remote_players[cid]=u
+            if sig:
+                if isinstance(sig, dict):
+                    updates=sig.get("updates",[])
+                    if updates:
+                        # log only every 60 ticks to avoid spam
+                        if app.world.tick % 60 == 0:
+                            print(f"[BGS] onStep got {len(updates)} updates, local={str(app.client_id)[:4] if app.client_id else 'none'}")
+                        for u in updates:
+                            cid=u.get("clientId")
+                            if cid:
+                                if cid!=app.client_id:
+                                    if cid not in app.remote_players:
+                                        print(f"[BGS] NEW PEER {cid[:6]} at {u.get('position')}")
+                                    app.remote_players[cid]=u
+                                # else: skip self
+                else:
+                    print(f"[BGS] sig not dict {type(sig)}")
             app.datastar_connected=is_datastar_connected()
         except Exception as e:
             print(f"signal read err {e}")
