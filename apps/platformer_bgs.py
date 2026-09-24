@@ -121,6 +121,7 @@ def onAppStart(app):
 
     # Add local players
     app.world.add_player("local_0","You",COLORS[0],KEYSETS[0])
+    app.world.add_player("local_1","P2",COLORS[1],KEYSETS[1])
 
     # Setup BGS multiplayer if available
     if HAS_MP:
@@ -128,7 +129,7 @@ def onAppStart(app):
         base_url = "http://localhost:10000"
         try:
             if hasattr(window, 'location') and 'github.io' in window.location.hostname:
-                base_url = "https://scs-207.onrender.com"
+                base_url = "https://scs-datastar-extension.onrender.com"
         except:
             pass
         app.mp_client = MultiplayerClient(base_url=base_url, environment="level1", character_name="Player")
@@ -148,9 +149,24 @@ def onAppStart(app):
         async def join_mp():
             try:
                 res = await app.mp_client.join()
-                app.client_id = res.get("client_id")
+                try:
+                    cid = res.get("client_id") if isinstance(res, dict) else res["client_id"]
+                except:
+                    try:
+                        import json as _j
+                        from browser import window as _w
+                        d = _j.loads(_w.JSON.stringify(res))
+                        cid = d.get("client_id")
+                        res = d
+                    except:
+                        cid = getattr(res, "client_id", None)
+                app.client_id = cid
                 app.room_id = "level1"
-                print(f"[BGS] Joined {app.client_id} sync={res.get('is_synchronizer')}")
+                try:
+                    sync = res.get("is_synchronizer") if isinstance(res, dict) else False
+                except:
+                    sync = False
+                print(f"[BGS] Joined {app.client_id} sync={sync}")
             except Exception as e:
                 print(f"[BGS] Join failed {e}")
         aio.run(join_mp())

@@ -81,9 +81,17 @@ class FetchResponse:
 
         # Standard browser fetch path: await self._js.json()
         try:
-            # In Brython, await js_response.json() returns Python object
             result = await self._js.json()
-            return result
+            if isinstance(result, (dict, list)):
+                return result
+            try:
+                import json as _j
+                return _j.loads(window.JSON.stringify(result))
+            except:
+                try:
+                    return dict(result)
+                except:
+                    return result
         except Exception as e:
             # Fallback: try text then parse
             try:
