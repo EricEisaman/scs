@@ -5,7 +5,8 @@ import math
 import random
 import json as py_json
 
-# Global signals - avoid closure capture
+# Global signals - V12 FIX: use Python global dict, not window dict (Brython window dict bug)
+_bgs_signals_py = {}
 window._bgs_signals = {}
 window._bgs_es = None
 
@@ -27,19 +28,21 @@ def _bgs_on_datastar_patch(evt):
                 return
         if isinstance(parsed, dict):
             for kk, vv in parsed.items():
-                window._bgs_signals[kk] = vv
-            # PEER DEBUG: log any signal
+                # V12 FIX: store in Python global dict (reliable) + window for compat
+                _bgs_signals_py[kk] = vv
+                try:
+                    window._bgs_signals[kk] = vv
+                except:
+                    pass
             try:
                 keys = list(parsed.keys())
                 if keys:
-                    print(f"[BGS] SSE got keys {keys}")
+                    print(f"[BGS] SSE got keys {keys} -> py dict now has {list(_bgs_signals_py.keys())}")
                 if "character-state-update" in parsed:
                     upd = parsed.get("character-state-update")
                     if isinstance(upd, dict):
                         ups = upd.get("updates",[])
-                        print(f"[BGS] PEER UPDATE {len(ups)} clients: {[u.get('clientId','?')[:4] for u in ups]}")
-                    else:
-                        print(f"[BGS] PEER UPDATE non-dict {type(upd)}")
+                        print(f"[BGS] PEER UPDATE {len(ups)} clients: {[u.get('clientId','?')[:4] for u in ups]} py dict ok={ 'character-state-update' in _bgs_signals_py }")
             except Exception as e3:
                 print(f"[BGS] SSE log err {e3}")
     except Exception as ex:
@@ -47,9 +50,15 @@ def _bgs_on_datastar_patch(evt):
 
 def get_signal(n,d=None):
     try:
+        # V12: try Python global first (reliable)
+        if n in _bgs_signals_py:
+            return _bgs_signals_py.get(n,d)
         return window._bgs_signals.get(n,d)
     except:
-        return d
+        try:
+            return _bgs_signals_py.get(n,d)
+        except:
+            return d
 
 def is_datastar_connected():
     try:
@@ -77,7 +86,7 @@ try:
     HAS_MP = True
     print("[BGS] MP imports OK from extensions/ - using V4 handlers")
 except Exception as e:
-    print(f"[BGS] MP import failed ({e}) - using inline fallback client V11 FINAL PEERS DEBUG V2 - 600 LINES V11 FIXED")
+    print(f"[BGS] MP import failed ({e}) - using inline fallback client V12 FINAL PY DICT FIX - 600 LINES V12 FIXED")
     HAS_MP = True
 
     class MultiplayerClient:
@@ -107,22 +116,22 @@ except Exception as e:
                     sid = data.get("session_id")
                     self.client_id = cid
                     self.session_id = sid
-                    print(f"[BGS] Joined {cid} sid={sid} - MP connection registered V11 FINAL PEERS DEBUG V2")
+                    print(f"[BGS] Joined {cid} sid={sid} - MP connection registered V12 FINAL PY DICT FIX")
 
-                    # --- V11 JS EVAL SSE - bypass Brython .new() + resolve_local bug ---
+                    # --- V12 JS EVAL SSE - bypass Brython .new() + resolve_local bug ---
                     try:
                         stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
                         # create EventSource via JS eval to avoid Brython new() + local index bug
                         es_obj = window.eval("new EventSource('" + stream_url + "')")
                         window._bgs_es = es_obj
                         es_obj.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
-                        print(f"[BGS] SSE OPEN V11 {stream_url}")
+                        print(f"[BGS] SSE OPEN V12 {stream_url}")
                     except Exception as sse_e:
-                        print(f"[BGS] SSE connect fail V11 {sse_e}")
+                        print(f"[BGS] SSE connect fail V12 {sse_e}")
 
                     return data
                 except Exception as ex:
-                    print(f"[BGS] join fail V11 {ex}")
+                    print(f"[BGS] join fail V12 {ex}")
                     await aio.sleep(1)
             raise Exception("join failed after retries")
 
@@ -456,26 +465,26 @@ def onKeyHold(app, keys):
 
 
 def onStep(app):
-    # V11 DEBUG - log every signal
+    # V12 DEBUG - log every signal
     if HAS_MP:
         try:
             sig=get_signal("character-state-update")
             if app.world.tick % 60 == 0:
-                print(f"[BGS] V11 TICK {app.world.tick} sig type {type(sig).__name__ if sig else 'None'} remote={len(app.remote_players)} local={str(app.client_id)[:6] if app.client_id else 'none'}")
+                print(f"[BGS] V12 TICK {app.world.tick} sig type {type(sig).__name__ if sig else 'None'} remote={len(app.remote_players)} local={str(app.client_id)[:6] if app.client_id else 'none'}")
             if sig and isinstance(sig, dict):
                 updates=sig.get("updates",[])
                 if updates:
-                    print(f"[BGS] V11 GOT {len(updates)} updates ids={[u.get('clientId','?')[:4] for u in updates]}")
+                    print(f"[BGS] V12 GOT {len(updates)} updates ids={[u.get('clientId','?')[:4] for u in updates]}")
                     for u in updates:
                         cid=u.get("clientId")
                         if cid and cid != app.client_id:
                             if cid not in app.remote_players:
-                                print(f"[BGS] V11 NEW PEER {cid[:6]} -> total {len(app.remote_players)+1}")
+                                print(f"[BGS] V12 NEW PEER {cid[:6]} -> total {len(app.remote_players)+1}")
                             app.remote_players[cid]=u
                             app.remote_players[cid]['_last_seen']=app.world.tick
             app.datastar_connected=is_datastar_connected()
         except Exception as e:
-            print(f"V11 signal err {e}")
+            print(f"V12 signal err {e}")
 
     app.world.step()
 
@@ -554,7 +563,7 @@ def redrawAll(app):
         drawLabel(p.name,x,y-p.h*0.7-14,size=11,fill=rgb(255,255,255),bold=True)
         if p.score>0:
             drawLabel(f"{p.score}",x,y-p.h*0.7-26,size=9,fill=rgb(255,235,100),bold=True)
-    # remote players (BGS character-state) - V11 SUPER VISIBLE, NO CULLING
+    # remote players (BGS character-state) - V12 SUPER VISIBLE, NO CULLING
     for cid, remote in app.remote_players.items():
         try:
             pos=remote.get("position",[0,0,0])
