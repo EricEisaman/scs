@@ -343,7 +343,7 @@ def onAppStart(app):
     app.paused = False
     app.show_help = True
     app.mode = "local"  # local or datastar
-    app.datastar_url = "https://scs-datastar-extension.onrender.com"  # placeholder
+    app.datastar_url = "https://scs-207.onrender.com"  # placeholder
     app.room_id = "DEMO"
     app.local_player_id = "player_0"
     app.input_seq = 0

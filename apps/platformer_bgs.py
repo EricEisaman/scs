@@ -129,7 +129,7 @@ def onAppStart(app):
         base_url = "http://localhost:10000"
         try:
             if hasattr(window, 'location') and 'github.io' in window.location.hostname:
-                base_url = "https://scs-datastar-extension.onrender.com"
+                base_url = "https://scs-207.onrender.com"
         except:
             pass
         app.mp_client = MultiplayerClient(base_url=base_url, environment="level1", character_name="Player")
