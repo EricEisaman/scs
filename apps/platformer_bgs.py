@@ -1,65 +1,54 @@
-# extensions/datastar.py - Model-only, Brython + Datastar v1 best practice
-from browser import window
+# apps/platformer_bgs.py
+# SCS Platformer BGS-MP-SYNC - Datastar correct (SSE + signal patches only)
+from scs import *
+from browser import window, aio
+import math
+import random
 import json
 
-_signals = {}
-_es = None
-_connected = False
+# --- Multiplayer imports - robust ---
+try:
+    from extensions.multiplayer import MultiplayerClient
+    from extensions.datastar import get_signal, is_datastar_connected
+    HAS_MP = True
+except Exception as e:
+    print(f"[BGS] MP import failed: {e}")
+    HAS_MP = False
+    def get_signal(n,d=None): return d
+    def is_datastar_connected(): return False
 
-def _parse_signals_data(raw: str):
-    # Datastar sends: "signals {\"key\": value}"
-    raw = raw.strip()
-    if raw.startswith("signals "):
-        raw = raw[8:]
-    return json.loads(raw)
+# ---------- Helpers ----------
+def clamp(v, lo, hi):
+    return lo if v < lo else hi if v > hi else v
 
-def _on_patch_signals(evt):
-    global _signals
-    try:
-        data = _parse_signals_data(evt.data)
-        # data is { "character-state-update": {...}, "client-joined": {...} }
-        _signals.update(data)
-    except Exception as e:
-        print(f"[datastar] parse error {e}: {evt.data[:200]}")
+class Platform:
+    def __init__(self, x, y, w, h, typ="normal", color=None):
+        self.x=x; self.y=y; self.w=w; self.h=h; self.type=typ; self.color=color or rgb(60,60,80)
 
-def _on_open(evt):
-    global _connected
-    _connected = True
-    print("[datastar] SSE OPEN")
+class Player:
+    def __init__(self, pid, name, x, y, color, keys):
+        self.id=pid; self.name=name; self.x=x; self.y=y; self.vx=0; self.vy=0
+        self.w=32; self.h=44; self.on_ground=False; self.facing=1; self.state="idle"
+        self.color=color; self.keys=keys; self.score=0; self.jump_count=0; self.max_jumps=2
+        self.alive=True; self.trail=[]
 
-def _on_error(evt):
-    global _connected
-    _connected = False
-    print("[datastar] SSE ERROR - will auto-reconnect")
-
-def connect_sse(url: str):
-    global _es, _connected
-    if _es:
-        try: _es.close()
-        except: pass
-    print(f"[datastar] connecting {url}")
-    _es = window.EventSource.new(url)
-    _es.addEventListener("datastar-patch-signals", _on_patch_signals)
-    # optional: ignore element patches for this game
-    _es.onopen = _on_open
-    _es.onerror = _on_error
-    # keep alive reference - Brython GC kills unreferenced ES
-    window._scs_datastar_es = _es
-    return _es
-
-def get_signal(name, default=None):
-    return _signals.get(name, default)
-
-def is_datastar_connected():
-    global _es, _connected
-    if not _es:
-        return False
-    # 0=CONNECTING, 1=OPEN, 2=CLOSED
-    return _es.readyState == 1 and _connected
-
-def disconnect():
-    global _es, _connected
-    if _es:
-        _es.close()
-        _es = None
-    _connected = False
+class World:
+    def __init__(self, width=2400, height=700):
+        self.width=width; self.height=height; self.gravity=0.65; self.friction=0.82
+        self.platforms=[]; self.coins=[]; self.players={}; self.tick=0
+        self.build_level()
+    def build_level(self):
+        self.platforms=[
+            Platform(1200,680,2400,50,"normal",rgb(40,40,60)),
+            Platform(250,580,180,18,"normal"), Platform(500,520,180,18),
+            Platform(750,460,200,18), Platform(1050,400,220,18),
+            Platform(1350,360,200,18,"bouncy",rgb(100,200,100)),
+            Platform(1650,420,180,18), Platform(1900,500,200,18),
+            Platform(30,400,24,700), Platform(2370,400,24,700),
+        ]
+        self.coins=[{"x":250+i*140,"y":400-(i%3)*100,"collected":False,"val":10} for i in range(10)]
+    def add_player(self, pid, name, color, keys):
+        p=Player(pid,name,150+len(self.players)*70,100,color,keys)
+        self.players[pid]=p
+        return p
+    def apply_input(self, pid, move_x, jump):
