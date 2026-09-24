@@ -1,6 +1,6 @@
 # apps/fetch_demo.py - FIXED PARSE
 from scs import *
-from ./extensions/extensions.fetch import fetch_json, FetchError
+from extensions.fetch import fetch_json, FetchError
 from browser import aio
 import random
 
