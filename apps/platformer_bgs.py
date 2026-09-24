@@ -63,7 +63,7 @@ try:
     HAS_MP = True
     print("[BGS] MP imports OK from extensions/ - using V4 handlers")
 except Exception as e:
-    print(f"[BGS] MP import failed ({e}) - using inline fallback client V7 FINAL - 600 LINES V7 FIXED")
+    print(f"[BGS] MP import failed ({e}) - using inline fallback client V8 FINAL - 600 LINES V8 FIXED")
     HAS_MP = True
 
     class MultiplayerClient:
@@ -76,51 +76,39 @@ except Exception as e:
             self._es = None
 
         async def join(self, retries=3):
+            # cache self attrs to locals at top to avoid self inside nested try
+            base_url = self.base_url
+            env_name = self.environment_name
+            char_name = self.character_name
             for attempt in range(retries):
                 try:
-                    url = self.base_url + "/api/multiplayer/join"
-                    payload = {"environment_name": self.environment_name, "character_name": self.character_name}
+                    url = base_url + "/api/multiplayer/join"
+                    payload = {"environment_name": env_name, "character_name": char_name}
                     body = window.JSON.stringify(payload)
                     print(f"[BGS] Joining {url} attempt {attempt+1}")
                     resp = await window.fetch(url, {"method":"POST","headers":{"Content-Type":"application/json"},"body":body,"mode":"cors"})
                     js_data = await resp.json()
                     data = py_json.loads(window.JSON.stringify(js_data))
-                    self.client_id = data.get("client_id")
-                    self.session_id = data.get("session_id")
-                    print(f"[BGS] Joined {self.client_id} sid={self.session_id} - MP connection registered V7 FINAL")
+                    cid = data.get("client_id")
+                    sid = data.get("session_id")
+                    self.client_id = cid
+                    self.session_id = sid
+                    print(f"[BGS] Joined {cid} sid={sid} - MP connection registered V8 FINAL")
 
-                    # --- V7 ULTRA-SAFE SSE - NO f-string with self, NO nested es undefined, NO lambda ---
+                    # --- V8 JS EVAL SSE - bypass Brython .new() + resolve_local bug ---
                     try:
-                        sid = self.session_id
-                        base = self.base_url
-                        stream_url = base + "/api/multiplayer/stream?sid=" + str(sid)
-                        ES = getattr(window, 'EventSource', None)
-                        if ES:
-                            try:
-                                es_obj = ES.new(stream_url)
-                            except:
-                                try:
-                                    es_obj = ES(stream_url)
-                                except:
-                                    es_obj = None
-                            if es_obj:
-                                window._bgs_es = es_obj
-                                try:
-                                    window._scs_es = es_obj
-                                except:
-                                    pass
-                                es_obj.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
-                                print(f"[BGS] SSE connecting {stream_url} V7")
-                            else:
-                                print("[BGS] SSE no es_obj V7")
-                        else:
-                            print("[BGS] SSE no EventSource V7")
+                        stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
+                        # create EventSource via JS eval to avoid Brython new() + local index bug
+                        es_obj = window.eval("new EventSource('" + stream_url + "')")
+                        window._bgs_es = es_obj
+                        es_obj.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
+                        print(f"[BGS] SSE OPEN V8 {stream_url}")
                     except Exception as sse_e:
-                        print(f"[BGS] SSE connect fail V7 {sse_e}")
+                        print(f"[BGS] SSE connect fail V8 {sse_e}")
 
                     return data
                 except Exception as ex:
-                    print(f"[BGS] join fail V7 {ex}")
+                    print(f"[BGS] join fail V8 {ex}")
                     await aio.sleep(1)
             raise Exception("join failed after retries")
 
