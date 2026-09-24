@@ -9,15 +9,22 @@ from browser import window, aio
 import math
 import random
 
-# ---------- Multiplayer Imports - FIXED ----------
-# CharacterState is a wire shape (dict), not a class to instantiate.
-# Import only MultiplayerClient to avoid HAS_MP=False silent fail
+# ---------- Multiplayer Imports - FIXED FOR BRYTHON ----------
+# Brython fails on 'from extensions.multiplayer import MultiplayerClient' with
+# 'extensions.multiplayer is not a package' - must import module then attr
+# CharacterState is compat stub per your screenshot - wire shape is dict
 try:
-    from extensions.multiplayer import MultiplayerClient
-    from extensions.datastar import get_signal, is_datastar_connected
+    import extensions.multiplayer as mp_ext
+    import extensions.datastar as ds_ext
+    MultiplayerClient = mp_ext.MultiplayerClient
+    get_signal = ds_ext.get_signal
+    is_datastar_connected = ds_ext.is_datastar_connected
     HAS_MP = True
+    print("[BGS] MP imports OK - CharacterState exists as stub")
 except Exception as e:
+    import traceback
     print(f"[BGS] MP import failed: {e}")
+    traceback.print_exc()
     HAS_MP = False
     def get_signal(n,d=None): return d
     def is_datastar_connected(): return False
