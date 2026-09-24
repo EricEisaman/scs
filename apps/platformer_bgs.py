@@ -24,20 +24,22 @@ try:
     HAS_MP = True
     print("[BGS] MP imports OK from extensions/")
 except Exception as e:
-    print(f"[BGS] MP import failed ({e}) - using inline fallback client - THIS FIXES YOUR ERROR")
+    print(f"[BGS] MP import failed ({e}) - using inline fallback client V2 - FULL 500+ LINES")
     HAS_MP = True
-    try:
-        import extensions.datastar as ds_ext
-        get_signal = ds_ext.get_signal
-        is_datastar_connected = ds_ext.is_datastar_connected
-        _has_ds = True
-    except:
-        _has_ds = False
-        _fallback_signals = {}
-        def get_signal(n,d=None):
-            return _fallback_signals.get(n,d)
-        def is_datastar_connected():
-            return hasattr(window, '_scs_es') and window._scs_es is not None
+    # fallback signals stored on window to avoid Brython closure issues
+    window._bgs_signals = {}
+    window._bgs_es = None
+    def get_signal(n,d=None):
+        try:
+            return window._bgs_signals.get(n,d)
+        except:
+            return d
+    def is_datastar_connected():
+        try:
+            return window._bgs_es is not None and window._bgs_es.readyState == 1
+        except:
+            return False
+
     class MultiplayerClient:
         def __init__(self, base_url="https://scs-207.onrender.com", environment="level1", environment_name=None, character_name="Player", **kw):
             self.base_url = base_url.rstrip("/")
@@ -46,6 +48,7 @@ except Exception as e:
             self.client_id = None
             self.session_id = None
             self._es = None
+
         async def join(self, retries=3):
             for attempt in range(retries):
                 try:
@@ -58,34 +61,47 @@ except Exception as e:
                     data = py_json.loads(window.JSON.stringify(js_data))
                     self.client_id = data.get("client_id")
                     self.session_id = data.get("session_id")
-                    print(f"[BGS] Joined {self.client_id} sid={self.session_id} - MP connection registered")
+                    print(f"[BGS] Joined {self.client_id} sid={self.session_id} - MP connection registered V2 FULL")
+
+                    # --- FIXED SSE - NO IMPORT OF extensions.datastar ---
                     try:
-                        import extensions.datastar as ds
-                        ds.connect_sse(f"{self.base_url}/api/multiplayer/stream?sid={self.session_id}")
-                    except:
-                        self._es = window.EventSource.new(f"{self.base_url}/api/multiplayer/stream?sid={self.session_id}")
-                        window._scs_es = self._es
-                        def _on_signal(evt):
-                            raw = evt.data
-                            if isinstance(raw, str) and raw.startswith("signals "):
-                                raw = raw[8:]
+                        stream_url = f"{self.base_url}/api/multiplayer/stream?sid={self.session_id}"
+                        es = window.EventSource.new(stream_url)
+                        window._bgs_es = es
+                        window._scs_es = es
+                        self._es = es
+
+                        def _on_datastar_patch(evt):
                             try:
-                                d = py_json.loads(raw)
-                                if _has_ds:
-                                    try:
-                                        ds_ext._signals.update(d)
-                                    except:
-                                        pass
-                                else:
-                                    _fallback_signals.update(d)
-                            except:
-                                pass
-                        self._es.addEventListener("datastar-patch-signals", _on_signal)
+                                raw = evt.data
+                                if isinstance(raw, str) and raw.startswith("signals "):
+                                    raw = raw[8:]
+                                parsed = py_json.loads(raw)
+                                if isinstance(parsed, dict):
+                                    for kk, vv in parsed.items():
+                                        window._bgs_signals[kk] = vv
+                                    if "character-state-update" in parsed:
+                                        print(f"[BGS] SSE got character-state-update")
+                            except Exception as ex:
+                                print(f"[BGS] SSE parse err {ex}")
+
+                        es.addEventListener("datastar-patch-signals", _on_datastar_patch)
+                        es.onopen = lambda e: print("[BGS] SSE OPEN V2 FULL")
+                        es.onerror = lambda e: print(f"[BGS] SSE ERROR {e}")
+                        print(f"[BGS] SSE connecting {stream_url}")
+                    except Exception as sse_e:
+                        print(f"[BGS] SSE connect fail {sse_e}")
+                        import traceback
+                        traceback.print_exc()
+
                     return data
                 except Exception as ex:
                     print(f"[BGS] join fail {ex}")
-                    await aio.sleep(2*(attempt+1))
-            raise Exception("join failed")
+                    import traceback
+                    traceback.print_exc()
+                    await aio.sleep(1)
+            raise Exception("join failed after retries")
+
         async def send_character_state(self, position, velocity, animationState="idle", onGround=True, **kw):
             if not self.client_id:
                 return
