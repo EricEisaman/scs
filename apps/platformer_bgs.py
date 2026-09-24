@@ -40,8 +40,8 @@ def get_signal(n,d=None):
 def is_datastar_connected():
     try:
         es = window._bgs_es
-        # avoid 'is not None' - Brython $is fails on JS null
-        if es is None:
+        # FIXED: avoid 'is None' entirely - use truthiness to dodge $B.$is null __class__ bug
+        if not es:
             return False
         # check if es is truthy and has readyState
         try:
@@ -63,7 +63,7 @@ try:
     HAS_MP = True
     print("[BGS] MP imports OK from extensions/ - using V4 handlers")
 except Exception as e:
-    print(f"[BGS] MP import failed ({e}) - using inline fallback client V4 - FULL 500+ LINES")
+    print(f"[BGS] MP import failed ({e}) - using inline fallback client V6 FINAL - 600 LINES FIXED")
     HAS_MP = True
 
     class MultiplayerClient:
@@ -87,22 +87,27 @@ except Exception as e:
                     data = py_json.loads(window.JSON.stringify(js_data))
                     self.client_id = data.get("client_id")
                     self.session_id = data.get("session_id")
-                    print(f"[BGS] Joined {self.client_id} sid={self.session_id} - MP connection registered V4")
+                    print(f"[BGS] Joined {self.client_id} sid={self.session_id} - MP connection registered V6 FINAL")
 
-                    # --- FIXED SSE - NO NESTED CLOSURE ---
+                    # --- V6 FIXED SSE - NO self._es, NO lambda onopen, NO is None ---
                     try:
                         stream_url = f"{self.base_url}/api/multiplayer/stream?sid={self.session_id}"
-                        es = window.EventSource.new(stream_url)
+                        # Brython: try .new() first, fallback to direct call
+                        try:
+                            es = window.EventSource.new(stream_url)
+                        except:
+                            es = window.EventSource(stream_url)
                         window._bgs_es = es
-                        window._scs_es = es
-                        self._es = es
-                        # use global handler, not nested def
+                        # keep old global too for compat
+                        try:
+                            window._scs_es = es
+                        except:
+                            pass
+                        # use global flat handler - no closure
                         es.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
-                        es.onopen = lambda e: print("[BGS] SSE OPEN V4")
-                        es.onerror = lambda e: print(f"[BGS] SSE ERROR")
-                        print(f"[BGS] SSE connecting {stream_url}")
+                        print(f"[BGS] SSE connecting {stream_url} V6")
                     except Exception as sse_e:
-                        print(f"[BGS] SSE connect fail {sse_e}")
+                        print(f"[BGS] SSE connect fail V6 {sse_e}")
 
                     return data
                 except Exception as ex:
