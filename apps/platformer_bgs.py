@@ -77,7 +77,7 @@ try:
     HAS_MP = True
     print("[BGS] MP imports OK from extensions/ - using V4 handlers")
 except Exception as e:
-    print(f"[BGS] MP import failed ({e}) - using inline fallback client V9 FINAL PEER DEBUG - 600 LINES V9 FIXED")
+    print(f"[BGS] MP import failed ({e}) - using inline fallback client V10 FINAL PEERS VISIBLE - 600 LINES V10 FIXED")
     HAS_MP = True
 
     class MultiplayerClient:
@@ -107,22 +107,22 @@ except Exception as e:
                     sid = data.get("session_id")
                     self.client_id = cid
                     self.session_id = sid
-                    print(f"[BGS] Joined {cid} sid={sid} - MP connection registered V9 FINAL PEER DEBUG")
+                    print(f"[BGS] Joined {cid} sid={sid} - MP connection registered V10 FINAL PEERS VISIBLE")
 
-                    # --- V9 JS EVAL SSE - bypass Brython .new() + resolve_local bug ---
+                    # --- V10 JS EVAL SSE - bypass Brython .new() + resolve_local bug ---
                     try:
                         stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
                         # create EventSource via JS eval to avoid Brython new() + local index bug
                         es_obj = window.eval("new EventSource('" + stream_url + "')")
                         window._bgs_es = es_obj
                         es_obj.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
-                        print(f"[BGS] SSE OPEN V9 {stream_url}")
+                        print(f"[BGS] SSE OPEN V10 {stream_url}")
                     except Exception as sse_e:
-                        print(f"[BGS] SSE connect fail V9 {sse_e}")
+                        print(f"[BGS] SSE connect fail V10 {sse_e}")
 
                     return data
                 except Exception as ex:
-                    print(f"[BGS] join fail V9 {ex}")
+                    print(f"[BGS] join fail V10 {ex}")
                     await aio.sleep(1)
             raise Exception("join failed after retries")
 
@@ -463,19 +463,30 @@ def onStep(app):
                 if isinstance(sig, dict):
                     updates=sig.get("updates",[])
                     if updates:
-                        # log only every 60 ticks to avoid spam
-                        if app.world.tick % 60 == 0:
-                            print(f"[BGS] onStep got {len(updates)} updates, local={str(app.client_id)[:4] if app.client_id else 'none'}")
+                        if app.world.tick % 120 == 0:
+                            print(f"[BGS] onStep got {len(updates)} updates local={str(app.client_id)[:6] if app.client_id else 'none'} remote_dict={len(app.remote_players)}")
                         for u in updates:
                             cid=u.get("clientId")
                             if cid:
-                                if cid!=app.client_id:
+                                # DEBUG: log comparison
+                                is_self = (cid == app.client_id)
+                                if not is_self:
                                     if cid not in app.remote_players:
-                                        print(f"[BGS] NEW PEER {cid[:6]} at {u.get('position')}")
+                                        print(f"[BGS] NEW PEER {cid[:6]} pos={u.get('position')} -> REMOTE COUNT {len(app.remote_players)+1}")
                                     app.remote_players[cid]=u
-                                # else: skip self
-                else:
-                    print(f"[BGS] sig not dict {type(sig)}")
+                                    # force visible for debug
+                                    app.remote_players[cid]['_last_seen'] = app.world.tick
+                                else:
+                                    if app.world.tick % 120 == 0:
+                                        print(f"[BGS] skipping self {cid[:6]}")
+                    # cleanup old remotes after 300 ticks (~5 sec) no update
+                    try:
+                        to_del = [k for k,v in app.remote_players.items() if app.world.tick - v.get('_last_seen',0) > 300]
+                        for k in to_del:
+                            print(f"[BGS] REMOVING stale peer {k[:6]}")
+                            del app.remote_players[k]
+                    except:
+                        pass
             app.datastar_connected=is_datastar_connected()
         except Exception as e:
             print(f"signal read err {e}")
@@ -564,20 +575,29 @@ def redrawAll(app):
         drawLabel(p.name,x,y-p.h*0.7-14,size=11,fill=rgb(255,255,255),bold=True)
         if p.score>0:
             drawLabel(f"{p.score}",x,y-p.h*0.7-26,size=9,fill=rgb(255,235,100),bold=True)
-    # remote players (BGS character-state) - via SSE only
+    # remote players (BGS character-state) - V10 SUPER VISIBLE, NO CULLING
     for cid, remote in app.remote_players.items():
-        pos=remote.get("position",[0,0])
-        x=pos[0]-app.camera_x
-        y=pos[1] if len(pos)>1 else 0
-        if x<-100 or x>app.width+100:
-            continue
-        state=remote.get("animationState","idle")
-        vel=remote.get("velocity",[0,0,0])
-        # simple lean based on velocity
-        lean=clamp(vel[0]/6,-1,1) if len(vel)>0 else 0
-        drawRect(x+lean*3,y,32,44,fill=rgb(180,180,255),opacity=80,roundness=8)
-        drawLabel(f"{cid[:4]} {state}",x,y-40,size=9,fill=rgb(200,200,255))
-        drawCircle(x+lean*4,y-6,4,fill=rgb(255,255,255))
+        try:
+            pos=remote.get("position",[0,0,0])
+            px = pos[0] if len(pos)>0 else 200
+            py = pos[1] if len(pos)>1 else 200
+            x=px-app.camera_x
+            y=py
+            # NO CULLING for debug - always draw
+            # if x<-100 or x>app.width+100: continue
+            state=remote.get("animationState","idle")
+            vel=remote.get("velocity",[0,0,0])
+            lean=clamp(vel[0]/6,-1,1) if len(vel)>0 else 0
+            # bright magenta outline + blue fill
+            drawRect(x,y+2,40,52,fill=rgb(255,0,255),roundness=12)
+            drawRect(x+lean*3,y,32,44,fill=rgb(100,180,255),opacity=95,roundness=8)
+            drawLabel(f"REMOTE {cid[:4]} {state}",x,y-46,size=12,fill=rgb(255,255,0),bold=True)
+            drawCircle(x+lean*4,y-6,5,fill=rgb(255,255,255))
+            drawCircle(x+lean*4+2,y-6,2,fill=rgb(0,0,0))
+            if app.world.tick % 60 == 0:
+                print(f"[BGS] DRAWING REMOTE {cid[:6]} at world {px:.0f},{py:.0f} screen {x:.0f},{y:.0f} state {state}")
+        except Exception as e:
+            print(f"[BGS] draw remote err {e}")
 
     # UI - BGS status bar
     drawRect(app.width//2,22,app.width,44,fill=rgb(0,0,0),opacity=60)
