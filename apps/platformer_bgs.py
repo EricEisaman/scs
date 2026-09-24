@@ -63,7 +63,7 @@ try:
     HAS_MP = True
     print("[BGS] MP imports OK from extensions/ - using V4 handlers")
 except Exception as e:
-    print(f"[BGS] MP import failed ({e}) - using inline fallback client V6 FINAL - 600 LINES FIXED")
+    print(f"[BGS] MP import failed ({e}) - using inline fallback client V7 FINAL - 600 LINES V7 FIXED")
     HAS_MP = True
 
     class MultiplayerClient:
@@ -78,7 +78,7 @@ except Exception as e:
         async def join(self, retries=3):
             for attempt in range(retries):
                 try:
-                    url = f"{self.base_url}/api/multiplayer/join"
+                    url = self.base_url + "/api/multiplayer/join"
                     payload = {"environment_name": self.environment_name, "character_name": self.character_name}
                     body = window.JSON.stringify(payload)
                     print(f"[BGS] Joining {url} attempt {attempt+1}")
@@ -87,31 +87,40 @@ except Exception as e:
                     data = py_json.loads(window.JSON.stringify(js_data))
                     self.client_id = data.get("client_id")
                     self.session_id = data.get("session_id")
-                    print(f"[BGS] Joined {self.client_id} sid={self.session_id} - MP connection registered V6 FINAL")
+                    print(f"[BGS] Joined {self.client_id} sid={self.session_id} - MP connection registered V7 FINAL")
 
-                    # --- V6 FIXED SSE - NO self._es, NO lambda onopen, NO is None ---
+                    # --- V7 ULTRA-SAFE SSE - NO f-string with self, NO nested es undefined, NO lambda ---
                     try:
-                        stream_url = f"{self.base_url}/api/multiplayer/stream?sid={self.session_id}"
-                        # Brython: try .new() first, fallback to direct call
-                        try:
-                            es = window.EventSource.new(stream_url)
-                        except:
-                            es = window.EventSource(stream_url)
-                        window._bgs_es = es
-                        # keep old global too for compat
-                        try:
-                            window._scs_es = es
-                        except:
-                            pass
-                        # use global flat handler - no closure
-                        es.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
-                        print(f"[BGS] SSE connecting {stream_url} V6")
+                        sid = self.session_id
+                        base = self.base_url
+                        stream_url = base + "/api/multiplayer/stream?sid=" + str(sid)
+                        ES = getattr(window, 'EventSource', None)
+                        if ES:
+                            try:
+                                es_obj = ES.new(stream_url)
+                            except:
+                                try:
+                                    es_obj = ES(stream_url)
+                                except:
+                                    es_obj = None
+                            if es_obj:
+                                window._bgs_es = es_obj
+                                try:
+                                    window._scs_es = es_obj
+                                except:
+                                    pass
+                                es_obj.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
+                                print(f"[BGS] SSE connecting {stream_url} V7")
+                            else:
+                                print("[BGS] SSE no es_obj V7")
+                        else:
+                            print("[BGS] SSE no EventSource V7")
                     except Exception as sse_e:
-                        print(f"[BGS] SSE connect fail V6 {sse_e}")
+                        print(f"[BGS] SSE connect fail V7 {sse_e}")
 
                     return data
                 except Exception as ex:
-                    print(f"[BGS] join fail {ex}")
+                    print(f"[BGS] join fail V7 {ex}")
                     await aio.sleep(1)
             raise Exception("join failed after retries")
 
