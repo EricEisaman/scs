@@ -1,99 +1,111 @@
-# extensions/multiplayer.py
 from browser import window, aio
-from extensions.fetch import fetch
 import json
 
 class CharacterState:
-    pass # for import compatibility
+    pass  # for import compatibility - wire shape is dict per MULTIPLAYER_SYNCH.md §5.1.1
 
 class MultiplayerClient:
-    def __init__(self, base_url="https://scs-207.onrender.com", environment="level1", environment_name=None, character_name="Player"):
+    def __init__(self, base_url="https://scs-207.onrender.com", environment="level1", environment_name=None, character_name="Player", **kw):
         self.base_url = base_url.rstrip("/")
-        self.environment_name = environment_name or environment or "level1"
-        self.character_name = character_name
+        self.environment_name = environment_name or environment or kw.get("environment") or "level1"
+        self.character_name = kw.get("character_name", character_name) or character_name or "Player"
         self.client_id = None
         self.session_id = None
         self.is_synchronizer = False
-        # callbacks (BGS pattern)
+        # callbacks - BGS pattern
         self.on_character_state = None
         self.on_item_authority_changed = None
+        self._es = None
 
     async def join(self, retries=3):
         # Render free tier cold start = 30-60s
         for attempt in range(retries):
             try:
-                resp = await fetch(
-                    f"{self.base_url}/api/multiplayer/join",
-                    method="POST",
-                    headers={"Content-Type": "application/json"},
-                    body=json.dumps({
-                        "environment_name": self.environment_name,
-                        "character_name": self.character_name
-                    }),
-                    mode="cors"
-                )
+                url = f"{self.base_url}/api/multiplayer/join"
+                payload = {"environment_name": self.environment_name, "character_name": self.character_name}
+                body = window.JSON.stringify(payload)
+                print(f"[mp] join {url} env={self.environment_name} attempt={attempt+1}")
+                resp = await window.fetch(url, {
+                    "method": "POST",
+                    "headers": {"Content-Type": "application/json"},
+                    "body": body,
+                    "mode": "cors"
+                })
                 if not resp.ok:
-                    raise Exception(f"join status {resp.status}")
-                data = await resp.json()
-                self.client_id = data.get("client_id") or data.get("clientId")
-                self.session_id = data.get("session_id") or data.get("sessionId")
+                    txt = ""
+                    try:
+                        txt = await resp.text()
+                    except:
+                        pass
+                    raise Exception(f"HTTP {resp.status} {txt}")
+                js_data = await resp.json()
+                data = json.loads(window.JSON.stringify(js_data))
+                self.client_id = data.get("client_id")
+                self.session_id = data.get("session_id")
                 self.is_synchronizer = data.get("is_synchronizer", False)
-
-                # SINGLE SSE connection - use datastar extension
-                from extensions.datastar import connect_sse
-                connect_sse(f"{self.base_url}/api/multiplayer/stream?sid={self.session_id}")
-
-                print(f"[BGS] joined {self.client_id} sync={self.is_synchronizer}")
+                # SSE - Datastar best practice: ONE EventSource via extensions.datastar
+                stream_url = f"{self.base_url}/api/multiplayer/stream?sid={self.session_id}"
+                try:
+                    import extensions.datastar as ds
+                    ds.connect_sse(stream_url)
+                except Exception as ex:
+                    print(f"[mp] datastar.connect_sse failed {ex}, using direct EventSource")
+                    self._es = window.EventSource.new(stream_url)
+                    window._scs_es = self._es
+                    def _on_sig(evt):
+                        raw = evt.data if isinstance(evt.data, str) else ""
+                        if raw.startswith("signals "):
+                            raw = raw[8:]
+                        try:
+                            d = json.loads(raw)
+                            try:
+                                import extensions.datastar as ds2
+                                ds2._signals.update(d)
+                            except:
+                                pass
+                            # callbacks
+                            if "character-state-update" in d and self.on_character_state:
+                                self.on_character_state(d.get("character-state-update", {}).get("updates", []) or d.get("updates", []))
+                        except Exception as pe:
+                            print(f"[mp] signal parse fail {pe}")
+                    self._es.addEventListener("datastar-patch-signals", _on_sig)
+                    self._es.onopen = lambda e: print("[mp] SSE OPEN")
+                    self._es.onerror = lambda e: print(f"[mp] SSE ERROR {e}")
+                print(f"[mp] Joined client_id={self.client_id} sid={self.session_id} sync={self.is_synchronizer}")
                 return data
             except Exception as e:
-                print(f"[BGS] join attempt {attempt+1}/{retries} failed: {e}")
-                if attempt < retries-1:
-                    await aio.sleep(2 * (attempt+1))
+                import traceback
+                print(f"[mp] join attempt {attempt+1} failed: {e}")
+                traceback.print_exc()
+                await aio.sleep(2*(attempt+1))
         raise Exception("join failed after retries")
 
-    async def send_character_state(self, position=None, velocity=None, animationState="idle", facing=1, onGround=True, score=0, **kwargs):
-        # Accept your old signature but translate to spec §5.1.1
+    async def send_character_state(self, position, velocity, animationState="idle", onGround=True, **kw):
         if not self.client_id:
             return
-        # normalize [x,y] -> [x,y,0]
-        pos = position if isinstance(position, (list,tuple)) and len(position)==3 else [position[0], position[1], 0] if position else [0,0,0]
-        vel = velocity if isinstance(velocity, (list,tuple)) and len(velocity)==3 else [velocity[0], velocity[1], 0] if velocity else [0,0,0]
-
-        char = {
-            "clientId": self.client_id,
-            "characterModelId": kwargs.get("characterModelId", "platformer_default"),
-            "position": pos,
-            "rotation": [0,0,0],
-            "velocity": vel,
-            "animationState": animationState,
-            "animationFrame": 0,
-            "isJumping": not onGround,
-            "isBoosting": False,
-            "boostTimeRemaining": 0,
-            "timestamp": int(window.Date.now())
-        }
         try:
-            await fetch(
-                f"{self.base_url}/api/multiplayer/character-state",
-                method="PATCH",
-                headers={
-                    "Content-Type": "application/json",
-                    "X-Client-ID": self.client_id
-                },
-                body=json.dumps({
-                    "updates": [char],
-                    "timestamp": char["timestamp"]
-                }),
-                mode="cors"
-            )
+            pos = [position[0], position[1], 0] if len(position)==2 else list(position)
+            vel = [velocity[0], velocity[1], 0] if len(velocity)==2 else list(velocity)
+            char = {
+                "clientId": self.client_id,
+                "characterModelId": "platformer_default",
+                "position": pos,
+                "rotation": [0,0,0],
+                "velocity": vel,
+                "animationState": animationState,
+                "animationFrame": kw.get("animationFrame", 0),
+                "isJumping": not onGround,
+                "isBoosting": kw.get("isBoosting", False),
+                "boostTimeRemaining": kw.get("boostTimeRemaining", 0),
+                "timestamp": int(window.Date.now())
+            }
+            url = f"{self.base_url}/api/multiplayer/character-state"
+            body = window.JSON.stringify({"updates": [char], "timestamp": char["timestamp"]})
+            await window.fetch(url, {
+                "method": "PATCH",
+                "headers": {"Content-Type": "application/json", "X-Client-ID": self.client_id},
+                "body": body,
+                "mode": "cors"
+            })
         except Exception as e:
-            print(f"[BGS] char-state PATCH error {e}")
-
-    async def leave(self):
-        from extensions.datastar import disconnect
-        disconnect()
-        if self.client_id:
-            try:
-                await fetch(f"{self.base_url}/api/multiplayer/leave",
-                    method="POST", headers={"X-Client-ID": self.client_id}, mode="cors")
-            except: pass
+            print(f"[mp] send_character_state failed {e}")
