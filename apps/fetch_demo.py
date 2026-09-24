@@ -1,4 +1,4 @@
-# apps/fetch_demo.py - FIXED PARSE
+# apps/fetch_demo.py
 from scs import *
 from extensions.fetch import fetch_json, FetchError
 from browser import aio
