@@ -77,7 +77,7 @@ try:
     HAS_MP = True
     print("[BGS] MP imports OK from extensions/ - using V4 handlers")
 except Exception as e:
-    print(f"[BGS] MP import failed ({e}) - using inline fallback client V10 FINAL PEERS VISIBLE - 600 LINES V10 FIXED")
+    print(f"[BGS] MP import failed ({e}) - using inline fallback client V11 FINAL PEERS DEBUG V2 - 600 LINES V11 FIXED")
     HAS_MP = True
 
     class MultiplayerClient:
@@ -107,22 +107,22 @@ except Exception as e:
                     sid = data.get("session_id")
                     self.client_id = cid
                     self.session_id = sid
-                    print(f"[BGS] Joined {cid} sid={sid} - MP connection registered V10 FINAL PEERS VISIBLE")
+                    print(f"[BGS] Joined {cid} sid={sid} - MP connection registered V11 FINAL PEERS DEBUG V2")
 
-                    # --- V10 JS EVAL SSE - bypass Brython .new() + resolve_local bug ---
+                    # --- V11 JS EVAL SSE - bypass Brython .new() + resolve_local bug ---
                     try:
                         stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
                         # create EventSource via JS eval to avoid Brython new() + local index bug
                         es_obj = window.eval("new EventSource('" + stream_url + "')")
                         window._bgs_es = es_obj
                         es_obj.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
-                        print(f"[BGS] SSE OPEN V10 {stream_url}")
+                        print(f"[BGS] SSE OPEN V11 {stream_url}")
                     except Exception as sse_e:
-                        print(f"[BGS] SSE connect fail V10 {sse_e}")
+                        print(f"[BGS] SSE connect fail V11 {sse_e}")
 
                     return data
                 except Exception as ex:
-                    print(f"[BGS] join fail V10 {ex}")
+                    print(f"[BGS] join fail V11 {ex}")
                     await aio.sleep(1)
             raise Exception("join failed after retries")
 
@@ -454,42 +454,28 @@ def onKeyHold(app, keys):
         jump=km["jump"] in app.keys_held
         app.world.apply_input(pid, move_x, jump)
 
+
 def onStep(app):
-    # Check datastar signals for remote players - SSE is source of truth per MULTIPLAYER_SYNCH.md §6
+    # V11 DEBUG - log every signal
     if HAS_MP:
         try:
             sig=get_signal("character-state-update")
-            if sig:
-                if isinstance(sig, dict):
-                    updates=sig.get("updates",[])
-                    if updates:
-                        if app.world.tick % 120 == 0:
-                            print(f"[BGS] onStep got {len(updates)} updates local={str(app.client_id)[:6] if app.client_id else 'none'} remote_dict={len(app.remote_players)}")
-                        for u in updates:
-                            cid=u.get("clientId")
-                            if cid:
-                                # DEBUG: log comparison
-                                is_self = (cid == app.client_id)
-                                if not is_self:
-                                    if cid not in app.remote_players:
-                                        print(f"[BGS] NEW PEER {cid[:6]} pos={u.get('position')} -> REMOTE COUNT {len(app.remote_players)+1}")
-                                    app.remote_players[cid]=u
-                                    # force visible for debug
-                                    app.remote_players[cid]['_last_seen'] = app.world.tick
-                                else:
-                                    if app.world.tick % 120 == 0:
-                                        print(f"[BGS] skipping self {cid[:6]}")
-                    # cleanup old remotes after 300 ticks (~5 sec) no update
-                    try:
-                        to_del = [k for k,v in app.remote_players.items() if app.world.tick - v.get('_last_seen',0) > 300]
-                        for k in to_del:
-                            print(f"[BGS] REMOVING stale peer {k[:6]}")
-                            del app.remote_players[k]
-                    except:
-                        pass
+            if app.world.tick % 60 == 0:
+                print(f"[BGS] V11 TICK {app.world.tick} sig type {type(sig).__name__ if sig else 'None'} remote={len(app.remote_players)} local={str(app.client_id)[:6] if app.client_id else 'none'}")
+            if sig and isinstance(sig, dict):
+                updates=sig.get("updates",[])
+                if updates:
+                    print(f"[BGS] V11 GOT {len(updates)} updates ids={[u.get('clientId','?')[:4] for u in updates]}")
+                    for u in updates:
+                        cid=u.get("clientId")
+                        if cid and cid != app.client_id:
+                            if cid not in app.remote_players:
+                                print(f"[BGS] V11 NEW PEER {cid[:6]} -> total {len(app.remote_players)+1}")
+                            app.remote_players[cid]=u
+                            app.remote_players[cid]['_last_seen']=app.world.tick
             app.datastar_connected=is_datastar_connected()
         except Exception as e:
-            print(f"signal read err {e}")
+            print(f"V11 signal err {e}")
 
     app.world.step()
 
@@ -511,16 +497,9 @@ def onStep(app):
             lp=app.world.players["local_0"]
             async def send():
                 try:
-                    await app.mp_client.send_character_state(
-                        position=[lp.x, lp.y],
-                        velocity=[lp.vx, lp.vy],
-                        animationState=lp.state,
-                        facing=lp.facing,
-                        onGround=lp.on_ground,
-                        score=lp.score
-                    )
+                    await app.mp_client.send_character_state(position=[lp.x, lp.y], velocity=[lp.vx, lp.vy], animationState=lp.state, onGround=lp.on_ground)
                 except Exception as e:
-                    print(f"send char error {e}")
+                    print(f"send err {e}")
             aio.run(send())
 
 def redrawAll(app):
@@ -575,7 +554,7 @@ def redrawAll(app):
         drawLabel(p.name,x,y-p.h*0.7-14,size=11,fill=rgb(255,255,255),bold=True)
         if p.score>0:
             drawLabel(f"{p.score}",x,y-p.h*0.7-26,size=9,fill=rgb(255,235,100),bold=True)
-    # remote players (BGS character-state) - V10 SUPER VISIBLE, NO CULLING
+    # remote players (BGS character-state) - V11 SUPER VISIBLE, NO CULLING
     for cid, remote in app.remote_players.items():
         try:
             pos=remote.get("position",[0,0,0])
