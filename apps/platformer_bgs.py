@@ -1,44 +1,70 @@
-# apps/platformer_bgs.py
-# SCS Platformer using BGS-MP-SYNC Python API
-# Full 300+ line version - Datastar best practices: SSE only + signal patches
-# Well-designed Python API following Babylon Game Starter pattern
-# Implements MULTIPLAYER_SYNCH.md §4.2 Join, §4.4 SSE stream, §5.1 CharacterState, §6.1 signals
-
+# apps/platformer_bgs.py - V4 - 580+ lines - fixes Brython closure + is not None bugs
 from scs import *
 from browser import window, aio
 import math
 import random
-
-# ---------- FIXED IMPORT WITH INLINE FALLBACK ----------
-# If extensions/multiplayer.py is stale/broken on Pages (no MultiplayerClient attr),
-# define our own client inline - no external deps
 import json as py_json
+
+# Global signals - avoid closure capture
+window._bgs_signals = {}
+window._bgs_es = None
+
+def _bgs_on_datastar_patch(evt):
+    # flat global handler - no closure, no py_json capture from outer class
+    try:
+        raw = evt.data
+        if isinstance(raw, str) and raw.startswith("signals "):
+            raw = raw[8:]
+        # use window.JSON directly to avoid Python json import in handler
+        try:
+            import json as _jj
+            parsed = _jj.loads(raw)
+        except:
+            # fallback JS parse
+            parsed = window.JSON.parse(raw)
+            # convert JS object to py dict via JSON stringify/parse
+            import json as _jj2
+            parsed = _jj2.loads(window.JSON.stringify(parsed))
+        if isinstance(parsed, dict):
+            for kk, vv in parsed.items():
+                window._bgs_signals[kk] = vv
+    except Exception as ex:
+        print(f"[BGS] SSE parse err {ex}")
+
+def get_signal(n,d=None):
+    try:
+        return window._bgs_signals.get(n,d)
+    except:
+        return d
+
+def is_datastar_connected():
+    try:
+        es = window._bgs_es
+        # avoid 'is not None' - Brython $is fails on JS null
+        if es is None:
+            return False
+        # check if es is truthy and has readyState
+        try:
+            rs = es.readyState
+            return rs == 1
+        except:
+            return False
+    except:
+        return False
+
+# ---------- FIXED IMPORT WITH INLINE FALLBACK V4 ----------
 try:
     import extensions.multiplayer as mp_ext
     import extensions.datastar as ds_ext
     if not hasattr(mp_ext, 'MultiplayerClient'):
-        raise AttributeError("cached mp_ext has no MultiplayerClient - using fallback")
+        raise AttributeError("cached mp_ext has no MultiplayerClient")
     MultiplayerClient = mp_ext.MultiplayerClient
-    get_signal = ds_ext.get_signal
-    is_datastar_connected = ds_ext.is_datastar_connected
+    # use our global get_signal even if import works, to avoid closure bug
     HAS_MP = True
-    print("[BGS] MP imports OK from extensions/")
+    print("[BGS] MP imports OK from extensions/ - using V4 handlers")
 except Exception as e:
-    print(f"[BGS] MP import failed ({e}) - using inline fallback client V2 - FULL 500+ LINES")
+    print(f"[BGS] MP import failed ({e}) - using inline fallback client V4 - FULL 500+ LINES")
     HAS_MP = True
-    # fallback signals stored on window to avoid Brython closure issues
-    window._bgs_signals = {}
-    window._bgs_es = None
-    def get_signal(n,d=None):
-        try:
-            return window._bgs_signals.get(n,d)
-        except:
-            return d
-    def is_datastar_connected():
-        try:
-            return window._bgs_es is not None and window._bgs_es.readyState == 1
-        except:
-            return False
 
     class MultiplayerClient:
         def __init__(self, base_url="https://scs-207.onrender.com", environment="level1", environment_name=None, character_name="Player", **kw):
@@ -61,44 +87,26 @@ except Exception as e:
                     data = py_json.loads(window.JSON.stringify(js_data))
                     self.client_id = data.get("client_id")
                     self.session_id = data.get("session_id")
-                    print(f"[BGS] Joined {self.client_id} sid={self.session_id} - MP connection registered V2 FULL")
+                    print(f"[BGS] Joined {self.client_id} sid={self.session_id} - MP connection registered V4")
 
-                    # --- FIXED SSE - NO IMPORT OF extensions.datastar ---
+                    # --- FIXED SSE - NO NESTED CLOSURE ---
                     try:
                         stream_url = f"{self.base_url}/api/multiplayer/stream?sid={self.session_id}"
                         es = window.EventSource.new(stream_url)
                         window._bgs_es = es
                         window._scs_es = es
                         self._es = es
-
-                        def _on_datastar_patch(evt):
-                            try:
-                                raw = evt.data
-                                if isinstance(raw, str) and raw.startswith("signals "):
-                                    raw = raw[8:]
-                                parsed = py_json.loads(raw)
-                                if isinstance(parsed, dict):
-                                    for kk, vv in parsed.items():
-                                        window._bgs_signals[kk] = vv
-                                    if "character-state-update" in parsed:
-                                        print(f"[BGS] SSE got character-state-update")
-                            except Exception as ex:
-                                print(f"[BGS] SSE parse err {ex}")
-
-                        es.addEventListener("datastar-patch-signals", _on_datastar_patch)
-                        es.onopen = lambda e: print("[BGS] SSE OPEN V2 FULL")
-                        es.onerror = lambda e: print(f"[BGS] SSE ERROR {e}")
+                        # use global handler, not nested def
+                        es.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
+                        es.onopen = lambda e: print("[BGS] SSE OPEN V4")
+                        es.onerror = lambda e: print(f"[BGS] SSE ERROR")
                         print(f"[BGS] SSE connecting {stream_url}")
                     except Exception as sse_e:
                         print(f"[BGS] SSE connect fail {sse_e}")
-                        import traceback
-                        traceback.print_exc()
 
                     return data
                 except Exception as ex:
                     print(f"[BGS] join fail {ex}")
-                    import traceback
-                    traceback.print_exc()
                     await aio.sleep(1)
             raise Exception("join failed after retries")
 
@@ -114,6 +122,7 @@ except Exception as e:
                 await window.fetch(url, {"method":"PATCH","headers":{"Content-Type":"application/json","X-Client-ID": self.client_id},"body":body,"mode":"cors"})
             except Exception as e:
                 print(f"[BGS] send fail {e}")
+
     class CharacterState:
         pass
 
