@@ -7,9 +7,6 @@ import math
 import random
 import json as py_json
 
-# SCS Extensions - correct import path per repo structure
-# extensions/ is a package, proc_audio lives at extensions/proc_audio.py
-# Use module import (import extensions.proc_audio) not from import, to avoid Brython submodule quirk
 try:
     import extensions.proc_audio as pa
     AudioEngine = pa.AudioEngine
@@ -22,25 +19,18 @@ try:
     BUILTIN_PRESETS = pa.BUILTIN_PRESETS
     QUALITY_PROFILES = pa.QUALITY_PROFILES
     HAS_PROC_AUDIO = True
-except Exception as e1:
-    try:
-        from extensions.proc_audio import AudioEngine as _AE, Patch as _P, Bus as _B
-        import extensions.proc_audio as pa
-        AudioEngine = pa.AudioEngine
-        Patch = pa.Patch
-        sfx = pa.sfx
-        Bus = pa.Bus
-        SeededRandom = pa.SeededRandom
-        OfflineRenderer = pa.OfflineRenderer
-        Recorder = pa.Recorder
-        BUILTIN_PRESETS = pa.BUILTIN_PRESETS
-        QUALITY_PROFILES = pa.QUALITY_PROFILES
-        HAS_PROC_AUDIO = True
-    except Exception as e2:
-        print(f"proc_audio import failed: {e1} / {e2}")
-        HAS_PROC_AUDIO = False
-        AudioEngine = None
-        Patch = None
+except Exception as e:
+    print(f"proc_audio import failed: {e}")
+    HAS_PROC_AUDIO = False
+    AudioEngine = None
+    Patch = None
+    sfx = None
+    Bus = None
+    SeededRandom = None
+    OfflineRenderer = None
+    Recorder = None
+    BUILTIN_PRESETS = {}
+    QUALITY_PROFILES = {}
 
 def onAppStart(app):
     app.width = 1050
