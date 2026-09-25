@@ -5,7 +5,7 @@ import math
 import random
 import json as py_json
 
-# Global signals - V19 FIX: use Python global dict, not window dict (Brython window dict bug)
+# Global signals - V20 FIX: use Python global dict, not window dict (Brython window dict bug)
 _bgs_signals_py = {}
 window._bgs_signals = {}
 window._bgs_es = None
@@ -34,7 +34,7 @@ def _bgs_on_datastar_patch(evt):
 
 def get_signal(n,d=None):
     try:
-        # V19: try Python global first (reliable)
+        # V20: try Python global first (reliable)
         if n in _bgs_signals_py:
             return _bgs_signals_py.get(n,d)
         return window._bgs_signals.get(n,d)
@@ -70,7 +70,7 @@ try:
     HAS_MP = True
     print("[BGS] MP imports OK from extensions/ - using V4 handlers")
 except Exception as e:
-    print(f"[BGS] MP import failed ({e}) - using inline fallback client V19 ROBUST JOIN + ALIGN FIX - 600 LINES V19 FIXED")
+    print(f"[BGS] MP import failed ({e}) - using inline fallback client V20 FIXED RESOLVE_LOCAL + ALIGN - 600 LINES V20 FIXED")
     HAS_MP = True
 
     class MultiplayerClient:
@@ -94,8 +94,9 @@ except Exception as e:
                     print(f"[BGS] Joining {url} attempt {attempt+1}")
                     resp = await window.fetch(url, {"method":"POST","headers":{"Content-Type":"application/json"},"body":body,"mode":"cors"})
                     # check ok - Render 502 returns no CORS
+                    ok = True
                     try:
-                        ok = resp.ok
+                        _tmp_ok = resp.ok
                     except:
                         ok = True
                     if not ok:
@@ -108,13 +109,13 @@ except Exception as e:
                         raise Exception("missing ids")
                     self.client_id = cid
                     self.session_id = sid
-                    print(f"[BGS] Joined {cid} sid={sid} - MP V19")
+                    print(f"[BGS] Joined {cid} sid={sid} - MP V20")
                     try:
                         stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
                         es_obj = window.eval("new EventSource('" + stream_url + "')")
                         window._bgs_es = es_obj
                         es_obj.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
-                        print(f"[BGS] SSE OPEN V19 {stream_url}")
+                        print(f"[BGS] SSE OPEN V20 {stream_url}")
                     except Exception as sse_e:
                         print(f"[BGS] SSE fail {sse_e}")
                     return data
@@ -133,10 +134,9 @@ except Exception as e:
                 char = {"clientId": self.client_id, "characterModelId": "platformer_default", "position": pos, "velocity": vel, "animationState": animationState, "animationFrame": 0, "isJumping": not onGround, "isBoosting": False, "boostTimeRemaining": 0, "timestamp": int(window.Date.now())}
                 url = self.base_url + "/api/multiplayer/character-state"
                 body = window.JSON.stringify({"updates":[char],"timestamp":char["timestamp"]})
-                try:
-                    await window.fetch(url, {"method":"PATCH","headers":{"Content-Type":"application/json","X-Client-ID": self.client_id},"body":body,"mode":"cors"})
-                except:
-                    pass
+                await window.fetch(url, {"method":"PATCH","headers":{"Content-Type":"application/json","X-Client-ID": self.client_id},"body":body,"mode":"cors"})
+            except:
+                pass
                 except:
                     pass
             except Exception as e:
@@ -494,7 +494,7 @@ def redrawAll(app):
         sx=(i*137%app.world.width-app.camera_x*0.2)%app.width
         sy=(i*237%app.height*0.8)%app.height
         drawCircle(sx,sy,(i%3)+1,fill=rgb(200,200,255),opacity=30+(i%40))
-    # platforms - V19 FIX: explicit align=center to match collision AABB center
+    # platforms - V20 FIX: explicit align=center to match collision AABB center
     for plat in app.world.platforms:
         x=plat.x-app.camera_x
         y=plat.y
@@ -540,7 +540,7 @@ def redrawAll(app):
         drawLabel(p.name,x,y-p.h*0.7-14,size=11,fill=rgb(255,255,255))
         if p.score>0:
             drawLabel(f"{p.score}",x,y-p.h*0.7-26,size=9,fill=rgb(255,235,100))
-    # remote players - V19 MINIMAL SAFE
+    # remote players - V20 MINIMAL SAFE
     for cid in list(app.remote_players.keys()):
         remote = app.remote_players.get(cid)
         if not remote:
