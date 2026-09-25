@@ -596,9 +596,22 @@ class AudioEngine:
             return False
         try:
             if ctx.state == "suspended":
-                # ctx.resume() returns promise in JS
-                p = ctx.resume()
-                # Brython promise handling - we don't need to await, just set state
+                try:
+                    p = ctx.resume()
+                    # Handle promise properly in Brython
+                    if p and hasattr(p, "then"):
+                        # Set up handlers
+                        def _on_resolved(*args):
+                            self._state = "ready"
+                            self._log("resume_resolved")
+                        def _on_rejected(err):
+                            self._log("resume_rejected", str(err))
+                        try:
+                            p.then(_on_resolved, _on_rejected)
+                        except:
+                            pass
+                except Exception as e:
+                    self._log("resume_promise_failed", str(e))
                 self._state = "ready"
                 self._log("resume_requested")
                 return True
@@ -1014,11 +1027,28 @@ class AudioEngine:
                     except:
                         pass
             else:
+                # Build set of ADSR node ids (they are dicts, envelope is on gain_node)
+                adsr_ids = set([g.get("id") for g in patch.graph if g.get("type") == "adsr"])
                 for src_id, dst_id in patch.routing:
                     if src_id.startswith("bus:"):
                         continue
+                    # Destination is bus -> src connects to gain_node
                     if dst_id.startswith("bus:"):
-                        # src -> gain -> bus
+                        src_node = graph_nodes.get(src_id)
+                        if not src_node:
+                            continue
+                        if isinstance(src_node, dict):
+                            # ADSR -> bus means gain_node -> bus (already handled later)
+                            if src_id in adsr_ids:
+                                continue
+                            continue
+                        try:
+                            src_node.connect(gain_node)
+                        except:
+                            pass
+                        continue
+                    # Destination is ADSR -> src should connect to gain_node (envelope lives on gain)
+                    if dst_id in adsr_ids:
                         src_node = graph_nodes.get(src_id)
                         if not src_node or isinstance(src_node, dict):
                             continue
@@ -1027,27 +1057,41 @@ class AudioEngine:
                         except:
                             pass
                         continue
+                    # Source is ADSR -> skip (ADSR is not an audio node)
+                    if src_id in adsr_ids:
+                        continue
                     s = graph_nodes.get(src_id)
                     d = graph_nodes.get(dst_id)
                     if not s or not d:
                         continue
                     if isinstance(s, dict) or isinstance(d, dict):
+                        # Skip LFO dicts etc, but ADSR already handled
                         continue
                     try:
                         s.connect(d)
                     except:
                         pass
-                # if no connection to gain, connect last non-bus node to gain
-                # find nodes that have no outgoing
-                has_out = set([r[0] for r in patch.routing])
-                # Actually connect nodes without outgoing to gain
+                # Connect any real nodes with no outgoing to gain_node (fallback)
+                has_out = set([r[0] for r in patch.routing if not r[0].startswith("bus:")])
                 for nid, node in graph_nodes.items():
                     if isinstance(node, dict):
                         continue
+                    if nid in adsr_ids:
+                        continue
                     if nid not in has_out:
-                        # check if it already connected to something that leads to gain? simplify: connect to gain
                         try:
-                            # avoid double connect if already connected to bus
+                            node.connect(gain_node)
+                        except:
+                            pass
+                    # Also ensure nodes that only routed to ADSR get connected
+                    # If node routes only to ADSR, has_out includes it but it wasn't connected above due to dict skip - now we connect
+                    routed_to_only_adsr = False
+                    for src, dst in patch.routing:
+                        if src == nid and dst in adsr_ids:
+                            routed_to_only_adsr = True
+                            break
+                    if routed_to_only_adsr:
+                        try:
                             node.connect(gain_node)
                         except:
                             pass
