@@ -1,68 +1,46 @@
 """
 proc_audio_demo.py - Demo for procedural audio extension
 SCS app: ?app=proc_audio_demo
-
-Features:
-- High-level sfx.play("jump", pitch=1.2, brightness=0.7, seed=42)
-- Low-level Patch builder
-- Bus mixer, spatial audio, variations, offline WAV export
-- Preset browser, macro controls, visual meters
-
-Controls:
-- Click to unlock audio (required by browsers)
-- Q/W/E/R/T/Y: play presets (jump, laser, explosion, coin, hover, engine)
-- A/S/D: spatial test, ducking test, burst protection test
-- Mouse: position controls panning
-- Space: random variation
-- M: mute music bus
-- L: linter check
-
-Uses proc_audio.py library
 """
 from scs import *
 import math
 import random
 import json as py_json
 
-# Try import proc_audio from SCS extensions/ (correct location per README)
+# SCS Extensions - correct import path per repo structure
+# extensions/ is a package, proc_audio lives at extensions/proc_audio.py
+# Use module import (import extensions.proc_audio) not from import, to avoid Brython submodule quirk
 try:
-    from extensions.proc_audio import AudioEngine, Patch, sfx, Bus, SeededRandom, OfflineRenderer, Recorder, BUILTIN_PRESETS, QUALITY_PROFILES
+    import extensions.proc_audio as pa
+    AudioEngine = pa.AudioEngine
+    Patch = pa.Patch
+    sfx = pa.sfx
+    Bus = pa.Bus
+    SeededRandom = pa.SeededRandom
+    OfflineRenderer = pa.OfflineRenderer
+    Recorder = pa.Recorder
+    BUILTIN_PRESETS = pa.BUILTIN_PRESETS
+    QUALITY_PROFILES = pa.QUALITY_PROFILES
     HAS_PROC_AUDIO = True
 except Exception as e1:
     try:
-        from proc_audio import AudioEngine, Patch, sfx, Bus, SeededRandom, OfflineRenderer, Recorder, BUILTIN_PRESETS, QUALITY_PROFILES
+        from extensions.proc_audio import AudioEngine as _AE, Patch as _P, Bus as _B
+        import extensions.proc_audio as pa
+        AudioEngine = pa.AudioEngine
+        Patch = pa.Patch
+        sfx = pa.sfx
+        Bus = pa.Bus
+        SeededRandom = pa.SeededRandom
+        OfflineRenderer = pa.OfflineRenderer
+        Recorder = pa.Recorder
+        BUILTIN_PRESETS = pa.BUILTIN_PRESETS
+        QUALITY_PROFILES = pa.QUALITY_PROFILES
         HAS_PROC_AUDIO = True
     except Exception as e2:
-        try:
-            import extensions.proc_audio as pa
-            AudioEngine = pa.AudioEngine
-            Patch = pa.Patch
-            sfx = pa.sfx
-            Bus = pa.Bus
-            SeededRandom = pa.SeededRandom
-            OfflineRenderer = pa.OfflineRenderer
-            Recorder = pa.Recorder
-            BUILTIN_PRESETS = pa.BUILTIN_PRESETS
-            QUALITY_PROFILES = pa.QUALITY_PROFILES
-            HAS_PROC_AUDIO = True
-        except Exception as e3:
-            try:
-                import proc_audio as pa
-                AudioEngine = pa.AudioEngine
-                Patch = pa.Patch
-                sfx = pa.sfx
-                Bus = pa.Bus
-                SeededRandom = pa.SeededRandom
-                OfflineRenderer = pa.OfflineRenderer
-                Recorder = pa.Recorder
-                BUILTIN_PRESETS = pa.BUILTIN_PRESETS
-                QUALITY_PROFILES = pa.QUALITY_PROFILES
-                HAS_PROC_AUDIO = True
-            except Exception as e4:
-                HAS_PROC_AUDIO = False
-                AudioEngine = None
-                Patch = None
-                print(f"proc_audio import failed: {e1} / {e2} / {e3} / {e4}")
+        print(f"proc_audio import failed: {e1} / {e2}")
+        HAS_PROC_AUDIO = False
+        AudioEngine = None
+        Patch = None
 
 def onAppStart(app):
     app.width = 1050

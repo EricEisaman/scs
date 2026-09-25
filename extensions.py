@@ -1,47 +1,71 @@
 # extensions.py - Root shim for Brython GitHub Pages
 # Fixes 404 for ./extensions.py - Brython tries this before ./extensions/__init__.py
 import sys, types
+
+# Ensure extensions package path
 try:
     __path__ = ['extensions']
-except: pass
+except:
+    pass
+
+# Pre-create empty modules to prevent Brython from trying ./extensions.py as package
+# BUT only if they don't already exist - and we will overwrite with real modules after
 for _n in ['fetch','datastar','multiplayer','proc_audio']:
     _f = f'extensions.{_n}'
     if _f not in sys.modules:
         try:
             sys.modules[_f] = types.ModuleType(_f)
-        except: pass
+        except:
+            pass
+
+# Now try to load real implementations and populate the placeholders
 try:
-    from extensions.fetch import fetch, fetch_json, fetch_text, FetchError, FetchResponse
-    sys.modules['extensions.fetch'].fetch = fetch
-    sys.modules['extensions.fetch'].fetch_json = fetch_json
-    sys.modules['extensions.fetch'].fetch_text = fetch_text
-    sys.modules['extensions.fetch'].FetchError = FetchError
-    sys.modules['extensions.fetch'].FetchResponse = FetchResponse
-except: pass
+    import extensions.fetch as _real_fetch
+    # Copy attributes to placeholder if placeholder exists
+    _mod = sys.modules.get('extensions.fetch')
+    if _mod:
+        for _k in ['fetch','fetch_json','fetch_text','FetchError','FetchResponse']:
+            try:
+                setattr(_mod, _k, getattr(_real_fetch, _k))
+            except:
+                pass
+    sys.modules['extensions.fetch'] = _real_fetch
+except:
+    pass
+
 try:
-    from extensions.datastar import get_signal, set_signal, get_game_snapshot, is_datastar_connected
-    sys.modules['extensions.datastar'].get_signal = get_signal
-    sys.modules['extensions.datastar'].set_signal = set_signal
-    sys.modules['extensions.datastar'].get_game_snapshot = get_game_snapshot
-    sys.modules['extensions.datastar'].is_datastar_connected = is_datastar_connected
-except: pass
+    import extensions.datastar as _real_ds
+    sys.modules['extensions.datastar'] = _real_ds
+except:
+    pass
+
 try:
-    from extensions.multiplayer import MultiplayerClient, CharacterState, MultiplayerError
-    sys.modules['extensions.multiplayer'].MultiplayerClient = MultiplayerClient
-    sys.modules['extensions.multiplayer'].CharacterState = CharacterState
-    sys.modules['extensions.multiplayer'].MultiplayerError = MultiplayerError
-except: pass
+    import extensions.multiplayer as _real_mp
+    sys.modules['extensions.multiplayer'] = _real_mp
+except:
+    pass
+
 try:
-    from extensions.proc_audio import AudioEngine, Patch, Bus, SoundHandle, SeededRandom, SpatialSource, OfflineRenderer, Recorder, sfx, BUILTIN_PRESETS, QUALITY_PROFILES, WORKLET_JS, MANIFEST_EXAMPLE
-    sys.modules['extensions.proc_audio'].AudioEngine = AudioEngine
-    sys.modules['extensions.proc_audio'].Patch = Patch
-    sys.modules['extensions.proc_audio'].Bus = Bus
-    sys.modules['extensions.proc_audio'].SoundHandle = SoundHandle
-    sys.modules['extensions.proc_audio'].SeededRandom = SeededRandom
-    sys.modules['extensions.proc_audio'].SpatialSource = SpatialSource
-    sys.modules['extensions.proc_audio'].OfflineRenderer = OfflineRenderer
-    sys.modules['extensions.proc_audio'].Recorder = Recorder
-    sys.modules['extensions.proc_audio'].sfx = sfx
-    sys.modules['extensions.proc_audio'].BUILTIN_PRESETS = BUILTIN_PRESETS
-    sys.modules['extensions.proc_audio'].QUALITY_PROFILES = QUALITY_PROFILES
-except: pass
+    import extensions.proc_audio as _real_pa
+    sys.modules['extensions.proc_audio'] = _real_pa
+except Exception as _e:
+    # If direct import fails, try to create module from file manually
+    try:
+        # Don't fail - leave placeholder so app doesn't crash on import
+        pass
+    except:
+        pass
+
+# Also ensure extensions package exists
+try:
+    import extensions as _ext_pkg
+    # Make sure submodules are accessible
+    for _name in ['fetch','datastar','multiplayer','proc_audio']:
+        _full = f'extensions.{_name}'
+        if _full in sys.modules:
+            try:
+                setattr(_ext_pkg, _name, sys.modules[_full])
+            except:
+                pass
+except:
+    pass
