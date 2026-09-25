@@ -5,7 +5,7 @@ import math
 import random
 import json as py_json
 
-# Global signals - V15 FIX: use Python global dict, not window dict (Brython window dict bug)
+# Global signals - V16 FIX: use Python global dict, not window dict (Brython window dict bug)
 _bgs_signals_py = {}
 window._bgs_signals = {}
 window._bgs_es = None
@@ -34,7 +34,7 @@ def _bgs_on_datastar_patch(evt):
 
 def get_signal(n,d=None):
     try:
-        # V15: try Python global first (reliable)
+        # V16: try Python global first (reliable)
         if n in _bgs_signals_py:
             return _bgs_signals_py.get(n,d)
         return window._bgs_signals.get(n,d)
@@ -70,7 +70,7 @@ try:
     HAS_MP = True
     print("[BGS] MP imports OK from extensions/ - using V4 handlers")
 except Exception as e:
-    print(f"[BGS] MP import failed ({e}) - using inline fallback client V15 FINAL CRASH-PROOF - 600 LINES V15 FIXED")
+    print(f"[BGS] MP import failed ({e}) - using inline fallback client V16 FINAL NO-RECURSION - 600 LINES V16 FIXED")
     HAS_MP = True
 
     class MultiplayerClient:
@@ -100,22 +100,22 @@ except Exception as e:
                     sid = data.get("session_id")
                     self.client_id = cid
                     self.session_id = sid
-                    print(f"[BGS] Joined {cid} sid={sid} - MP connection registered V15 FINAL CRASH-PROOF")
+                    print(f"[BGS] Joined {cid} sid={sid} - MP connection registered V16 FINAL NO-RECURSION")
 
-                    # --- V15 JS EVAL SSE - bypass Brython .new() + resolve_local bug ---
+                    # --- V16 JS EVAL SSE - bypass Brython .new() + resolve_local bug ---
                     try:
                         stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
                         # create EventSource via JS eval to avoid Brython new() + local index bug
                         es_obj = window.eval("new EventSource('" + stream_url + "')")
                         window._bgs_es = es_obj
                         es_obj.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
-                        print(f"[BGS] SSE OPEN V15 {stream_url}")
+                        print(f"[BGS] SSE OPEN V16 {stream_url}")
                     except Exception as sse_e:
-                        print(f"[BGS] SSE connect fail V15 {sse_e}")
+                        print(f"[BGS] SSE connect fail V16 {sse_e}")
 
                     return data
                 except Exception as ex:
-                    print(f"[BGS] join fail V15 {ex}")
+                    print(f"[BGS] join fail V16 {ex}")
                     await aio.sleep(1)
             raise Exception("join failed after retries")
 
@@ -125,7 +125,7 @@ except Exception as e:
             try:
                 pos = [position[0], position[1], 0] if len(position)==2 else list(position)
                 vel = [velocity[0], velocity[1], 0] if len(velocity)==2 else list(velocity)
-                # V15 FIX: remove rotation - server CharacterState has no rotation field
+                # V16 FIX: remove rotation - server CharacterState has no rotation field
                 char = {"clientId": self.client_id, "characterModelId": "platformer_default", "position": pos, "velocity": vel, "animationState": animationState, "animationFrame": 0, "isJumping": not onGround, "isBoosting": False, "boostTimeRemaining": 0, "timestamp": int(window.Date.now())}
                 url = self.base_url + "/api/multiplayer/character-state"
                 body = window.JSON.stringify({"updates":[char],"timestamp":char["timestamp"]})
@@ -530,33 +530,25 @@ def redrawAll(app):
         drawLabel(p.name,x,y-p.h*0.7-14,size=11,fill=rgb(255,255,255))
         if p.score>0:
             drawLabel(f"{p.score}",x,y-p.h*0.7-26,size=9,fill=rgb(255,235,100))
-    # remote players - V15 CRASH-PROOF single representation
-    try:
-        for cid, remote in list(app.remote_players.items()):
-            try:
-                pos=remote.get("position",[0,0,0])
-                if not pos or len(pos)<2:
-                    continue
-                px = float(pos[0]) if pos[0] is not None else 0.0
-                py = float(pos[1]) if pos[1] is not None else 0.0
-                x=px-app.camera_x
-                y=py
-                if x<-200 or x>app.width+200 or y<-200 or y>app.height+200:
-                    continue
-                vel=remote.get("velocity",[0,0,0])
-                lean=0
-                try:
-                    lean=clamp(float(vel[0])/6,-1,1) if vel and len(vel)>0 and vel[0] is not None else 0
-                except:
-                    lean=0
-                # safe draws - no bold param that might crash old scs.py
-                drawRect(x+lean*3,y,32,44,fill=rgb(120,180,255))
-                drawLabel(cid[:4],x,y-36,size=10,fill=rgb(200,220,255))
-                drawCircle(x+lean*3,y-8,4,fill=rgb(255,255,255))
-            except Exception as e:
-                continue
-    except Exception as e:
-        pass
+    # remote players - V16 MINIMAL SAFE
+    for cid in list(app.remote_players.keys()):
+        remote = app.remote_players.get(cid)
+        if not remote:
+            continue
+        pos = remote.get("position")
+        if not pos or len(pos) < 2:
+            continue
+        px = pos[0]
+        py = pos[1]
+        # ensure numbers
+        if px is None or py is None:
+            continue
+        x = px - app.camera_x
+        y = py
+        if x < -300 or x > app.width + 300:
+            continue
+        drawRect(x,y,30,40,fill=rgb(120,180,255))
+        drawLabel(cid[:4],x,y-30,size=10,fill=rgb(200,220,255))
 
     # UI - BGS status bar
     drawRect(app.width//2,22,app.width,44,fill=rgb(0,0,0),opacity=60)
