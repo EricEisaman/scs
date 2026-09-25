@@ -137,10 +137,6 @@ except Exception as e:
                 await window.fetch(url, {"method":"PATCH","headers":{"Content-Type":"application/json","X-Client-ID": self.client_id},"body":body,"mode":"cors"})
             except:
                 pass
-                except:
-                    pass
-            except Exception as e:
-                pass
 
     class CharacterState:
         pass
