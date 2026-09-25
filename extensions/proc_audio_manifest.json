@@ -1,0 +1,341 @@
+{
+  "version": 1,
+  "description": "Procedural Audio Preset Manifest - SCS Platform",
+  "generated": "2026-09-25",
+  "categories": {
+    "master": {
+      "db": -4,
+      "limiter": true
+    },
+    "music": {
+      "db": -8,
+      "ducked_by": "voice"
+    },
+    "sfx": {
+      "db": -3
+    },
+    "ui": {
+      "db": -6
+    },
+    "voice": {
+      "db": -2
+    },
+    "ambience": {
+      "db": -10
+    },
+    "cinematic": {
+      "db": -4
+    }
+  },
+  "quality_profiles": {
+    "low": {
+      "max_voices": 16,
+      "reverb": false
+    },
+    "medium": {
+      "max_voices": 32,
+      "reverb": true
+    },
+    "high": {
+      "max_voices": 48,
+      "reverb": true,
+      "convolver": true
+    },
+    "cinematic": {
+      "max_voices": 96,
+      "reverb": true,
+      "convolver": true
+    }
+  },
+  "presets": {
+    "arcade_laser_01": {
+      "id": "arcade_laser_01",
+      "version": 1,
+      "seed": 1938,
+      "duration": 0.22,
+      "category": "sfx",
+      "polyphony": 6,
+      "tags": [
+        "weapon",
+        "laser",
+        "arcade"
+      ],
+      "randomization": {
+        "pitch_semitones": [
+          -1.5,
+          1.5
+        ],
+        "duration_scale": [
+          0.88,
+          1.12
+        ],
+        "pan": [
+          -0.25,
+          0.25
+        ]
+      },
+      "graph": [
+        {
+          "id": "osc",
+          "type": "oscillator",
+          "wave": "sawtooth",
+          "frequency": 1200
+        },
+        {
+          "id": "pitch",
+          "type": "param_envelope",
+          "target": "osc.frequency",
+          "points": [
+            [
+              0.0,
+              2400,
+              "exponential"
+            ],
+            [
+              0.18,
+              120,
+              "exponential"
+            ]
+          ]
+        },
+        {
+          "id": "filter",
+          "type": "biquad",
+          "mode": "lowpass",
+          "frequency": 4200,
+          "q": 2.5
+        },
+        {
+          "id": "amp",
+          "type": "adsr",
+          "attack": 0.003,
+          "decay": 0.11,
+          "sustain": 0.0,
+          "release": 0.04
+        }
+      ],
+      "routing": [
+        [
+          "osc",
+          "filter"
+        ],
+        [
+          "filter",
+          "amp"
+        ],
+        [
+          "amp",
+          "bus:sfx"
+        ]
+      ]
+    },
+    "character.jump": {
+      "id": "character.jump",
+      "version": 1,
+      "seed": 42,
+      "duration": 0.35,
+      "category": "sfx",
+      "polyphony": 4,
+      "tags": [
+        "movement",
+        "jump",
+        "character",
+        "arcade"
+      ],
+      "randomization": {
+        "pitch_semitones": [
+          -1,
+          1
+        ],
+        "pan": [
+          -0.2,
+          0.2
+        ]
+      },
+      "graph": [
+        {
+          "id": "osc",
+          "type": "oscillator",
+          "wave": "sine",
+          "frequency": 220
+        },
+        {
+          "id": "pitch",
+          "type": "param_envelope",
+          "target": "osc.frequency",
+          "points": [
+            [
+              0,
+              440,
+              "exp"
+            ],
+            [
+              0.18,
+              660,
+              "exp"
+            ]
+          ]
+        },
+        {
+          "id": "filter",
+          "type": "biquad",
+          "mode": "lowpass",
+          "frequency": 2200,
+          "q": 0.7
+        },
+        {
+          "id": "amp",
+          "type": "adsr",
+          "attack": 0.005,
+          "decay": 0.12,
+          "sustain": 0,
+          "release": 0.08
+        }
+      ],
+      "routing": [
+        [
+          "osc",
+          "filter"
+        ],
+        [
+          "filter",
+          "amp"
+        ],
+        [
+          "amp",
+          "bus:sfx"
+        ]
+      ],
+      "meta": {
+        "name": "Soft Jump",
+        "loudness_db": -14
+      }
+    },
+    "weapon.plasma_bolt": {
+      "id": "weapon.plasma_bolt",
+      "version": 1,
+      "seed": 9021,
+      "duration": 0.28,
+      "category": "sfx",
+      "polyphony": 8,
+      "tags": [
+        "weapon",
+        "plasma",
+        "projectile"
+      ],
+      "graph": [
+        {
+          "id": "osc",
+          "type": "oscillator",
+          "wave": "square",
+          "frequency": 900
+        },
+        {
+          "id": "pitch",
+          "type": "param_envelope",
+          "target": "osc.frequency",
+          "points": [
+            [
+              0,
+              1800,
+              "exp"
+            ],
+            [
+              0.2,
+              200,
+              "exp"
+            ]
+          ]
+        },
+        {
+          "id": "filter",
+          "type": "biquad",
+          "mode": "bandpass",
+          "frequency": 2500,
+          "q": 3
+        },
+        {
+          "id": "dist",
+          "type": "waveshaper",
+          "amount": 25
+        },
+        {
+          "id": "amp",
+          "type": "adsr",
+          "attack": 0.002,
+          "decay": 0.15,
+          "sustain": 0,
+          "release": 0.08
+        }
+      ],
+      "routing": [
+        [
+          "osc",
+          "filter"
+        ],
+        [
+          "filter",
+          "dist"
+        ],
+        [
+          "dist",
+          "amp"
+        ],
+        [
+          "amp",
+          "bus:sfx"
+        ]
+      ]
+    },
+    "ui.coin_pickup": {
+      "id": "ui.coin_pickup",
+      "version": 1,
+      "seed": 101,
+      "duration": 0.6,
+      "category": "ui",
+      "polyphony": 10,
+      "tags": [
+        "ui",
+        "pickup",
+        "coin",
+        "positive"
+      ],
+      "graph": [
+        {
+          "id": "osc",
+          "type": "oscillator",
+          "wave": "sine",
+          "frequency": 880
+        },
+        {
+          "id": "osc2",
+          "type": "oscillator",
+          "wave": "sine",
+          "frequency": 1320
+        },
+        {
+          "id": "amp",
+          "type": "adsr",
+          "attack": 0.005,
+          "decay": 0.25,
+          "sustain": 0,
+          "release": 0.15
+        }
+      ],
+      "routing": [
+        [
+          "osc",
+          "amp"
+        ],
+        [
+          "osc2",
+          "amp"
+        ],
+        [
+          "amp",
+          "bus:ui"
+        ]
+      ]
+    }
+  }
+}
