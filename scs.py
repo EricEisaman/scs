@@ -1,6 +1,6 @@
 """
 scs.py - Sigma Computer Science - CMU Graphics API shim for Brython
-Fixed: align is creation-time only (not mutable), honors all 9 positions
+Version: 2.1.4 - ALIGN FIX - align is creation-time only, 9 positions
 
 CMU Academy spec per https://academy.cs.cmu.edu/docs/rect:
   Rect(left, top, width, height, fill='black', border=None, borderWidth=2,
@@ -21,6 +21,25 @@ It is NOT a mutable property. You cannot do r.align = 'center' later.
 from browser import window, document
 import math
 import json as _json
+
+# ---------- SCS VERSION LOG - PROOF IT'S NEW ----------
+SCS_VERSION = "2.1.4-ALIGN-FIX"
+SCS_BUILD = "2026-09-25T19:35:00Z"
+try:
+    print(f"\n{'='*60}")
+    print(f"  SCS v{SCS_VERSION} - {SCS_BUILD}")
+    print(f"  align is creation-time only - 9 positions")
+    print(f"  Rect default left-top, Circle/Oval/Poly default center")
+    print(f"  drawRect(525,350,500,200,align='center') -> left=275,top=250")
+    print(f"{'='*60}\n")
+    # Also log to browser console if available
+    if hasattr(window, 'console'):
+        window.console.log(f"SCS v{SCS_VERSION} loaded")
+except Exception as e:
+    try:
+        print(f"SCS v{SCS_VERSION} loaded (console log failed: {e})")
+    except:
+        pass
 
 # ---------- Align helpers - 9 positions, creation-time only ----------
 def _normalize_align(align):
