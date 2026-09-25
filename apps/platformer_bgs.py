@@ -5,7 +5,7 @@ import math
 import random
 import json as py_json
 
-# Global signals - V20 FIX: use Python global dict, not window dict (Brython window dict bug)
+# Global signals - V22 FIX: use Python global dict, not window dict (Brython window dict bug)
 _bgs_signals_py = {}
 window._bgs_signals = {}
 window._bgs_es = None
@@ -34,7 +34,7 @@ def _bgs_on_datastar_patch(evt):
 
 def get_signal(n,d=None):
     try:
-        # V20: try Python global first (reliable)
+        # V22: try Python global first (reliable)
         if n in _bgs_signals_py:
             return _bgs_signals_py.get(n,d)
         return window._bgs_signals.get(n,d)
@@ -70,7 +70,7 @@ try:
     HAS_MP = True
     print("[BGS] MP imports OK from extensions/ - using V4 handlers")
 except Exception as e:
-    print(f"[BGS] MP import failed ({e}) - using inline fallback client V20 FIXED RESOLVE_LOCAL + ALIGN - 600 LINES V20 FIXED")
+    print(f"[BGS] MP import failed ({e}) - using inline fallback client V22 FIXED SYNTAX + ALIGN - 600 LINES V22 FIXED")
     HAS_MP = True
 
     class MultiplayerClient:
@@ -109,13 +109,13 @@ except Exception as e:
                         raise Exception("missing ids")
                     self.client_id = cid
                     self.session_id = sid
-                    print(f"[BGS] Joined {cid} sid={sid} - MP V20")
+                    print(f"[BGS] Joined {cid} sid={sid} - MP V22")
                     try:
                         stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
                         es_obj = window.eval("new EventSource('" + stream_url + "')")
                         window._bgs_es = es_obj
                         es_obj.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
-                        print(f"[BGS] SSE OPEN V20 {stream_url}")
+                        print(f"[BGS] SSE OPEN V22 {stream_url}")
                     except Exception as sse_e:
                         print(f"[BGS] SSE fail {sse_e}")
                     return data
@@ -485,28 +485,27 @@ def onStep(app):
             aio.run(send())
 def redrawAll(app):
     drawRect(0,0,app.width,app.height,fill=app.background)
-    # stars parallax
     for i in range(40):
         sx=(i*137%app.world.width-app.camera_x*0.2)%app.width
         sy=(i*237%app.height*0.8)%app.height
-        drawCircle(sx,sy,(i%3)+1,fill=rgb(200,200,255),opacity=30+(i%40))
-    # platforms - V20 FIX: explicit align=center to match collision AABB center
+        drawCircle(sx,sy,(i%3)+1,fill=rgb(200,200,255))
+    # platforms - V22 FIX: drawRect is top-left in deployed scs.py, so draw at left/top
     for plat in app.world.platforms:
-        x=plat.x-app.camera_x
-        y=plat.y
-        if x+plat.w/2<-120 or x-plat.w/2>app.width+120:
+        # world left/top
+        left = plat.x - plat.w/2
+        top = plat.y - plat.h/2
+        x = left - app.camera_x
+        y = top
+        if x+plat.w<-120 or x>app.width+120:
             continue
         if plat.type=="bouncy":
-            drawRect(x,y+3,plat.w,plat.h,fill=rgb(20,50,20), align='center')
-            drawRect(x,y,plat.w,plat.h,fill=rgb(100,200,100), align='center')
+            drawRect(x,y+3,plat.w,plat.h,fill=rgb(20,50,20))
+            drawRect(x,y,plat.w,plat.h,fill=rgb(100,200,100))
         elif plat.type=="wall":
-            drawRect(x,y,plat.w,plat.h,fill=plat.color, align='center')
+            drawRect(x,y,plat.w,plat.h,fill=plat.color)
         else:
-            drawRect(x,y+3,plat.w,plat.h,fill=rgb(20,20,35), align='center')
-            drawRect(x,y,plat.w,plat.h,fill=plat.color, align='center')
-        # DEBUG: uncomment to see collision rect outline
-        # drawRect(x,y,plat.w,plat.h,fill=None, border=rgb(255,0,0), borderWidth=1, align='center')
-    # coins with bob
+            drawRect(x,y+3,plat.w,plat.h,fill=rgb(20,20,35))
+            drawRect(x,y,plat.w,plat.h,fill=plat.color)
     for c in app.world.coins:
         if c.get("collected"):
             continue
@@ -515,28 +514,26 @@ def redrawAll(app):
         if cx<-50 or cx>app.width+50:
             continue
         drawCircle(cx,cy,10,fill=rgb(255,235,100))
-        drawCircle(cx,cy-2,10,fill=rgb(255,250,180),opacity=40)
+        drawCircle(cx,cy-2,10,fill=rgb(255,250,180))
         drawLabel("$",cx,cy,size=12,fill=rgb(100,80,0))
-    # local players with trail + eyes
     for pid, p in app.world.players.items():
         x=p.x-app.camera_x
         y=p.y
         if x<-100 or x>app.width+100:
             continue
-        # trail
         for i,(tx,ty) in enumerate(p.trail):
-            drawCircle(tx-app.camera_x,ty,2+i*0.6,fill=p.color,opacity=(i+1)/len(p.trail)*28)
+            drawCircle(tx-app.camera_x,ty,2+i*0.6,fill=p.color)
         col=p.color
         if p.coin_flash>0:
             col=rgb(255,255,255) if p.coin_flash%2==0 else p.color
-        drawRect(x,y,p.w,p.h*0.9,fill=col, align='center')
+        # player visual: center at p.x,p.y but drawRect is top-left, so offset by w/2,h/2
+        drawRect(x-p.w/2,y-p.h/2,p.w,p.h*0.9,fill=col)
         eye_x=x+p.facing*6
         drawCircle(eye_x,y-6,5,fill=rgb(255,255,255))
         drawCircle(eye_x+p.facing*2,y-6,2,fill=rgb(0,0,0))
         drawLabel(p.name,x,y-p.h*0.7-14,size=11,fill=rgb(255,255,255))
         if p.score>0:
             drawLabel(f"{p.score}",x,y-p.h*0.7-26,size=9,fill=rgb(255,235,100))
-    # remote players - V20 MINIMAL SAFE
     for cid in list(app.remote_players.keys()):
         remote = app.remote_players.get(cid)
         if not remote:
@@ -546,18 +543,18 @@ def redrawAll(app):
             continue
         px = pos[0]
         py = pos[1]
-        # ensure numbers
         if px is None or py is None:
             continue
         x = px - app.camera_x
         y = py
         if x < -300 or x > app.width + 300:
             continue
-        drawRect(x,y,30,40,fill=rgb(120,180,255), align='center')
+        # remote: center at px,py, draw top-left
+        drawRect(x-15,y-20,30,40,fill=rgb(120,180,255))
         drawLabel(cid[:4],x,y-30,size=10,fill=rgb(200,220,255))
 
     # UI - BGS status bar
-    drawRect(app.width//2,22,app.width,44,fill=rgb(0,0,0),opacity=60)
+    drawRect(app.width//2,22,app.width,44,fill=rgb(0,0,0))
     mode_color=rgb(78,205,196) if app.datastar_connected else rgb(249,202,36)
     status=f"BGS-MP-SYNC | ENV: {app.room_id} | LOCAL: {len(app.world.players)} | REMOTE: {len(app.remote_players)} | TICK: {app.world.tick}"
     if app.datastar_connected:
@@ -569,7 +566,7 @@ def redrawAll(app):
 
     # Scoreboard + BGS authority
     y=50
-    drawRect(90,y+20,160,20+len(app.world.players)*18,fill=rgb(0,0,0),opacity=70,roundness=8)
+    drawRect(90,y+20,160,20+len(app.world.players)*18,fill=rgb(0,0,0))
     drawLabel("LOCAL",90,y,size=12,fill=rgb(255,255,255))
     y+=18
     for p in list(app.world.players.values())[:6]:
@@ -578,7 +575,7 @@ def redrawAll(app):
 
     if app.remote_players:
         y+=10
-        drawRect(90,y+10,160,10+len(app.remote_players)*16,fill=rgb(0,0,0),opacity=60,roundness=8)
+        drawRect(90,y+10,160,10+len(app.remote_players)*16,fill=rgb(0,0,0))
         drawLabel("REMOTE (BGS)",90,y,size=11,fill=rgb(180,200,255))
         y+=14
         for cid, r in list(app.remote_players.items())[:6]:
@@ -589,7 +586,7 @@ def redrawAll(app):
     if app.show_help:
         hx=app.width-160
         hy=80
-        drawRect(hx,hy+60,300,140,fill=rgb(0,0,0),opacity=75,roundness=8)
+        drawRect(hx,hy+60,300,140,fill=rgb(0,0,0))
         drawLabel("BGS CONTROLS",hx,hy-20,size=12,fill=rgb(255,255,255))
         drawLabel("WASD / Arrows move",hx,hy,size=10,fill=rgb(200,220,255))
         drawLabel("R reset P pause 1 add",hx,hy+16,size=10,fill=rgb(200,220,255))
@@ -598,5 +595,5 @@ def redrawAll(app):
         drawLabel("Env-authority + item-claim",hx,hy+64,size=10,fill=rgb(78,205,196))
 
     # footer - spec reminder
-    drawRect(app.width//2,app.height-18,app.width,36,fill=rgb(0,0,0),opacity=65)
+    drawRect(app.width//2,app.height-18,app.width,36,fill=rgb(0,0,0))
     drawLabel("BGS-MP-SYNC Python: PATCH /api/multiplayer/character-state + SSE character-state-update | Datastar patch_signals | No WebSockets",app.width//2,app.height-18,size=9,fill=rgb(120,255,180))
