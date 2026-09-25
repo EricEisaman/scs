@@ -5,7 +5,7 @@ import math
 import random
 import json as py_json
 
-# Global signals - V23 FIX: use Python global dict, not window dict (Brython window dict bug)
+# Global signals - V24 FIX: use Python global dict, not window dict (Brython window dict bug)
 _bgs_signals_py = {}
 window._bgs_signals = {}
 window._bgs_es = None
@@ -34,7 +34,7 @@ def _bgs_on_datastar_patch(evt):
 
 def get_signal(n,d=None):
     try:
-        # V23: try Python global first (reliable)
+        # V24: try Python global first (reliable)
         if n in _bgs_signals_py:
             return _bgs_signals_py.get(n,d)
         return window._bgs_signals.get(n,d)
@@ -70,7 +70,7 @@ try:
     HAS_MP = True
     print("[BGS] MP imports OK from extensions/ - using V4 handlers")
 except Exception as e:
-    print(f"[BGS] MP import failed ({e}) - using inline fallback client V23 FIXED SYNTAX + ALIGN - 600 LINES V23 FIXED")
+    print(f"[BGS] MP import failed ({e}) - using inline fallback client V24 FIXED SYNTAX + ALIGN - 600 LINES V24 FIXED")
     HAS_MP = True
 
     class MultiplayerClient:
@@ -109,13 +109,13 @@ except Exception as e:
                         raise Exception("missing ids")
                     self.client_id = cid
                     self.session_id = sid
-                    print(f"[BGS] Joined {cid} sid={sid} - MP V23")
+                    print(f"[BGS] Joined {cid} sid={sid} - MP V24")
                     try:
                         stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
                         es_obj = window.eval("new EventSource('" + stream_url + "')")
                         window._bgs_es = es_obj
                         es_obj.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
-                        print(f"[BGS] SSE OPEN V23 {stream_url}")
+                        print(f"[BGS] SSE OPEN V24 {stream_url}")
                     except Exception as sse_e:
                         print(f"[BGS] SSE fail {sse_e}")
                     return data
@@ -198,7 +198,6 @@ class World:
         self.build_level()
 
     def build_level(self):
-        # Ground + floating platforms - over 300 lines total file
         self.platforms=[
             Platform(1200,680,2400,50,"normal",rgb(40,40,60)),
             Platform(250,580,180,18,"normal",rgb(80,80,110)),
@@ -212,11 +211,16 @@ class World:
             Platform(30,400,24,700,"wall",rgb(50,50,70)),
             Platform(2370,400,24,700,"wall",rgb(50,50,70)),
         ]
-        # Coins with bobbing
-        self.coins=[
-            {"x":250+i*140,"y":400-(i%3)*100,"collected":False,"val":10,"bob":random.random()*6.28}
-            for i in range(12)
-        ]
+        # Coins - V24 FIX: place 50px ABOVE each platform, not inside it
+        self.coins=[]
+        for plat in self.platforms:
+            if plat.type=="wall" or plat.w>1000:
+                continue
+            self.coins.append({"x":plat.x,"y":plat.y-50,"collected":False,"val":10,"bob":random.random()*6.28})
+        # extra floating coins
+        extras=[(400,300),(900,300),(1200,250),(1800,280)]
+        for ex,ey in extras:
+            self.coins.append({"x":ex,"y":ey,"collected":False,"val":10,"bob":random.random()*6.28})
 
     def add_player(self, pid, name, color, keys):
         p=Player(pid,name,150+len(self.players)*70,100,color,keys)
@@ -486,7 +490,7 @@ def redrawAll(app):
         sx=(i*137%app.world.width-app.camera_x*0.2)%app.width
         sy=(i*237%app.height*0.8)%app.height
         drawCircle(sx,sy,(i%3)+1,fill=rgb(200,200,255))
-    # platforms - V23 FIX: drawRect is top-left in deployed scs.py, so draw at left/top
+    # platforms - V24 FIX: drawRect is top-left in deployed scs.py, so draw at left/top
     for plat in app.world.platforms:
         # world left/top
         left = plat.x - plat.w/2
