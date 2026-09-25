@@ -5,7 +5,7 @@ import math
 import random
 import json as py_json
 
-# Global signals - V16 FIX: use Python global dict, not window dict (Brython window dict bug)
+# Global signals - V17 FIX: use Python global dict, not window dict (Brython window dict bug)
 _bgs_signals_py = {}
 window._bgs_signals = {}
 window._bgs_es = None
@@ -34,7 +34,7 @@ def _bgs_on_datastar_patch(evt):
 
 def get_signal(n,d=None):
     try:
-        # V16: try Python global first (reliable)
+        # V17: try Python global first (reliable)
         if n in _bgs_signals_py:
             return _bgs_signals_py.get(n,d)
         return window._bgs_signals.get(n,d)
@@ -70,7 +70,7 @@ try:
     HAS_MP = True
     print("[BGS] MP imports OK from extensions/ - using V4 handlers")
 except Exception as e:
-    print(f"[BGS] MP import failed ({e}) - using inline fallback client V16 FINAL NO-RECURSION - 600 LINES V16 FIXED")
+    print(f"[BGS] MP import failed ({e}) - using inline fallback client V17 FIXED COLLISION ALIGN - 600 LINES V17 FIXED")
     HAS_MP = True
 
     class MultiplayerClient:
@@ -100,22 +100,22 @@ except Exception as e:
                     sid = data.get("session_id")
                     self.client_id = cid
                     self.session_id = sid
-                    print(f"[BGS] Joined {cid} sid={sid} - MP connection registered V16 FINAL NO-RECURSION")
+                    print(f"[BGS] Joined {cid} sid={sid} - MP connection registered V17 FIXED COLLISION ALIGN")
 
-                    # --- V16 JS EVAL SSE - bypass Brython .new() + resolve_local bug ---
+                    # --- V17 JS EVAL SSE - bypass Brython .new() + resolve_local bug ---
                     try:
                         stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
                         # create EventSource via JS eval to avoid Brython new() + local index bug
                         es_obj = window.eval("new EventSource('" + stream_url + "')")
                         window._bgs_es = es_obj
                         es_obj.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
-                        print(f"[BGS] SSE OPEN V16 {stream_url}")
+                        print(f"[BGS] SSE OPEN V17 {stream_url}")
                     except Exception as sse_e:
-                        print(f"[BGS] SSE connect fail V16 {sse_e}")
+                        print(f"[BGS] SSE connect fail V17 {sse_e}")
 
                     return data
                 except Exception as ex:
-                    print(f"[BGS] join fail V16 {ex}")
+                    print(f"[BGS] join fail V17 {ex}")
                     await aio.sleep(1)
             raise Exception("join failed after retries")
 
@@ -125,7 +125,7 @@ except Exception as e:
             try:
                 pos = [position[0], position[1], 0] if len(position)==2 else list(position)
                 vel = [velocity[0], velocity[1], 0] if len(velocity)==2 else list(velocity)
-                # V16 FIX: remove rotation - server CharacterState has no rotation field
+                # V17 FIX: remove rotation - server CharacterState has no rotation field
                 char = {"clientId": self.client_id, "characterModelId": "platformer_default", "position": pos, "velocity": vel, "animationState": animationState, "animationFrame": 0, "isJumping": not onGround, "isBoosting": False, "boostTimeRemaining": 0, "timestamp": int(window.Date.now())}
                 url = self.base_url + "/api/multiplayer/character-state"
                 body = window.JSON.stringify({"updates":[char],"timestamp":char["timestamp"]})
@@ -485,20 +485,22 @@ def redrawAll(app):
         sx=(i*137%app.world.width-app.camera_x*0.2)%app.width
         sy=(i*237%app.height*0.8)%app.height
         drawCircle(sx,sy,(i%3)+1,fill=rgb(200,200,255),opacity=30+(i%40))
-    # platforms
+    # platforms - V17 FIX: collision and visual perfectly aligned, both centered at plat.x,plat.y
     for plat in app.world.platforms:
         x=plat.x-app.camera_x
         y=plat.y
-        if x+plat.w/2<-100 or x-plat.w/2>app.width+100:
+        if x+plat.w/2<-120 or x-plat.w/2>app.width+120:
             continue
+        # visual centered at x,y exactly matching collision box center
         if plat.type=="bouncy":
-            drawRect(x,y+2,plat.w,plat.h,fill=rgb(20,50,20),roundness=6)
-            drawRect(x,y,plat.w,plat.h,fill=rgb(100,200,100),roundness=6)
+            # shadow slightly below but same x
+            drawRect(x,y+3,plat.w,plat.h,fill=rgb(20,50,20))
+            drawRect(x,y,plat.w,plat.h,fill=rgb(100,200,100))
         elif plat.type=="wall":
-            drawRect(x,y,plat.w,plat.h,fill=plat.color,roundness=2)
+            drawRect(x,y,plat.w,plat.h,fill=plat.color)
         else:
-            drawRect(x,y+2,plat.w,plat.h,fill=rgb(20,20,35),roundness=4)
-            drawRect(x,y,plat.w,plat.h,fill=plat.color,roundness=4)
+            drawRect(x,y+3,plat.w,plat.h,fill=rgb(20,20,35))
+            drawRect(x,y,plat.w,plat.h,fill=plat.color)
     # coins with bob
     for c in app.world.coins:
         if c.get("collected"):
@@ -530,7 +532,7 @@ def redrawAll(app):
         drawLabel(p.name,x,y-p.h*0.7-14,size=11,fill=rgb(255,255,255))
         if p.score>0:
             drawLabel(f"{p.score}",x,y-p.h*0.7-26,size=9,fill=rgb(255,235,100))
-    # remote players - V16 MINIMAL SAFE
+    # remote players - V17 MINIMAL SAFE
     for cid in list(app.remote_players.keys()):
         remote = app.remote_players.get(cid)
         if not remote:
