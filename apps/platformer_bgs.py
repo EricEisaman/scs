@@ -5,7 +5,7 @@ import math
 import random
 import json as py_json
 
-# Global signals - V22 FIX: use Python global dict, not window dict (Brython window dict bug)
+# Global signals - V23 FIX: use Python global dict, not window dict (Brython window dict bug)
 _bgs_signals_py = {}
 window._bgs_signals = {}
 window._bgs_es = None
@@ -34,7 +34,7 @@ def _bgs_on_datastar_patch(evt):
 
 def get_signal(n,d=None):
     try:
-        # V22: try Python global first (reliable)
+        # V23: try Python global first (reliable)
         if n in _bgs_signals_py:
             return _bgs_signals_py.get(n,d)
         return window._bgs_signals.get(n,d)
@@ -70,7 +70,7 @@ try:
     HAS_MP = True
     print("[BGS] MP imports OK from extensions/ - using V4 handlers")
 except Exception as e:
-    print(f"[BGS] MP import failed ({e}) - using inline fallback client V22 FIXED SYNTAX + ALIGN - 600 LINES V22 FIXED")
+    print(f"[BGS] MP import failed ({e}) - using inline fallback client V23 FIXED SYNTAX + ALIGN - 600 LINES V23 FIXED")
     HAS_MP = True
 
     class MultiplayerClient:
@@ -109,13 +109,13 @@ except Exception as e:
                         raise Exception("missing ids")
                     self.client_id = cid
                     self.session_id = sid
-                    print(f"[BGS] Joined {cid} sid={sid} - MP V22")
+                    print(f"[BGS] Joined {cid} sid={sid} - MP V23")
                     try:
                         stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
                         es_obj = window.eval("new EventSource('" + stream_url + "')")
                         window._bgs_es = es_obj
                         es_obj.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
-                        print(f"[BGS] SSE OPEN V22 {stream_url}")
+                        print(f"[BGS] SSE OPEN V23 {stream_url}")
                     except Exception as sse_e:
                         print(f"[BGS] SSE fail {sse_e}")
                     return data
@@ -460,36 +460,33 @@ def onStep(app):
             app.datastar_connected=is_datastar_connected()
         except:
             pass
-
     app.world.step()
-
     if "local_0" in app.world.players:
         target=app.world.players["local_0"].x-app.width//2
         app.camera_x=app.camera_x*0.85+target*0.15
         app.camera_x=clamp(app.camera_x,0,app.world.width-app.width)
-
     if HAS_MP and app.mp_client and app.client_id and "local_0" in app.world.players:
         now=0
         try:
             now=int(window.Date.now())
         except:
             now=app.world.tick*16
-        if now - app.last_send_ms > 50:
+        if now - app.last_send_ms > 100:
             app.last_send_ms=now
             lp=app.world.players["local_0"]
-            async def send():
-                try:
-                    await app.mp_client.send_character_state(position=[lp.x, lp.y], velocity=[lp.vx, lp.vy], animationState=lp.state, onGround=lp.on_ground)
-                except:
-                    pass
-            aio.run(send())
+            # fire and forget without aio.run to avoid recursion
+            try:
+                # call send but don't await via aio, use direct JS promise
+                window.eval(f"fetch('{app.mp_client.base_url}/api/multiplayer/character-state', {{method:'PATCH',headers:{{'Content-Type':'application/json','X-Client-ID':'{app.client_id}'}},body:JSON.stringify({{updates:[{{clientId:'{app.client_id}',characterModelId:'platformer_default',position:[{lp.x},{lp.y},0],velocity:[{lp.vx},{lp.vy},0],animationState:'{lp.state}',animationFrame:0,isJumping:{str(not lp.on_ground).lower()},isBoosting:false,boostTimeRemaining:0,timestamp:Date.now()}}],timestamp:Date.now()}})}}).catch(()=>{{}})")
+            except:
+                pass
 def redrawAll(app):
     drawRect(0,0,app.width,app.height,fill=app.background)
     for i in range(40):
         sx=(i*137%app.world.width-app.camera_x*0.2)%app.width
         sy=(i*237%app.height*0.8)%app.height
         drawCircle(sx,sy,(i%3)+1,fill=rgb(200,200,255))
-    # platforms - V22 FIX: drawRect is top-left in deployed scs.py, so draw at left/top
+    # platforms - V23 FIX: drawRect is top-left in deployed scs.py, so draw at left/top
     for plat in app.world.platforms:
         # world left/top
         left = plat.x - plat.w/2
