@@ -113,7 +113,7 @@ def redrawAll(app):
 
     # Unlock banner
     if not app.unlocked:
-        drawRect(app.width//2, app.height//2, 420, 120, fill=rgb(40,40,80), border=rgb(100,120,255), borderWidth=2)
+        drawRect(app.width//2, app.height//2, 420, 120, fill=rgb(40,40,80), border=rgb(100,120,255), borderWidth=2, align='center')
         drawLabel("CLICK TO UNLOCK AUDIO", app.width//2, app.height//2 - 20, size=20, fill=rgb(255,255,255), bold=True)
         drawLabel("Browsers require user gesture to start AudioContext", app.width//2, app.height//2 + 10, size=11, fill=rgb(180,180,220))
         drawLabel("Then use QWERTY keys to play presets", app.width//2, app.height//2 + 30, size=11, fill=rgb(180,180,220))
