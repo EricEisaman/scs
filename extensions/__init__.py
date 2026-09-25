@@ -8,3 +8,6 @@ except: pass
 try:
     from .multiplayer import MultiplayerClient, CharacterState, MultiplayerError
 except: pass
+try:
+    from .proc_audio import AudioEngine, Patch, Bus, SoundHandle, SeededRandom, SpatialSource, OfflineRenderer, Recorder, sfx, BUILTIN_PRESETS, QUALITY_PROFILES
+except: pass

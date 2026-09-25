@@ -4,7 +4,7 @@ import sys, types
 try:
     __path__ = ['extensions']
 except: pass
-for _n in ['fetch','datastar','multiplayer']:
+for _n in ['fetch','datastar','multiplayer','proc_audio']:
     _f = f'extensions.{_n}'
     if _f not in sys.modules:
         try:
@@ -30,4 +30,18 @@ try:
     sys.modules['extensions.multiplayer'].MultiplayerClient = MultiplayerClient
     sys.modules['extensions.multiplayer'].CharacterState = CharacterState
     sys.modules['extensions.multiplayer'].MultiplayerError = MultiplayerError
+except: pass
+try:
+    from extensions.proc_audio import AudioEngine, Patch, Bus, SoundHandle, SeededRandom, SpatialSource, OfflineRenderer, Recorder, sfx, BUILTIN_PRESETS, QUALITY_PROFILES, WORKLET_JS, MANIFEST_EXAMPLE
+    sys.modules['extensions.proc_audio'].AudioEngine = AudioEngine
+    sys.modules['extensions.proc_audio'].Patch = Patch
+    sys.modules['extensions.proc_audio'].Bus = Bus
+    sys.modules['extensions.proc_audio'].SoundHandle = SoundHandle
+    sys.modules['extensions.proc_audio'].SeededRandom = SeededRandom
+    sys.modules['extensions.proc_audio'].SpatialSource = SpatialSource
+    sys.modules['extensions.proc_audio'].OfflineRenderer = OfflineRenderer
+    sys.modules['extensions.proc_audio'].Recorder = Recorder
+    sys.modules['extensions.proc_audio'].sfx = sfx
+    sys.modules['extensions.proc_audio'].BUILTIN_PRESETS = BUILTIN_PRESETS
+    sys.modules['extensions.proc_audio'].QUALITY_PROFILES = QUALITY_PROFILES
 except: pass

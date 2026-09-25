@@ -24,27 +24,45 @@ import math
 import random
 import json as py_json
 
-# Try import proc_audio from different locations
+# Try import proc_audio from SCS extensions/ (correct location per README)
 try:
-    from proc_audio import AudioEngine, Patch, sfx, Bus, SeededRandom, OfflineRenderer, Recorder, BUILTIN_PRESETS, QUALITY_PROFILES
+    from extensions.proc_audio import AudioEngine, Patch, sfx, Bus, SeededRandom, OfflineRenderer, Recorder, BUILTIN_PRESETS, QUALITY_PROFILES
     HAS_PROC_AUDIO = True
-except Exception as e:
+except Exception as e1:
     try:
-        import proc_audio as pa
-        AudioEngine = pa.AudioEngine
-        Patch = pa.Patch
-        sfx = pa.sfx
-        Bus = pa.Bus
-        SeededRandom = pa.SeededRandom
-        OfflineRenderer = pa.OfflineRenderer
-        Recorder = pa.Recorder
-        BUILTIN_PRESETS = pa.BUILTIN_PRESETS
-        QUALITY_PROFILES = pa.QUALITY_PROFILES
+        from proc_audio import AudioEngine, Patch, sfx, Bus, SeededRandom, OfflineRenderer, Recorder, BUILTIN_PRESETS, QUALITY_PROFILES
         HAS_PROC_AUDIO = True
     except Exception as e2:
-        HAS_PROC_AUDIO = False
-        AudioEngine = None
-        Patch = None
+        try:
+            import extensions.proc_audio as pa
+            AudioEngine = pa.AudioEngine
+            Patch = pa.Patch
+            sfx = pa.sfx
+            Bus = pa.Bus
+            SeededRandom = pa.SeededRandom
+            OfflineRenderer = pa.OfflineRenderer
+            Recorder = pa.Recorder
+            BUILTIN_PRESETS = pa.BUILTIN_PRESETS
+            QUALITY_PROFILES = pa.QUALITY_PROFILES
+            HAS_PROC_AUDIO = True
+        except Exception as e3:
+            try:
+                import proc_audio as pa
+                AudioEngine = pa.AudioEngine
+                Patch = pa.Patch
+                sfx = pa.sfx
+                Bus = pa.Bus
+                SeededRandom = pa.SeededRandom
+                OfflineRenderer = pa.OfflineRenderer
+                Recorder = pa.Recorder
+                BUILTIN_PRESETS = pa.BUILTIN_PRESETS
+                QUALITY_PROFILES = pa.QUALITY_PROFILES
+                HAS_PROC_AUDIO = True
+            except Exception as e4:
+                HAS_PROC_AUDIO = False
+                AudioEngine = None
+                Patch = None
+                print(f"proc_audio import failed: {e1} / {e2} / {e3} / {e4}")
 
 def onAppStart(app):
     app.width = 1050
