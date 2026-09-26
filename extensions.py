@@ -1,11 +1,5 @@
-# extensions.py - SCS Extensions System - v3.0.17 FINAL - per expert sister
-# fetch: top-level json, no **kw, dict auto-converts, one-shot conversion
-# datastar: Python-owned _signals_store, debug JSON string, recursive onlyIfMissing, str(raw), single attached ES
-# multiplayer: one-shot conversion
-# Apps frozen, scs frozen
-
-import sys
-import types
+# extensions.py - v3.0.18 FINAL - NO $B.$is - per sister expert
+import sys, types
 from browser import window, aio
 import json as py_json
 
@@ -26,26 +20,27 @@ class FetchResponse:
         self.status = int(js_response.status)
         try:
             self.statusText = str(js_response.statusText)
-        except Exception:
+        except:
             self.statusText = ""
     async def json(self):
         js_value = await self._js.json()
+        json_text = window.JSON.stringify(js_value)
         try:
-            return py_json.loads(window.JSON.stringify(js_value))
+            return py_json.loads(json_text)
         except Exception as exc:
             try:
-                window.console.error("[fetch] response JSON conversion failed", exc)
-            except Exception:
+                window.console.error("[fetch] JSON conversion failed", exc, json_text[:500])
+            except:
                 pass
-            return js_value
+            raise
     async def text(self):
         return await self._js.text()
 
 async def fetch(url, method="GET", headers=None, body=None):
     options = {"method": method}
-    if headers is not None:
+    if headers != None:
         options["headers"] = headers
-    if body is not None:
+    if body != None:
         options["body"] = body
     js_response = await window.fetch(url, options)
     return FetchResponse(js_response)
@@ -100,11 +95,7 @@ class MultiplayerClient:
         js_data = await resp.json()
         try:
             data = py_json.loads(window.JSON.stringify(js_data))
-        except Exception as exc:
-            try:
-                window.console.error("[MP] join JSON conversion failed", exc)
-            except:
-                pass
+        except:
             data = {}
         cid = data.get("client_id")
         sid = data.get("session_id")
@@ -119,19 +110,13 @@ class MultiplayerClient:
             stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
             es_obj = window.EventSource.new(stream_url)
             self._es = es_obj
-            try:
-                window._bgs_es = es_obj
-            except:
-                pass
+            window._bgs_es = es_obj
         except:
             try:
                 stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
                 es_obj = window.EventSource(stream_url)
                 self._es = es_obj
-                try:
-                    window._bgs_es = es_obj
-                except:
-                    pass
+                window._bgs_es = es_obj
             except:
                 pass
         return {"client_id": str(cid), "session_id": str(sid), "is_synchronizer": bool(is_sync), "environment_name": env_name}
@@ -159,22 +144,19 @@ if not hasattr(window, "_bgs_signals_json"):
 def _sync_debug_signals():
     try:
         window._bgs_signals_json = py_json.dumps(_signals_store)
-    except Exception:
-        try:
-            window._bgs_signals_json = "{}"
-        except:
-            pass
+    except:
+        window._bgs_signals_json = "{}"
     try:
         window._bgs_signals_debug = window.JSON.parse(window._bgs_signals_json)
     except:
         pass
 
 def _parse_datastar_patch(raw):
-    if raw is None:
+    if raw == None:
         return None, False
     try:
         raw = str(raw)
-    except Exception:
+    except:
         return None, False
     signals_json = None
     only_if_missing = False
@@ -187,7 +169,7 @@ def _parse_datastar_patch(raw):
 
 def _merge_patch(target, patch):
     for key, value in patch.items():
-        if value is None:
+        if value == None:
             target.pop(key, None)
         elif isinstance(value, dict):
             existing = target.get(key)
@@ -212,7 +194,7 @@ def _on_datastar_patch(evt):
     if not raw:
         return
     signals_json, only_if_missing = _parse_datastar_patch(raw)
-    if signals_json is None:
+    if signals_json == None:
         return
     try:
         patch = py_json.loads(signals_json)
@@ -223,13 +205,9 @@ def _on_datastar_patch(evt):
             pass
         return
     if not isinstance(patch, dict):
-        try:
-            window.console.warn("[BGS] Signal patch was not an object:", patch)
-        except:
-            pass
         return
     if only_if_missing:
-        filtered = {k: v for k, v in patch.items() if v is not None}
+        filtered = {k: v for k, v in patch.items() if v != None}
         if not filtered:
             return
         _merge_if_missing(_signals_store, filtered)
@@ -247,7 +225,13 @@ def get_signal(name, default=None):
 def is_connected(max_silence_ms=10000):
     try:
         es = window._bgs_es
-        if es is None or es.readyState != 1:
+        if not es:
+            return False
+        try:
+            rs = getattr(es, "readyState", 0)
+            if rs != 1:
+                return False
+        except:
             return False
         last = getattr(window, "_bgs_last_patch_ms", 0)
         if last == 0:
@@ -262,20 +246,27 @@ def is_connected(max_silence_ms=10000):
 
 def attach_to_eventsource(es):
     global _attached_es
-    if es is None:
+    if not es:
         raise ValueError("attach_to_eventsource requires an EventSource")
-    if es is _attached_es:
-        return
-    if _attached_es is not None:
+    try:
+        if _attached_es and es == _attached_es:
+            return
+    except:
+        try:
+            if _attached_es == es:
+                return
+        except:
+            pass
+    if _attached_es:
         try:
             _attached_es.removeEventListener("datastar-patch-signals", _on_datastar_patch)
-        except Exception:
+        except:
             pass
     try:
         es.addEventListener("datastar-patch-signals", _on_datastar_patch)
     except Exception as exc:
         try:
-            window.console.error("[BGS] Failed to attach datastar listener:", exc)
+            window.console.error("[BGS] Failed to attach", exc)
         except:
             pass
         raise
@@ -294,6 +285,6 @@ except:
     pass
 
 try:
-    window.console.log("[extensions.py] v3.0.17 FINAL - sister expert fixes - apps frozen")
+    window.console.log("[extensions.py] v3.0.18 FINAL - NO $B.$is - sister expert - apps frozen")
 except:
     pass

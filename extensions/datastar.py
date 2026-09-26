@@ -1,41 +1,32 @@
 from browser import window
 import json as py_json
 
-# === Ownership ===
-# Python state: source of truth for Brython gameplay
 _signals_store = {}
-# Browser state: EventSource object
 _attached_es = None
 
 if not hasattr(window, "_bgs_es"):
     window._bgs_es = None
 if not hasattr(window, "_bgs_last_patch_ms"):
     window._bgs_last_patch_ms = 0
-# Debug snapshots only - never read for game logic
 if not hasattr(window, "_bgs_signals_json"):
     window._bgs_signals_json = "{}"
 
 def _sync_debug_signals():
     try:
         window._bgs_signals_json = py_json.dumps(_signals_store)
-    except Exception:
-        try:
-            window._bgs_signals_json = "{}"
-        except:
-            pass
-    # Optional JS object mirror for console inspection - clearly named debug only
+    except:
+        window._bgs_signals_json = "{}"
     try:
         window._bgs_signals_debug = window.JSON.parse(window._bgs_signals_json)
     except:
         pass
 
 def _parse_datastar_patch(raw):
-    # raw may be JS string wrapper - coerce to Python str
-    if raw is None:
+    if raw == None:
         return None, False
     try:
         raw = str(raw)
-    except Exception:
+    except:
         return None, False
     signals_json = None
     only_if_missing = False
@@ -48,7 +39,7 @@ def _parse_datastar_patch(raw):
 
 def _merge_patch(target, patch):
     for key, value in patch.items():
-        if value is None:
+        if value == None:
             target.pop(key, None)
         elif isinstance(value, dict):
             existing = target.get(key)
@@ -73,7 +64,7 @@ def _on_datastar_patch(evt):
     if not raw:
         return
     signals_json, only_if_missing = _parse_datastar_patch(raw)
-    if signals_json is None:
+    if signals_json == None:
         return
     try:
         patch = py_json.loads(signals_json)
@@ -84,16 +75,9 @@ def _on_datastar_patch(evt):
             pass
         return
     if not isinstance(patch, dict):
-        try:
-            window.console.warn("[BGS] Signal patch was not an object:", patch)
-        except:
-            pass
         return
-    # Respect Datastar semantics: onlyIfMissing true = init defaults only, no deletes
     if only_if_missing:
-        # If patch contains null with onlyIfMissing, ignore deletes per sister's contract advice
-        # Filter nulls out for onlyIfMissing case
-        filtered = {k: v for k, v in patch.items() if v is not None}
+        filtered = {k: v for k, v in patch.items() if v != None}
         if not filtered:
             return
         _merge_if_missing(_signals_store, filtered)
@@ -106,16 +90,17 @@ def _on_datastar_patch(evt):
     _sync_debug_signals()
 
 def get_signal(name, default=None):
-    # Always read from Python-owned store - never from window
     return _signals_store.get(name, default)
 
 def is_connected(max_silence_ms=10000):
     try:
         es = window._bgs_es
+        # Avoid $B.$is - use truthiness and == None
         if not es:
             return False
         try:
-            if es.readyState != 1:
+            rs = getattr(es, "readyState", 0)
+            if rs != 1:
                 return False
         except:
             return False
@@ -135,21 +120,25 @@ def attach_to_eventsource(es):
     if not es:
         raise ValueError("attach_to_eventsource requires an EventSource")
     try:
-        if _attached_es is not None and es == _attached_es:
+        # Avoid `is` - use == for JS objects
+        if _attached_es and es == _attached_es:
             return
     except:
-        if _attached_es == es:
-            return
+        try:
+            if _attached_es == es:
+                return
+        except:
+            pass
     if _attached_es:
         try:
             _attached_es.removeEventListener("datastar-patch-signals", _on_datastar_patch)
-        except Exception:
+        except:
             pass
     try:
         es.addEventListener("datastar-patch-signals", _on_datastar_patch)
     except Exception as exc:
         try:
-            window.console.error("[BGS] Failed to attach datastar listener:", exc)
+            window.console.error("[BGS] Failed to attach", exc)
         except:
             pass
         raise

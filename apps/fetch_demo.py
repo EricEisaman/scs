@@ -1,124 +1,130 @@
-# apps/fetch_demo.py
+# apps/fetch_demo.py - FIXED - top-level imports only, no local imports in async
 from scs import *
+from browser import window, aio
 from extensions.fetch import fetch_json, FetchError
-from browser import aio
-import random
+import json as py_json
 
-print("fetch_demo: scs imported, extensions.fetch imported")
+__version__ = "0.2.0-fixed"
+__build__ = "2026-09-26-no-local-import-async"
 
-def parse_poem(raw):
-    print(f"parse_poem: raw type={type(raw)}")
+try:
+    window.console.log("[fetch_demo] scs imported, extensions.fetch imported - FIXED top-level only")
+except:
+    pass
+
+poem_text = "Loading..."
+poem_title = ""
+poem_author = ""
+loading = True
+error_msg = ""
+
+async def load_poem(app=None):
+    global poem_text, poem_title, poem_author, loading, error_msg
+    loading = True
+    error_msg = ""
     try:
-        print(f"parse_poem: raw str={str(raw)[:800]}")
+        window.console.log("[fetch_demo] load_poem called")
+        # No local imports here - fetch_json already imported at top
+        data = await fetch_json("https://poetrydb.org/random")
+        # data is already Python dict via one-shot conversion
+        if isinstance(data, list) and len(data) > 0:
+            item = data[0]
+        else:
+            item = data
+        # item should be dict
+        try:
+            poem_title = item.get("title", "Untitled") if isinstance(item, dict) else getattr(item, "title", "Untitled")
+            poem_author = item.get("author", "Unknown") if isinstance(item, dict) else getattr(item, "author", "Unknown")
+            # lines may be list
+            if isinstance(item, dict):
+                lines = item.get("lines", [])
+            else:
+                lines = getattr(item, "lines", [])
+            if isinstance(lines, list):
+                poem_text = "\n".join(lines[:20])
+            else:
+                poem_text = str(lines)[:500]
+        except Exception as e:
+            poem_text = str(item)[:500]
+            try:
+                window.console.error("[fetch_demo] parse failed", e)
+            except:
+                pass
+        loading = False
+    except Exception as e:
+        loading = False
+        error_msg = str(e)
+        poem_text = "Failed: " + error_msg
+        try:
+            window.console.error("[fetch_demo] load_poem failed", e)
+        except:
+            pass
+
+def onAppStart(app):
+    app.width = 1050
+    app.height = 700
+    app.background = rgb(15,15,30)
+    app.stepsPerSecond = 30
+    global poem_text
+    poem_text = "Loading poem..."
+    # Start async load
+    try:
+        aio.run(load_poem(app))
+    except Exception as e:
+        try:
+            window.console.error("[fetch_demo] aio.run failed", e)
+        except:
+            pass
+
+def redrawAll(app):
+    try:
+        drawRect(0,0,app.width,app.height,fill=app.background)
     except:
         pass
     try:
-        if isinstance(raw, list) and len(raw) > 0:
-            print(f"parse_poem: raw is list len {len(raw)}, taking [0]")
-            data = raw[0]
-            print(f"parse_poem: data type={type(data)}, keys={list(data.keys())[:10] if isinstance(data, dict) else 'not dict'}")
+        drawLabel("Fetch Demo - PoetryDB", app.width//2, 40, size=24, fill=rgb(255,255,255), bold=True)
+        if loading:
+            drawLabel("Loading...", app.width//2, app.height//2, size=20, fill=rgb(200,200,255))
+        elif error_msg:
+            drawLabel("Error:", app.width//2, 80, size=16, fill=rgb(255,100,100))
+            drawLabel(error_msg[:80], app.width//2, 110, size=12, fill=rgb(255,150,150))
+            drawLabel(poem_text[:100], app.width//2, 140, size=12, fill=rgb(200,200,200))
         else:
-            print(f"parse_poem: raw is not list, using raw as data")
-            data = raw
-        # Brython JS objects may not have .get, use dict access
-        if isinstance(data, dict):
-            title = data.get('title', 'Untitled')
-            author = data.get('author', 'Unknown')
-            lines = data.get('lines', [])
-            print(f"parse_poem: got via .get title={title}")
-        else:
-            # JS object from window.fetch().json() may be JS dict-like
-            try:
-                title = data['title']
-                author = data['author']
-                lines = data['lines']
-                print(f"parse_poem: got via [] title={title}")
-            except Exception as e2:
-                print(f"parse_poem: [] access failed {e2}, trying getattr")
-                title = getattr(data, 'title', 'Untitled')
-                author = getattr(data, 'author', 'Unknown')
-                lines = getattr(data, 'lines', [])
-        if not isinstance(lines, list):
-            lines = [str(lines)]
-        print(f"parse_poem: success title={title} author={author} lines={len(lines)}")
-        return {'title': title, 'author': author, 'lines': lines}
+            drawLabel(poem_title, app.width//2, 80, size=18, fill=rgb(255,235,100), bold=True)
+            drawLabel("by " + poem_author, app.width//2, 110, size=14, fill=rgb(200,220,255))
+            # Draw poem lines
+            y = 150
+            for line in poem_text.split("\n")[:20]:
+                drawLabel(line, app.width//2, y, size=12, fill=rgb(220,220,220))
+                y += 20
+        drawLabel("Press R to reload, click to fetch new", app.width//2, app.height-30, size=12, fill=rgb(150,150,150))
+        drawLabel("v3.0.18 NO $B.$is + NO local import async", app.width//2, app.height-15, size=8, fill=rgb(100,255,100))
     except Exception as e:
-        import traceback
-        print(f"parse_poem exception: {e}")
-        traceback.print_exc()
-        return {'title': 'Parse Error', 'author': str(e), 'lines': [str(raw)[:300]]}
-
-async def load_poem(app):
-    print("load_poem called")
-    app.loading = True
-    app.error = None
-    app.statusText = "Fetching poem..."
-    try:
-        data = await fetch_json('https://poetrydb.org/random')
-        print(f"load_poem: fetch_json returned type={type(data)}")
         try:
-            print(f"load_poem: data preview={str(data)[:600]}")
+            window.console.error("[fetch_demo] redrawAll failed", e)
         except:
             pass
-        parsed = parse_poem(data)
-        app.poem = parsed
-        app.titleText = parsed['title']
-        app.authorText = parsed['author']
-        app.lines = parsed['lines']
-        app.loading = False
-        app.statusText = f"Loaded: {parsed['title']} by {parsed['author']}"
-        print(f"load_poem: done {parsed['title']}")
-    except Exception as e:
-        import traceback
-        print(f"load_poem failed: {e}")
-        traceback.print_exc()
-        app.error = f"Error: {e}"
-        app.loading = False
-        app.statusText = app.error
 
-def onAppStart(app):
-    print("onAppStart called")
-    app.width = 1050
-    app.height = 700
-    app.stepsPerSecond = 30
-    app.poem = None
-    app.titleText = ""
-    app.authorText = ""
-    app.lines = []
-    app.loading = True
-    app.error = None
-    app.statusText = "Loading..."
-    app.background = gradient(rgb(15, 17, 21), rgb(26, 29, 36), start='top')
-    aio.run(load_poem(app))
+def onMousePress(app, x, y):
+    try:
+        aio.run(load_poem(app))
+    except:
+        pass
 
 def onKeyPress(app, key):
-    if key == 'space' or key == 'r' or key == 'n':
-        aio.run(load_poem(app))
+    if key.lower() == 'r':
+        try:
+            aio.run(load_poem(app))
+        except:
+            pass
 
-def onMousePress(app, mouseX, mouseY):
-    aio.run(load_poem(app))
+def run():
+    try:
+        runApp(1050, 700)
+    except Exception as e:
+        try:
+            window.console.error("[fetch_demo] runApp failed", e)
+        except:
+            pass
 
-def redrawAll(app):
-    drawRect(0, 0, app.width, app.height, fill=app.background)
-    drawLabel("extensions.fetch demo", app.width//2, 30, size=22, fill=rgb(200,210,230), bold=True)
-    drawLabel("PoetryDB.org  •  SPACE / R / Click", app.width//2, 55, size=12, fill=rgb(120,130,150))
-    if app.loading:
-        drawLabel("Loading poem...", app.width//2, app.height//2, size=20, fill=rgb(76,110,245), bold=True)
-        drawLabel(app.statusText, app.width//2, app.height//2 + 30, size=12, fill=rgb(150,160,180))
-        return
-    if app.error:
-        drawLabel("Failed", app.width//2, 120, size=18, fill='red', bold=True)
-        drawLabel(app.error, app.width//2, 150, size=12, fill=rgb(200,150,150))
-        drawLabel("Press SPACE", app.width//2, 180, size=14, fill=rgb(180,180,200))
-        return
-    if app.poem is None:
-        return
-    drawLabel(app.titleText, app.width//2, 110, size=24, fill=rgb(235,240,255), bold=True)
-    drawLabel(f"by {app.authorText}", app.width//2, 140, size=14, fill=rgb(180,190,210), italic=True)
-    y = 190
-    for i, line in enumerate(app.lines):
-        if y > app.height - 40:
-            break
-        drawLabel(line, app.width//2, y, size=14, fill=rgb(210,220,235))
-        y += 22
-    drawLabel(f"{len(app.lines)} lines", app.width//2, app.height - 20, size=11, fill=rgb(100,110,130))
+run()
