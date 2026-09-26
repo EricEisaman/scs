@@ -599,24 +599,21 @@ def redrawAll(app):
     for cid in list(app.remote_players.keys()):
         try:
             remote=app.remote_players.get(cid)
-            if not isinstance(remote, dict):
-                continue
-            pos=remote.get("position")
+            try:
+                pos=remote.get("position")
+            except:
+                pos=getattr(remote,"position",None)
             if not pos or len(pos)<2:
                 continue
             px=float(pos[0])
             py=float(pos[1])
             peer_id=str(cid)
             vis=app.remote_visuals.get(cid)
-            color=vis.color if vis else COLORS[sum(ord(char) for char in peer_id)%len(COLORS)]
+            color=vis.color if vis else rgb(120,180,255)
             facing=vis.facing if vis else 1
             trail=vis.trail if vis else []
-            if vis and vis.render_pos:
-                x=float(vis.render_pos[0])-float(app.camera_x)
-                y=float(vis.render_pos[1])
-            else:
-                x=px-float(app.camera_x)
-                y=py
+            x=px-float(app.camera_x)
+            y=py
             if x < -300 or x > app.width+300:
                 continue
             for i,(trail_x,trail_y) in enumerate(trail):
