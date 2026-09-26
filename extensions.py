@@ -1,6 +1,6 @@
-# extensions.py - v3.0.20 - FIX resolve_local - Sage-ec working
+# extensions.py - v3.0.22 - FIX e-15 + module callable
 import sys, types
-from browser import window, aio
+from browser import window
 import json as py_json
 
 try:
@@ -9,17 +9,41 @@ except:
     _ext_pkg = types.ModuleType('extensions')
     sys.modules['extensions'] = _ext_pkg
 
-def _convert_js(js_data):
+def _js_to_py(js_obj):
     try:
-        json_str = window.JSON.stringify(js_data)
-        # Use JS parser first to avoid Brython scientific notation bug
+        if js_obj == None:
+            return None
+        s = str(window.Object.prototype.toString.call(js_obj))
+        if s == "[object Array]":
+            result = []
+            for i in range(int(js_obj.length)):
+                try:
+                    result.append(_js_to_py(js_obj[i]))
+                except:
+                    result.append(None)
+            return result
+        if s == "[object Object]":
+            result = {}
+            keys = window.Object.keys(js_obj)
+            for k in keys:
+                try:
+                    py_k = str(k)
+                    result[py_k] = _js_to_py(js_obj[k])
+                except:
+                    continue
+            return result
         try:
-            js_obj = window.JSON.parse(json_str)
-            return py_json.loads(window.JSON.stringify(js_obj))
+            if window.typeof(js_obj) == "number":
+                return float(str(js_obj))
+            if window.typeof(js_obj) == "string":
+                return str(js_obj)
+            if window.typeof(js_obj) == "boolean":
+                return bool(js_obj)
         except:
-            return py_json.loads(json_str)
+            pass
+        return js_obj
     except Exception:
-        return js_data
+        return js_obj
 
 def _parse_join_data(js_data):
     cid = None
@@ -60,15 +84,14 @@ class FetchError(RuntimeError):
     pass
 
 class FetchResponse:
-    def __init__(self, js_response, is_aio=False):
+    def __init__(self, js_response):
         self._js = js_response
-        self._is_aio = is_aio
         try:
-            self.ok = bool(js_response.ok) if not is_aio else True
+            self.ok = bool(js_response.ok)
         except:
             self.ok = True
         try:
-            self.status = int(js_response.status) if hasattr(js_response, 'status') else 200
+            self.status = int(js_response.status)
         except:
             self.status = 200
     async def json(self):
@@ -77,31 +100,14 @@ class FetchResponse:
     async def text(self):
         return await self._js.text()
 
-async def fetch(url, method="GET", headers=None, body=None, mode="cors"):
-    opts = {"method": method, "mode": mode}
+async def fetch(url, method="GET", headers=None, body=None):
+    opts = {"method": method, "mode": "cors"}
     if headers:
         opts["headers"] = headers
     if body != None:
         opts["body"] = body
-    try:
-        js_resp = await window.fetch(url, opts)
-        return FetchResponse(js_resp, is_aio=False)
-    except Exception as e1:
-        try:
-            window.console.warn("[fetch] window.fetch failed, trying without mode", str(e1)[:200])
-            opts2 = {"method": method}
-            if headers:
-                opts2["headers"] = headers
-            if body != None:
-                opts2["body"] = body
-            js_resp = await window.fetch(url, opts2)
-            return FetchResponse(js_resp, is_aio=False)
-        except Exception as e1b:
-            try:
-                aio_resp = await aio.fetch(url, method=method)
-                return FetchResponse(aio_resp, is_aio=True)
-            except Exception as e2:
-                raise FetchError(f"fetch failed {url}: {e1} / {e1b} / {e2}")
+    js_resp = await window.fetch(url, opts)
+    return FetchResponse(js_resp)
 
 async def fetch_json(url):
     resp = await fetch(url)
@@ -109,7 +115,7 @@ async def fetch_json(url):
         txt = await resp.text()
         raise FetchError(f"HTTP {resp.status} {txt[:200]}")
     js_data = await resp.json()
-    return _convert_js(js_data)
+    return _js_to_py(js_data)
 
 async def fetch_text(url):
     resp = await fetch(url)
@@ -244,24 +250,13 @@ def _on_datastar_patch(evt):
         return
     try:
         js_patch = window.JSON.parse(signals_json)
-        try:
-            patch = py_json.loads(window.JSON.stringify(js_patch))
-        except:
-            patch = js_patch
+        patch = _js_to_py(js_patch)
     except Exception as exc:
         try:
-            patch = py_json.loads(signals_json)
-        except Exception as exc2:
-            try:
-                window.console.error("[BGS] Invalid Datastar signal JSON:", exc2, signals_json[:500])
-            except:
-                pass
-            return
-    if not isinstance(patch, dict):
-        try:
-            patch = py_json.loads(window.JSON.stringify(patch))
+            window.console.error("[BGS] Invalid Datastar signal JSON:", exc, signals_json[:500])
         except:
-            return
+            pass
+        return
     if not isinstance(patch, dict):
         return
     if only_if_missing:
@@ -343,6 +338,6 @@ except:
     pass
 
 try:
-    window.console.log("[extensions.py] v3.0.21 FIX JSON scientific notation + DUAL BACKEND")
+    window.console.log("[extensions.py] v3.0.22 FIX e-15 via _js_to_py - NO py_json.loads")
 except:
     pass

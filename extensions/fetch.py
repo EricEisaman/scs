@@ -1,30 +1,67 @@
-from browser import window, aio
+from browser import window
 import json as py_json
 
 class FetchError(RuntimeError):
     pass
 
-def _convert_js(js_data):
+def _js_to_py(js_obj):
+    # Convert JS object to Python without using json.loads to avoid e-15 bug
     try:
-        json_str = window.JSON.stringify(js_data)
+        # Try to use JS JSON roundtrip but with manual handling
+        # If js_obj is primitive, return directly
+        if js_obj == None:
+            return None
+        t = window.Object.prototype.toString.call(js_obj)
+        s = str(t)
+        if s == "[object Array]":
+            result = []
+            length = js_obj.length
+            for i in range(length):
+                try:
+                    result.append(_js_to_py(js_obj[i]))
+                except:
+                    result.append(None)
+            return result
+        if s == "[object Object]":
+            result = {}
+            keys = window.Object.keys(js_obj)
+            # keys is JS array
+            for k in keys:
+                try:
+                    # k is JS string, convert to Python str
+                    py_k = str(k)
+                    py_v = _js_to_py(js_obj[k])
+                    result[py_k] = py_v
+                except Exception:
+                    continue
+            return result
+        # Primitive
         try:
-            js_obj = window.JSON.parse(json_str)
-            return py_json.loads(window.JSON.stringify(js_obj))
+            # Numbers - handle scientific notation by converting via float(str())
+            if isinstance(js_obj, float) or isinstance(js_obj, int):
+                return js_obj
+            # JS number
+            if window.typeof(js_obj) == "number":
+                return float(str(js_obj))
+            if window.typeof(js_obj) == "string":
+                return str(js_obj)
+            if window.typeof(js_obj) == "boolean":
+                return bool(js_obj)
         except:
-            return py_json.loads(json_str)
+            pass
+        return js_obj
     except Exception:
-        return js_data
+        return js_obj
 
 class FetchResponse:
-    def __init__(self, js_response, is_aio=False):
+    def __init__(self, js_response):
         self._js = js_response
-        self._is_aio = is_aio
         try:
-            self.ok = bool(js_response.ok) if not is_aio else True
+            self.ok = bool(js_response.ok)
         except:
             self.ok = True
         try:
-            self.status = int(js_response.status) if hasattr(js_response, 'status') else 200
+            self.status = int(js_response.status)
         except:
             self.status = 200
     async def json(self):
@@ -33,22 +70,14 @@ class FetchResponse:
     async def text(self):
         return await self._js.text()
 
-async def fetch(url, method="GET", headers=None, body=None, mode="cors"):
-    opts = {"method": method, "mode": mode}
+async def fetch(url, method="GET", headers=None, body=None):
+    opts = {"method": method, "mode": "cors"}
     if headers:
         opts["headers"] = headers
     if body != None:
         opts["body"] = body
-    try:
-        js_resp = await window.fetch(url, opts)
-        return FetchResponse(js_resp, is_aio=False)
-    except Exception as e1:
-        # Fallback to aio.fetch
-        try:
-            aio_resp = await aio.fetch(url, method=method)
-            return FetchResponse(aio_resp, is_aio=True)
-        except Exception as e2:
-            raise FetchError(f"fetch failed {url}: {e1} / {e2}")
+    js_resp = await window.fetch(url, opts)
+    return FetchResponse(js_resp)
 
 async def fetch_json(url):
     resp = await fetch(url)
@@ -56,7 +85,7 @@ async def fetch_json(url):
         txt = await resp.text()
         raise FetchError(f"HTTP {resp.status} {txt[:200]}")
     js_data = await resp.json()
-    return _convert_js(js_data)
+    return _js_to_py(js_data)
 
 async def fetch_text(url):
     resp = await fetch(url)

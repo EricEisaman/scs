@@ -11,6 +11,41 @@ if not hasattr(window, "_bgs_last_patch_ms"):
 if not hasattr(window, "_bgs_signals_json"):
     window._bgs_signals_json = "{}"
 
+def _js_to_py(js_obj):
+    try:
+        if js_obj == None:
+            return None
+        s = str(window.Object.prototype.toString.call(js_obj))
+        if s == "[object Array]":
+            result = []
+            for i in range(int(js_obj.length)):
+                try:
+                    result.append(_js_to_py(js_obj[i]))
+                except:
+                    result.append(None)
+            return result
+        if s == "[object Object]":
+            result = {}
+            keys = window.Object.keys(js_obj)
+            for k in keys:
+                try:
+                    result[str(k)] = _js_to_py(js_obj[k])
+                except:
+                    continue
+            return result
+        try:
+            if window.typeof(js_obj) == "number":
+                return float(str(js_obj))
+            if window.typeof(js_obj) == "string":
+                return str(js_obj)
+            if window.typeof(js_obj) == "boolean":
+                return bool(js_obj)
+        except:
+            pass
+        return js_obj
+    except Exception:
+        return js_obj
+
 def _sync_debug_signals():
     try:
         window._bgs_signals_json = py_json.dumps(_signals_store)
@@ -66,31 +101,15 @@ def _on_datastar_patch(evt):
     signals_json, only_if_missing = _parse_datastar_patch(raw)
     if signals_json == None:
         return
-    # FIX: Use window.JSON.parse to avoid Brython json bug with scientific notation like 6.88e-15
     try:
-        # First try JS parser
         js_patch = window.JSON.parse(signals_json)
-        # Convert JS object to Python via one-shot stringify/parse
-        try:
-            patch = py_json.loads(window.JSON.stringify(js_patch))
-        except:
-            patch = js_patch
+        patch = _js_to_py(js_patch)
     except Exception as exc:
-        # Fallback to Python parser for old format
         try:
-            patch = py_json.loads(signals_json)
-        except Exception as exc2:
-            try:
-                window.console.error("[BGS] Invalid Datastar signal JSON:", exc2, signals_json[:500])
-            except:
-                pass
-            return
-    if not isinstance(patch, dict):
-        # If js_patch is JS object, try convert
-        try:
-            patch = py_json.loads(window.JSON.stringify(patch))
+            window.console.error("[BGS] Invalid Datastar signal JSON:", exc, signals_json[:500])
         except:
-            return
+            pass
+        return
     if not isinstance(patch, dict):
         return
     if only_if_missing:
