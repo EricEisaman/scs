@@ -197,11 +197,13 @@ class RemoteVisual:
         self.interp_t=0.0
 
 def update_remote_visual(app, client_id, remote):
-    if not isinstance(remote, dict):
-        return
-    pos=remote.get("position")
+    try:
+        pos=remote.get("position")
+    except:
+        pos=getattr(remote,"position",None)
     if not pos or len(pos)<2:
         return
+    client_id=str(client_id)
     vis=app.remote_visuals.get(client_id)
     if not vis:
         color_index=sum(ord(char) for char in client_id)%len(COLORS)
@@ -209,7 +211,10 @@ def update_remote_visual(app, client_id, remote):
         app.remote_visuals[client_id]=vis
     px=float(pos[0])
     py=float(pos[1])
-    velocity=remote.get("velocity",[0,0,0])
+    try:
+        velocity=remote.get("velocity",[0,0])
+    except:
+        velocity=getattr(remote,"velocity",[0,0])
     vx=float(velocity[0]) if len(velocity)>0 else 0.0
     vy=float(velocity[1]) if len(velocity)>1 else 0.0
     if abs(vx)>0.3:
@@ -271,11 +276,29 @@ class World:
         for plat in self.platforms:
             if plat.type=="wall" or plat.w>1000:
                 continue
-            self.coins.append({"x":plat.x,"y":plat.y-50,"collected":False,"val":10,"bob":random.random()*6.28})
+            self.add_coin(plat.x,plat.y-50)
         # extra floating coins
         extras=[(400,300),(900,300),(1200,250),(1800,280)]
         for ex,ey in extras:
-            self.coins.append({"x":ex,"y":ey,"collected":False,"val":10,"bob":random.random()*6.28})
+            self.add_coin(ex,ey)
+
+    def add_coin(self, x, y, instance_id=""):
+        if not instance_id:
+            instance_id="level1:coin_"+str(len(self.coins))
+        coin={
+            "id":instance_id,
+            "instanceId":instance_id,
+            "itemName":"platformer_coin",
+            "x":x,
+            "y":y,
+            "collected":False,
+            "isCollected":False,
+            "collectedByClientId":"",
+            "val":10,
+            "bob":random.random()*6.28,
+        }
+        self.coins.append(coin)
+        return coin
 
     def add_player(self, pid, name, color, keys):
         p=Player(pid,name,150+len(self.players)*70,100,color,keys)
@@ -325,6 +348,7 @@ class World:
 
     def step(self):
         self.tick+=1
+        collected_ids=[]
         for p in list(self.players.values()):
             if not p.on_ground:
                 p.vy+=self.gravity
@@ -383,6 +407,8 @@ class World:
                 dy=p.y-coin["y"]
                 if abs(dx)<22 and abs(dy)<28:
                     coin["collected"]=True
+                    coin["isCollected"]=True
+                    collected_ids.append(coin.get("instanceId",coin.get("id","")))
                     p.score+=coin.get("val",10)
                     p.coin_flash=10
 
@@ -391,6 +417,7 @@ class World:
             if not isinstance(coin, dict):
                 continue
             coin["bob"]+=0.08
+        return collected_ids
 
 # ---------- App State ----------
 KEYSETS=[
@@ -419,6 +446,9 @@ def onAppStart(app):
     app.remote_visuals={}  # clientId -> remote rendering state
     app.authority={}  # instanceId -> ownerId
     app.last_send_ms=0
+    app.last_item_send_ms=0
+    app.pending_coin_collections={}
+    app.dynamic_coin_seq=0
 
     # Add local players
     app.world.add_player("local_0","You",COLORS[0],KEYSETS[0])
@@ -484,6 +514,7 @@ def onKeyPress(app, key):
         app.world=World()
         app.world.add_player("local_0","You",COLORS[0],KEYSETS[0])
         app.remote_players.clear()
+        app.remote_visuals.clear()
     if key=='p':
         app.paused=not getattr(app,'paused',False)
     if key=='h':
@@ -492,7 +523,50 @@ def onKeyPress(app, key):
         idx=len(app.world.players)
         app.world.add_player(f"local_{idx}",f"P{idx+1}",COLORS[idx%len(COLORS)],KEYSETS[idx%len(KEYSETS)])
     if key=='c':
-        app.world.coins.append({"x":random.randint(100,2000),"y":random.randint(100,400),"collected":False,"val":10,"bob":random.random()*6.28})
+        app.dynamic_coin_seq+=1
+        owner=str(app.client_id) if app.client_id else "offline"
+        coin_id="level1:"+owner+":coin_"+str(app.dynamic_coin_seq)
+        app.world.add_coin(random.randint(100,2000),random.randint(100,400),coin_id)
+
+def apply_item_state_update(app, update):
+    if not isinstance(update, dict):
+        return
+    collected_by_id={}
+    for row in update.get("updates",[]):
+        if isinstance(row, dict) and row.get("isCollected"):
+            instance_id=row.get("instanceId")
+            if instance_id:
+                collected_by_id[instance_id]=row.get("collectedByClientId","")
+    for event in update.get("collections",[]):
+        if isinstance(event, dict):
+            instance_id=event.get("instanceId")
+            if instance_id:
+                collected_by_id[instance_id]=event.get("collectedByClientId","")
+    if not collected_by_id:
+        return
+    for coin in app.world.coins:
+        instance_id=coin.get("instanceId",coin.get("id"))
+        if instance_id in collected_by_id:
+            coin["collected"]=True
+            coin["isCollected"]=True
+            coin["collectedByClientId"]=collected_by_id[instance_id]
+            app.pending_coin_collections.pop(instance_id,None)
+
+def send_bgs_patch(app, path, payload):
+    try:
+        url=app.mp_client.base_url+path
+        headers={"Content-Type":"application/json","X-Client-ID":str(app.client_id)}
+        body=py_json.dumps(payload,separators=(",",":"))
+        script=(
+            f"fetch({py_json.dumps(url)},{{method:'PATCH',"
+            f"headers:{py_json.dumps(headers)},body:{py_json.dumps(body)}}})"
+            ".catch(function(error){console.error('[BGS] PATCH failed',error)})"
+        )
+        window.eval(script)
+        return True
+    except Exception as ex:
+        print(f"[BGS] PATCH {path} failed: {ex}")
+        return False
 
 def onKeyHold(app, keys):
     app.keys_held=set(keys)
@@ -517,10 +591,36 @@ def onStep(app):
                     cid=u.get("clientId")
                     if cid and cid != app.client_id:
                         app.remote_players[cid]=u
+            item_sig=get_signal("item-state-update")
+            if item_sig:
+                apply_item_state_update(app,item_sig)
             app.datastar_connected=is_datastar_connected()
         except:
             pass
-    app.world.step()
+    collected_ids=app.world.step()
+    now=0
+    try:
+        now=int(window.Date.now())
+    except:
+        now=int(app.world.tick*1000/app.stepsPerSecond)
+    if app.client_id:
+        for instance_id in collected_ids:
+            if instance_id:
+                app.pending_coin_collections[instance_id]={
+                    "instanceId":instance_id,
+                    "collectedByClientId":str(app.client_id),
+                    "timestamp":now,
+                }
+                for coin in app.world.coins:
+                    if coin.get("instanceId")==instance_id:
+                        coin["collectedByClientId"]=str(app.client_id)
+        if app.pending_coin_collections and now-app.last_item_send_ms>500:
+            app.last_item_send_ms=now
+            send_bgs_patch(app,"/api/multiplayer/item-state",{
+                "updates":[],
+                "collections":list(app.pending_coin_collections.values()),
+                "timestamp":now,
+            })
     for cid, remote in list(app.remote_players.items()):
         try:
             update_remote_visual(app,cid,remote)
@@ -539,12 +639,23 @@ def onStep(app):
         if now - app.last_send_ms > 100:
             app.last_send_ms=now
             lp=app.world.players["local_0"]
-            # fire and forget without aio.run to avoid recursion
-            try:
-                # call send but don't await via aio, use direct JS promise
-                window.eval(f"fetch('{app.mp_client.base_url}/api/multiplayer/character-state', {{method:'PATCH',headers:{{'Content-Type':'application/json','X-Client-ID':'{app.client_id}'}},body:JSON.stringify({{updates:[{{clientId:'{app.client_id}',characterModelId:'platformer_default',position:[{lp.x},{lp.y},0],velocity:[{lp.vx},{lp.vy},0],animationState:'{lp.state}',animationFrame:0,isJumping:{str(not lp.on_ground).lower()},isBoosting:false,boostTimeRemaining:0,timestamp:Date.now()}}],timestamp:Date.now()}})}}).catch(()=>{{}})")
-            except:
-                pass
+            timestamp=now
+            send_bgs_patch(app,"/api/multiplayer/character-state",{
+                "updates":[{
+                    "clientId":str(app.client_id),
+                    "characterModelId":"platformer-default",
+                    "position":[float(lp.x),float(lp.y)],
+                    "velocity":[float(lp.vx),float(lp.vy)],
+                    "animationState":str(lp.state),
+                    "animationFrame":float(app.world.tick),
+                    "isJumping":bool(not lp.on_ground),
+                    "facing":int(lp.facing),
+                    "score":int(lp.score),
+                    "onGround":bool(lp.on_ground),
+                    "timestamp":timestamp,
+                }],
+                "timestamp":timestamp,
+            })
 def redrawAll(app):
     drawRect(0,0,app.width,app.height,fill=app.background)
     for i in range(40):
