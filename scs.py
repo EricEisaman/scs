@@ -1,6 +1,6 @@
 """
 scs.py - Sigma Computer Science - CMU Graphics API shim for Brython
-Version: 3.0.2 - EXACT CMU ALIGN LOGIC
+Version: 3.0.5 - EXACT CMU ALIGN LOGIC
 
 Per https://academy.cs.cmu.edu/docs/ and
 https://github.com/cmu-cs-academy/desktop-cmu-graphics/blob/main/cmu_graphics/shape_logic.py
@@ -34,8 +34,8 @@ CMU Implementation: x,y is interpreted according to align
 from browser import window, document
 import math
 
-SCS_VERSION = "3.0.2"
-SCS_BUILD = "2026-09-26-v3.0.2-debug-disabled"
+SCS_VERSION = "3.0.5"
+SCS_BUILD = "2026-09-26-v3.0.5-debug-disabled"
 try:
     window.console.log(f"[SCS] scs.py version {SCS_VERSION} build {SCS_BUILD} - EXACT CMU ALIGN LOGIC, 1078 lines, opacity native")
 except:

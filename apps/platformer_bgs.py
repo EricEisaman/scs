@@ -1,5 +1,3 @@
-# apps/platformer_bgs.py - v0.1.2 FIXED TRAIL + JS-ONLY DATASTAR
-# Version: 0.1.2 - Fixed trail size, opacity fade, Dict.transition crash
 # apps/platformer_bgs.py - FINAL WITH OPACITY - REMOTE TRAIL VISIBLE - EXACT PROP MATCH
 # Uses opacity as required per SCS spec - requires patched scs.py with opacity support
 # Trail is direction-dependent, uses opacity fading, works for both local and remote
@@ -7,102 +5,96 @@
 from scs import *
 from browser import window, aio
 
-__version__ = "0.1.2"
-__build__ = "2026-09-26-v0.1.2-crash-proof"
+__version__ = "0.1.5"
+__build__ = "2026-09-26-v0.1.5-proper-datastar"
 
-# Log version immediately
 try:
     from browser import window as _w
-    _w.console.log(f"[BGS] platformer_bgs.py version {__version__} build {__build__} - FIXED TRAIL + JS-ONLY DATASTAR")
-    _w.console.log(f"[BGS] Trail: size 1.5-5.0 (was 3-13), opacity 0-75% (was 15-90%), drains when idle")
+    _w.console.log(f"[BGS] platformer_bgs.py version {__version__} build {__build__} - PROPER DATASTAR SINGLE SOURCE")
 except:
-    print(f"[BGS] platformer_bgs.py version {__version__} build {__build__}")
-
+    print(f"[BGS] version {__version__}")
 
 import math
 import random
 import json as py_json
 
-_bgs_signals_py = {}
+# PROPER DATASTAR: Single source of truth - no duplicate _bgs_signals_py
 window._bgs_signals = {}
 window._bgs_es = None
 
-# FIXED V4 PATCH HANDLING v0.1.2 - crash-proof, no Brython loads on raw
 def _bgs_on_datastar_patch(evt):
+    # PROPER DATASTAR: evt is datastar-patch-signals, data = "signals {json}"
+    # Spec: https://data-star.dev - SSE event, patch signals
+    # ZERO Brython json.loads - only window.JSON.parse, ZERO duplicate
     try:
         raw = evt.data
         if not raw:
             return
         if isinstance(raw, str) and raw.startswith("signals "):
             raw = raw[8:]
-        # CRITICAL: Use ONLY window.JSON.parse for raw - never Brython json.loads
-        # Brython json.loads crashes on Array(2) and (2) [{...}, 231]
+        # JS parse only - crash-proof vs Array(2) / (2) [{..}, 231]
         try:
             js_parsed = window.JSON.parse(raw)
-        except Exception as e:
-            # Raw not valid JSON, bail
+        except:
             return
-        
-        # js_parsed is JS object - convert to Python dict safely
+        # js_parsed = {signalName: value} - store directly
         try:
-            # Try to get keys
-            try:
-                js_keys = window.Object.keys(js_parsed)
-                # It's a JS object, iterate
-                for i in range(len(js_keys)):
-                    k = js_keys[i]
-                    try:
-                        v = js_parsed[k]
-                    except:
-                        continue
-                    # Convert v to Python via safe JSON roundtrip
-                    try:
-                        # Use JS stringify then Python loads - safe for nested
-                        json_str = window.JSON.stringify(v)
-                        if json_str:
-                            import json as _jj_safe
-                            py_v = _jj_safe.loads(json_str)
-                            _bgs_signals_py[k] = py_v
-                        else:
-                            _bgs_signals_py[k] = v
-                    except:
-                        # If conversion fails, store JS ref directly - get_signal will handle
-                        try:
-                            _bgs_signals_py[k] = v
-                        except:
-                            pass
-                    try:
-                        window._bgs_signals[k] = v
-                    except:
-                        pass
-            except:
-                # Might already be Python dict (if window.JSON.parse returned Python somehow)
-                if isinstance(js_parsed, dict):
-                    for kk, vv in js_parsed.items():
-                        _bgs_signals_py[kk] = vv
-                        try:
-                            window._bgs_signals[kk] = vv
-                        except:
-                            pass
-        except Exception as e:
-            try:
-                window.console.log(f"[BGS] patch store fail: {e}")
-            except:
-                pass
-    except Exception as ex:
+            keys = window.Object.keys(js_parsed)
+            for i in range(len(keys)):
+                k = keys[i]
+                try:
+                    window._bgs_signals[k] = js_parsed[k]
+                except:
+                    pass
+        except:
+            pass
+    except:
         pass
 
-def get_signal(n,d=None):
+def _js_get(obj, key, default=None):
+    if obj is None:
+        return default
     try:
-        # V4: try Python global first (reliable) - this worked
-        if n in _bgs_signals_py:
-            return _bgs_signals_py.get(n,d)
-        return window._bgs_signals.get(n,d)
-    except:
+        if isinstance(obj, dict):
+            return obj.get(key, default)
         try:
-            return _bgs_signals_py.get(n,d)
+            v = obj[key]
+            return default if v is None else v
         except:
-            return d
+            return default
+    except:
+        return default
+
+def _js_get_list(obj, key):
+    if obj is None:
+        return []
+    try:
+        val = _js_get(obj, key, [])
+        if val is None:
+            return []
+        if isinstance(val, list):
+            return val
+        try:
+            if window.Array.isArray(val):
+                return [val[i] for i in range(int(val.length))]
+        except:
+            pass
+        return []
+    except:
+        return []
+
+def get_signal(n, d=None):
+    # PROPER: Single source - window._bgs_signals only
+    try:
+        v = window._bgs_signals[n]
+        if v is not None:
+            return v
+    except:
+        pass
+    try:
+        return window._bgs_signals.get(n, d)
+    except:
+        return d
 
 def is_datastar_connected():
     try:
@@ -415,14 +407,15 @@ def onStep(app):
     if HAS_MP:
         try:
             sig=get_signal("character-state-update")
-            if sig and isinstance(sig, dict):
-                for u in sig.get("updates",[]):
-                    cid=u.get("clientId")
+            if sig:
+                updates = _js_get_list(sig, "updates")
+                for u in updates:
+                    cid=_js_get(u, "clientId")
                     if cid and cid != app.client_id:
                         app.remote_players[cid]=u
                         if cid not in app.remote_visuals:
                             app.remote_visuals[cid]=RemoteVisual(clientId=cid, color=rgb(120,180,255))
-                        remote_coins = u.get("collectedCoins", [])
+                        remote_coins = _js_get_list(u, "collectedCoins")
                         if remote_coins:
                             for rc_id in remote_coins:
                                 for coin in app.world.coins:
@@ -431,26 +424,26 @@ def onStep(app):
                                         coin["isCollected"]=True
                                         coin["collectedBy"]=cid
             item_sig = get_signal("item-state-update")
-            if item_sig and isinstance(item_sig, dict):
-                updates = item_sig.get("updates", [])
-                collections = item_sig.get("collections", [])
+            if item_sig:
+                updates = _js_get_list(item_sig, "updates")
+                collections = _js_get_list(item_sig, "collections")
                 for upd in updates:
-                    inst_id = upd.get("instanceId") or upd.get("id")
-                    if upd.get("isCollected"):
+                    inst_id = _js_get(upd, "instanceId") or _js_get(upd, "id")
+                    if _js_get(upd, "isCollected"):
                         for coin in app.world.coins:
                             if coin["id"]==inst_id or coin["instanceId"]==inst_id:
                                 if not coin.get("collected"):
                                     coin["collected"]=True
                                     coin["isCollected"]=True
-                                    coin["collectedBy"]=upd.get("collectedByClientId","remote")
+                                    coin["collectedBy"]=_js_get(upd, "collectedByClientId","remote")
                 for coll in collections:
-                    inst_id = coll.get("instanceId")
+                    inst_id = _js_get(coll, "instanceId")
                     for coin in app.world.coins:
                         if coin["id"]==inst_id or coin["instanceId"]==inst_id:
                             if not coin.get("collected"):
                                 coin["collected"]=True
                                 coin["isCollected"]=True
-                                coin["collectedBy"]=coll.get("collectedByClientId","remote")
+                                coin["collectedBy"]=_js_get(coll, "collectedByClientId","remote")
             app.datastar_connected=is_datastar_connected()
         except:
             pass
