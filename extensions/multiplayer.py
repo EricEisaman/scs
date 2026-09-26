@@ -1,9 +1,10 @@
-from browser import window
+
+from browser import window, aio
+import json as py_json
 
 BASE_URL_DEFAULT = "https://scs-207.onrender.com"
 
 def _parse_join_data(js_data):
-    # Pure sync helper - outside async to avoid $B.resolve_local bug
     cid = None
     sid = None
     is_sync = False
@@ -47,11 +48,20 @@ class MultiplayerClient:
         self.session_id = None
         self.is_synchronizer = False
         self._es = None
+
     async def join(self):
         base_url = self.base_url
         url = base_url + "/api/multiplayer/join"
         payload = {"environment_name": self.environment_name, "character_name": self.character_name}
-        resp = await window.fetch(url, {"method": "POST", "headers": {"Content-Type": "application/json"}, "body": window.JSON.stringify(payload)})
+        # Use window.fetch directly - as you demanded
+        try:
+            resp = await window.fetch(url, {"method": "POST", "headers": {"Content-Type": "application/json"}, "body": window.JSON.stringify(payload)})
+        except Exception as e:
+            try:
+                window.console.warn("[MultiplayerClient] window.fetch join failed, trying aio", str(e))
+                resp = await aio.fetch(url, {"method": "POST", "headers": {"Content-Type": "application/json"}, "body": py_json.dumps(payload)})
+            except Exception as e2:
+                raise RuntimeError(f"join fetch failed {e} / {e2}")
         if not resp.ok:
             raise RuntimeError("join HTTP " + str(resp.status))
         js_data = await resp.json()
@@ -61,7 +71,7 @@ class MultiplayerClient:
         self.client_id = str(cid)
         self.session_id = str(sid)
         self.is_synchronizer = bool(is_sync)
-        # EventSource - keep simple, no nested try
+        # Attach EventSource for datastar
         try:
             stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
             es_obj = window.EventSource.new(stream_url)
@@ -75,3 +85,27 @@ class MultiplayerClient:
             except Exception:
                 pass
         return {"client_id": str(cid), "session_id": str(sid), "is_synchronizer": bool(is_sync), "environment_name": env_name}
+
+    async def send_character_state(self, client_id, state_payload):
+        # Helper for 60Hz updates - accommodates full multiplayer system
+        # state_payload is dict with updates list
+        base_url = self.base_url
+        url = base_url + "/api/multiplayer/character-state"
+        try:
+            body_str = window.JSON.stringify(state_payload)
+        except:
+            body_str = py_json.dumps(state_payload)
+        opts = {"method": "PATCH", "headers": {"Content-Type": "application/json", "X-Client-ID": str(client_id)}, "body": body_str}
+        try:
+            js_opts = window.JSON.parse(window.JSON.stringify(opts))
+        except:
+            js_opts = opts
+        try:
+            resp = await window.fetch(url, js_opts)
+            return resp.ok
+        except Exception as e:
+            try:
+                window.console.error("[MultiplayerClient] send_character_state failed", str(e))
+            except:
+                pass
+            return False

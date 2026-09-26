@@ -1,4 +1,4 @@
-# extensions.py - v3.0.25 - FIX module callable + e-15 SAFE
+# extensions.py - v3.0.29 FINAL - window.fetch + full MP accommodation + e-15 SAFE
 import sys, types
 from browser import window
 
@@ -8,108 +8,120 @@ except:
     _ext_pkg = types.ModuleType('extensions')
     sys.modules['extensions'] = _ext_pkg
 
-def _js_to_py_safe(js_obj):
-    try:
-        if js_obj is None:
-            return None
-    except:
-        pass
-    try:
-        if window.JSON.stringify(js_obj) == "null":
-            return None
-    except:
-        pass
-    if isinstance(js_obj, (str, int, float, bool)):
-        return js_obj
-    try:
-        is_arr = False
-        try:
-            is_arr = bool(window.Array.isArray(js_obj))
-        except:
-            is_arr = False
-        if is_arr:
-            result = []
-            ln = int(js_obj.length)
-            for i in range(ln):
-                try:
-                    result.append(_js_to_py_safe(js_obj[i]))
-                except:
-                    result.append(None)
-            return result
-        try:
-            keys = window.Object.keys(js_obj)
-            result = {}
-            kl = int(keys.length)
-            for idx in range(kl):
-                try:
-                    k = keys[idx]
-                    result[str(k)] = _js_to_py_safe(js_obj[k])
-                except:
-                    continue
-            return result
-        except:
-            pass
-    except Exception as e:
-        try:
-            window.console.log("[_js_to_py_safe] error", str(e))
-        except:
-            pass
-    try:
-        s = str(js_obj)
-        if "e" in s.lower() or s.replace(".","",1).replace("-","",1).isdigit():
-            try:
-                return float(s)
-            except:
-                pass
-        return s
-    except:
-        return None
+# ---- FETCH ----
 
-def _js_to_py_simple(js_obj):
-    try:
-        if js_obj is None:
-            return None
-    except:
-        pass
-    try:
-        if window.JSON.stringify(js_obj) == "null":
-            return None
-    except:
-        pass
-    if isinstance(js_obj, (str, int, float, bool)):
-        return js_obj
-    try:
-        is_arr = False
+from browser import window, aio
+import json as py_json
+
+class FetchError(RuntimeError):
+    pass
+
+class FetchResponse:
+    def __init__(self, js_response):
+        self._js = js_response
         try:
-            is_arr = bool(window.Array.isArray(js_obj))
+            self.ok = bool(js_response.ok)
         except:
-            is_arr = False
-        if is_arr:
-            res = []
-            for i in range(int(js_obj.length)):
-                res.append(_js_to_py_simple(js_obj[i]))
-            return res
+            self.ok = True
         try:
-            keys = window.Object.keys(js_obj)
-            res = {}
-            for idx in range(int(keys.length)):
-                k = keys[idx]
-                res[str(k)] = _js_to_py_simple(js_obj[k])
-            return res
+            self.status = int(js_response.status)
+        except:
+            self.status = 200
+        try:
+            self.statusText = str(js_response.statusText)
+        except:
+            self.statusText = ""
+
+    async def json(self):
+        js_data = await self._js.json()
+        return js_data
+
+    async def text(self):
+        return await self._js.text()
+
+async def fetch(url, method="GET", headers=None, body=None, mode="cors", credentials=None, cache=None):
+    opts = {"method": method, "mode": mode}
+    if headers is not None:
+        opts["headers"] = headers
+    if body is not None:
+        try:
+            if isinstance(body, dict):
+                import json as _j
+                opts["body"] = _j.dumps(body)
+            else:
+                opts["body"] = body
+        except:
+            opts["body"] = body
+    if credentials is not None:
+        opts["credentials"] = credentials
+    if cache is not None:
+        opts["cache"] = cache
+
+    try:
+        # PRIMARY: window.fetch - this is what Sage-ec/scs uses and what you asked for
+        js_resp = await window.fetch(url, opts)
+        return FetchResponse(js_resp)
+    except Exception as e1:
+        try:
+            window.console.warn("[extensions.fetch] window.fetch failed, trying aio.fetch", str(e1))
         except:
             pass
-    except:
-        pass
-    try:
-        s = str(js_obj)
-        if "e" in s.lower() or s.replace(".","",1).replace("-","",1).isdigit():
+        try:
+            js_resp = await aio.fetch(url, opts)
+            return FetchResponse(js_resp)
+        except Exception as e2:
             try:
-                return float(s)
+                window.console.error("[extensions.fetch] both fetches failed", str(e1), str(e2))
             except:
                 pass
-        return s
-    except:
-        return js_obj
+            raise FetchError(f"fetch failed for {url}: {e1} / {e2}")
+
+async def fetch_json(url, method="GET", headers=None, body=None, mode="cors"):
+    resp = await fetch(url, method=method, headers=headers, body=body, mode=mode)
+    if not resp.ok:
+        try:
+            txt = await resp.text()
+        except:
+            txt = ""
+        raise FetchError(f"HTTP {resp.status} {txt[:200]}")
+    js_data = await resp.json()
+    try:
+        # Original Sage-ec pattern: stringify then parse
+        json_str = window.JSON.stringify(js_data)
+        return py_json.loads(json_str)
+    except Exception as conv_e:
+        # Fallback for e-15 or JS objects that don't stringify cleanly
+        try:
+            window.console.warn("[fetch_json] conversion failed, returning raw", str(conv_e))
+        except:
+            pass
+        return js_data
+
+async def fetch_text(url, method="GET", headers=None, body=None, mode="cors"):
+    resp = await fetch(url, method=method, headers=headers, body=body, mode=mode)
+    if not resp.ok:
+        raise FetchError(f"HTTP {resp.status}")
+    return await resp.text()
+
+
+_mod_ft = types.ModuleType('extensions.fetch')
+_mod_ft.fetch = fetch
+_mod_ft.fetch_json = fetch_json
+_mod_ft.fetch_text = fetch_text
+_mod_ft.FetchResponse = FetchResponse
+_mod_ft.FetchError = FetchError
+sys.modules['extensions.fetch'] = _mod_ft
+try:
+    _ext_pkg.fetch = _mod_ft
+except:
+    pass
+
+# ---- MULTIPLAYER ----
+
+from browser import window, aio
+import json as py_json
+
+BASE_URL_DEFAULT = "https://scs-207.onrender.com"
 
 def _parse_join_data(js_data):
     cid = None
@@ -146,63 +158,6 @@ def _parse_join_data(js_data):
             pass
     return cid, sid, is_sync, env_name
 
-class FetchError(RuntimeError):
-    pass
-
-class FetchResponse:
-    def __init__(self, js_response):
-        self._js = js_response
-        try:
-            self.ok = bool(js_response.ok)
-        except:
-            self.ok = True
-        try:
-            self.status = int(js_response.status)
-        except:
-            self.status = 200
-    async def json(self):
-        js_data = await self._js.json()
-        return js_data
-    async def text(self):
-        return await self._js.text()
-
-async def fetch(url, method="GET", headers=None, body=None):
-    opts = {"method": method, "mode": "cors"}
-    if headers:
-        opts["headers"] = headers
-    if body is not None:
-        opts["body"] = body
-    js_resp = await window.fetch(url, opts)
-    return FetchResponse(js_resp)
-
-async def fetch_json(url):
-    resp = await fetch(url)
-    if not resp.ok:
-        txt = await resp.text()
-        raise FetchError(f"HTTP {resp.status} {txt[:200]}")
-    js_data = await resp.json()
-    return _js_to_py_simple(js_data)
-
-async def fetch_text(url):
-    resp = await fetch(url)
-    if not resp.ok:
-        raise FetchError(f"HTTP {resp.status}")
-    return await resp.text()
-
-_mod_ft = types.ModuleType('extensions.fetch')
-_mod_ft.fetch = fetch
-_mod_ft.fetch_json = fetch_json
-_mod_ft.fetch_text = fetch_text
-_mod_ft.FetchResponse = FetchResponse
-_mod_ft.FetchError = FetchError
-sys.modules['extensions.fetch'] = _mod_ft
-try:
-    _ext_pkg.fetch = _mod_ft
-except:
-    pass
-
-BASE_URL_DEFAULT = "https://scs-207.onrender.com"
-
 class MultiplayerClient:
     def __init__(self, base_url=BASE_URL_DEFAULT, environment="level1", environment_name=None, character_name="Player", **kw):
         self.base_url = base_url.rstrip("/")
@@ -212,11 +167,20 @@ class MultiplayerClient:
         self.session_id = None
         self.is_synchronizer = False
         self._es = None
+
     async def join(self):
         base_url = self.base_url
         url = base_url + "/api/multiplayer/join"
         payload = {"environment_name": self.environment_name, "character_name": self.character_name}
-        resp = await window.fetch(url, {"method": "POST", "headers": {"Content-Type": "application/json"}, "body": window.JSON.stringify(payload)})
+        # Use window.fetch directly - as you demanded
+        try:
+            resp = await window.fetch(url, {"method": "POST", "headers": {"Content-Type": "application/json"}, "body": window.JSON.stringify(payload)})
+        except Exception as e:
+            try:
+                window.console.warn("[MultiplayerClient] window.fetch join failed, trying aio", str(e))
+                resp = await aio.fetch(url, {"method": "POST", "headers": {"Content-Type": "application/json"}, "body": py_json.dumps(payload)})
+            except Exception as e2:
+                raise RuntimeError(f"join fetch failed {e} / {e2}")
         if not resp.ok:
             raise RuntimeError("join HTTP " + str(resp.status))
         js_data = await resp.json()
@@ -226,6 +190,7 @@ class MultiplayerClient:
         self.client_id = str(cid)
         self.session_id = str(sid)
         self.is_synchronizer = bool(is_sync)
+        # Attach EventSource for datastar
         try:
             stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
             es_obj = window.EventSource.new(stream_url)
@@ -240,6 +205,33 @@ class MultiplayerClient:
                 pass
         return {"client_id": str(cid), "session_id": str(sid), "is_synchronizer": bool(is_sync), "environment_name": env_name}
 
+    async def send_character_state(self, client_id, state_payload):
+        # Helper for 60Hz updates - accommodates full multiplayer system
+        # state_payload is dict with updates list
+        base_url = self.base_url
+        url = base_url + "/api/multiplayer/character-state"
+        try:
+            body_str = window.JSON.stringify(state_payload)
+        except:
+            body_str = py_json.dumps(state_payload)
+        opts = {"method": "PATCH", "headers": {"Content-Type": "application/json", "X-Client-ID": str(client_id)}, "body": body_str}
+        try:
+            js_opts = window.JSON.parse(window.JSON.stringify(opts))
+        except:
+            js_opts = opts
+        try:
+            resp = await window.fetch(url, js_opts)
+            return resp.ok
+        except Exception as e:
+            try:
+                window.console.error("[MultiplayerClient] send_character_state failed", str(e))
+            except:
+                pass
+            return False
+
+
+BASE_URL_DEFAULT = "https://scs-207.onrender.com"
+
 _mod_mp = types.ModuleType('extensions.multiplayer')
 _mod_mp.MultiplayerClient = MultiplayerClient
 _mod_mp.BASE_URL_DEFAULT = BASE_URL_DEFAULT
@@ -249,6 +241,7 @@ try:
 except:
     pass
 
+# ---- DATASTAR ----
 _signals_store = {}
 _attached_es = None
 
@@ -258,6 +251,52 @@ if not hasattr(window, "_bgs_last_patch_ms"):
     window._bgs_last_patch_ms = 0
 if not hasattr(window, "_bgs_signals_json"):
     window._bgs_signals_json = "{}"
+
+def _js_to_py_safe(js_obj):
+    try:
+        if js_obj is None:
+            return None
+    except:
+        pass
+    if isinstance(js_obj, str):
+        return js_obj
+    if isinstance(js_obj, bool):
+        return bool(js_obj)
+    if isinstance(js_obj, int):
+        return int(js_obj)
+    if isinstance(js_obj, float):
+        return float(js_obj)
+    if isinstance(js_obj, dict):
+        return {str(k): _js_to_py_safe(v) for k, v in js_obj.items()}
+    if isinstance(js_obj, list):
+        return [_js_to_py_safe(x) for x in js_obj]
+    try:
+        if window.Array.isArray(js_obj):
+            out = []
+            ln = int(js_obj.length)
+            for i in range(ln):
+                out.append(_js_to_py_safe(js_obj[i]))
+            return out
+    except:
+        pass
+    try:
+        keys = window.Object.keys(js_obj)
+        kl = int(keys.length)
+        out = {}
+        for idx in range(kl):
+            k = keys[idx]
+            out[str(k)] = _js_to_py_safe(js_obj[k])
+        return out
+    except:
+        pass
+    try:
+        s = str(js_obj)
+        try:
+            return float(s)
+        except:
+            return s
+    except:
+        return None
 
 def _sync_debug_signals():
     try:
@@ -327,10 +366,7 @@ def _on_datastar_patch(evt):
     if not isinstance(patch, dict):
         return
     if only_if_missing:
-        filtered = {}
-        for k, v in patch.items():
-            if v is not None:
-                filtered[k] = v
+        filtered = {k: v for k, v in patch.items() if v is not None}
         if not filtered:
             return
         _merge_if_missing(_signals_store, filtered)
@@ -375,11 +411,7 @@ def attach_to_eventsource(es):
         if _attached_es and es == _attached_es:
             return
     except:
-        try:
-            if _attached_es == es:
-                return
-        except:
-            pass
+        pass
     if _attached_es:
         try:
             _attached_es.removeEventListener("datastar-patch-signals", _on_datastar_patch)
@@ -408,6 +440,6 @@ except:
     pass
 
 try:
-    window.console.log("[extensions.py] v3.0.25 FIX module callable + e-15 SAFE")
+    window.console.log("[extensions.py] v3.0.29 FINAL - window.fetch + full MP + e-15 SAFE")
 except:
     pass

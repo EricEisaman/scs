@@ -1,5 +1,6 @@
 
 from browser import window
+import json as py_json
 
 _signals_store = {}
 _attached_es = None
@@ -12,67 +13,56 @@ if not hasattr(window, "_bgs_signals_json"):
     window._bgs_signals_json = "{}"
 
 def _js_to_py_safe(js_obj):
+    # e-15 SAFE: never use py_json.loads on datastar patches
+    # Manual conversion handles 1e-15 floats that break Brython json
     try:
         if js_obj is None:
             return None
     except:
         pass
-    try:
-        if window.JSON.stringify(js_obj) == "null":
-            return None
-    except:
-        pass
-    if isinstance(js_obj, (str, int, float, bool)):
+    if isinstance(js_obj, str):
         return js_obj
+    if isinstance(js_obj, bool):
+        return bool(js_obj)
+    if isinstance(js_obj, int):
+        return int(js_obj)
+    if isinstance(js_obj, float):
+        return float(js_obj)
+    if isinstance(js_obj, dict):
+        return {str(k): _js_to_py_safe(v) for k, v in js_obj.items()}
+    if isinstance(js_obj, list):
+        return [_js_to_py_safe(x) for x in js_obj]
     try:
-        is_arr = False
-        try:
-            is_arr = bool(window.Array.isArray(js_obj))
-        except:
-            is_arr = False
-        if is_arr:
-            result = []
+        if window.Array.isArray(js_obj):
+            out = []
             ln = int(js_obj.length)
             for i in range(ln):
-                try:
-                    result.append(_js_to_py_safe(js_obj[i]))
-                except:
-                    result.append(None)
-            return result
-        # object
-        try:
-            keys = window.Object.keys(js_obj)
-            result = {}
-            kl = int(keys.length)
-            for idx in range(kl):
-                try:
-                    k = keys[idx]
-                    result[str(k)] = _js_to_py_safe(js_obj[k])
-                except:
-                    continue
-            return result
-        except:
-            pass
-    except Exception as e:
-        try:
-            window.console.log("[_js_to_py_safe] error", str(e))
-        except:
-            pass
+                out.append(_js_to_py_safe(js_obj[i]))
+            return out
+    except:
+        pass
+    try:
+        keys = window.Object.keys(js_obj)
+        kl = int(keys.length)
+        out = {}
+        for idx in range(kl):
+            k = keys[idx]
+            out[str(k)] = _js_to_py_safe(js_obj[k])
+        return out
+    except:
+        pass
     try:
         s = str(js_obj)
-        if "e" in s.lower() or s.replace(".","",1).replace("-","",1).isdigit():
-            try:
-                return float(s)
-            except:
-                pass
-        return s
+        try:
+            return float(s)
+        except:
+            return s
     except:
         return None
 
 def _sync_debug_signals():
     try:
-        import json as _j
-        window._bgs_signals_json = _j.dumps(_signals_store)
+        window._bgs_signals_json = py_json.dumps(_signals_store)
     except:
         window._bgs_signals_json = "{}"
     try:
@@ -137,10 +127,7 @@ def _on_datastar_patch(evt):
     if not isinstance(patch, dict):
         return
     if only_if_missing:
-        filtered = {}
-        for k, v in patch.items():
-            if v is not None:
-                filtered[k] = v
+        filtered = {k: v for k, v in patch.items() if v is not None}
         if not filtered:
             return
         _merge_if_missing(_signals_store, filtered)
@@ -185,11 +172,7 @@ def attach_to_eventsource(es):
         if _attached_es and es == _attached_es:
             return
     except:
-        try:
-            if _attached_es == es:
-                return
-        except:
-            pass
+        pass
     if _attached_es:
         try:
             _attached_es.removeEventListener("datastar-patch-signals", _on_datastar_patch)
