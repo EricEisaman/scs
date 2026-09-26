@@ -20,8 +20,8 @@ class Handler(SimpleHTTPRequestHandler):
     def end_headers(self):
         origin = self.get_cors_origin()
         self.send_header('Access-Control-Allow-Origin', origin)
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE, PATCH')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, X-Client-ID')
         self.send_header('Access-Control-Allow-Credentials', 'true')
         self.send_header('Vary', 'Origin')
         if self.path.endswith('.py') or self.path.endswith('.html'):
@@ -44,26 +44,35 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.write(b'ok')
             return
         
-        if path.startswith('/api/'):
+        if path.startswith('/api/multiplayer/join'):
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
+            cid = f"client_{os.urandom(4).hex()}"
+            sid = f"sess_{os.urandom(4).hex()}"
             resp = {
-                "peer_id": f"peer_{os.urandom(4).hex()}",
-                "room": "default",
+                "client_id": cid,
+                "session_id": sid,
+                "peer_id": cid,
+                "room": "level1",
                 "status": "ok"
             }
             self.wfile.write(json.dumps(resp).encode())
             return
         
-        # Favicon handling - serve from root regardless of /scs/ prefix or .ico/.png
+        if path.startswith('/api/'):
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            resp = {"status": "ok"}
+            self.wfile.write(json.dumps(resp).encode())
+            return
+        
         if 'favicon' in path_lower:
-            # Try root favicon.png, favicon.ico, scs.jpg, etc.
             for candidate in ['favicon.png', 'favicon.ico', 'scs.jpg', 'scs.png']:
                 if Path(candidate).exists():
                     self.path = f'/{candidate}'
                     break
-            # Also handle /scs/favicon.png -> /favicon.png
             if path_lower in ('/scs/favicon.png', '/scs/favicon.ico', '/favicon.png', '/favicon.ico'):
                 for candidate in ['favicon.png', 'favicon.ico']:
                     if Path(candidate).exists():
@@ -82,6 +91,32 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         
+        if path.startswith('/api/multiplayer/join'):
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length else b''
+            try:
+                data = json.loads(body) if body else {}
+            except:
+                data = {}
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            
+            cid = f"client_{os.urandom(4).hex()}"
+            sid = f"sess_{os.urandom(4).hex()}"
+            resp = {
+                "client_id": cid,
+                "session_id": sid,
+                "peer_id": cid,
+                "clientId": cid,
+                "sessionId": sid,
+                "room": data.get("environment_name", "level1"),
+                "status": "ok"
+            }
+            self.wfile.write(json.dumps(resp).encode())
+            return
+        
         if path.startswith('/api/'):
             content_length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_length) if content_length else b''
@@ -91,8 +126,6 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             
             resp = {
-                "peer_id": f"peer_{os.urandom(4).hex()}",
-                "room": "default",
                 "status": "ok",
                 "received": len(body)
             }
@@ -101,6 +134,23 @@ class Handler(SimpleHTTPRequestHandler):
         
         self.send_response(404)
         self.end_headers()
+    
+    def do_PATCH(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        
+        if path.startswith('/api/'):
+            content_length = int(self.headers.get('Content-Length', 0))
+            self.rfile.read(content_length)
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "ok"}).encode())
+            return
+        
+        self.send_response(404)
+        self.end_headers()
 
-print(f'Serving ALL static + favicon + API + /healthz on {PORT}')
+print(f'Serving ALL static + favicon + API + /healthz on {PORT} with client_id/session_id')
 HTTPServer(('0.0.0.0', PORT), Handler).serve_forever()
