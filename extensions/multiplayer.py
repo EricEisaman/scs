@@ -22,10 +22,11 @@ class MultiplayerClient:
                 payload = {"environment_name": self.environment_name, "character_name": self.character_name}
                 body = window.JSON.stringify(payload)
                 js_opts = {"method": "POST", "headers": {"Content-Type": "application/json"}, "body": body}
+                opts = js_opts
                 try:
                     opts = window.JSON.parse(window.JSON.stringify(js_opts))
                 except:
-                    opts = js_opts
+                    pass
                 resp = await window.fetch(url, opts)
                 if not resp.ok:
                     txt = ""
@@ -33,24 +34,13 @@ class MultiplayerClient:
                         txt = await resp.text()
                     except:
                         pass
-                    raise RuntimeError("join HTTP " + str(resp.status) + ": " + txt[:500])
+                    raise RuntimeError("join HTTP " + str(resp.status))
                 js_data = await resp.json()
+                # Simple JSON round-trip - avoids resolve_local bug
                 try:
-                    data = {}
-                    keys = window.Object.keys(js_data)
-                    for i in range(len(keys)):
-                        k = keys[i]
-                        try:
-                            data[k] = js_data[k]
-                        except:
-                            continue
-                    if not data:
-                        data = py_json.loads(window.JSON.stringify(js_data))
+                    data = py_json.loads(window.JSON.stringify(js_data))
                 except:
-                    try:
-                        data = py_json.loads(window.JSON.stringify(js_data))
-                    except:
-                        data = {}
+                    data = {}
                 cid = data.get("client_id")
                 sid = data.get("session_id")
                 is_sync = data.get("is_synchronizer", False)
@@ -65,16 +55,20 @@ class MultiplayerClient:
                     try:
                         es_obj = window.EventSource.new(stream_url)
                     except:
-                        es_obj = window.EventSource(stream_url)
+                        try:
+                            es_obj = window.EventSource(stream_url)
+                        except:
+                            es_obj = None
                     self._es = es_obj
-                    try:
-                        window._bgs_es = es_obj
-                    except:
-                        pass
+                    if es_obj is not None:
+                        try:
+                            window._bgs_es = es_obj
+                        except:
+                            pass
                 except:
                     pass
                 return {"client_id": cid, "session_id": sid, "is_synchronizer": bool(is_sync), "environment_name": data.get("environment_name", self.environment_name)}
             except Exception as ex:
                 last_exc = ex
                 await aio.sleep(1.0 * (attempt + 1))
-        raise last_exc or RuntimeError("join failed - NO FALLBACK")
+        raise last_exc or RuntimeError("join failed")

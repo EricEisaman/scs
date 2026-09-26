@@ -1,41 +1,10 @@
 from browser import window
+import json as py_json
 
 if not hasattr(window, "_bgs_signals"):
     window._bgs_signals = {}
 if not hasattr(window, "_bgs_es"):
     window._bgs_es = None
-
-def _js_to_py(js_val, depth=0):
-    if depth > 20:
-        return None
-    try:
-        if js_val is None:
-            return None
-        if isinstance(js_val, (str, int, float, bool)):
-            return js_val
-        if isinstance(js_val, dict):
-            return {k: _js_to_py(v, depth+1) for k, v in js_val.items()}
-        if isinstance(js_val, (list, tuple)):
-            return [_js_to_py(x, depth+1) for x in js_val]
-        try:
-            if window.Array.isArray(js_val):
-                return [_js_to_py(js_val[i], depth+1) for i in range(int(js_val.length))]
-        except:
-            pass
-        try:
-            keys = window.Object.keys(js_val)
-            result = {}
-            for i in range(len(keys)):
-                k = keys[i]
-                try:
-                    result[k] = _js_to_py(js_val[k], depth+1)
-                except:
-                    continue
-            return result
-        except:
-            return js_val
-    except:
-        return None
 
 def _merge_patch(target, patch):
     if patch is None:
@@ -44,13 +13,15 @@ def _merge_patch(target, patch):
         return patch
     if not isinstance(target, dict):
         target = {}
-    for k, v in patch.items():
+    for k in patch:
+        v = patch[k]
         if v is None:
             if k in target:
                 del target[k]
         else:
-            if isinstance(v, dict) and isinstance(target.get(k), dict):
-                target[k] = _merge_patch(target.get(k, {}), v)
+            tv = target.get(k)
+            if isinstance(v, dict) and isinstance(tv, dict):
+                target[k] = _merge_patch(tv, v)
             else:
                 target[k] = v
     return target
@@ -60,70 +31,58 @@ def _on_datastar_patch(evt):
         raw = evt.data
         if not raw:
             return
-        try:
-            lines = raw.splitlines()
-            if len(lines) == 0:
-                lines = [raw]
-        except:
-            lines = [raw]
+        lines = raw.split("\n")
+        # Handle both \n joined and actual newlines
+        tmp = []
+        for l in lines:
+            tmp.extend(l.splitlines())
+        lines = tmp
         signal_line = None
         only_if_missing = False
         for line in lines:
             if not isinstance(line, str):
                 continue
-            stripped = line.strip()
-            if stripped.startswith("signals "):
-                signal_line = stripped[8:].strip()
-            elif stripped.startswith("signals"):
-                idx = stripped.find("{")
+            s = line.strip()
+            if s.startswith("signals "):
+                signal_line = s[8:].strip()
+            elif s.startswith("signals"):
+                idx = s.find("{")
                 if idx != -1:
-                    signal_line = stripped[idx:].strip()
-            elif "onlyIfMissing" in stripped and "true" in stripped.lower():
+                    signal_line = s[idx:].strip()
+            if "onlyIfMissing" in s and "true" in s.lower():
                 only_if_missing = True
         if not signal_line:
-            try:
-                for l in lines:
-                    if "{" in l:
-                        start = l.find("{")
-                        signal_line = l[start:].strip()
-                        if "onlyIfMissing" in signal_line:
-                            signal_line = signal_line[:signal_line.find("onlyIfMissing")].strip()
-                        break
-            except:
-                pass
+            for l in lines:
+                if "{" in l:
+                    idx = l.find("{")
+                    signal_line = l[idx:].strip()
+                    break
         if not signal_line:
             return
         try:
             js_parsed = window.JSON.parse(signal_line)
+            data = py_json.loads(window.JSON.stringify(js_parsed))
         except:
             return
-        try:
-            keys = window.Object.keys(js_parsed)
-            for i in range(len(keys)):
-                k = keys[i]
-                try:
-                    v = js_parsed[k]
-                    if v is None:
-                        try:
-                            if k in window._bgs_signals:
-                                del window._bgs_signals[k]
-                        except:
-                            window._bgs_signals[k] = None
-                        continue
-                    if only_if_missing and k in window._bgs_signals:
-                        continue
-                    py_v = _js_to_py(v)
-                    if py_v is None:
-                        continue
-                    existing = window._bgs_signals.get(k)
-                    if isinstance(existing, dict) and isinstance(py_v, dict):
-                        window._bgs_signals[k] = _merge_patch(existing, py_v)
-                    else:
-                        window._bgs_signals[k] = py_v
-                except:
+        for k in data:
+            try:
+                v = data[k]
+                if v is None:
+                    try:
+                        if k in window._bgs_signals:
+                            del window._bgs_signals[k]
+                    except:
+                        pass
                     continue
-        except:
-            pass
+                if only_if_missing and k in window._bgs_signals:
+                    continue
+                existing = window._bgs_signals.get(k)
+                if isinstance(existing, dict) and isinstance(v, dict):
+                    window._bgs_signals[k] = _merge_patch(existing, v)
+                else:
+                    window._bgs_signals[k] = v
+            except:
+                continue
     except:
         pass
 
@@ -131,10 +90,7 @@ def get_signal(name, default=None):
     try:
         return window._bgs_signals.get(name, default)
     except:
-        try:
-            return window._bgs_signals[name]
-        except:
-            return default
+        return default
 
 def is_connected():
     try:
@@ -148,6 +104,7 @@ def is_connected():
 def attach_to_eventsource(es):
     try:
         es.addEventListener("datastar-patch-signals", _on_datastar_patch)
+        es.addEventListener("multiplayer-snapshot", _on_datastar_patch)
         window._bgs_es = es
     except:
         pass
