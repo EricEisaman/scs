@@ -1,13 +1,13 @@
 # apps/platformer_bgs.py - v0.1.10 CLEAN TRANSPORT - follows detailed review
-# Version: 0.1.11 - 60Hz networking - 16ms PATCH
+# Version: 0.1.12 - 60Hz networking - STRICT NO FALLBACK INITIATION
 # Transport model: Option B - Brython owns realtime multiplayer via custom SSE + 60Hz PATCH (16ms)
 # Server sends datastar-patch-signals for compat, we parse per spec: multi-line data, onlyIfMissing, null=remove, merge-patch
 
 from scs import *
 from browser import window, aio
 
-__version__ = "0.1.11"
-__build__ = "2026-09-26-v0.1.11-60hz-networking"
+__version__ = "0.1.12"
+__build__ = "2026-09-26-v0.1.12-no-fallback-initiation"
 
 try:
     from browser import window as _w
@@ -279,9 +279,10 @@ class RemoteVisual:
         self.target_pos = None
         self.interp_t = 0.0
 
-# Single transport owner - no unused ds_ext
+# STRICT INITIATION - NO FALLBACK ALLOWED per spec
 MULTIPLAYER_ENABLED = False
 USING_FALLBACK_MP = False
+MultiplayerClient = None
 try:
     import extensions.multiplayer as mp_ext
     if not hasattr(mp_ext, 'MultiplayerClient'):
@@ -289,103 +290,24 @@ try:
     MultiplayerClient = mp_ext.MultiplayerClient
     MULTIPLAYER_ENABLED = True
     try:
-        window.console.log("[BGS] using extensions.multiplayer")
+        window.console.log("[BGS] using extensions.multiplayer - STRICT, NO FALLBACK")
     except:
         pass
 except Exception as e:
+    # NO FALLBACK FOR INITIATION - fail hard
+    MULTIPLAYER_ENABLED = False
+    USING_FALLBACK_MP = False
+    MultiplayerClient = None
     try:
-        window.console.warn("[BGS] extensions.multiplayer import failed, using fallback", e)
+        window.console.error("[BGS] extensions.multiplayer import failed - NO FALLBACK, initiation aborted", e)
     except:
-        print(f"[BGS] mp_ext import failed: {e}")
-    MULTIPLAYER_ENABLED = True
-    USING_FALLBACK_MP = True
+        print(f"[BGS] FATAL: mp_ext import failed, no fallback allowed: {e}")
+    # Do NOT define fallback class
     class MultiplayerClient:
-        def __init__(self, base_url="https://scs-207.onrender.com", environment="level1", environment_name=None, character_name="Player", **kw):
-            self.base_url = base_url.rstrip("/")
-            self.environment_name = environment_name or environment or "level1"
-            self.character_name = kw.get("character_name", character_name) or "Player"
-            self.client_id = None
-            self.session_id = None
-        async def join(self, retries=3):
-            base_url = self.base_url
-            for attempt in range(retries):
-                try:
-                    url = base_url + "/api/multiplayer/join"
-                    payload = {"environment_name": self.environment_name, "character_name": self.character_name}
-                    body = window.JSON.stringify(payload)
-                    js_opts = {"method":"POST","headers":{"Content-Type":"application/json"},"body":body}
-                    try:
-                        opts = window.JSON.parse(window.JSON.stringify(js_opts))
-                    except Exception as e:
-                        try:
-                            window.console.warn("[BGS] opts JSON roundtrip failed", e)
-                        except:
-                            pass
-                        opts = js_opts
-                    resp = await window.fetch(url, opts)
-                    if not resp.ok:
-                        txt = ""
-                        try:
-                            txt = await resp.text()
-                        except Exception as e:
-                            try:
-                                window.console.warn("[BGS] resp.text() failed", e)
-                            except:
-                                pass
-                        raise Exception(f"join HTTP {resp.status}: {txt[:200]}")
-                    js_data = await resp.json()
-                    data = _js_to_py_safe(js_data)
-                    if not data:
-                        try:
-                            data = py_json.loads(window.JSON.stringify(js_data))
-                        except Exception as e:
-                            try:
-                                window.console.warn("[BGS] fallback loads failed", e)
-                            except:
-                                pass
-                            data = {}
-                    cid = data.get("client_id") if isinstance(data, dict) else None
-                    sid = data.get("session_id") if isinstance(data, dict) else None
-                    if not cid or not sid:
-                        raise Exception(f"missing ids in {data}")
-                    self.client_id = cid
-                    self.session_id = sid
-                    try:
-                        stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
-                        es_obj = None
-                        try:
-                            es_obj = window.EventSource.new(stream_url)
-                        except Exception as e1:
-                            try:
-                                window.console.warn(f"[BGS] EventSource.new failed {e1}, trying direct call")
-                                es_obj = window.EventSource(stream_url)
-                            except Exception as e2:
-                                try:
-                                    window.console.error(f"[BGS] EventSource creation failed {e1} / {e2}")
-                                except:
-                                    pass
-                                raise e2
-                        window._bgs_es = es_obj
-                        if es_obj:
-                            es_obj.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
-                            es_obj.addEventListener("multiplayer-snapshot", _bgs_on_datastar_patch)
-                            try:
-                                window.console.log(f"[BGS] EventSource opened {stream_url}")
-                            except:
-                                pass
-                    except Exception as e:
-                        try:
-                            window.console.error("[BGS] EventSource setup failed", e)
-                        except:
-                            print(f"[BGS] EventSource setup failed {e}")
-                    return data
-                except Exception as ex:
-                    try:
-                        window.console.error(f"[BGS] join fail {attempt+1}", ex)
-                    except:
-                        print(f"[BGS] join fail {attempt+1}: {ex}")
-                    await aio.sleep(1.5)
-            return {"client_id": None, "session_id": None, "local_demo": True, "is_synchronizer": False}
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("NO FALLBACK FOR INITIATION - extensions.multiplayer required")
+        async def join(self, *args, **kwargs):
+            raise RuntimeError("NO FALLBACK FOR INITIATION - extensions.multiplayer required")
 
 def clamp(v, lo, hi):
     return lo if v < lo else hi if v > hi else v
