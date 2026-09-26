@@ -14,58 +14,35 @@ class FetchResponse:
         except:
             self.statusText = ""
     async def json(self):
-        js_value = await self._js.json()
-        json_text = window.JSON.stringify(js_value)
-        try:
-            return py_json.loads(json_text)
-        except Exception as exc:
-            try:
-                window.console.error("[fetch] JSON conversion failed", exc, json_text[:500])
-            except:
-                pass
-            raise
+        # Old working: return JS data directly, no conversion - let app convert
+        js_data = await self._js.json()
+        return js_data
     async def text(self):
-        try:
-            return await self._js.text()
-        except Exception as exc:
-            try:
-                window.console.error("[fetch] text() failed", exc)
-            except:
-                pass
-            raise
+        return await self._js.text()
 
 async def fetch(url, method="GET", headers=None, body=None):
-    options = {"method": method}
-    if headers != None:
-        options["headers"] = headers
+    opts = {"method": method}
+    if headers:
+        opts["headers"] = headers
     if body != None:
-        options["body"] = body
-    try:
-        js_response = await window.fetch(url, options)
-    except Exception as exc:
-        try:
-            window.console.error("[fetch] window.fetch threw", exc, url)
-        except:
-            pass
-        raise FetchError(f"fetch failed {url}: {exc}")
-    return FetchResponse(js_response)
+        opts["body"] = body
+    js_resp = await window.fetch(url, opts)
+    return FetchResponse(js_resp)
 
 async def fetch_json(url):
-    response = await fetch(url)
-    if not response.ok:
-        try:
-            txt = await response.text()
-        except:
-            txt = ""
-        raise FetchError(f"fetch_json HTTP {response.status} {response.statusText} {txt[:200]} url={url}")
-    return await response.json()
+    resp = await fetch(url)
+    if not resp.ok:
+        raise FetchError(f"HTTP {resp.status}")
+    js_data = await resp.json()
+    # Convert here with one-shot
+    try:
+        return py_json.loads(window.JSON.stringify(js_data))
+    except:
+        # Fallback to js_data if conversion fails
+        return js_data
 
 async def fetch_text(url):
-    response = await fetch(url)
-    if not response.ok:
-        try:
-            txt = await response.text()
-        except:
-            txt = ""
-        raise FetchError(f"fetch_text HTTP {response.status} {response.statusText} {txt[:200]} url={url}")
-    return await response.text()
+    resp = await fetch(url)
+    if not resp.ok:
+        raise FetchError(f"HTTP {resp.status}")
+    return await resp.text()
