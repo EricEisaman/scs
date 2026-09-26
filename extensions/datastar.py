@@ -1,4 +1,3 @@
-
 from browser import window
 import json as py_json
 
@@ -13,8 +12,6 @@ if not hasattr(window, "_bgs_signals_json"):
     window._bgs_signals_json = "{}"
 
 def _js_to_py_safe(js_obj):
-    # e-15 SAFE: never use py_json.loads on datastar patches
-    # Manual conversion handles 1e-15 floats that break Brython json
     try:
         if js_obj is None:
             return None

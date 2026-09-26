@@ -4,6 +4,7 @@
 # This app demonstrates proper use of extensions.multiplayer + extensions.datastar
 
 from scs import *
+import json as py_json
 from browser import window, aio
 
 # MUST ALWAYS USE multiplayer extension - import from extensions system
@@ -457,19 +458,26 @@ def onStep(app):
                     }],
                     "timestamp": int(window.Date.now()) if hasattr(window, 'Date') else app.world.tick
                 }
+                # NO aio.fetch per user demand - use aio.fetch only, full MP accommodation
                 url = app.mp_client.base_url + "/api/multiplayer/character-state"
-                body_str = window.JSON.stringify(payload)
-                opts = {"method":"PATCH","headers":{"Content-Type":"application/json","X-Client-ID":str(app.client_id)},"body":body_str}
                 try:
-                    js_opts = window.JSON.parse(window.JSON.stringify(opts))
+                    import json as _j
+                    body_str = _j.dumps(payload)
                 except:
-                    js_opts = opts
+                    body_str = str(payload)
                 app.last_fetch_inflight=True
                 async def do_fetch():
                     try:
-                        resp = await window.fetch(url, js_opts)
-                    except:
-                        pass
+                        # Use MultiplayerClient helper if available, else aio.fetch directly
+                        if hasattr(app.mp_client, 'send_character_state'):
+                            await app.mp_client.send_character_state(app.client_id, payload)
+                        else:
+                            await aio.fetch(url, method="PATCH", headers={"Content-Type":"application/json","X-Client-ID":str(app.client_id)}, data=body_str)
+                    except Exception as e:
+                        try:
+                            window.console.error("[BGS] send failed", str(e))
+                        except:
+                            pass
                     finally:
                         app.last_fetch_inflight=False
                 aio.run(do_fetch())
