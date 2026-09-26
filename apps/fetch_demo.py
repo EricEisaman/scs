@@ -1,24 +1,22 @@
-# apps/fetch_demo.py - WORKING VERSION from Sage-ec/scs README - minimal, no list comps in async
+# apps/fetch_demo.py - FIXED v0.3.1 - NO local imports in async
 from scs import *
 from extensions.fetch import fetch_json
-from browser import aio
+from browser import aio, window
+import json as py_json
 
-__version__ = "0.3.0-simple"
-__build__ = "2026-09-26-simple-readme"
+__version__ = "0.3.1-no-local-import"
+__build__ = "2026-09-26-no-local-import-anywhere"
 
 try:
-    from browser import window
-    window.console.log("[fetch_demo] SIMPLE README VERSION")
+    window.console.log("[fetch_demo] SIMPLE README VERSION - NO LOCAL IMPORTS")
 except:
     pass
 
 def parse_poem(raw):
-    # Model helper - pure, outside async to avoid resolve_local bug
     if isinstance(raw, list):
         data = raw[0]
     else:
         data = raw
-    # Handle both dict and JS object
     try:
         title = data.get("title", "Untitled") if isinstance(data, dict) else data["title"]
     except:
@@ -49,7 +47,6 @@ async def load_poem(app):
         app.poem = parse_poem(data)
     except Exception as e:
         try:
-            from browser import window
             window.console.error("[fetch_demo] load failed", e)
         except:
             pass
@@ -87,20 +84,22 @@ def redrawAll(app):
         drawLabel("by " + poem.get("author", ""), app.width//2, 110, size=14, fill=rgb(200,220,255))
         y = 150
         lines = poem.get("lines", [])
-        # Avoid list comp in async, but here in redrawAll it's sync - safe, but keep simple loop
-        for i in range(min(len(lines), 20)):
-            line = lines[i]
+        # Use simple for loop, no range(len()) complex that might trigger resolve_local in sync is okay, but keep safe
+        count = 0
+        for line in lines:
+            if count >= 20:
+                break
             drawLabel(str(line), app.width//2, y, size=12, fill=rgb(220,220,220))
             y += 22
+            count += 1
         drawLabel("Press R / SPACE / Click for new poem", app.width//2, app.height-30, size=12, fill=rgb(150,150,150))
-        drawLabel("v0.3.0 SIMPLE - works on Sage-ec/scs", app.width//2, app.height-15, size=8, fill=rgb(100,255,100))
+        drawLabel("v0.3.1 NO LOCAL IMPORTS", app.width//2, app.height-15, size=8, fill=rgb(100,255,100))
 
 def run():
     try:
         runApp(1050, 700)
     except Exception as e:
         try:
-            from browser import window
             window.console.error("[fetch_demo] runApp failed", e)
         except:
             pass
