@@ -388,6 +388,7 @@ def onAppStart(app):
     app.mp_client=None
     app.datastar_connected=False
     app.remote_players={}  # clientId -> CharacterState dict
+    app.remote_visuals={}  # clientId -> remote rendering state
     app.authority={}  # instanceId -> ownerId
     app.last_send_ms=0
 
