@@ -1,4 +1,4 @@
-# extensions.py - v3.0.24 - FIX e-15 without py_json.loads
+# extensions.py - v3.0.25 - FIX module callable + e-15 SAFE
 import sys, types
 from browser import window
 
@@ -9,45 +9,34 @@ except:
     sys.modules['extensions'] = _ext_pkg
 
 def _js_to_py_safe(js_obj):
-    # Safe conversion that NEVER uses py_json.loads - for datastar patches with e-15
     try:
         if js_obj is None:
             return None
     except:
         pass
     try:
-        # JS null is stringified as "null"
         if window.JSON.stringify(js_obj) == "null":
             return None
     except:
         pass
+    if isinstance(js_obj, (str, int, float, bool)):
+        return js_obj
     try:
-        t = window.typeof(js_obj)
-    except:
-        t = ""
-    if t == "number":
+        is_arr = False
         try:
-            # float(str()) handles e-15
-            return float(str(js_obj))
+            is_arr = bool(window.Array.isArray(js_obj))
         except:
-            return 0.0
-    if t == "string":
-        return str(js_obj)
-    if t == "boolean":
-        return bool(js_obj)
-    if t == "object":
+            is_arr = False
+        if is_arr:
+            result = []
+            ln = int(js_obj.length)
+            for i in range(ln):
+                try:
+                    result.append(_js_to_py_safe(js_obj[i]))
+                except:
+                    result.append(None)
+            return result
         try:
-            # Check if array
-            if bool(window.Array.isArray(js_obj)):
-                result = []
-                ln = int(js_obj.length)
-                for i in range(ln):
-                    try:
-                        result.append(_js_to_py_safe(js_obj[i]))
-                    except:
-                        result.append(None)
-                return result
-            # Object
             keys = window.Object.keys(js_obj)
             result = {}
             kl = int(keys.length)
@@ -58,15 +47,25 @@ def _js_to_py_safe(js_obj):
                 except:
                     continue
             return result
-        except Exception as e:
+        except:
+            pass
+    except Exception as e:
+        try:
+            window.console.log("[_js_to_py_safe] error", str(e))
+        except:
+            pass
+    try:
+        s = str(js_obj)
+        if "e" in s.lower() or s.replace(".","",1).replace("-","",1).isdigit():
             try:
-                window.console.log("[_js_to_py_safe] fallback error", str(e))
+                return float(s)
             except:
                 pass
-    return None
+        return s
+    except:
+        return None
 
 def _js_to_py_simple(js_obj):
-    # For fetch - uses window.JSON roundtrip but with Python float handling
     try:
         if js_obj is None:
             return None
@@ -77,34 +76,40 @@ def _js_to_py_simple(js_obj):
             return None
     except:
         pass
+    if isinstance(js_obj, (str, int, float, bool)):
+        return js_obj
     try:
-        t = window.typeof(js_obj)
-        if t == "number":
-            return float(str(js_obj))
-        if t == "string":
-            return str(js_obj)
-        if t == "boolean":
-            return bool(js_obj)
-    except:
-        pass
-    try:
-        # For PoetryDB, data is simple, use direct JS to Python via iteration
-        if bool(window.Array.isArray(js_obj)):
+        is_arr = False
+        try:
+            is_arr = bool(window.Array.isArray(js_obj))
+        except:
+            is_arr = False
+        if is_arr:
             res = []
             for i in range(int(js_obj.length)):
                 res.append(_js_to_py_simple(js_obj[i]))
             return res
-        # Check if object
-        if window.typeof(js_obj) == "object":
+        try:
             keys = window.Object.keys(js_obj)
             res = {}
             for idx in range(int(keys.length)):
                 k = keys[idx]
                 res[str(k)] = _js_to_py_simple(js_obj[k])
             return res
-    except Exception:
+        except:
+            pass
+    except:
         pass
-    return js_obj
+    try:
+        s = str(js_obj)
+        if "e" in s.lower() or s.replace(".","",1).replace("-","",1).isdigit():
+            try:
+                return float(s)
+            except:
+                pass
+        return s
+    except:
+        return js_obj
 
 def _parse_join_data(js_data):
     cid = None
@@ -403,6 +408,6 @@ except:
     pass
 
 try:
-    window.console.log("[extensions.py] v3.0.24 FIX e-15 SAFE - no py_json.loads")
+    window.console.log("[extensions.py] v3.0.25 FIX module callable + e-15 SAFE")
 except:
     pass

@@ -22,30 +22,25 @@ def _js_to_py_safe(js_obj):
             return None
     except:
         pass
+    if isinstance(js_obj, (str, int, float, bool)):
+        return js_obj
     try:
-        t = window.typeof(js_obj)
-    except:
-        t = ""
-    if t == "number":
+        is_arr = False
         try:
-            return float(str(js_obj))
+            is_arr = bool(window.Array.isArray(js_obj))
         except:
-            return 0.0
-    if t == "string":
-        return str(js_obj)
-    if t == "boolean":
-        return bool(js_obj)
-    if t == "object":
+            is_arr = False
+        if is_arr:
+            result = []
+            ln = int(js_obj.length)
+            for i in range(ln):
+                try:
+                    result.append(_js_to_py_safe(js_obj[i]))
+                except:
+                    result.append(None)
+            return result
+        # object
         try:
-            if bool(window.Array.isArray(js_obj)):
-                result = []
-                ln = int(js_obj.length)
-                for i in range(ln):
-                    try:
-                        result.append(_js_to_py_safe(js_obj[i]))
-                    except:
-                        result.append(None)
-                return result
             keys = window.Object.keys(js_obj)
             result = {}
             kl = int(keys.length)
@@ -56,12 +51,23 @@ def _js_to_py_safe(js_obj):
                 except:
                     continue
             return result
-        except Exception as e:
+        except:
+            pass
+    except Exception as e:
+        try:
+            window.console.log("[_js_to_py_safe] error", str(e))
+        except:
+            pass
+    try:
+        s = str(js_obj)
+        if "e" in s.lower() or s.replace(".","",1).replace("-","",1).isdigit():
             try:
-                window.console.log("[_js_to_py_safe] error", str(e))
+                return float(s)
             except:
                 pass
-    return None
+        return s
+    except:
+        return None
 
 def _sync_debug_signals():
     try:

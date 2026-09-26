@@ -5,42 +5,72 @@ class FetchError(RuntimeError):
     pass
 
 def _js_to_py_simple(js_obj):
+    # Avoid window.typeof - use Python isinstance and JS Array check only
     try:
         if js_obj is None:
             return None
     except:
         pass
     try:
+        # JS null check
         if window.JSON.stringify(js_obj) == "null":
             return None
     except:
         pass
+    # Python primitives already converted by Brython
+    if isinstance(js_obj, (str, int, float, bool)):
+        return js_obj
+    # JS primitives that are still JS objects - convert via str
     try:
-        t = window.typeof(js_obj)
-        if t == "number":
-            return float(str(js_obj))
-        if t == "string":
-            return str(js_obj)
-        if t == "boolean":
-            return bool(js_obj)
-    except:
-        pass
-    try:
-        if bool(window.Array.isArray(js_obj)):
+        # If it's a JS string, Array.isArray false and not object with keys? 
+        # Try to detect number via converting to float
+        # Use JS to check: if it's array
+        is_arr = False
+        try:
+            is_arr = bool(window.Array.isArray(js_obj))
+        except:
+            is_arr = False
+        if is_arr:
             res = []
-            for i in range(int(js_obj.length)):
-                res.append(_js_to_py_simple(js_obj[i]))
+            ln = int(js_obj.length)
+            for i in range(ln):
+                try:
+                    res.append(_js_to_py_simple(js_obj[i]))
+                except:
+                    res.append(None)
             return res
-        if window.typeof(js_obj) == "object":
+        # If object, try Object.keys
+        try:
             keys = window.Object.keys(js_obj)
+            kl = int(keys.length)
             res = {}
-            for idx in range(int(keys.length)):
+            for idx in range(kl):
                 k = keys[idx]
-                res[str(k)] = _js_to_py_simple(js_obj[k])
+                try:
+                    res[str(k)] = _js_to_py_simple(js_obj[k])
+                except:
+                    continue
             return res
+        except:
+            pass
+    except Exception as e:
+        try:
+            window.console.log("[_js_to_py_simple] error", str(e))
+        except:
+            pass
+    # Fallback: try str conversion for numbers
+    try:
+        # If it's JS number, str() will give scientific notation which Python float can parse
+        s = str(js_obj)
+        # Try float
+        if s.replace(".","",1).replace("-","",1).replace("e","",1).replace("E","",1).replace("+","",1).isdigit() or "e" in s.lower():
+            try:
+                return float(s)
+            except:
+                pass
+        return s
     except:
-        pass
-    return js_obj
+        return js_obj
 
 class FetchResponse:
     def __init__(self, js_response):
