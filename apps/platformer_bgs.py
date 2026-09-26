@@ -1,17 +1,17 @@
 # apps/platformer_bgs.py - v0.1.8 PROPER TRANSPORT OWNERSHIP
-# Version: 0.1.8 - Fixes: eval removal, protocol parsing, expiry, seq, 10Hz, coin spawn, logging
+# Version: 0.1.9 - Fixes: eval removal, protocol parsing, expiry, seq, 10Hz, coin spawn, logging
 # Transport: Custom SSE multiplayer-snapshot owned by Brython (not Datastar signal store)
 # If server sends datastar-patch-signals, we parse correctly: split data lines, handle onlyIfMissing, null=remove
 
 from scs import *
 from browser import window, aio
 
-__version__ = "0.1.8"
-__build__ = "2026-09-26-v0.1.8-clean-transport"
+__version__ = "0.1.9"
+__build__ = "2026-09-26-v0.1.9-es-fix"
 
 try:
     from browser import window as _w
-    _w.console.log(f"[BGS] platformer_bgs.py version {__version__} build {__build__} - CLEAN TRANSPORT OWNERSHIP")
+    _w.console.log(f"[BGS] platformer_bgs.py version {__version__} build {__build__} - ES FIX + CLEAN TRANSPORT")
 except:
     print(f"[BGS] version {__version__}")
 
@@ -221,9 +221,13 @@ except Exception as e:
                 try:
                     url = base_url + "/api/multiplayer/join"
                     payload = {"environment_name": self.environment_name, "character_name": self.character_name}
-                    # SAFE: Use JSON.stringify for body, no eval
                     body = window.JSON.stringify(payload)
-                    opts = window.JSON.parse(window.JSON.stringify({"method":"POST","headers":{"Content-Type":"application/json"},"body":body}))
+                    # Build fetch opts as JS object safely
+                    js_opts = {"method":"POST","headers":{"Content-Type":"application/json"},"body":body}
+                    try:
+                        opts = window.JSON.parse(window.JSON.stringify(js_opts))
+                    except:
+                        opts = js_opts
                     resp = await window.fetch(url, opts)
                     if not resp.ok:
                         txt = ""
@@ -235,35 +239,46 @@ except Exception as e:
                     js_data = await resp.json()
                     data = _js_to_py_safe(js_data)
                     if not data:
-                        data = py_json.loads(window.JSON.stringify(js_data))
-                    cid = data.get("client_id")
-                    sid = data.get("session_id")
+                        try:
+                            data = py_json.loads(window.JSON.stringify(js_data))
+                        except:
+                            data = {}
+                    cid = data.get("client_id") if isinstance(data, dict) else None
+                    sid = data.get("session_id") if isinstance(data, dict) else None
                     if not cid or not sid:
                         raise Exception(f"missing ids in {data}")
                     self.client_id = cid
                     self.session_id = sid
                     try:
-                        # SAFE: No window.eval, construct EventSource via JS interop safely
                         stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
-                        # Use window.EventSource if available via Brython
+                        # SAFE: Brython JS interop - window.EventSource.new()
+                        es_obj = None
                         try:
                             es_obj = window.EventSource.new(stream_url)
-                        except:
-                            # Fallback to JS constructor without eval string concat injection
-                            es_obj = window.eval("new EventSource")(stream_url) if hasattr(window, 'eval') else None
-                            if es_obj is None:
-                                # Last resort: use browser API via new
-                                es_obj = __new__(window.EventSource, stream_url)
+                        except Exception as e1:
+                            try:
+                                # Alternative Brython spelling
+                                es_obj = window.EventSource.new(stream_url)
+                            except Exception as e2:
+                                try:
+                                    window.console.warn(f"[BGS] EventSource.new failed {e1} / {e2}, trying direct")
+                                    # Direct constructor via Brython's JS
+                                    es_obj = window.EventSource(stream_url)
+                                except Exception as e3:
+                                    raise e3
                         window._bgs_es = es_obj
                         if es_obj:
                             es_obj.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
-                            # Also listen for custom event if server uses it
                             es_obj.addEventListener("multiplayer-snapshot", _bgs_on_datastar_patch)
+                            try:
+                                window.console.log(f"[BGS] EventSource opened {stream_url}")
+                            except:
+                                pass
                     except Exception as e:
                         try:
                             window.console.error("[BGS] EventSource create failed", e)
                         except:
-                            pass
+                            print(f"[BGS] EventSource create failed {e}")
                     return data
                 except Exception as ex:
                     try:
