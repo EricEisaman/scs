@@ -13,52 +13,98 @@ window._bgs_signals = {}
 window._bgs_es = None
 
 def _bgs_on_datastar_patch(evt):
+    # FIXED: JS-only parsing, no Brython json.loads that crashes on Dict objects
     try:
         raw = evt.data
         if not raw:
             return
+        # Strip datastar prefix
         if isinstance(raw, str) and raw.startswith("signals "):
             raw = raw[8:]
-        parsed = None
+        # Only use JS JSON.parse - never Brython json.loads on raw datastar payload
         try:
-            import json as _jj
             if isinstance(raw, str):
-                parsed = _jj.loads(raw)
+                js_obj = window.JSON.parse(raw)
             else:
-                parsed = raw
-        except:
+                js_obj = raw
+        except Exception as e:
+            # If parse fails, try to log first 100 chars
             try:
-                if isinstance(raw, str):
-                    parsed = window.JSON.parse(raw)
-                else:
-                    parsed = raw
+                window.console.log(f"[BGS] patch parse fail: {str(e)[:100]} raw={str(raw)[:200]}")
             except:
-                return
+                pass
+            return
+        # Iterate JS object keys safely
         try:
-            if parsed is not None:
+            # js_obj is a JS dict, use Object.keys
+            js_keys = window.Object.keys(js_obj)
+            for i in range(len(js_keys)):
+                k = js_keys[i]
+                v = js_obj[k]
+                # Store JS version directly
                 try:
-                    json_str = window.JSON.stringify(parsed)
-                    import json as _jj2
-                    parsed = _jj2.loads(json_str)
+                    window._bgs_signals[k] = v
                 except:
                     pass
-                if isinstance(parsed, dict):
-                    for kk, vv in parsed.items():
-                        _bgs_signals_py[kk] = vv
-                        try:
-                            window._bgs_signals[kk] = vv
-                        except:
-                            pass
+                # Try to make Python copy via JS JSON roundtrip (safe for simple data)
+                # Skip conversion for complex types that cause Dict.transition error
+                try:
+                    # Only convert if v is JSON-serializable
+                    # Use JS to check type
+                    v_type = window.eval(f"typeof window._bgs_signals['{k}']")
+                    # For all, attempt python conversion via JSON
+                    py_json_str = window.JSON.stringify(v)
+                    # This will be valid JSON string if v is simple
+                    import json as _jj
+                    py_v = _jj.loads(py_json_str)
+                    _bgs_signals_py[k] = py_v
+                except:
+                    # If conversion fails (e.g., circular, Dict object), keep JS ref
+                    # and also store raw JS in py dict as fallback
+                    try:
+                        _bgs_signals_py[k] = v
+                    except:
+                        pass
+        except Exception as e:
+            try:
+                window.console.log(f"[BGS] patch iterate fail: {e}")
+            except:
+                pass
+    except Exception as e:
+        try:
+            window.console.log(f"[BGS] patch outer fail: {e}")
         except:
             pass
-    except:
-        pass
 
 def get_signal(n, d=None):
+    # FIXED: Prefer Python dict, fallback to JS object with conversion
     try:
         if n in _bgs_signals_py:
-            return _bgs_signals_py.get(n, d)
-        return window._bgs_signals.get(n, d)
+            val = _bgs_signals_py.get(n, d)
+            # If val is JS object, try to convert to Python dict for easier use
+            if val is not None:
+                try:
+                    # Check if it's a JS object that needs conversion
+                    if hasattr(val, '__class__') and 'JSObj' in str(type(val)):
+                        py_str = window.JSON.stringify(val)
+                        import json as _jj
+                        return _jj.loads(py_str)
+                except:
+                    pass
+            return val
+    except:
+        pass
+    try:
+        # Try JS signals
+        js_val = window._bgs_signals.get(n, None)
+        if js_val is not None:
+            try:
+                py_str = window.JSON.stringify(js_val)
+                import json as _jj
+                return _jj.loads(py_str)
+            except:
+                return js_val
+        return d
     except:
         try:
             return _bgs_signals_py.get(n, d)
