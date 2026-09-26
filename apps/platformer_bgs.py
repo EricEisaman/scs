@@ -211,27 +211,38 @@ class World:
             if p.x>self.width-40: p.x=self.width-40
             if p.y>self.height+200: p.x,p.y,p.vx,p.vy=p.spawn_x,p.spawn_y,0,0
             
-            # ORIGINAL TRAIL LOGIC WITH OPACITY - direction dependent
+            # FIXED TRAIL LOGIC - drains when idle, no tower
             try:
                 facing = int(p.facing) if p.facing!=0 else 1
                 trail_x = float(p.x) - float(facing) * (float(p.w) * 0.5)
                 trail_y = float(p.y) + float(p.h) * 0.2
-                add = True
-                if p.last_trail_x is not None:
-                    dx = trail_x - p.last_trail_x
-                    dy = trail_y - p.last_trail_y
-                    if math.hypot(dx, dy) < 2.0:
-                        add = False
-                if abs(float(p.vx)) < 0.5 and abs(float(p.vy)) < 0.5:
-                    if random.random() > 0.3:
-                        add = False
+                is_moving = abs(float(p.vx)) > 0.5 or abs(float(p.vy)) > 0.5
+                add = False
+                if is_moving:
+                    if p.last_trail_x is None:
+                        add = True
+                    else:
+                        dx = trail_x - p.last_trail_x
+                        dy = trail_y - p.last_trail_y
+                        if math.hypot(dx, dy) >= 3.0:  # Only add if moved 3px
+                            add = True
+                else:
+                    # FIXED: When standing still, drain trail quickly so no tower after 5 sec
+                    if len(p.trail) > 0:
+                        # Pop 2 per frame when idle = trail clears in ~10 frames (0.16 sec)
+                        p.trail.pop(0)
+                        if len(p.trail) > 0:
+                            p.trail.pop(0)
+                    # Don't add new points when idle
+                    add = False
                 if add:
                     p.trail.append((trail_x, trail_y))
                     p.last_trail_x = trail_x
                     p.last_trail_y = trail_y
             except:
-                p.trail.append((float(p.x), float(p.y)))
-            if len(p.trail)>20: p.trail.pop(0)
+                if abs(float(p.vx)) > 0.5 or abs(float(p.vy)) > 0.5:
+                    p.trail.append((float(p.x), float(p.y)))
+            if len(p.trail)>18: p.trail.pop(0)  # Max 18, was 20
             if p.coin_flash>0: p.coin_flash-=1
             
             if app_ref:
@@ -407,19 +418,34 @@ def onStep(app):
             facing = int(vis.facing) if vis.facing!=0 else 1
             trail_x = px - float(facing) * 15.0
             trail_y = py + 10.0
+            # Check if remote is moving
+            try:
+                vx = float(vel[0]) if 'vel' in locals() else 0
+                vy = float(vel[1]) if 'vel' in locals() else 0
+                is_moving = abs(vx) > 0.5 or abs(vy) > 0.5
+            except:
+                is_moving = True
             should_add = False
-            if vis.last_px is None:
-                should_add = True
-            else:
-                dist = math.hypot(trail_x - vis.last_px, trail_y - vis.last_py) if vis.last_px is not None else 999
-                if dist > 1.5:
+            if is_moving:
+                if vis.last_px is None:
                     should_add = True
+                else:
+                    dist = math.hypot(trail_x - vis.last_px, trail_y - vis.last_py) if vis.last_px is not None else 999
+                    if dist > 3.0:  # Was 1.5, now 3.0 to avoid stacking
+                        should_add = True
+            else:
+                # FIXED: Drain remote trail when idle
+                if len(vis.trail) > 0:
+                    vis.trail.pop(0)
+                    if len(vis.trail) > 0:
+                        vis.trail.pop(0)
             if should_add:
                 vis.trail.append((trail_x, trail_y))
                 vis.last_px = trail_x
                 vis.last_py = trail_y
         except:
-            vis.trail.append((px, py))
+            if len(vis.trail) < app.trail_length:
+                vis.trail.append((px, py))
         if len(vis.trail) > app.trail_length: 
             vis.trail.pop(0)
         vis.blink_phase += 0.05
@@ -483,9 +509,20 @@ def onStep(app):
                 print(f"[BGS] 60Hz send fail {e}")
 
 def drawTrail(trail, color, camera_x, is_local=False, facing=1):
-    # USES OPACITY AS REQUIRED - fading trail with opacity
+    # FIXED: trails half size and fully fade out, no tower when standing
     if not trail or len(trail)==0:
         return
+    # Skip drawing if all points are stacked (player standing still)
+    if len(trail) >= 2:
+        try:
+            # If trail is stacked in same spot, don't draw the tower
+            total_dist = 0
+            for j in range(len(trail)-1):
+                total_dist += math.hypot(trail[j+1][0]-trail[j][0], trail[j+1][1]-trail[j][1])
+            if total_dist < 3.0:  # All points in same spot = standing still, skip
+                return
+        except:
+            pass
     for i in range(len(trail)):
         try:
             tx = float(trail[i][0]); ty = float(trail[i][1])
@@ -494,9 +531,9 @@ def drawTrail(trail, color, camera_x, is_local=False, facing=1):
             y = ty
         except: continue
         t = i / max(1, len(trail)-1)  # 0 oldest (most transparent), 1 newest (opaque)
-        # Opacity fading: oldest 15%, newest 90%
-        opacity = 15 + t * 75  # 15 to 90
-        size = 3 + t * 10
+        # FIXED: opacity 0% -> 75%, size 1.5 -> 5.0 (was 3->13, twice as big)
+        opacity = t * 75  # 0 to 75, oldest invisible
+        size = 1.5 + t * 3.5  # 1.5 to 5.0 radius, was 3 to 13
         try:
             if is_local:
                 # Local: use color with opacity, plus white core with higher opacity for newest
