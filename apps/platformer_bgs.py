@@ -1,7 +1,6 @@
-# apps/platformer_bgs.py - V4.6 - FINAL: visible trails + coin MP + 60Hz server
-# 1. Trail now ULTRA VISIBLE and direction-dependent
-# 2. Coins handled by multiplayer via character-state channel
-# 3. MP server proper 60Hz
+# apps/platformer_bgs.py - FINAL WITH OPACITY - REMOTE TRAIL VISIBLE - EXACT PROP MATCH
+# Uses opacity as required per SCS spec - requires patched scs.py with opacity support
+# Trail is direction-dependent, uses opacity fading, works for both local and remote
 
 from scs import *
 from browser import window, aio
@@ -49,14 +48,12 @@ def get_signal(n, d=None):
 def is_datastar_connected():
     try:
         es = window._bgs_es
-        if not es:
-            return False
-        try:
-            return es.readyState == 1
-        except:
-            return False
-    except:
-        return False
+        if not es: return False
+        try: return es.readyState == 1
+        except: return False
+    except: return False
+
+# Exact prop match per MULTIPLAYER_SYNCH.md §5.1.1
 
 class RemoteVisual:
     def __init__(self, clientId, color):
@@ -64,6 +61,8 @@ class RemoteVisual:
         self.color = color
         self.trail = []
         self.facing = 1
+        self.last_px = None
+        self.last_py = None
         self.blink_phase = random.random()*6.28
         self.is_blinking = False
 
@@ -95,8 +94,7 @@ except Exception as e:
                     data = py_json.loads(window.JSON.stringify(js_data))
                     cid = data.get("client_id")
                     sid = data.get("session_id")
-                    if not cid or not sid:
-                        raise Exception("missing ids")
+                    if not cid or not sid: raise Exception("missing ids")
                     self.client_id = cid
                     self.session_id = sid
                     try:
@@ -104,13 +102,12 @@ except Exception as e:
                         es_obj = window.eval("new EventSource('" + stream_url + "')")
                         window._bgs_es = es_obj
                         es_obj.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
-                    except:
-                        pass
+                    except: pass
                     return data
                 except Exception as ex:
                     print(f"[BGS] join fail {attempt+1}: {ex}")
                     await aio.sleep(1.5)
-            return {"client_id": None, "session_id": None, "local_demo": True}
+            return {"client_id": None, "session_id": None, "local_demo": True, "is_synchronizer": False}
 
 def clamp(v, lo, hi):
     return lo if v < lo else hi if v > hi else v
@@ -126,6 +123,8 @@ class Player:
         self.color=color; self.keys=keys; self.score=0; self.jump_count=0; self.max_jumps=2
         self.coyote_timer=0; self.jump_buffer=0; self.spawn_x=float(x); self.spawn_y=float(y)
         self.trail=[]; self.coin_flash=0
+        self.anim_phase=0.0
+        self.last_trail_x=None; self.last_trail_y=None
 
 class World:
     def __init__(self, width=2400, height=700):
@@ -146,15 +145,16 @@ class World:
             Platform(2370,400,24,700,"wall",rgb(50,50,70)),
         ]
         self.coins=[]
-        for idx, plat in enumerate(self.platforms):
+        for plat in self.platforms:
             if plat.type=="wall" or plat.w>1000: continue
             self.coins.append({
                 "id": f"coin_{len(self.coins)}",
                 "instanceId": f"coin_{len(self.coins)}",
                 "x":float(plat.x),"y":float(plat.y-50),
-                "collected":False,
-                "collectedBy":None,
-                "val":10,"bob":random.random()*6.28
+                "collected":False,"collectedBy":None,"val":10,"bob":random.random()*6.28,
+                "pos": [float(plat.x), float(plat.y-50), 0.0],
+                "rot": [0.0,0.0,0.0,1.0],
+                "isCollected": False
             })
         extras=[(400,300),(900,300),(1200,250),(1800,280)]
         for ex,ey in extras:
@@ -162,9 +162,10 @@ class World:
                 "id": f"coin_{len(self.coins)}",
                 "instanceId": f"coin_{len(self.coins)}",
                 "x":float(ex),"y":float(ey),
-                "collected":False,
-                "collectedBy":None,
-                "val":10,"bob":random.random()*6.28
+                "collected":False,"collectedBy":None,"val":10,"bob":random.random()*6.28,
+                "pos": [float(ex), float(ey), 0.0],
+                "rot": [0.0,0.0,0.0,1.0],
+                "isCollected": False
             })
     def add_player(self, pid, name, color, keys):
         p=Player(pid,name,150+len(self.players)*70,100,color,keys); self.players[pid]=p; return p
@@ -174,6 +175,7 @@ class World:
         if move_x!=0:
             p.vx=move_x*5.8; p.facing=move_x
             if p.on_ground: p.state="run"
+            else: p.state="jump" if p.vy<0 else "fall"
         else:
             p.vx*=self.friction
             if abs(p.vx)<0.2: p.vx=0
@@ -192,6 +194,7 @@ class World:
         for p in list(self.players.values()):
             if not p.on_ground: p.vy+=self.gravity
             p.x+=p.vx; p.y+=p.vy; p.on_ground=False
+            p.anim_phase = (p.anim_phase + 0.05) % 1.0
             px1,py1=p.x-p.w/2,p.y-p.h/2; px2,py2=p.x+p.w/2,p.y+p.h/2
             for plat in self.platforms:
                 bx1,by1=plat.x-plat.w/2,plat.y-plat.h/2; bx2,by2=plat.x+plat.w/2,plat.y+plat.h/2
@@ -208,52 +211,47 @@ class World:
             if p.x>self.width-40: p.x=self.width-40
             if p.y>self.height+200: p.x,p.y,p.vx,p.vy=p.spawn_x,p.spawn_y,0,0
             
-            # TRAIL - direction dependent origin
+            # ORIGINAL TRAIL LOGIC WITH OPACITY - direction dependent
             try:
                 facing = int(p.facing) if p.facing!=0 else 1
-                trail_origin_x = float(p.x) - float(facing) * (float(p.w) * 0.5)
-                trail_origin_y = float(p.y) + float(p.h) * 0.3
-                speed = math.hypot(float(p.vx), float(p.vy))
-                # ALWAYS add when moving, for visibility
-                if speed > 0.3 or abs(float(p.vx)) > 0.5:
-                    p.trail.append((trail_origin_x, trail_origin_y, float(p.vx), float(p.vy)))
-                else:
-                    if p.trail and random.random() < 0.25:
-                        p.trail.pop(0)
+                trail_x = float(p.x) - float(facing) * (float(p.w) * 0.5)
+                trail_y = float(p.y) + float(p.h) * 0.2
+                add = True
+                if p.last_trail_x is not None:
+                    dx = trail_x - p.last_trail_x
+                    dy = trail_y - p.last_trail_y
+                    if math.hypot(dx, dy) < 2.0:
+                        add = False
+                if abs(float(p.vx)) < 0.5 and abs(float(p.vy)) < 0.5:
+                    if random.random() > 0.3:
+                        add = False
+                if add:
+                    p.trail.append((trail_x, trail_y))
+                    p.last_trail_x = trail_x
+                    p.last_trail_y = trail_y
             except:
-                p.trail.append((float(p.x), float(p.y), 0.0, 0.0))
-            
+                p.trail.append((float(p.x), float(p.y)))
             if len(p.trail)>20: p.trail.pop(0)
             if p.coin_flash>0: p.coin_flash-=1
             
-            # COIN COLLECTION - MULTIPLAYER HANDLED
-            # Check against app_ref coin states that include remote collections
             if app_ref:
                 for coin in app_ref.world.coins:
-                    if coin.get("collected"): continue
-                    try:
-                        dx=float(p.x)-float(coin["x"]); dy=float(p.y)-float(coin["y"])
+                    if coin.get("collected") or coin.get("isCollected"): continue
+                    try: dx=float(p.x)-float(coin["x"]); dy=float(p.y)-float(coin["y"])
                     except: continue
                     if abs(dx)<22 and abs(dy)<28:
-                        # Mark locally and add to multiplayer set
                         coin["collected"]=True
+                        coin["isCollected"]=True
                         coin["collectedBy"]=p.id
                         p.score+=coin.get("val",10)
                         p.coin_flash=10
                         if app_ref:
                             app_ref.local_collected_coins.add(coin["id"])
-                            # Try to claim authority if server supports it
-                            try:
-                                if app_ref.client_id:
-                                    # Broadcast coin collection via character-state channel
-                                    # This will be picked up by remote peers in onStep
-                                    pass
-                            except:
-                                pass
 
         for coin in self.coins:
             if not isinstance(coin, dict): continue
             coin["bob"]+=0.08
+            coin["pos"] = [float(coin["x"]), float(coin["y"]), 0.0]
 
 KEYSETS=[
     {"left":"a","right":"d","jump":"w","down":"s"},
@@ -264,13 +262,13 @@ KEYSETS=[
 COLORS=[rgb(255,107,107),rgb(78,205,196),rgb(69,183,209),rgb(249,202,36),rgb(108,92,231),rgb(253,121,168)]
 
 def onAppStart(app):
-    app.width=1050; app.height=700; app.stepsPerSecond=60  # 60Hz
+    app.width=1050; app.height=700; app.stepsPerSecond=60
     app.background=rgb(15,15,30)
     app.world=World(); app.camera_x=0.0; app.keys_held=set(); app.show_help=True
     app.mode="bgs-multiplayer"; app.room_id="level1"; app.client_id=None; app.mp_client=None
     app.datastar_connected=False; app.remote_players={}; app.remote_visuals={}
     app.authority={}; app.last_send_ms=0; app.enable_trails=True; app.trail_length=20
-    app.local_collected_coins=set()  # Multiplayer coin sync
+    app.local_collected_coins=set()
     app.is_host=False
     app.world.add_player("local_0","You",COLORS[0],KEYSETS[0])
     if HAS_MP:
@@ -294,23 +292,22 @@ def onAppStart(app):
             try:
                 res=await app.mp_client.join()
                 cid=res.get("client_id") if isinstance(res, dict) else None
+                is_sync=False
                 if not cid:
                     try:
                         import json as _j
                         d=_j.loads(window.JSON.stringify(res)) if hasattr(window, 'JSON') else {}
                         cid=d.get("client_id")
                         is_sync=d.get("is_synchronizer", False)
-                        app.is_host=is_sync
                     except: 
                         cid=getattr(res, "client_id", None)
-                        app.is_host=getattr(res, "is_synchronizer", False)
+                        is_sync=getattr(res, "is_synchronizer", False)
                 else:
-                    try:
-                        app.is_host=res.get("is_synchronizer", False)
-                    except:
-                        app.is_host=False
+                    try: is_sync=res.get("is_synchronizer", False)
+                    except: is_sync=False
                 app.client_id=cid
-                print(f"[BGS] Joined {app.client_id} host={app.is_host} 60Hz")
+                app.is_host=is_sync
+                print(f"[BGS] Joined {app.client_id} host={app.is_host} - OPACITY TRAIL")
             except Exception as e: print(f"[BGS] Join failed {e}")
         aio.run(join_mp())
 
@@ -322,13 +319,18 @@ def onKeyPress(app, key):
     if key=='h': app.show_help=not app.show_help
     if key=='g':
         app.enable_trails=not app.enable_trails
-        print(f"[BGS] Trails {'ON' if app.enable_trails else 'OFF'}")
     if key=='1' and len(app.world.players)<4:
         idx=len(app.world.players)
         app.world.add_player(f"local_{idx}",f"P{idx+1}",COLORS[idx%len(COLORS)],KEYSETS[idx%len(KEYSETS)])
     if key=='c':
         new_id=f"coin_{len(app.world.coins)}"
-        app.world.coins.append({"id":new_id,"instanceId":new_id,"x":float(random.randint(100,2000)),"y":float(random.randint(100,400)),"collected":False,"collectedBy":None,"val":10,"bob":random.random()*6.28})
+        app.world.coins.append({
+            "id":new_id,"instanceId":new_id,
+            "x":float(random.randint(100,2000)),"y":float(random.randint(100,400)),
+            "collected":False,"isCollected":False,"collectedBy":None,"val":10,"bob":random.random()*6.28,
+            "pos":[float(random.randint(100,2000)), float(random.randint(100,400)), 0.0],
+            "rot":[0.0,0.0,0.0,1.0]
+        })
 
 def onKeyHold(app, keys):
     app.keys_held=set(keys)
@@ -350,30 +352,38 @@ def onStep(app):
                         app.remote_players[cid]=u
                         if cid not in app.remote_visuals:
                             app.remote_visuals[cid]=RemoteVisual(clientId=cid, color=rgb(120,180,255))
-                        # COIN SYNC - handle remote coin collections
                         remote_coins = u.get("collectedCoins", [])
                         if remote_coins:
                             for rc_id in remote_coins:
-                                # Mark local coin as collected if remote collected it
                                 for coin in app.world.coins:
                                     if coin["id"]==rc_id and not coin.get("collected"):
                                         coin["collected"]=True
+                                        coin["isCollected"]=True
                                         coin["collectedBy"]=cid
-                                        print(f"[BGS] Remote {cid} collected {rc_id}")
-            # Also check for dedicated coin-state-update signal if server sends it
-            coin_sig = get_signal("coin-state-update")
-            if coin_sig and isinstance(coin_sig, dict):
-                for c_id, c_state in coin_sig.items():
-                    if c_state.get("collected"):
+            item_sig = get_signal("item-state-update")
+            if item_sig and isinstance(item_sig, dict):
+                updates = item_sig.get("updates", [])
+                collections = item_sig.get("collections", [])
+                for upd in updates:
+                    inst_id = upd.get("instanceId") or upd.get("id")
+                    if upd.get("isCollected"):
                         for coin in app.world.coins:
-                            if coin["id"]==c_id and not coin.get("collected"):
+                            if coin["id"]==inst_id or coin["instanceId"]==inst_id:
+                                if not coin.get("collected"):
+                                    coin["collected"]=True
+                                    coin["isCollected"]=True
+                                    coin["collectedBy"]=upd.get("collectedByClientId","remote")
+                for coll in collections:
+                    inst_id = coll.get("instanceId")
+                    for coin in app.world.coins:
+                        if coin["id"]==inst_id or coin["instanceId"]==inst_id:
+                            if not coin.get("collected"):
                                 coin["collected"]=True
-                                coin["collectedBy"]=c_state.get("by","remote")
+                                coin["isCollected"]=True
+                                coin["collectedBy"]=coll.get("collectedByClientId","remote")
             app.datastar_connected=is_datastar_connected()
-        except Exception as e:
-            # print(f"[BGS] signal parse fail {e}")
+        except:
             pass
-    # Pass app ref for coin handling
     app.world.step(app_ref=app)
 
     for cid, remote in list(app.remote_players.items()):
@@ -382,27 +392,36 @@ def onStep(app):
             vis = RemoteVisual(clientId=cid, color=rgb(120,180,255))
             app.remote_visuals[cid]=vis
         pos = remote.get("position"); vel = remote.get("velocity", [0,0,0])
+        rot = remote.get("rotation", [0,0,0])
         if not pos or len(pos)<2: continue
         try:
             px = float(pos[0]); py = float(pos[1])
             vx = float(vel[0]) if len(vel)>0 else 0.0
-            vy = float(vel[1]) if len(vel)>1 else 0.0
+            yaw = float(rot[1]) if len(rot)>1 else 0.0
+            if abs(vx) > 0.3:
+                vis.facing = 1 if vx > 0 else -1
+            else:
+                vis.facing = 1 if abs(yaw) < 1.5 else -1
         except: continue
-        if abs(vx) > 0.3: vis.facing = 1 if vx > 0 else -1
-        # Direction-dependent trail origin for remote
         try:
             facing = int(vis.facing) if vis.facing!=0 else 1
-            trail_origin_x = px - float(facing) * 15.0
-            trail_origin_y = py + 10.0
-            speed = math.hypot(vx, vy)
-            if speed > 0.5:
-                vis.trail.append((trail_origin_x, trail_origin_y, vx, vy))
+            trail_x = px - float(facing) * 15.0
+            trail_y = py + 10.0
+            should_add = False
+            if vis.last_px is None:
+                should_add = True
             else:
-                if vis.trail and random.random() < 0.2:
-                    vis.trail.pop(0)
+                dist = math.hypot(trail_x - vis.last_px, trail_y - vis.last_py) if vis.last_px is not None else 999
+                if dist > 1.5:
+                    should_add = True
+            if should_add:
+                vis.trail.append((trail_x, trail_y))
+                vis.last_px = trail_x
+                vis.last_py = trail_y
         except:
-            vis.trail.append((px, py, 0.0, 0.0))
-        if len(vis.trail) > app.trail_length: vis.trail.pop(0)
+            vis.trail.append((px, py))
+        if len(vis.trail) > app.trail_length: 
+            vis.trail.pop(0)
         vis.blink_phase += 0.05
         vis.is_blinking = (app.world.tick + hash(cid) % 60) % 120 == 0
 
@@ -413,119 +432,106 @@ def onStep(app):
             app.camera_x=clamp(app.camera_x,0,float(app.world.width-app.width))
         except: pass
 
-    # 60Hz SEND RATE - was 100ms (10Hz), now 16ms (60Hz)
     if HAS_MP and app.mp_client and app.client_id and "local_0" in app.world.players:
         now=0
         try: now=int(window.Date.now())
         except: now=app.world.tick*16
-        if now - app.last_send_ms > 16:  # 60Hz
+        if now - app.last_send_ms > 16:
             app.last_send_ms=now
             lp=app.world.players["local_0"]
             try:
-                safe_x = float(lp.x); safe_y = float(lp.y)
-                safe_vx = float(lp.vx); safe_vy = float(lp.vy)
-                # Include collected coins for multiplayer sync
-                collected_list = list(app.local_collected_coins)
-                collected_json = py_json.dumps(collected_list)
-                # Use window.eval to send at 60Hz - compatible with scs-datastar-extension
-                # Server at scs-207.onrender.com runs at 60Hz tick and broadcasts via SSE
+                safe_clientId = str(app.client_id)
+                safe_modelId = "platformer_default"
+                safe_pos = [float(lp.x), float(lp.y), 0.0]
+                facing_yaw = 0.0 if int(lp.facing) >=0 else math.pi
+                safe_rot = [0.0, float(facing_yaw), 0.0]
+                safe_vel = [float(lp.vx), float(lp.vy), 0.0]
+                safe_animState = str(lp.state)
+                safe_animFrame = float(lp.anim_phase)
+                safe_isJumping = bool(not lp.on_ground)
+                safe_isBoosting = False
+                safe_boostTime = 0.0
+                safe_timestamp = int(window.Date.now()) if hasattr(window, 'Date') else app.world.tick
+                safe_collected = list(app.local_collected_coins)
+                collected_json = py_json.dumps(safe_collected)
                 window.eval(f"""
                     fetch('{app.mp_client.base_url}/api/multiplayer/character-state', {{
                         method:'PATCH',
-                        headers:{{'Content-Type':'application/json','X-Client-ID':'{app.client_id}'}},
+                        headers:{{'Content-Type':'application/json','X-Client-ID':'{safe_clientId}'}},
                         body: JSON.stringify({{
                             updates:[{{
-                                clientId:'{app.client_id}',
-                                characterModelId:'platformer_default',
-                                position:[{safe_x},{safe_y},0],
-                                velocity:[{safe_vx},{safe_vy},0],
-                                animationState:'{lp.state}',
-                                animationFrame:0,
-                                isJumping:{str(not lp.on_ground).lower()},
-                                isBoosting:false,
-                                boostTimeRemaining:0,
+                                clientId:'{safe_clientId}',
+                                characterModelId:'{safe_modelId}',
+                                position:[{safe_pos[0]},{safe_pos[1]},{safe_pos[2]}],
+                                rotation:[{safe_rot[0]},{safe_rot[1]},{safe_rot[2]}],
+                                velocity:[{safe_vel[0]},{safe_vel[1]},{safe_vel[2]}],
+                                animationState:'{safe_animState}',
+                                animationFrame:{safe_animFrame},
+                                isJumping:{str(safe_isJumping).lower()},
+                                isBoosting:{str(safe_isBoosting).lower()},
+                                boostType:null,
+                                boostTimeRemaining:{safe_boostTime},
+                                timestamp:{safe_timestamp},
                                 collectedCoins:{collected_json},
-                                score:{lp.score},
-                                timestamp:Date.now()
+                                score:{int(lp.score)}
                             }}],
-                            timestamp:Date.now()
+                            timestamp:{safe_timestamp}
                         }})
                     }}).catch(()=>{{}})
                 """)
             except Exception as e:
-                print(f"[BGS] send fail {e}")
+                print(f"[BGS] 60Hz send fail {e}")
 
 def drawTrail(trail, color, camera_x, is_local=False, facing=1):
-    """ULTRA VISIBLE - no opacity tricks that might fail, solid colors"""
-    if not trail or len(trail)<1:
+    # USES OPACITY AS REQUIRED - fading trail with opacity
+    if not trail or len(trail)==0:
         return
-    # Draw all points as solid large circles first (guaranteed visible)
     for i in range(len(trail)):
         try:
-            # trail entry can be (x,y) or (x,y,vx,vy)
-            entry = trail[i]
-            tx = float(entry[0])
-            ty = float(entry[1])
+            tx = float(trail[i][0]); ty = float(trail[i][1])
             cam = float(camera_x)
             x = tx - cam
             y = ty
-        except:
-            continue
-        t = i / max(1, len(trail)-1)
-        # Size grows towards newest
-        size = 4 + t * 12
-        # Use bright yellow/white for local, color for remote
-        if is_local:
-            # White core + color outline for local
-            if t > 0.5:
-                try:
-                    # Outer color
-                    drawCircle(x, y, size+2, fill=color)
-                    # Inner white for pop
-                    drawCircle(x, y, size*0.6, fill=rgb(255,255,200))
-                except:
-                    try:
-                        drawCircle(x, y, size, fill=rgb(255,255,100))
-                    except:
-                        pass
+        except: continue
+        t = i / max(1, len(trail)-1)  # 0 oldest (most transparent), 1 newest (opaque)
+        # Opacity fading: oldest 15%, newest 90%
+        opacity = 15 + t * 75  # 15 to 90
+        size = 3 + t * 10
+        try:
+            if is_local:
+                # Local: use color with opacity, plus white core with higher opacity for newest
+                drawCircle(x, y, size, fill=color, opacity=opacity)
+                if t > 0.6:
+                    # White core - more visible
+                    drawCircle(x, y, size*0.5, fill=rgb(255,255,180), opacity=opacity*0.9)
             else:
-                try:
-                    drawCircle(x, y, size*0.7, fill=rgb(255,255,100))
-                except:
-                    pass
-        else:
-            # Remote - solid color trail
+                # Remote: SOLID with opacity - guaranteed visible
+                drawCircle(x, y, size, fill=color, opacity=opacity)
+                if t > 0.5:
+                    drawCircle(x, y, size*0.35, fill=rgb(255,255,255), opacity=opacity*0.8)
+        except Exception as e:
             try:
-                drawCircle(x, y, size, fill=color)
-                # Add white highlight
-                if t > 0.7:
-                    drawCircle(x, y, size*0.4, fill=rgb(200,220,255))
-            except:
-                try:
-                    drawCircle(x, y, size, fill=rgb(100,200,255))
-                except:
-                    pass
+                drawCircle(x, y, size, fill=rgb(255,255,0), opacity=opacity)
+            except: pass
     
-    # Connect with thick lines for motion blur
     for i in range(len(trail)-1):
         try:
             tx1 = float(trail[i][0]); ty1 = float(trail[i][1])
             tx2 = float(trail[i+1][0]); ty2 = float(trail[i+1][1])
             cam = float(camera_x)
             x1 = tx1 - cam; y1 = ty1; x2 = tx2 - cam; y2 = ty2
-        except:
-            continue
+        except: continue
         t = i / max(1, len(trail)-1)
-        if math.hypot(x2-x1, y2-y1) < 0.5:
+        if math.hypot(x2-x1, y2-y1) < 0.1:
             continue
-        width = 3 + t * 8
+        width = 2 + t * 5
+        line_opacity = 10 + t * 60  # 10% to 70% for lines
         try:
-            drawLine(x1, y1, x2, y2, fill=color, lineWidth=width)
+            drawLine(x1, y1, x2, y2, fill=color, lineWidth=width, opacity=line_opacity)
         except:
             try:
-                drawLine(x1, y1, x2, y2, fill=rgb(255,255,0), lineWidth=width)
-            except:
-                pass
+                drawLine(x1, y1, x2, y2, fill=rgb(255,255,0), lineWidth=width, opacity=line_opacity)
+            except: pass
 
 def redrawAll(app):
     try: drawRect(0,0,app.width,app.height,fill=app.background)
@@ -547,20 +553,12 @@ def redrawAll(app):
             else: drawRect(x,y+3,plat.w,plat.h,fill=rgb(20,20,35)); drawRect(x,y,plat.w,plat.h,fill=plat.color)
         except: continue
     for c in app.world.coins:
-        if c.get("collected"): continue
-        try:
-            cx=float(c["x"])-float(app.camera_x); cy=float(c["y"])+math.sin(float(c.get("bob",0)))*6
+        if c.get("collected") or c.get("isCollected"): continue
+        try: cx=float(c["x"])-float(app.camera_x); cy=float(c["y"])+math.sin(float(c.get("bob",0)))*6
         except: continue
         if cx<-50 or cx>app.width+50: continue
-        # Different color if collected by remote
-        if c.get("collectedBy"):
-            drawCircle(cx,cy,10,fill=rgb(100,100,100))
-        else:
-            drawCircle(cx,cy,10,fill=rgb(255,235,100))
-            drawCircle(cx,cy-2,10,fill=rgb(255,250,180))
-            drawLabel("$",cx,cy,size=12,fill=rgb(100,80,0))
-
-    # LOCAL - trail FIRST, then player
+        drawCircle(cx,cy,10,fill=rgb(255,235,100)); drawCircle(cx,cy-2,10,fill=rgb(255,250,180))
+        drawLabel("$",cx,cy,size=12,fill=rgb(100,80,0))
     for pid, p in app.world.players.items():
         try: x=float(p.x)-float(app.camera_x); y=float(p.y)
         except: continue
@@ -577,8 +575,6 @@ def redrawAll(app):
             drawLabel(p.name,x,y-p.h*0.7-14,size=11,fill=rgb(255,255,255))
             if p.score>0: drawLabel(f"{p.score}",x,y-p.h*0.7-26,size=9,fill=rgb(255,235,100))
         except: pass
-
-    # REMOTE - trail FIRST
     for cid in list(app.remote_players.keys()):
         remote = app.remote_players.get(cid)
         if not remote: continue
@@ -588,14 +584,13 @@ def redrawAll(app):
         except: continue
         try: x = px - float(app.camera_x); y = py
         except: continue
-        if x < -300 or x > app.width + 300: continue
+        if x < -400 or x > app.width + 400: continue
         vis = app.remote_visuals.get(cid)
         if not vis: continue
-        if app.enable_trails and vis.trail:
+        if app.enable_trails and vis.trail and len(vis.trail)>0:
             drawTrail(vis.trail, vis.color, app.camera_x, is_local=False, facing=int(vis.facing))
         try:
             drawRect(x-15,y-20,30,40,fill=vis.color)
-            # shadow - no opacity param for safety
             drawRect(x-15,y+18,30,4,fill=rgb(30,30,30))
             facing = int(vis.facing)
             if vis.is_blinking:
@@ -608,47 +603,43 @@ def redrawAll(app):
             drawLabel(cid[:4],x,y-30,size=10,fill=rgb(200,220,255))
             st = remote.get("animationState","")
             if st: drawLabel(st, x, y+28, size=8, fill=rgb(180,180,255))
-            # Show remote score from MP
             r_score = remote.get("score", 0)
-            if r_score>0:
-                drawLabel(f"{r_score}", x, y-42, size=9, fill=rgb(255,235,100))
+            if r_score>0: drawLabel(f"{r_score}", x, y-42, size=9, fill=rgb(255,235,100))
         except Exception as e:
             print(f"[BGS] draw remote fail {e}")
             continue
-
     drawRect(app.width//2,22,app.width,44,fill=rgb(0,0,0))
-    status=f"BGS 60Hz | LOCAL:{len(app.world.players)} REMOTE:{len(app.remote_players)} COINS:{len([c for c in app.world.coins if not c.get('collected')])}/{len(app.world.coins)} TRAILS:{'ON' if app.enable_trails else 'OFF'}"
-    if app.datastar_connected: status+=" | DATASTAR 60Hz"
-    else: status+=" | LOCAL DEMO"
-    if app.is_host: status+=" | HOST"
-    drawLabel(status,app.width//2,14,size=11,fill=rgb(220,220,230))
+    status=f"BGS 60Hz OPACITY | LOCAL:{len(app.world.players)} REMOTE:{len(app.remote_players)} COINS:{len([c for c in app.world.coins if not c.get('collected')])}/{len(app.world.coins)}"
+    if app.datastar_connected: status+=" | 60Hz CONNECTED"
+    else: status+=" | LOCAL"
+    if app.is_host: status+=" HOST"
+    drawLabel(status,app.width//2,14,size=10,fill=rgb(220,220,230))
     drawCircle(app.width-20,14,6,fill=rgb(100,255,100) if app.datastar_connected else rgb(255,200,100))
-
     y=50
     drawRect(90,y+20,160,20+len(app.world.players)*18,fill=rgb(0,0,0))
     drawLabel("LOCAL",90,y,size=12,fill=rgb(255,255,255)); y+=18
     for p in list(app.world.players.values())[:6]:
-        drawLabel(f"{p.name}: {p.score}",90,y,size=11,fill=p.color); y+=18
+        drawLabel(f"{p.name}: {p.score} trail:{len(p.trail)}",90,y,size=11,fill=p.color); y+=18
     if app.remote_players:
         y+=10
         drawRect(90,y+10,160,10+len(app.remote_players)*16,fill=rgb(0,0,0))
-        drawLabel("REMOTE (BGS 60Hz)",90,y,size=11,fill=rgb(180,200,255)); y+=14
+        drawLabel(f"REMOTE 60Hz ({len(app.remote_players)})",90,y,size=11,fill=rgb(180,200,255)); y+=14
         for cid, r in list(app.remote_players.items())[:6]:
+            vis = app.remote_visuals.get(cid)
+            trail_len = len(vis.trail) if vis and vis.trail else 0
             st=r.get("animationState","?"); sc=r.get("score",0)
-            drawLabel(f"{cid[:6]} {st} ${sc}",90,y,size=10,fill=rgb(180,180,255)); y+=16
-
+            drawLabel(f"{cid[:6]} {st} ${sc} trail:{trail_len}",90,y,size=10,fill=rgb(180,180,255)); y+=16
     if app.show_help:
         hx=app.width-160; hy=80
-        drawRect(hx,hy+60,300,170,fill=rgb(0,0,0))
+        drawRect(hx,hy+60,300,190,fill=rgb(0,0,0))
         drawLabel("BGS CONTROLS",hx,hy-20,size=12,fill=rgb(255,255,255))
-        drawLabel("WASD / Arrows move",hx,hy,size=10,fill=rgb(200,220,255))
-        drawLabel("R reset G trails P pause",hx,hy+16,size=10,fill=rgb(200,220,255))
-        drawLabel("Trail: trailing edge",hx,hy+32,size=10,fill=rgb(255,235,100))
-        drawLabel("facing=1 -> x - w",hx,hy+48,size=10,fill=rgb(180,200,255))
-        drawLabel("facing=-1 -> x + w",hx,hy+64,size=10,fill=rgb(180,200,255))
-        drawLabel("Coins: MP via char-state",hx,hy+80,size=10,fill=rgb(100,255,100))
-        drawLabel(f"60Hz send: 16ms",hx,hy+96,size=10,fill=rgb(100,255,100))
-        drawLabel(f"Collected: {len(app.local_collected_coins)}",hx,hy+112,size=10,fill=rgb(255,235,100))
-
+        drawLabel("WASD move",hx,hy,size=10,fill=rgb(200,220,255))
+        drawLabel("R reset G trails",hx,hy+16,size=10,fill=rgb(200,220,255))
+        drawLabel("OPACITY TRAIL",hx,hy+32,size=10,fill=rgb(255,235,100))
+        drawLabel("opacity 15->90%",hx,hy+48,size=8,fill=rgb(180,200,255))
+        drawLabel("Remote uses opacity",hx,hy+60,size=8,fill=rgb(180,200,255))
+        drawLabel("60Hz: 16ms PATCH",hx,hy+72,size=10,fill=rgb(100,255,100))
+        drawLabel(f"Coins:{len(app.local_collected_coins)}",hx,hy+84,size=10,fill=rgb(255,235,100))
+        drawLabel("scs.py patched",hx,hy+96,size=8,fill=rgb(100,255,100))
     drawRect(app.width//2,app.height-18,app.width,36,fill=rgb(0,0,0))
-    drawLabel("BGS 60Hz: PATCH char-state @16ms + SSE + coin sync | scs-datastar-extension compatible",app.width//2,app.height-18,size=9,fill=rgb(120,255,180))
+    drawLabel("OPACITY TRAIL: drawCircle(...,opacity=15-90) drawLine(...,opacity=10-70) | EXACT PROP MATCH + REMOTE VISIBLE",app.width//2,app.height-18,size=7,fill=rgb(120,255,180))
