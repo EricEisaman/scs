@@ -12,55 +12,59 @@ class MultiplayerClient:
         self.session_id = None
         self.is_synchronizer = False
         self._es = None
-
     async def join(self):
-        # Clean separation: dict for options (auto-converted), JSON text for body
         base_url = self.base_url
         url = base_url + "/api/multiplayer/join"
         payload = {"environment_name": self.environment_name, "character_name": self.character_name}
-        resp = await window.fetch(url, {
-            "method": "POST",
-            "headers": {"Content-Type": "application/json"},
-            "body": window.JSON.stringify(payload)
-        })
+        resp = await window.fetch(url, {"method": "POST", "headers": {"Content-Type": "application/json"}, "body": window.JSON.stringify(payload)})
         if not resp.ok:
             raise RuntimeError("join HTTP " + str(resp.status))
         js_data = await resp.json()
-        # One-shot Python-native conversion at boundary - not JS property probing
         try:
-            data = py_json.loads(window.JSON.stringify(js_data))
-        except Exception as exc:
+            cid = js_data.client_id
+        except:
             try:
-                window.console.error("[MP] join JSON conversion failed", exc)
+                cid = js_data["client_id"]
             except:
-                pass
-            data = {}
-        cid = data.get("client_id")
-        sid = data.get("session_id")
-        is_sync = bool(data.get("is_synchronizer", False))
-        env_name = data.get("environment_name", self.environment_name)
+                cid = None
+        try:
+            sid = js_data.session_id
+        except:
+            try:
+                sid = js_data["session_id"]
+            except:
+                sid = None
+        try:
+            is_sync = js_data.is_synchronizer
+        except:
+            try:
+                is_sync = js_data["is_synchronizer"]
+            except:
+                is_sync = False
         if not cid or not sid:
             raise RuntimeError("missing ids")
         self.client_id = str(cid)
         self.session_id = str(sid)
-        self.is_synchronizer = is_sync
+        self.is_synchronizer = bool(is_sync)
         try:
             stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
             es_obj = window.EventSource.new(stream_url)
             self._es = es_obj
-            try:
-                window._bgs_es = es_obj
-            except:
-                pass
+            window._bgs_es = es_obj
         except:
             try:
                 stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
                 es_obj = window.EventSource(stream_url)
                 self._es = es_obj
-                try:
-                    window._bgs_es = es_obj
-                except:
-                    pass
+                window._bgs_es = es_obj
+            except:
+                pass
+        env_name = self.environment_name
+        try:
+            env_name = js_data.environment_name
+        except:
+            try:
+                env_name = js_data["environment_name"]
             except:
                 pass
         return {"client_id": str(cid), "session_id": str(sid), "is_synchronizer": bool(is_sync), "environment_name": env_name}

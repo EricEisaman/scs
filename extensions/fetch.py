@@ -34,7 +34,6 @@ async def fetch_json(url):
         raise FetchError(f"HTTP {resp.status}")
     js_data = await resp.json()
     try:
-        # One-shot conversion
         return py_json.loads(window.JSON.stringify(js_data))
     except:
         return js_data
