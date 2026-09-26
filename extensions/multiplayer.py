@@ -84,19 +84,19 @@ class MultiplayerClient:
         if not self.client_id:
             return
         try:
-            pos = [position[0], position[1], 0] if len(position)==2 else list(position)
-            vel = [velocity[0], velocity[1], 0] if len(velocity)==2 else list(velocity)
+            pos = [float(position[0]), float(position[1])]
+            vel = [float(velocity[0]), float(velocity[1])]
             char = {
                 "clientId": self.client_id,
-                "characterModelId": "platformer_default",
+                "characterModelId": "platformer-default",
                 "position": pos,
-                "rotation": [0,0,0],
                 "velocity": vel,
                 "animationState": animationState,
                 "animationFrame": kw.get("animationFrame", 0),
                 "isJumping": not onGround,
-                "isBoosting": kw.get("isBoosting", False),
-                "boostTimeRemaining": kw.get("boostTimeRemaining", 0),
+                "facing": int(kw.get("facing", 1)),
+                "score": int(kw.get("score", 0)),
+                "onGround": bool(onGround),
                 "timestamp": int(window.Date.now())
             }
             url = f"{self.base_url}/api/multiplayer/character-state"

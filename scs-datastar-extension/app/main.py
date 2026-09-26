@@ -67,7 +67,6 @@ class MultiplayerRegistry:
         self.base_synchronizer: Optional[str] = None
         self.character_cache: Dict[str, CharacterState] = {}  # client_id -> last CharacterState
         self.item_cache: Dict[str, ItemInstanceState] = {}  # instanceId -> last state
-        self.sse_subscribers: List[asyncio.Queue] = []
         self._lock = asyncio.Lock()
         self._tick_task: Optional[asyncio.Task] = None
         self.running = True
@@ -92,7 +91,7 @@ class MultiplayerRegistry:
         async with self._lock:
             client_id = uuid.uuid4().hex[:8]
             session_id = uuid.uuid4().hex[:16]
-            existing = len(self.clients)
+            existing = sum(session.environment == req.environment_name for session in self.clients.values())
             is_sync = self.base_synchronizer is None
 
             session = ClientSession(
@@ -123,7 +122,7 @@ class MultiplayerRegistry:
                 "character": req.character_name,
                 "totalClients": existing + 1,
                 "timestamp": int(time.time()*1000)
-            })
+            }, environment=req.environment_name)
 
             if auth_event.get("became_authority"):
                 await self._broadcast_signal("env-item-authority-changed", {
@@ -132,7 +131,7 @@ class MultiplayerRegistry:
                     "newAuthorityId": client_id,
                     "reason": "arrival",
                     "timestamp": int(time.time()*1000)
-                })
+                }, environment=req.environment_name)
 
             # Bootstrap: send existing authorities to new client via its queue (handled in stream)
 
@@ -149,6 +148,9 @@ class MultiplayerRegistry:
             if not session:
                 return
             self.sessions.pop(session.session_id, None)
+            if session.sse_queue:
+                self._enqueue_signal(session.sse_queue, "__close__", {})
+                session.sse_queue = None
             if self.base_synchronizer == client_id:
                 # Promote earliest remaining
                 if self.clients:
@@ -166,18 +168,18 @@ class MultiplayerRegistry:
             events = self.authority.client_leaves(client_id)
             for ev in events:
                 if ev["type"] == "env-authority-changed":
-                    await self._broadcast_signal("env-item-authority-changed", ev)
+                    await self._broadcast_signal("env-item-authority-changed", ev, environment=ev.get("environmentName", session.environment))
                 elif ev["type"] == "item-authority-changed":
-                    await self._broadcast_signal("item-authority-changed", ev)
+                    await self._broadcast_signal("item-authority-changed", ev, environment=session.environment)
 
             self.freshness.client_leaves(session.environment, client_id)
 
             await self._broadcast_signal("client-left", {
                 "eventType": "left",
                 "clientId": client_id,
-                "totalClients": len(self.clients),
+                "totalClients": sum(s.environment == session.environment for s in self.clients.values()),
                 "timestamp": int(time.time()*1000)
-            })
+            }, environment=session.environment)
 
     async def get_client_by_session(self, session_id: str) -> Optional[ClientSession]:
         client_id = self.sessions.get(session_id)
@@ -185,46 +187,115 @@ class MultiplayerRegistry:
             return None
         return self.clients.get(client_id)
 
-    def subscribe_sse(self) -> asyncio.Queue:
-        q = asyncio.Queue(maxsize=64)
-        self.sse_subscribers.append(q)
-        return q
-
-    def unsubscribe_sse(self, q: asyncio.Queue):
-        try: self.sse_subscribers.remove(q)
-        except ValueError: pass
-
-    async def _broadcast_signal(self, signal_name: str, payload: Dict[str, Any]):
-        # Push to all SSE queues as Datastar patch_signals
-        # Each queue will be consumed by its SSE generator
-        for q in list(self.sse_subscribers):
+    @staticmethod
+    def _enqueue_signal(queue: asyncio.Queue, signal_name: str, payload: Dict[str, Any]):
+        try:
+            queue.put_nowait((signal_name, payload))
+        except asyncio.QueueFull:
             try:
-                q.put_nowait((signal_name, payload))
-            except asyncio.QueueFull:
-                try:
-                    q.get_nowait()
-                    q.put_nowait((signal_name, payload))
-                except: pass
+                queue.get_nowait()
+                queue.put_nowait((signal_name, payload))
+            except (asyncio.QueueEmpty, asyncio.QueueFull):
+                pass
+
+    async def subscribe_sse(self, client_id: str):
+        """Atomically attach a live queue and capture the matching environment snapshot."""
+        async with self._lock:
+            client = self.clients.get(client_id)
+            if not client:
+                raise HTTPException(401, "Unknown client_id")
+            if client.sse_queue:
+                self._enqueue_signal(client.sse_queue, "__close__", {})
+            queue = asyncio.Queue(maxsize=64)
+            client.sse_queue = queue
+            env_name = client.environment
+            now = int(time.time()*1000)
+            bootstrap = [("connectionState", {
+                "connectionState": "connected",
+                "clientId": client.client_id,
+                "sessionId": client.session_id,
+                "isSynchronizer": client.is_synchronizer,
+                "environment": env_name,
+                "serverTick": 0,
+                "datastarConnected": True,
+            })]
+            for existing in self.clients.values():
+                if existing.environment == env_name and existing.client_id != client_id:
+                    bootstrap.append(("client-joined", {
+                        "eventType": "joined",
+                        "clientId": existing.client_id,
+                        "environment": env_name,
+                        "character": existing.character_name,
+                        "totalClients": sum(s.environment == env_name for s in self.clients.values()),
+                        "timestamp": now,
+                    }))
+            env_authority = self.authority.envAuthority.get(env_name)
+            if env_authority:
+                bootstrap.append(("envAuthority", {
+                    "environmentName": env_name,
+                    "previousAuthorityId": None,
+                    "newAuthorityId": env_authority,
+                    "reason": "arrival",
+                    "timestamp": now,
+                }))
+            for instance_id, owner in self.authority.itemOwners.items():
+                if self._item_belongs_to_environment(instance_id, env_name):
+                    bootstrap.append(("itemAuthority", {
+                        "instanceId": instance_id,
+                        "previousOwnerId": None,
+                        "newOwnerId": owner["ownerClientId"],
+                        "reason": "claim",
+                        "timestamp": now,
+                    }))
+            characters = [state.to_dict() for owner_id, state in self.character_cache.items()
+                          if owner_id in self.clients and self.clients[owner_id].environment == env_name]
+            if characters:
+                bootstrap.append(("character-state-update", {"updates": characters, "timestamp": now}))
+            items = [row for instance_id, row in self.item_cache.items()
+                     if self._item_belongs_to_environment(instance_id, env_name)]
+            if items:
+                bootstrap.append(("item-state-update", {"updates": items, "collections": [], "timestamp": now}))
+            return queue, bootstrap
+
+    @staticmethod
+    def _item_belongs_to_environment(instance_id: str, environment: str) -> bool:
+        return str(instance_id).startswith(environment + ":")
+
+    async def unsubscribe_sse(self, client_id: str, queue: asyncio.Queue):
+        async with self._lock:
+            client = self.clients.get(client_id)
+            if client and client.sse_queue is queue:
+                client.sse_queue = None
+
+    async def _broadcast_signal(self, signal_name: str, payload: Dict[str, Any], environment: Optional[str] = None):
+        for client in list(self.clients.values()):
+            if environment is not None and client.environment != environment:
+                continue
+            if client.sse_queue:
+                self._enqueue_signal(client.sse_queue, signal_name, payload)
 
     async def handle_character_state(self, client_id: str, updates: List[Dict]):
         async with self._lock:
             if client_id not in self.clients:
                 raise HTTPException(403, "Unknown client")
+            session = self.clients[client_id]
             # Authorization: each update.clientId must == X-Client-ID
-            for u in updates:
-                if u.get("clientId") != client_id:
-                    raise HTTPException(403, f"clientId mismatch: {u.get('clientId')} != {client_id}")
-                # Cache
+            parsed_updates = []
+            for update in updates:
                 try:
-                    cs = CharacterState(**u)
-                    self.character_cache[client_id] = cs
-                except Exception as e:
-                    print(f"CharacterState parse error: {e}")
+                    state = CharacterState.from_payload(update)
+                except (TypeError, ValueError) as ex:
+                    raise HTTPException(422, str(ex))
+                if state.clientId != client_id:
+                    raise HTTPException(403, f"clientId mismatch: {state.clientId} != {client_id}")
+                parsed_updates.append(state)
+            for state in parsed_updates:
+                self.character_cache[client_id] = state
 
             await self._broadcast_signal("character-state-update", {
-                "updates": updates,
+                "updates": [state.to_dict() for state in parsed_updates],
                 "timestamp": int(time.time()*1000)
-            })
+            }, environment=session.environment)
 
     async def handle_item_state(self, client_id: str, updates: List[Dict], collections: List[Dict]):
         async with self._lock:
@@ -263,11 +334,11 @@ class MultiplayerRegistry:
             # Collections: first-write-wins
             for coll in collections:
                 iid = coll.get("instanceId")
-                if not iid or iid in [c.get("instanceId") for c in self.item_cache.values() if c.get("isCollected")]:
-                    # Already collected? Check cache
-                    cached = self.item_cache.get(iid)
-                    if cached and cached.get("isCollected"):
-                        continue
+                if not iid:
+                    continue
+                cached = self.item_cache.get(iid)
+                if cached and cached.get("isCollected"):
+                    continue
                 if coll.get("collectedByClientId") != client_id:
                     continue
                 # Accept
@@ -284,10 +355,13 @@ class MultiplayerRegistry:
                     "updates": accepted_updates,
                     "collections": accepted_collections,
                     "timestamp": int(time.time()*1000)
-                })
+                }, environment=env_name)
 
     async def handle_item_claim(self, client_id: str, claim: Dict) -> Dict:
         async with self._lock:
+            session = self.clients.get(client_id)
+            if not session:
+                raise HTTPException(403, "Unknown client")
             iid = claim.get("instanceId")
             if not iid:
                 raise HTTPException(400, "Missing instanceId")
@@ -300,7 +374,7 @@ class MultiplayerRegistry:
                         "newOwnerId": result.get("new"),
                         "reason": result.get("reason", "claim"),
                         "timestamp": int(time.time()*1000)
-                    })
+                    }, environment=session.environment)
                 return {
                     "ok": True,
                     "accepted": True,
@@ -319,6 +393,9 @@ class MultiplayerRegistry:
 
     async def handle_item_release(self, client_id: str, release: Dict) -> Dict:
         async with self._lock:
+            session = self.clients.get(client_id)
+            if not session:
+                raise HTTPException(403, "Unknown client")
             iid = release.get("instanceId")
             if not iid:
                 raise HTTPException(400, "Missing instanceId")
@@ -330,7 +407,7 @@ class MultiplayerRegistry:
                     "newOwnerId": None,
                     "reason": "release",
                     "timestamp": int(time.time()*1000)
-                })
+                }, environment=session.environment)
                 return {"ok": True, "released": True, "instanceId": iid, "serverTimestamp": int(time.time()*1000)}
             else:
                 return {"ok": True, "released": False, "instanceId": iid, "serverTimestamp": int(time.time()*1000)}
@@ -398,73 +475,20 @@ async def stream(request: Request, sid: Optional[str] = None, x_session_id: Opti
     client = await registry.get_client_by_session(session_id)
     if not client:
         raise HTTPException(401, "Unknown session_id")
-    if len(registry.sse_subscribers) >= 64:
+    if sum(bool(session.sse_queue) for session in registry.clients.values()) >= 64:
         raise HTTPException(503, "Too many clients")
 
     async def event_generator():
-        # Bootstrap: send current state
-        # 1. Existing clients
-        # 2. Authority maps
-        # 3. Character and item caches
-
-        # Initial signals
-        yield SSE.patch_signals({
-            "connectionState": "connected",
-            "clientId": client.client_id,
-            "sessionId": session_id,
-            "isSynchronizer": client.is_synchronizer,
-            "environment": client.environment,
-            "serverTick": 0,
-            "datastarConnected": True
-        })
-
-        # Bootstrap authorities
-        for env_name, auth_id in registry.authority.envAuthority.items():
-            yield SSE.patch_signals({
-                "envAuthority": {
-                    "environmentName": env_name,
-                    "previousAuthorityId": None,
-                    "newAuthorityId": auth_id,
-                    "reason": "arrival",
-                    "timestamp": int(time.time()*1000)
-                }
-            })
-
-        for iid, data in registry.authority.itemOwners.items():
-            yield SSE.patch_signals({
-                "itemAuthority": {
-                    "instanceId": iid,
-                    "previousOwnerId": None,
-                    "newOwnerId": data["ownerClientId"],
-                    "reason": "claim",
-                    "timestamp": int(time.time()*1000)
-                }
-            })
-
-        # Bootstrap character states
-        if registry.character_cache:
-            yield SSE.patch_signals({
-                "character-state-update": {
-                    "updates": [c.to_dict() if hasattr(c, "to_dict") else c for c in registry.character_cache.values()],
-                    "timestamp": int(time.time()*1000)
-                }
-            })
-
-        # Bootstrap item states
-        if registry.item_cache:
-            yield SSE.patch_signals({
-                "item-state-update": {
-                    "updates": list(registry.item_cache.values()),
-                    "collections": [],
-                    "timestamp": int(time.time()*1000)
-                }
-            })
-
-        # Subscribe to live signals
-        queue = registry.subscribe_sse()
+        queue, bootstrap = await registry.subscribe_sse(client.client_id)
         try:
+            for signal_name, payload in bootstrap:
+                yield SSE.patch_signals({signal_name: payload})
+                if signal_name == "character-state-update":
+                    yield SSE.patch_signals({"gameSnapshot": payload})
             while True:
                 signal_name, payload = await queue.get()
+                if signal_name == "__close__":
+                    break
                 # Map signal_name to Datastar signal patch
                 # BGS signals are delivered as patch_signals({signal_name: payload})
                 yield SSE.patch_signals({signal_name: payload})
@@ -475,7 +499,7 @@ async def stream(request: Request, sid: Optional[str] = None, x_session_id: Opti
         except asyncio.CancelledError:
             pass
         finally:
-            registry.unsubscribe_sse(queue)
+            await registry.unsubscribe_sse(client.client_id, queue)
 
     return DatastarResponse(event_generator())
 
@@ -547,7 +571,10 @@ async def effects_state(request: Request, body: EffectsBody, x_client_id: Option
     registry: MultiplayerRegistry = request.app.state.mp
     if registry.base_synchronizer != cid:
         raise HTTPException(403, "Not base synchronizer")
-    await registry._broadcast_signal("effects-state-update", body.dict())
+    session = registry.clients.get(cid)
+    if not session:
+        raise HTTPException(403, "Unknown client")
+    await registry._broadcast_signal("effects-state-update", body.dict(), environment=session.environment)
     return {"ok": True}
 
 app.include_router(bgs_router)

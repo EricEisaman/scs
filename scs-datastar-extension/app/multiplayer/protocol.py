@@ -10,6 +10,7 @@ This is the well-designed Python API that mirrors BGS patterns but for 2D platfo
 
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional, Dict, Any, Literal
+import math
 import time
 
 # ---------- Session lifecycle ----------
@@ -64,6 +65,43 @@ class CharacterState:
     score: int = 0
     onGround: bool = False
     timestamp: int = field(default_factory=lambda: int(time.time()*1000))
+
+    @classmethod
+    def from_payload(cls, payload: Dict[str, Any]):
+        if not isinstance(payload, dict):
+            raise ValueError("character update must be an object")
+        allowed = set(cls.__dataclass_fields__)
+        unknown = set(payload)-allowed
+        if unknown:
+            raise ValueError("unsupported character fields: " + ", ".join(sorted(unknown)))
+        if not isinstance(payload.get("clientId"), str) or not payload["clientId"]:
+            raise ValueError("clientId must be a non-empty string")
+        values = dict(payload)
+        for name in ("position", "velocity"):
+            vector = values.get(name, [0.0, 0.0])
+            if not isinstance(vector, (list, tuple)) or len(vector) != 2:
+                raise ValueError(name + " must contain exactly two numbers")
+            if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in vector):
+                raise ValueError(name + " must contain finite numbers")
+            values[name] = [float(value) for value in vector]
+        if "facing" in values and (isinstance(values["facing"], bool) or not isinstance(values["facing"], int) or values["facing"] not in (-1, 1)):
+            raise ValueError("facing must be -1 or 1")
+        if "score" in values and (isinstance(values["score"], bool) or not isinstance(values["score"], int)):
+            raise ValueError("score must be an integer")
+        for name in ("isJumping", "onGround"):
+            if name in values and not isinstance(values[name], bool):
+                raise ValueError(name + " must be a boolean")
+        for name in ("characterModelId", "animationState"):
+            if name in values and not isinstance(values[name], str):
+                raise ValueError(name + " must be a string")
+        if "animationFrame" in values:
+            frame = values["animationFrame"]
+            if isinstance(frame, bool) or not isinstance(frame, (int, float)) or not math.isfinite(frame):
+                raise ValueError("animationFrame must be a finite number")
+            values["animationFrame"] = float(frame)
+        if "timestamp" in values and (isinstance(values["timestamp"], bool) or not isinstance(values["timestamp"], int)):
+            raise ValueError("timestamp must be an integer")
+        return cls(**values)
 
     def to_dict(self):
         return asdict(self)

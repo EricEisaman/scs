@@ -27,6 +27,7 @@ from scs import *
 from browser import window, document, aio
 import math
 import random
+from extensions.game_audio import initialize_game_audio, unlock_game_audio, play_game_sound, game_audio_status
 
 # Try to import extensions (may not exist in some contexts)
 try:
@@ -173,10 +174,11 @@ class World:
 
     def apply_input(self, pid, move_x, jump, down=False):
         if pid not in self.players:
-            return
+            return False
         p = self.players[pid]
         if not p.alive:
-            return
+            return False
+        jumped = False
         
         # Horizontal
         if move_x != 0:
@@ -203,13 +205,17 @@ class World:
                 p.jump_count = 1
                 p.state = "jump"
                 p.jump_buffer = 0
+                jumped = True
             elif p.jump_count < p.max_jumps:
                 p.vy = -11.0
                 p.jump_count += 1
                 p.state = "jump"
                 p.jump_buffer = 0
+                jumped = True
+        return jumped
 
     def resolve_collisions(self, p):
+        events = []
         p.on_ground = False
         px1, py1, px2, py2 = p.aabb()
         
@@ -229,6 +235,7 @@ class World:
                 p.vx = 0
                 p.vy = 0
                 p.score = max(0, p.score - 20)
+                events.append(("damage", p.id))
                 continue
             
             overlap_x = min(px2, bx2) - max(px1, bx1)
@@ -254,12 +261,15 @@ class World:
                     if plat.type == "bouncy":
                         p.vy = -16
                         p.on_ground = False
+                        events.append(("bounce", p.id))
                 else:
                     p.y = by2 + p.h/2 + 0.5
                     p.vy = 0
+        return events
 
     def step(self):
         self.tick += 1
+        events = []
         # Update platforms (moving)
         for plat in self.platforms:
             if plat.type == "moving":
@@ -268,6 +278,7 @@ class World:
         for p in self.players.values():
             if not p.alive:
                 continue
+            was_on_ground = p.on_ground
             
             # Timers
             if p.jump_buffer > 0:
@@ -286,7 +297,7 @@ class World:
             p.x += p.vx
             p.y += p.vy
             
-            self.resolve_collisions(p)
+            events.extend(self.resolve_collisions(p))
             
             # Bounds
             if p.x < 40:
@@ -301,6 +312,10 @@ class World:
                 p.vx = 0
                 p.vy = 0
                 p.score = max(0, p.score - 15)
+                events.append(("damage", p.id))
+
+            if not was_on_ground and p.on_ground:
+                events.append(("land", p.id))
             
             # Trail for juice
             p.trail.append((p.x, p.y))
@@ -308,12 +323,14 @@ class World:
                 p.trail.pop(0)
             
             # Coins
-            for coin in self.coins:
+            for coin_index, coin in enumerate(self.coins):
                 if coin.collected:
                     continue
                 if math.hypot(p.x - coin.x, p.y - coin.y) < 28:
                     coin.collected = True
                     p.score += coin.val
+                    events.append(("coin", p.id, coin_index))
+        return events
 
 # ==================== SCS APP ====================
 
@@ -350,6 +367,7 @@ def onAppStart(app):
     app.last_snapshot = None
     app.datastar_connected = False
     app.particles = []
+    initialize_game_audio(app, seed=2401)
     
     # Add initial players
     app.world.add_player("player_0", "You", PLAYER_COLORS[0], KEYSETS[0])
@@ -386,6 +404,7 @@ async def try_connect_datastar(app):
         app.datastar_connected = False
 
 def onKeyPress(app, key):
+    unlock_game_audio(app)
     key = key.lower()
     app.keys_held.add(key)
     
@@ -416,6 +435,9 @@ def onKeyPress(app, key):
                 app.world.add_player(pid, f"P{idx+1}", PLAYER_COLORS[idx], KEYSETS[idx % len(KEYSETS)])
     elif key == "space":
         app.keys_held.add("space")
+
+def onMousePress(app, mouseX, mouseY):
+    unlock_game_audio(app)
 
 def onKeyRelease(app, key):
     key = key.lower()
@@ -475,7 +497,8 @@ def onStep(app):
                     move_x += 1
                 jump = "w" in app.keys_held or "arrowup" in app.keys_held or " " in app.keys_held or "space" in app.keys_held
                 # Apply locally immediately for responsiveness (client prediction)
-                app.world.apply_input(app.local_player_id, move_x, jump)
+                if app.world.apply_input(app.local_player_id, move_x, jump):
+                    play_game_sound(app,"character.jump",f"jump:{app.local_player_id}:{app.input_seq}")
                 # Also send to server (fire and forget)
                 # aio.run(send_input...) - we don't want to block onStep, so we use a trick: schedule via aio
                 # For simplicity, we skip server send in this local demo version
@@ -530,9 +553,21 @@ def onStep(app):
             down = False
         
         if pid in ("player_0", "player_1", "player_2", "player_3"):
-            app.world.apply_input(pid, move_x, jump, app.input_seq)
+            if app.world.apply_input(pid, move_x, jump, app.input_seq):
+                play_game_sound(app,"character.jump",f"jump:{pid}:{app.input_seq}")
     
-    app.world.step()
+    for event in app.world.step():
+        kind=event[0]
+        player_id=event[1]
+        event_id=":".join(str(part) for part in ("platformer",app.world.tick)+event)
+        if kind=="coin":
+            play_game_sound(app,"ui.coin_pickup",event_id)
+        elif kind=="land":
+            play_game_sound(app,"character.footstep_stone",event_id)
+        elif kind=="bounce":
+            play_game_sound(app,"character.jump_soft",event_id)
+        elif kind=="damage":
+            play_game_sound(app,"weapon.explosion_small",event_id)
     
     # Camera follows player 0
     if "player_0" in app.world.players:
@@ -655,6 +690,7 @@ def redrawAll(app):
     else:
         status_text += " | DATASTAR: LOCAL"
         conn_color = rgb(255, 200, 100)
+    status_text += " | " + game_audio_status(app)
     
     drawLabel(status_text, app.width//2, 14, size=11, fill=rgb(220, 220, 230))
     drawCircle(app.width - 20, 14, 6, fill=conn_color)

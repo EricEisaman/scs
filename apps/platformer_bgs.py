@@ -4,6 +4,7 @@ from browser import window, aio
 import math
 import random
 import json as py_json
+from extensions.game_audio import initialize_game_audio, unlock_game_audio, play_game_sound, game_audio_status
 
 # Global signals - V24 FIX: use Python global dict, not window dict (Brython window dict bug)
 _bgs_signals_py = {}
@@ -142,9 +143,21 @@ except Exception as e:
             if not self.client_id:
                 return
             try:
-                pos = [position[0], position[1], 0] if len(position)==2 else list(position)
-                vel = [velocity[0], velocity[1], 0] if len(velocity)==2 else list(velocity)
-                char = {"clientId": self.client_id, "characterModelId": "platformer_default", "position": pos, "velocity": vel, "animationState": animationState, "animationFrame": 0, "isJumping": not onGround, "isBoosting": False, "boostTimeRemaining": 0, "timestamp": int(window.Date.now())}
+                pos = [float(position[0]), float(position[1])]
+                vel = [float(velocity[0]), float(velocity[1])]
+                char = {
+                    "clientId": self.client_id,
+                    "characterModelId": "platformer-default",
+                    "position": pos,
+                    "velocity": vel,
+                    "animationState": animationState,
+                    "animationFrame": kw.get("animationFrame", 0.0),
+                    "isJumping": not onGround,
+                    "facing": int(kw.get("facing", 1)),
+                    "score": int(kw.get("score", 0)),
+                    "onGround": bool(onGround),
+                    "timestamp": int(window.Date.now()),
+                }
                 url = self.base_url + "/api/multiplayer/character-state"
                 body = window.JSON.stringify({"updates":[char],"timestamp":char["timestamp"]})
                 await window.fetch(url, {"method":"PATCH","headers":{"Content-Type":"application/json","X-Client-ID": self.client_id},"body":body,"mode":"cors"})
@@ -467,6 +480,7 @@ def onAppStart(app):
     app.item_retry_ms=500
     app.pending_coin_collections={}
     app.dynamic_coin_seq=0
+    initialize_game_audio(app,seed=1201)
 
     # Add local players
     app.world.add_player("local_0","You",COLORS[0],KEYSETS[0])
@@ -528,6 +542,7 @@ def onAppStart(app):
         aio.run(join_mp())
 
 def onKeyPress(app, key):
+    unlock_game_audio(app)
     if key=='r':
         app.world=World()
         app.world.add_player("local_0","You",COLORS[0],KEYSETS[0])
@@ -545,6 +560,9 @@ def onKeyPress(app, key):
         owner=str(app.client_id) if app.client_id else "offline"
         coin_id="level1:"+owner+":coin_"+str(app.dynamic_coin_seq)
         app.world.add_coin(random.randint(100,2000),random.randint(100,400),coin_id)
+
+def onMousePress(app, mouseX, mouseY):
+    unlock_game_audio(app)
 
 def apply_item_state_update(app, update):
     if not isinstance(update, dict):
@@ -622,7 +640,10 @@ def onKeyHold(app, keys):
         if km["right"] in app.keys_held:
             move_x+=1
         jump=km["jump"] in app.keys_held
+        old_jump_count=p.jump_count
         app.world.apply_input(pid, move_x, jump)
+        if p.jump_count>old_jump_count:
+            play_game_sound(app,"character.jump",f"jump:{pid}:{app.world.tick}:{p.jump_count}")
 
 
 def onStep(app):
@@ -644,7 +665,15 @@ def onStep(app):
             app.datastar_connected=is_datastar_connected()
         except:
             pass
+    grounded_before={pid:p.on_ground for pid,p in app.world.players.items()}
     collected_ids=app.world.step()
+    for coin_id in collected_ids:
+        play_game_sound(app,"ui.coin_pickup",f"coin:{coin_id}")
+    for pid,p in app.world.players.items():
+        if p.vy<=-15.5 and p.state=="jump":
+            play_game_sound(app,"character.jump_soft",f"bounce:{pid}:{app.world.tick}")
+        elif not grounded_before.get(pid,False) and p.on_ground:
+            play_game_sound(app,"character.footstep_stone",f"land:{pid}:{app.world.tick}")
     now=0
     try:
         now=int(window.Date.now())
@@ -803,6 +832,7 @@ def redrawAll(app):
         status+=" | DATASTAR: CONNECTED"
     else:
         status+=" | LOCAL DEMO"
+    status+=" | "+game_audio_status(app)
     drawLabel(status,app.width//2,14,size=11,fill=rgb(220,220,230))
     drawCircle(app.width-20,14,6,fill=rgb(100,255,100) if app.datastar_connected else rgb(255,200,100))
 
