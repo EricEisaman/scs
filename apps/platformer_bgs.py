@@ -185,6 +185,33 @@ class Player:
         self.trail=[]
         self.coin_flash=0
 
+class RemoteVisual:
+    def __init__(self, client_id, color):
+        self.color=color
+        self.facing=1
+        self.trail=[]
+        self.last_trail_pos=None
+        self.blink_offset=sum(ord(char) for char in client_id)%120
+        self.is_blinking=False
+
+def draw_motion_blur(trail, color, camera_x):
+    for i, (trail_x, trail_y) in enumerate(trail):
+        progress=i/max(1, len(trail)-1)
+        x=trail_x-camera_x
+        size=1.5+progress*3.5
+        try:
+            drawCircle(x,trail_y,size,fill=color,opacity=progress*75)
+        except:
+            drawCircle(x,trail_y,size,fill=color)
+    for i in range(len(trail)-1):
+        x1,y1=trail[i]
+        x2,y2=trail[i+1]
+        progress=i/max(1, len(trail)-1)
+        try:
+            drawLine(x1-camera_x,y1,x2-camera_x,y2,fill=color,lineWidth=2+progress*5,opacity=10+progress*60)
+        except:
+            drawLine(x1-camera_x,y1,x2-camera_x,y2,fill=color,lineWidth=2+progress*5)
+
 class World:
     def __init__(self, width=2400, height=700):
         self.width=width
@@ -465,6 +492,39 @@ def onStep(app):
         except:
             pass
     app.world.step()
+    for cid, remote in list(app.remote_players.items()):
+        if not isinstance(remote, dict):
+            continue
+        pos=remote.get("position")
+        if not pos or len(pos)<2:
+            continue
+        vis=app.remote_visuals.get(cid)
+        if not vis:
+            color_index=sum(ord(char) for char in cid)%len(COLORS)
+            vis=RemoteVisual(cid,COLORS[color_index])
+            app.remote_visuals[cid]=vis
+        try:
+            px=float(pos[0])
+            py=float(pos[1])
+            velocity=remote.get("velocity",[0,0,0])
+            vx=float(velocity[0]) if len(velocity)>0 else 0.0
+            vy=float(velocity[1]) if len(velocity)>1 else 0.0
+        except:
+            continue
+        if abs(vx)>0.3:
+            vis.facing=1 if vx>0 else -1
+        moving=abs(vx)>0.5 or abs(vy)>0.5
+        if moving:
+            trail_pos=(px-vis.facing*15,py+10)
+            if vis.last_trail_pos is None or math.hypot(trail_pos[0]-vis.last_trail_pos[0],trail_pos[1]-vis.last_trail_pos[1])>3:
+                vis.trail.append(trail_pos)
+                vis.last_trail_pos=trail_pos
+        elif vis.trail:
+            vis.trail.pop(0)
+        if len(vis.trail)>12:
+            vis.trail.pop(0)
+        vis.is_blinking=(app.world.tick+vis.blink_offset)%120<5
+
     if "local_0" in app.world.players:
         target=app.world.players["local_0"].x-app.width//2
         app.camera_x=app.camera_x*0.85+target*0.15
@@ -550,8 +610,20 @@ def redrawAll(app):
         y = py
         if x < -300 or x > app.width + 300:
             continue
-        # remote: center at px,py, draw top-left
-        drawRect(x-15,y-20,30,40,fill=rgb(120,180,255))
+        vis=app.remote_visuals.get(cid)
+        if not vis:
+            continue
+        if vis.trail:
+            draw_motion_blur(vis.trail,vis.color,app.camera_x)
+        drawRect(x-15,y-20,30,40,fill=vis.color)
+        facing=vis.facing
+        if vis.is_blinking:
+            drawLine(x-12,y-6,x-2,y-6,fill=rgb(20,20,30),lineWidth=2)
+            drawLine(x+2,y-6,x+12,y-6,fill=rgb(20,20,30),lineWidth=2)
+        else:
+            eye_x=x+facing*6
+            drawCircle(eye_x,y-6,5,fill=rgb(255,255,255))
+            drawCircle(eye_x+facing*2,y-6,2,fill=rgb(0,0,0))
         drawLabel(cid[:4],x,y-30,size=10,fill=rgb(200,220,255))
 
     # UI - BGS status bar
