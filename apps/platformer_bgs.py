@@ -191,26 +191,12 @@ class RemoteVisual:
         self.facing=1
         self.trail=[]
         self.last_trail_pos=None
+        self.previous_pos=None
+        self.target_pos=None
+        self.render_pos=None
+        self.interp_t=0.0
         self.blink_offset=sum(ord(char) for char in client_id)%120
         self.is_blinking=False
-
-def draw_motion_blur(trail, color, camera_x):
-    for i, (trail_x, trail_y) in enumerate(trail):
-        progress=i/max(1, len(trail)-1)
-        x=trail_x-camera_x
-        size=1.5+progress*3.5
-        try:
-            drawCircle(x,trail_y,size,fill=color,opacity=progress*75)
-        except:
-            drawCircle(x,trail_y,size,fill=color)
-    for i in range(len(trail)-1):
-        x1,y1=trail[i]
-        x2,y2=trail[i+1]
-        progress=i/max(1, len(trail)-1)
-        try:
-            drawLine(x1-camera_x,y1,x2-camera_x,y2,fill=color,lineWidth=2+progress*5,opacity=10+progress*60)
-        except:
-            drawLine(x1-camera_x,y1,x2-camera_x,y2,fill=color,lineWidth=2+progress*5)
 
 class World:
     def __init__(self, width=2400, height=700):
@@ -514,15 +500,30 @@ def onStep(app):
             continue
         if abs(vx)>0.3:
             vis.facing=1 if vx>0 else -1
+        if vis.target_pos is None:
+            vis.previous_pos=(px,py)
+            vis.target_pos=(px,py)
+            vis.render_pos=(px,py)
+            vis.interp_t=1.0
+        elif abs(px-vis.target_pos[0])>0.1 or abs(py-vis.target_pos[1])>0.1:
+            vis.previous_pos=vis.render_pos or vis.target_pos
+            vis.target_pos=(px,py)
+            vis.interp_t=0.0
+        vis.interp_t=min(1.0,vis.interp_t+0.2)
+        vis.render_pos=(
+            vis.previous_pos[0]+(vis.target_pos[0]-vis.previous_pos[0])*vis.interp_t,
+            vis.previous_pos[1]+(vis.target_pos[1]-vis.previous_pos[1])*vis.interp_t,
+        )
+        render_x,render_y=vis.render_pos
         moving=abs(vx)>0.5 or abs(vy)>0.5
         if moving:
-            trail_pos=(px-vis.facing*15,py+10)
-            if vis.last_trail_pos is None or math.hypot(trail_pos[0]-vis.last_trail_pos[0],trail_pos[1]-vis.last_trail_pos[1])>3:
+            trail_pos=(render_x,render_y)
+            if vis.last_trail_pos is None or math.hypot(trail_pos[0]-vis.last_trail_pos[0],trail_pos[1]-vis.last_trail_pos[1])>0.1:
                 vis.trail.append(trail_pos)
                 vis.last_trail_pos=trail_pos
         elif vis.trail:
             vis.trail.pop(0)
-        if len(vis.trail)>12:
+        if len(vis.trail)>8:
             vis.trail.pop(0)
         vis.is_blinking=(app.world.tick+vis.blink_offset)%120<5
 
@@ -614,8 +615,11 @@ def redrawAll(app):
         vis=app.remote_visuals.get(cid)
         if not vis:
             continue
-        if vis.trail:
-            draw_motion_blur(vis.trail,vis.color,app.camera_x)
+        if vis.render_pos is not None:
+            x=vis.render_pos[0]-app.camera_x
+            y=vis.render_pos[1]
+        for i,(trail_x,trail_y) in enumerate(vis.trail):
+            drawCircle(trail_x-app.camera_x,trail_y,2+i*0.6,fill=vis.color)
         drawRect(x-15,y-20,30,40,fill=vis.color)
         facing=vis.facing
         if vis.is_blinking:
