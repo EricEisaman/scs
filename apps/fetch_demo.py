@@ -1,7 +1,7 @@
-# apps/fetch_demo.py - v3.0.21 FIX JSON + fallback poem
+# apps/fetch_demo.py - v3.0.23 FIX module callable
 from scs import *
 from extensions.fetch import fetch_json
-from browser import aio, window
+from browser import window
 
 def parse_poem(raw):
     if isinstance(raw, list):
@@ -42,7 +42,7 @@ async def load_poem(app):
             window.console.error("[fetch_demo] load failed", str(type(e)), str(e))
         except:
             pass
-        app.poem = {"title": "The Road Not Taken (fallback)", "author": "Robert Frost - PoetryDB error: " + str(e)[:60], "lines": ["Two roads diverged in a yellow wood,", "And sorry I could not travel both", "Press R to retry", str(e)[:80]]}
+        app.poem = {"title": "The Road Not Taken (fallback)", "author": "Robert Frost - error: " + str(e)[:60], "lines": ["Two roads diverged", "Press R to retry", str(e)[:80]]}
     app.loading = False
 
 def onAppStart(app):
@@ -51,14 +51,33 @@ def onAppStart(app):
     app.background = gradient(rgb(15, 17, 21), rgb(26, 29, 36), start="top")
     app.loading = True
     app.poem = {"title": "", "author": "", "lines": []}
-    aio.run(load_poem(app))
+    # Use browser.aio via window to avoid module callable issue
+    try:
+        from browser import aio
+        aio.run(load_poem(app))
+    except Exception as e:
+        try:
+            window.console.error("[fetch_demo] aio.run failed", e)
+            # Fallback: use asyncio
+            import asyncio
+            asyncio.ensure_future(load_poem(app))
+        except:
+            pass
 
 def onMousePress(app, x, y):
-    aio.run(load_poem(app))
+    try:
+        from browser import aio
+        aio.run(load_poem(app))
+    except:
+        pass
 
 def onKeyPress(app, key):
     if key.lower() in ("r", " ", "space"):
-        aio.run(load_poem(app))
+        try:
+            from browser import aio
+            aio.run(load_poem(app))
+        except:
+            pass
 
 def redrawAll(app):
     if getattr(app, "loading", False):
@@ -72,6 +91,6 @@ def redrawAll(app):
             drawLabel(str(line), app.width//2, y, size=12, fill=rgb(220,220,220))
             y += 22
         drawLabel("Press R / SPACE / Click for new poem", app.width//2, app.height-30, size=12, fill=rgb(150,150,150))
-        drawLabel("v3.0.21 FIX JSON scientific notation", app.width//2, app.height-15, size=8, fill=rgb(100,255,100))
+        drawLabel("v3.0.23 FIX null rich_comp", app.width//2, app.height-15, size=8, fill=rgb(100,255,100))
 
 runApp(1050, 700)

@@ -11,40 +11,59 @@ if not hasattr(window, "_bgs_last_patch_ms"):
 if not hasattr(window, "_bgs_signals_json"):
     window._bgs_signals_json = "{}"
 
+def _is_null_js(js_obj):
+    try:
+        if js_obj is None:
+            return True
+    except:
+        pass
+    try:
+        return bool(window.JSON.stringify(js_obj) == "null")
+    except:
+        return False
+
 def _js_to_py(js_obj):
     try:
-        if js_obj == None:
+        if _is_null_js(js_obj):
             return None
-        s = str(window.Object.prototype.toString.call(js_obj))
-        if s == "[object Array]":
-            result = []
-            for i in range(int(js_obj.length)):
-                try:
-                    result.append(_js_to_py(js_obj[i]))
-                except:
-                    result.append(None)
-            return result
-        if s == "[object Object]":
-            result = {}
-            keys = window.Object.keys(js_obj)
-            for k in keys:
-                try:
-                    result[str(k)] = _js_to_py(js_obj[k])
-                except:
-                    continue
-            return result
         try:
-            if window.typeof(js_obj) == "number":
-                return float(str(js_obj))
-            if window.typeof(js_obj) == "string":
-                return str(js_obj)
-            if window.typeof(js_obj) == "boolean":
-                return bool(js_obj)
+            type_str = window.typeof(js_obj)
         except:
-            pass
+            type_str = ""
+        if type_str == "number":
+            return float(str(js_obj))
+        if type_str == "string":
+            return str(js_obj)
+        if type_str == "boolean":
+            return bool(js_obj)
+        try:
+            json_str = window.JSON.stringify(js_obj)
+            return py_json.loads(json_str)
+        except Exception:
+            try:
+                if hasattr(js_obj, 'length'):
+                    length = int(js_obj.length)
+                    result = []
+                    for i in range(length):
+                        try:
+                            result.append(_js_to_py(js_obj[i]))
+                        except:
+                            result.append(None)
+                    return result
+                keys = window.Object.keys(js_obj)
+                result = {}
+                for idx in range(int(keys.length)):
+                    try:
+                        k = keys[idx]
+                        result[str(k)] = _js_to_py(js_obj[k])
+                    except:
+                        continue
+                return result
+            except:
+                pass
         return js_obj
     except Exception:
-        return js_obj
+        return None
 
 def _sync_debug_signals():
     try:
@@ -74,7 +93,7 @@ def _parse_datastar_patch(raw):
 
 def _merge_patch(target, patch):
     for key, value in patch.items():
-        if value == None:
+        if value is None:
             target.pop(key, None)
         elif isinstance(value, dict):
             existing = target.get(key)
@@ -99,7 +118,7 @@ def _on_datastar_patch(evt):
     if not raw:
         return
     signals_json, only_if_missing = _parse_datastar_patch(raw)
-    if signals_json == None:
+    if signals_json is None:
         return
     try:
         js_patch = window.JSON.parse(signals_json)
@@ -113,7 +132,10 @@ def _on_datastar_patch(evt):
     if not isinstance(patch, dict):
         return
     if only_if_missing:
-        filtered = {k: v for k, v in patch.items() if v != None}
+        filtered = {}
+        for k, v in patch.items():
+            if v is not None:
+                filtered[k] = v
         if not filtered:
             return
         _merge_if_missing(_signals_store, filtered)

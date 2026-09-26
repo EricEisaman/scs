@@ -1,4 +1,4 @@
-# extensions.py - v3.0.22 - FIX e-15 + module callable
+# extensions.py - v3.0.23 - FIX null rich_comp + module callable
 import sys, types
 from browser import window
 import json as py_json
@@ -9,41 +9,87 @@ except:
     _ext_pkg = types.ModuleType('extensions')
     sys.modules['extensions'] = _ext_pkg
 
+def _is_null_js(js_obj):
+    # Safe null check without == None rich_comp
+    try:
+        if js_obj is None:
+            return True
+    except:
+        pass
+    try:
+        # JS null check via typeof and == null in JS
+        return bool(window.JSON.stringify(js_obj) == "null")
+    except:
+        try:
+            return window.typeof(js_obj) == "object" and not bool(js_obj)
+        except:
+            return False
+
 def _js_to_py(js_obj):
     try:
-        if js_obj == None:
+        if _is_null_js(js_obj):
             return None
-        s = str(window.Object.prototype.toString.call(js_obj))
-        if s == "[object Array]":
-            result = []
-            for i in range(int(js_obj.length)):
-                try:
-                    result.append(_js_to_py(js_obj[i]))
-                except:
-                    result.append(None)
-            return result
-        if s == "[object Object]":
-            result = {}
-            keys = window.Object.keys(js_obj)
-            for k in keys:
-                try:
-                    py_k = str(k)
-                    result[py_k] = _js_to_py(js_obj[k])
-                except:
-                    continue
-            return result
+        # Get type string safely
         try:
-            if window.typeof(js_obj) == "number":
-                return float(str(js_obj))
-            if window.typeof(js_obj) == "string":
-                return str(js_obj)
-            if window.typeof(js_obj) == "boolean":
-                return bool(js_obj)
+            type_str = window.typeof(js_obj)
         except:
-            pass
+            type_str = ""
+        if type_str == "number":
+            try:
+                return float(str(js_obj))
+            except:
+                return 0.0
+        if type_str == "string":
+            return str(js_obj)
+        if type_str == "boolean":
+            return bool(js_obj)
+        # For objects/arrays, try JSON roundtrip with Python json (works for PoetryDB, may fail for e-15)
+        try:
+            json_str = window.JSON.stringify(js_obj)
+            # Python json can handle e-15, Brython's cannot, so try Python json first
+            # Use py_json which is Python's json module re-exported
+            # If it contains e- or E- with small exponent, Python json handles it
+            return py_json.loads(json_str)
+        except Exception:
+            # Fallback: try JS parse then manual iteration without == None
+            try:
+                # If it's array
+                if hasattr(js_obj, 'length'):
+                    try:
+                        length = int(js_obj.length)
+                        result = []
+                        for i in range(length):
+                            try:
+                                result.append(_js_to_py(js_obj[i]))
+                            except:
+                                result.append(None)
+                        return result
+                    except:
+                        pass
+                # If it's object, use Object.keys
+                try:
+                    keys = window.Object.keys(js_obj)
+                    result = {}
+                    # keys is JS array, iterate via index
+                    kl = int(keys.length)
+                    for idx in range(kl):
+                        try:
+                            k = keys[idx]
+                            py_k = str(k)
+                            result[py_k] = _js_to_py(js_obj[k])
+                        except:
+                            continue
+                    return result
+                except:
+                    pass
+            except:
+                pass
         return js_obj
     except Exception:
-        return js_obj
+        try:
+            return str(js_obj)
+        except:
+            return None
 
 def _parse_join_data(js_data):
     cid = None
@@ -221,7 +267,7 @@ def _parse_datastar_patch(raw):
 
 def _merge_patch(target, patch):
     for key, value in patch.items():
-        if value == None:
+        if value is None:
             target.pop(key, None)
         elif isinstance(value, dict):
             existing = target.get(key)
@@ -246,7 +292,7 @@ def _on_datastar_patch(evt):
     if not raw:
         return
     signals_json, only_if_missing = _parse_datastar_patch(raw)
-    if signals_json == None:
+    if signals_json is None:
         return
     try:
         js_patch = window.JSON.parse(signals_json)
@@ -260,7 +306,10 @@ def _on_datastar_patch(evt):
     if not isinstance(patch, dict):
         return
     if only_if_missing:
-        filtered = {k: v for k, v in patch.items() if v != None}
+        filtered = {}
+        for k, v in patch.items():
+            if v is not None:
+                filtered[k] = v
         if not filtered:
             return
         _merge_if_missing(_signals_store, filtered)
@@ -338,6 +387,6 @@ except:
     pass
 
 try:
-    window.console.log("[extensions.py] v3.0.22 FIX e-15 via _js_to_py - NO py_json.loads")
+    window.console.log("[extensions.py] v3.0.23 FIX null rich_comp")
 except:
     pass

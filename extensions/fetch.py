@@ -4,54 +4,59 @@ import json as py_json
 class FetchError(RuntimeError):
     pass
 
-def _js_to_py(js_obj):
-    # Convert JS object to Python without using json.loads to avoid e-15 bug
+def _is_null_js(js_obj):
     try:
-        # Try to use JS JSON roundtrip but with manual handling
-        # If js_obj is primitive, return directly
-        if js_obj == None:
+        if js_obj is None:
+            return True
+    except:
+        pass
+    try:
+        return bool(window.JSON.stringify(js_obj) == "null")
+    except:
+        return False
+
+def _js_to_py(js_obj):
+    try:
+        if _is_null_js(js_obj):
             return None
-        t = window.Object.prototype.toString.call(js_obj)
-        s = str(t)
-        if s == "[object Array]":
-            result = []
-            length = js_obj.length
-            for i in range(length):
-                try:
-                    result.append(_js_to_py(js_obj[i]))
-                except:
-                    result.append(None)
-            return result
-        if s == "[object Object]":
-            result = {}
-            keys = window.Object.keys(js_obj)
-            # keys is JS array
-            for k in keys:
-                try:
-                    # k is JS string, convert to Python str
-                    py_k = str(k)
-                    py_v = _js_to_py(js_obj[k])
-                    result[py_k] = py_v
-                except Exception:
-                    continue
-            return result
-        # Primitive
         try:
-            # Numbers - handle scientific notation by converting via float(str())
-            if isinstance(js_obj, float) or isinstance(js_obj, int):
-                return js_obj
-            # JS number
-            if window.typeof(js_obj) == "number":
-                return float(str(js_obj))
-            if window.typeof(js_obj) == "string":
-                return str(js_obj)
-            if window.typeof(js_obj) == "boolean":
-                return bool(js_obj)
+            type_str = window.typeof(js_obj)
         except:
-            pass
+            type_str = ""
+        if type_str == "number":
+            return float(str(js_obj))
+        if type_str == "string":
+            return str(js_obj)
+        if type_str == "boolean":
+            return bool(js_obj)
+        try:
+            json_str = window.JSON.stringify(js_obj)
+            return py_json.loads(json_str)
+        except Exception:
+            try:
+                if hasattr(js_obj, 'length'):
+                    length = int(js_obj.length)
+                    result = []
+                    for i in range(length):
+                        try:
+                            result.append(_js_to_py(js_obj[i]))
+                        except:
+                            result.append(None)
+                    return result
+                keys = window.Object.keys(js_obj)
+                result = {}
+                for idx in range(int(keys.length)):
+                    try:
+                        k = keys[idx]
+                        result[str(k)] = _js_to_py(js_obj[k])
+                    except:
+                        continue
+                return result
+            except:
+                pass
         return js_obj
     except Exception:
-        return js_obj
+        return None
 
 class FetchResponse:
     def __init__(self, js_response):
