@@ -144,6 +144,18 @@ def _get_align_offsets(align, width, height):
         oy = height / 2
     return ox, oy
 
+def _debug_log(msg):
+    try:
+        from browser import window
+        if hasattr(window, 'console') and hasattr(window.console, 'log'):
+            window.console.log(msg)
+    except:
+        pass
+    try:
+        print(msg)
+    except:
+        pass
+
 def _resolve_bbox(x, y, width, height, align):
     """
     Given reference point (x,y), bbox size (w,h), and align,
@@ -153,6 +165,7 @@ def _resolve_bbox(x, y, width, height, align):
     where ox,oy from _get_align_offsets
     """
     ox, oy = _get_align_offsets(align, width, height)
+    _debug_log(f"[SCS ALIGN DEBUG] _resolve_bbox x={x} y={y} w={width} h={height} align={align} -> norm={_normalize_align(align)} ox={ox} oy={oy} -> left={x-ox} top={y-oy}")
     return x - ox, y - oy
 
 # ======================================================================
