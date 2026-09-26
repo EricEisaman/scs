@@ -1,4 +1,4 @@
-# extensions.py - v3.0.19 - DUAL BACKEND - Sage-ec working - NO $B.$is
+# extensions.py - v3.0.20 - FIX resolve_local - Sage-ec working
 import sys, types
 from browser import window, aio
 import json as py_json
@@ -9,7 +9,48 @@ except:
     _ext_pkg = types.ModuleType('extensions')
     sys.modules['extensions'] = _ext_pkg
 
-# --- fetch - DUAL BACKEND window.fetch primary, aio.fetch fallback ---
+def _convert_js(js_data):
+    try:
+        json_str = window.JSON.stringify(js_data)
+        return py_json.loads(json_str)
+    except Exception:
+        return js_data
+
+def _parse_join_data(js_data):
+    cid = None
+    sid = None
+    is_sync = False
+    env_name = "level1"
+    try:
+        cid = js_data.client_id
+    except:
+        try:
+            cid = js_data["client_id"]
+        except:
+            cid = None
+    try:
+        sid = js_data.session_id
+    except:
+        try:
+            sid = js_data["session_id"]
+        except:
+            sid = None
+    try:
+        is_sync = js_data.is_synchronizer
+    except:
+        try:
+            is_sync = js_data["is_synchronizer"]
+        except:
+            is_sync = False
+    try:
+        env_name = js_data.environment_name
+    except:
+        try:
+            env_name = js_data["environment_name"]
+        except:
+            pass
+    return cid, sid, is_sync, env_name
+
 class FetchError(RuntimeError):
     pass
 
@@ -25,29 +66,11 @@ class FetchResponse:
             self.status = int(js_response.status) if hasattr(js_response, 'status') else 200
         except:
             self.status = 200
-        try:
-            self.statusText = str(js_response.statusText) if hasattr(js_response, 'statusText') else ""
-        except:
-            self.statusText = ""
     async def json(self):
-        try:
-            js_data = await self._js.json()
-            return js_data
-        except Exception as e:
-            # aio fallback returns text that needs parsing
-            try:
-                txt = await self._js.text()
-                return py_json.loads(txt)
-            except:
-                raise
+        js_data = await self._js.json()
+        return js_data
     async def text(self):
-        try:
-            return await self._js.text()
-        except:
-            try:
-                return str(self._js)
-            except:
-                return ""
+        return await self._js.text()
 
 async def fetch(url, method="GET", headers=None, body=None, mode="cors"):
     opts = {"method": method, "mode": mode}
@@ -55,45 +78,23 @@ async def fetch(url, method="GET", headers=None, body=None, mode="cors"):
         opts["headers"] = headers
     if body != None:
         opts["body"] = body
-    # Try window.fetch first
     try:
         js_resp = await window.fetch(url, opts)
         return FetchResponse(js_resp, is_aio=False)
     except Exception as e1:
         try:
-            window.console.warn("[fetch] window.fetch failed, trying aio.fetch", str(e1)[:200])
-        except:
-            pass
-        try:
-            # aio.fetch fallback
             aio_resp = await aio.fetch(url, method=method)
             return FetchResponse(aio_resp, is_aio=True)
         except Exception as e2:
-            try:
-                window.console.error("[fetch] both backends failed", str(e1)[:200], str(e2)[:200])
-            except:
-                pass
             raise FetchError(f"fetch failed {url}: {e1} / {e2}")
 
 async def fetch_json(url):
     resp = await fetch(url)
     if not resp.ok:
-        try:
-            txt = await resp.text()
-        except:
-            txt = ""
+        txt = await resp.text()
         raise FetchError(f"HTTP {resp.status} {txt[:200]}")
     js_data = await resp.json()
-    try:
-        # One-shot conversion at boundary
-        json_str = window.JSON.stringify(js_data)
-        return py_json.loads(json_str)
-    except Exception as e:
-        try:
-            window.console.log("[fetch_json] using js_data directly fallback", str(e)[:100])
-        except:
-            pass
-        return js_data
+    return _convert_js(js_data)
 
 async def fetch_text(url):
     resp = await fetch(url)
@@ -113,7 +114,6 @@ try:
 except:
     pass
 
-# --- multiplayer - simple ---
 BASE_URL_DEFAULT = "https://scs-207.onrender.com"
 
 class MultiplayerClient:
@@ -133,27 +133,7 @@ class MultiplayerClient:
         if not resp.ok:
             raise RuntimeError("join HTTP " + str(resp.status))
         js_data = await resp.json()
-        try:
-            cid = js_data.client_id
-        except:
-            try:
-                cid = js_data["client_id"]
-            except:
-                cid = None
-        try:
-            sid = js_data.session_id
-        except:
-            try:
-                sid = js_data["session_id"]
-            except:
-                sid = None
-        try:
-            is_sync = js_data.is_synchronizer
-        except:
-            try:
-                is_sync = js_data["is_synchronizer"]
-            except:
-                is_sync = False
+        cid, sid, is_sync, env_name = _parse_join_data(js_data)
         if not cid or not sid:
             raise RuntimeError("missing ids")
         self.client_id = str(cid)
@@ -164,21 +144,12 @@ class MultiplayerClient:
             es_obj = window.EventSource.new(stream_url)
             self._es = es_obj
             window._bgs_es = es_obj
-        except:
+        except Exception:
             try:
-                stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
                 es_obj = window.EventSource(stream_url)
                 self._es = es_obj
                 window._bgs_es = es_obj
-            except:
-                pass
-        env_name = self.environment_name
-        try:
-            env_name = js_data.environment_name
-        except:
-            try:
-                env_name = js_data["environment_name"]
-            except:
+            except Exception:
                 pass
         return {"client_id": str(cid), "session_id": str(sid), "is_synchronizer": bool(is_sync), "environment_name": env_name}
 
@@ -191,7 +162,6 @@ try:
 except:
     pass
 
-# --- datastar - NO $B.$is ---
 _signals_store = {}
 _attached_es = None
 
@@ -346,6 +316,6 @@ except:
     pass
 
 try:
-    window.console.log("[extensions.py] v3.0.19 DUAL BACKEND - Sage-ec working - NO $B.$is")
+    window.console.log("[extensions.py] v3.0.20 FIX resolve_local - NO $B.$is - DUAL BACKEND")
 except:
     pass

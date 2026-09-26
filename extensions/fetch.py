@@ -4,6 +4,14 @@ import json as py_json
 class FetchError(RuntimeError):
     pass
 
+def _convert_js(js_data):
+    # Pure helper outside async
+    try:
+        json_str = window.JSON.stringify(js_data)
+        return py_json.loads(json_str)
+    except Exception:
+        return js_data
+
 class FetchResponse:
     def __init__(self, js_response, is_aio=False):
         self._js = js_response
@@ -16,17 +24,9 @@ class FetchResponse:
             self.status = int(js_response.status) if hasattr(js_response, 'status') else 200
         except:
             self.status = 200
-        try:
-            self.statusText = str(js_response.statusText) if hasattr(js_response, 'statusText') else ""
-        except:
-            self.statusText = ""
     async def json(self):
-        try:
-            js_data = await self._js.json()
-            return js_data
-        except:
-            txt = await self._js.text()
-            return py_json.loads(txt)
+        js_data = await self._js.json()
+        return js_data
     async def text(self):
         return await self._js.text()
 
@@ -40,10 +40,7 @@ async def fetch(url, method="GET", headers=None, body=None, mode="cors"):
         js_resp = await window.fetch(url, opts)
         return FetchResponse(js_resp, is_aio=False)
     except Exception as e1:
-        try:
-            window.console.warn("[fetch] window.fetch failed, trying aio", str(e1)[:200])
-        except:
-            pass
+        # Fallback to aio.fetch
         try:
             aio_resp = await aio.fetch(url, method=method)
             return FetchResponse(aio_resp, is_aio=True)
@@ -56,10 +53,7 @@ async def fetch_json(url):
         txt = await resp.text()
         raise FetchError(f"HTTP {resp.status} {txt[:200]}")
     js_data = await resp.json()
-    try:
-        return py_json.loads(window.JSON.stringify(js_data))
-    except:
-        return js_data
+    return _convert_js(js_data)
 
 async def fetch_text(url):
     resp = await fetch(url)
