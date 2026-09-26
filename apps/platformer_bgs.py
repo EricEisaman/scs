@@ -1,5 +1,5 @@
-# apps/platformer_bgs.py - v0.1.1 FIXED TRAIL + JS-ONLY DATASTAR
-# Version: 0.1.1 - Fixed trail size, opacity fade, Dict.transition crash
+# apps/platformer_bgs.py - v0.1.2 FIXED TRAIL + JS-ONLY DATASTAR
+# Version: 0.1.2 - Fixed trail size, opacity fade, Dict.transition crash
 # apps/platformer_bgs.py - FINAL WITH OPACITY - REMOTE TRAIL VISIBLE - EXACT PROP MATCH
 # Uses opacity as required per SCS spec - requires patched scs.py with opacity support
 # Trail is direction-dependent, uses opacity fading, works for both local and remote
@@ -7,8 +7,8 @@
 from scs import *
 from browser import window, aio
 
-__version__ = "0.1.1"
-__build__ = "2026-09-26-v0.1.1-V4-patch"
+__version__ = "0.1.2"
+__build__ = "2026-09-26-v0.1.2-crash-proof"
 
 # Log version immediately
 try:
@@ -27,33 +27,68 @@ _bgs_signals_py = {}
 window._bgs_signals = {}
 window._bgs_es = None
 
-# OLD WORKING V4 PATCH HANDLING - this worked for remote peers
+# FIXED V4 PATCH HANDLING v0.1.2 - crash-proof, no Brython loads on raw
 def _bgs_on_datastar_patch(evt):
     try:
         raw = evt.data
+        if not raw:
+            return
         if isinstance(raw, str) and raw.startswith("signals "):
             raw = raw[8:]
+        # CRITICAL: Use ONLY window.JSON.parse for raw - never Brython json.loads
+        # Brython json.loads crashes on Array(2) and (2) [{...}, 231]
         try:
-            import json as _jj
-            parsed = _jj.loads(raw)
-        except:
+            js_parsed = window.JSON.parse(raw)
+        except Exception as e:
+            # Raw not valid JSON, bail
+            return
+        
+        # js_parsed is JS object - convert to Python dict safely
+        try:
+            # Try to get keys
             try:
-                parsed = window.JSON.parse(raw)
-                import json as _jj2
-                parsed = _jj2.loads(window.JSON.stringify(parsed))
+                js_keys = window.Object.keys(js_parsed)
+                # It's a JS object, iterate
+                for i in range(len(js_keys)):
+                    k = js_keys[i]
+                    try:
+                        v = js_parsed[k]
+                    except:
+                        continue
+                    # Convert v to Python via safe JSON roundtrip
+                    try:
+                        # Use JS stringify then Python loads - safe for nested
+                        json_str = window.JSON.stringify(v)
+                        if json_str:
+                            import json as _jj_safe
+                            py_v = _jj_safe.loads(json_str)
+                            _bgs_signals_py[k] = py_v
+                        else:
+                            _bgs_signals_py[k] = v
+                    except:
+                        # If conversion fails, store JS ref directly - get_signal will handle
+                        try:
+                            _bgs_signals_py[k] = v
+                        except:
+                            pass
+                    try:
+                        window._bgs_signals[k] = v
+                    except:
+                        pass
             except:
-                # Final fallback - try direct
-                try:
-                    parsed = window.JSON.parse(raw)
-                except:
-                    return
-        if isinstance(parsed, dict):
-            for kk, vv in parsed.items():
-                _bgs_signals_py[kk] = vv
-                try:
-                    window._bgs_signals[kk] = vv
-                except:
-                    pass
+                # Might already be Python dict (if window.JSON.parse returned Python somehow)
+                if isinstance(js_parsed, dict):
+                    for kk, vv in js_parsed.items():
+                        _bgs_signals_py[kk] = vv
+                        try:
+                            window._bgs_signals[kk] = vv
+                        except:
+                            pass
+        except Exception as e:
+            try:
+                window.console.log(f"[BGS] patch store fail: {e}")
+            except:
+                pass
     except Exception as ex:
         pass
 
