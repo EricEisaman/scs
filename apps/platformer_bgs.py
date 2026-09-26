@@ -597,36 +597,37 @@ def redrawAll(app):
         if p.score>0:
             drawLabel(f"{p.score}",x,y-p.h*0.7-26,size=9,fill=rgb(255,235,100))
     for cid in list(app.remote_players.keys()):
-        remote = app.remote_players.get(cid)
-        if not remote:
+        try:
+            remote=app.remote_players.get(cid)
+            if not isinstance(remote, dict):
+                continue
+            pos=remote.get("position")
+            if not pos or len(pos)<2:
+                continue
+            px=float(pos[0])
+            py=float(pos[1])
+            peer_id=str(cid)
+            vis=app.remote_visuals.get(cid)
+            color=vis.color if vis else COLORS[sum(ord(char) for char in peer_id)%len(COLORS)]
+            facing=vis.facing if vis else 1
+            trail=vis.trail if vis else []
+            if vis and vis.render_pos:
+                x=float(vis.render_pos[0])-float(app.camera_x)
+                y=float(vis.render_pos[1])
+            else:
+                x=px-float(app.camera_x)
+                y=py
+            if x < -300 or x > app.width+300:
+                continue
+            for i,(trail_x,trail_y) in enumerate(trail):
+                drawCircle(float(trail_x)-float(app.camera_x),float(trail_y),2+i*0.6,fill=color)
+            drawRect(x-15,y-20,30,40,fill=color)
+            eye_x=x+facing*6
+            drawCircle(eye_x,y-6,5,fill=rgb(255,255,255))
+            drawCircle(eye_x+facing*2,y-6,2,fill=rgb(0,0,0))
+            drawLabel(peer_id[:4],x,y-30,size=10,fill=rgb(200,220,255))
+        except:
             continue
-        pos = remote.get("position")
-        if not pos or len(pos) < 2:
-            continue
-        px = pos[0]
-        py = pos[1]
-        if px is None or py is None:
-            continue
-        x = px - app.camera_x
-        y = py
-        if x < -300 or x > app.width + 300:
-            continue
-        vis=app.remote_visuals.get(cid)
-        if not vis:
-            color_index=sum(ord(char) for char in cid)%len(COLORS)
-            vis=RemoteVisual(cid,COLORS[color_index])
-            app.remote_visuals[cid]=vis
-        if vis.render_pos:
-            x=vis.render_pos[0]-app.camera_x
-            y=vis.render_pos[1]
-        for i,(trail_x,trail_y) in enumerate(vis.trail):
-            drawCircle(trail_x-app.camera_x,trail_y,2+i*0.6,fill=vis.color)
-        drawRect(x-15,y-20,30,40,fill=vis.color)
-        facing=vis.facing
-        eye_x=x+facing*6
-        drawCircle(eye_x,y-6,5,fill=rgb(255,255,255))
-        drawCircle(eye_x+facing*2,y-6,2,fill=rgb(0,0,0))
-        drawLabel(cid[:4],x,y-30,size=10,fill=rgb(200,220,255))
 
     # UI - BGS status bar
     drawRect(app.width//2,22,app.width,44,fill=rgb(0,0,0))
