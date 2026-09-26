@@ -1,7 +1,7 @@
 import os
 import json
 import time
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
 
@@ -46,7 +46,7 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.write(b'ok')
             return
         
-        # SSE stream for multiplayer - MUST be text/event-stream
+        # SSE stream - MUST be threaded or it blocks all other requests
         if path.startswith('/api/multiplayer/stream'):
             sid = query.get('sid', ['unknown'])[0]
             self.send_response(200)
@@ -55,22 +55,16 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header('Connection', 'keep-alive')
             self.end_headers()
             
-            # Send initial connected event
             self.wfile.write(b': connected\n\n')
             self.wfile.flush()
             
-            # Keep connection open with periodic keepalives and empty datastar patches
-            # Simple stub that sends heartbeat and allows client to stay connected
             try:
-                for i in range(60):  # 60 * 15s = 15 min max
-                    # Send datastar-patch-signals event with empty updates to keep client happy
-                    # Format: event: datastar-patch-signals\ndata: signals {...}\n\n
-                    # For now, send empty remote players to indicate connected
+                for i in range(120):  # 120 * 10s = 20 min
                     event_data = json.dumps({"updates": []})
                     sse_msg = f"event: datastar-patch-signals\ndata: signals {event_data}\n\n"
                     self.wfile.write(sse_msg.encode())
                     self.wfile.flush()
-                    time.sleep(15)
+                    time.sleep(10)
             except:
                 pass
             return
@@ -101,7 +95,6 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps(resp).encode())
             return
         
-        # Favicon
         if 'favicon' in path_lower:
             for candidate in ['favicon.png', 'favicon.ico']:
                 if Path(candidate).exists():
@@ -181,5 +174,6 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
-print(f'Serving ALL + SSE text/event-stream + favicon + API + /healthz on {PORT}')
-HTTPServer(('0.0.0.0', PORT), Handler).serve_forever()
+print(f'Serving ALL + SSE + API + /healthz on {PORT} with ThreadingHTTPServer (fixes blocking)')
+HTTPServerClass = ThreadingHTTPServer
+HTTPServerClass(('0.0.0.0', PORT), Handler).serve_forever()
