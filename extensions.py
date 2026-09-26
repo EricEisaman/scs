@@ -1,26 +1,68 @@
+# extensions.py - SCS Extensions System - Stable API v3.0.17
+# Root shim - Brython tries ./extensions.py before ./extensions/__init__.py
+# Implements full API and injects sys.modules['extensions.*']
+# COMMITTED API - DO NOT CHANGE APPS/SCS UNNECESSARILY
+# Each extension has dedicated API so apps don't need to change
+# fetch_demo safe - PoetryDB returns list
 
 import sys
 import types
 from browser import window, aio
 import json as py_json
 
-# Clear IDB caches that cause old shim to stick - do it here early
-try:
-    for _n in ["brython", "scs", "SCS", "scs-cache", "brython-cache", "__brython_transpile__"]:
-        try:
-            window.indexedDB.deleteDatabase(_n)
-        except:
-            pass
-except:
-    pass
-
+# Ensure extensions package exists
 try:
     import extensions as _ext_pkg
 except:
     _ext_pkg = types.ModuleType('extensions')
     sys.modules['extensions'] = _ext_pkg
 
-# fetch - must work for fetch_demo
+# === extensions.fetch - STABLE API - MUST NOT BREAK fetch_demo ===
+# fetch_demo.py: from extensions.fetch import fetch_json, FetchError
+# PoetryDB returns list - must handle arrays correctly
+
+def _js_to_py_recursive(js_val, depth=0):
+    if depth > 25:
+        return None
+    try:
+        if js_val is None:
+            return None
+        if isinstance(js_val, (str, int, float, bool)):
+            return js_val
+        try:
+            if window.Array.isArray(js_val):
+                result = []
+                for i in range(int(js_val.length)):
+                    try:
+                        result.append(_js_to_py_recursive(js_val[i], depth+1))
+                    except:
+                        continue
+                return result
+        except:
+            pass
+        try:
+            keys = window.Object.keys(js_val)
+            if len(keys) == 0:
+                try:
+                    return py_json.loads(window.JSON.stringify(js_val))
+                except:
+                    return js_val
+            result = {}
+            for i in range(len(keys)):
+                k = keys[i]
+                try:
+                    result[k] = _js_to_py_recursive(js_val[k], depth+1)
+                except:
+                    continue
+            return result
+        except:
+            try:
+                return py_json.loads(window.JSON.stringify(js_val))
+            except:
+                return js_val
+    except:
+        return None
+
 class FetchResponse:
     def __init__(self, js_resp):
         self._js = js_resp
@@ -34,14 +76,34 @@ class FetchResponse:
     async def json(self):
         js_data = await self._js.json()
         try:
+            result = _js_to_py_recursive(js_data)
+            if result is not None:
+                return result
+        except:
+            pass
+        try:
             keys = window.Object.keys(js_data)
+            try:
+                if window.Array.isArray(js_data):
+                    lst = []
+                    for i in range(int(js_data.length)):
+                        try:
+                            lst.append(_js_to_py_recursive(js_data[i], 1))
+                        except:
+                            lst.append(js_data[i])
+                    return lst
+            except:
+                pass
             result = {}
             for i in range(len(keys)):
                 k = keys[i]
                 try:
-                    result[k] = js_data[k]
+                    result[k] = _js_to_py_recursive(js_data[k], 1)
                 except:
-                    continue
+                    try:
+                        result[k] = js_data[k]
+                    except:
+                        continue
             return result
         except:
             try:
@@ -96,10 +158,13 @@ try:
 except:
     pass
 
-# multiplayer - STRICT NO FALLBACK
+# === extensions.multiplayer - STABLE COMMITTED API ===
+# MUST ALWAYS USE THIS - NO FALLBACK ALLOWED
+# Purpose: enable cmu_graphics users to quickly add multiplayer
 BASE_URL_DEFAULT = "https://scs-207.onrender.com"
 
 class MultiplayerClient:
+    # Stable API - __init__(base_url, environment_name, character_name)
     def __init__(self, base_url=BASE_URL_DEFAULT, environment="level1", environment_name=None, character_name="Player", **kw):
         self.base_url = base_url.rstrip("/")
         self.environment_name = environment_name or environment or "level1"
@@ -108,6 +173,7 @@ class MultiplayerClient:
         self.session_id = None
         self.is_synchronizer = False
         self._es = None
+    # Stable API - async def join()
     async def join(self, retries=3):
         base_url = self.base_url
         last_exc = None
@@ -128,7 +194,7 @@ class MultiplayerClient:
                         txt = await resp.text()
                     except:
                         pass
-                    raise RuntimeError("join HTTP " + str(resp.status))
+                    raise RuntimeError("join HTTP " + str(resp.status) + ": " + txt[:500])
                 js_data = await resp.json()
                 try:
                     data = {}
@@ -150,7 +216,7 @@ class MultiplayerClient:
                 sid = data.get("session_id")
                 is_sync = data.get("is_synchronizer", False)
                 if not cid or not sid:
-                    raise RuntimeError("missing ids")
+                    raise RuntimeError("missing ids in join response")
                 self.client_id = cid
                 self.session_id = sid
                 self.is_synchronizer = bool(is_sync)
@@ -183,13 +249,13 @@ try:
 except:
     pass
 
-# datastar
+# === extensions.datastar - STABLE COMMITTED API ===
 if not hasattr(window, "_bgs_signals"):
     window._bgs_signals = {}
 if not hasattr(window, "_bgs_es"):
     window._bgs_es = None
 
-def _js_to_py(js_val, depth=0):
+def _js_to_py_ds(js_val, depth=0):
     if depth > 20:
         return None
     try:
@@ -198,12 +264,12 @@ def _js_to_py(js_val, depth=0):
         if isinstance(js_val, (str, int, float, bool)):
             return js_val
         if isinstance(js_val, dict):
-            return {k: _js_to_py(v, depth+1) for k, v in js_val.items()}
+            return {k: _js_to_py_ds(v, depth+1) for k, v in js_val.items()}
         if isinstance(js_val, (list, tuple)):
-            return [_js_to_py(x, depth+1) for x in js_val]
+            return [_js_to_py_ds(x, depth+1) for x in js_val]
         try:
             if window.Array.isArray(js_val):
-                return [_js_to_py(js_val[i], depth+1) for i in range(int(js_val.length))]
+                return [_js_to_py_ds(js_val[i], depth+1) for i in range(int(js_val.length))]
         except:
             pass
         try:
@@ -212,7 +278,7 @@ def _js_to_py(js_val, depth=0):
             for i in range(len(keys)):
                 k = keys[i]
                 try:
-                    result[k] = _js_to_py(js_val[k], depth+1)
+                    result[k] = _js_to_py_ds(js_val[k], depth+1)
                 except:
                     continue
             return result
@@ -296,7 +362,7 @@ def _on_datastar_patch(evt):
                         continue
                     if only_if_missing and k in window._bgs_signals:
                         continue
-                    py_v = _js_to_py(v)
+                    py_v = _js_to_py_ds(v)
                     if py_v is None:
                         continue
                     existing = window._bgs_signals.get(k)
@@ -332,6 +398,7 @@ def is_connected():
 def attach_to_eventsource(es):
     try:
         es.addEventListener("datastar-patch-signals", _on_datastar_patch)
+        es.addEventListener("multiplayer-snapshot", _on_datastar_patch)
         window._bgs_es = es
     except:
         pass
@@ -348,6 +415,6 @@ except:
     pass
 
 try:
-    window.console.log("[extensions.py] loaded - NO FALLBACK MP fixed, fetch_demo safe v3.0.16")
+    window.console.log("[extensions.py] STABLE API v3.0.17 - MUST USE MP EXTENSION, fetch_demo safe - array fix")
 except:
     pass

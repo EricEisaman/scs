@@ -1,6 +1,52 @@
 from browser import window
 import json as py_json
 
+def _js_to_py_recursive(js_val, depth=0):
+    if depth > 25:
+        return None
+    try:
+        if js_val is None:
+            return None
+        if isinstance(js_val, (str, int, float, bool)):
+            return js_val
+        # Check if JS array
+        try:
+            if window.Array.isArray(js_val):
+                result = []
+                for i in range(int(js_val.length)):
+                    try:
+                        result.append(_js_to_py_recursive(js_val[i], depth+1))
+                    except:
+                        continue
+                return result
+        except:
+            pass
+        # Check if dict-like
+        try:
+            keys = window.Object.keys(js_val)
+            # If no keys, try stringify
+            if len(keys) == 0:
+                try:
+                    # Try JSON stringify parse for primitives
+                    return py_json.loads(window.JSON.stringify(js_val))
+                except:
+                    return js_val
+            result = {}
+            for i in range(len(keys)):
+                k = keys[i]
+                try:
+                    result[k] = _js_to_py_recursive(js_val[k], depth+1)
+                except:
+                    continue
+            return result
+        except:
+            try:
+                return py_json.loads(window.JSON.stringify(js_val))
+            except:
+                return js_val
+    except:
+        return None
+
 class FetchResponse:
     def __init__(self, js_resp):
         self._js = js_resp
@@ -13,15 +59,38 @@ class FetchResponse:
         self.headers = {}
     async def json(self):
         js_data = await self._js.json()
+        # Use recursive converter that handles arrays correctly
+        try:
+            result = _js_to_py_recursive(js_data)
+            if result is not None:
+                return result
+        except:
+            pass
+        # Fallback: try direct Object.keys for dict
         try:
             keys = window.Object.keys(js_data)
+            # If it's array-like with numeric keys, build list
+            try:
+                if window.Array.isArray(js_data):
+                    lst = []
+                    for i in range(int(js_data.length)):
+                        try:
+                            lst.append(_js_to_py_recursive(js_data[i], 1))
+                        except:
+                            lst.append(js_data[i])
+                    return lst
+            except:
+                pass
             result = {}
             for i in range(len(keys)):
                 k = keys[i]
                 try:
-                    result[k] = js_data[k]
+                    result[k] = _js_to_py_recursive(js_data[k], 1)
                 except:
-                    continue
+                    try:
+                        result[k] = js_data[k]
+                    except:
+                        continue
             return result
         except:
             try:
