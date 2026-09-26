@@ -12,8 +12,13 @@ def _on_signals(evt):
         data = json.loads(raw)
         if isinstance(data, dict):
             _signals.update(data)
+            # Also update BGS signals
+            try:
+                for k,v in data.items():
+                    window._bgs_signals[k] = v
+            except:
+                pass
     except Exception as e:
-        # print(f"[datastar] parse fail {e} raw={raw[:100]}")
         pass
 
 def connect_sse(url):
@@ -26,11 +31,22 @@ def connect_sse(url):
     _es = window.EventSource.new(url)
     _es.addEventListener("datastar-patch-signals", _on_signals)
     window._scs_es = _es  # prevent Brython GC
+    window._bgs_es = _es
     print(f"[datastar] SSE {url}")
     return _es
 
 def get_signal(name, default=None):
     return _signals.get(name, default)
+
+def set_signal(name, value):
+    _signals[name] = value
+    try:
+        window._bgs_signals[name] = value
+    except:
+        pass
+
+def get_game_snapshot():
+    return dict(_signals)
 
 def is_datastar_connected():
     try:

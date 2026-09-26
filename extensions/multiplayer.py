@@ -1,8 +1,19 @@
 from browser import window, aio
 import json
 
+# Pre-import datastar at module load, not inside async func (Brython import inside async crashes)
+try:
+    import extensions.datastar as _ds_mod
+    _has_ds = True
+except:
+    _ds_mod = None
+    _has_ds = False
+
 class CharacterState:
     pass  # for import compatibility - wire shape is dict per MULTIPLAYER_SYNCH.md §5.1.1
+
+class MultiplayerError(Exception):
+    pass
 
 class MultiplayerClient:
     def __init__(self, base_url="https://scs-207.onrender.com", environment="level1", environment_name=None, character_name="Player", **kw):
@@ -18,7 +29,6 @@ class MultiplayerClient:
         self._es = None
 
     async def join(self, retries=3):
-        # Render free tier cold start = 30-60s
         for attempt in range(retries):
             try:
                 url = f"{self.base_url}/api/multiplayer/join"
@@ -43,34 +53,46 @@ class MultiplayerClient:
                 self.client_id = data.get("client_id")
                 self.session_id = data.get("session_id")
                 self.is_synchronizer = data.get("is_synchronizer", False)
-                # SSE - Datastar best practice: ONE EventSource via extensions.datastar
+                # SSE - use pre-imported datastar module, not import inside async (Brython crash)
                 stream_url = f"{self.base_url}/api/multiplayer/stream?sid={self.session_id}"
-                try:
-                    import extensions.datastar as ds
-                    ds.connect_sse(stream_url)
-                except Exception as ex:
-                    print(f"[mp] datastar.connect_sse failed {ex}, using direct EventSource")
-                    self._es = window.EventSource.new(stream_url)
-                    window._scs_es = self._es
-                    def _on_sig(evt):
-                        raw = evt.data if isinstance(evt.data, str) else ""
-                        if raw.startswith("signals "):
-                            raw = raw[8:]
-                        try:
-                            d = json.loads(raw)
+                connected = False
+                if _has_ds and _ds_mod and hasattr(_ds_mod, 'connect_sse'):
+                    try:
+                        _ds_mod.connect_sse(stream_url)
+                        connected = True
+                        print(f"[mp] datastar.connect_sse OK {stream_url}")
+                    except Exception as ex:
+                        print(f"[mp] datastar.connect_sse failed {ex}, using direct EventSource")
+                if not connected:
+                    try:
+                        self._es = window.EventSource.new(stream_url)
+                        window._scs_es = self._es
+                        def _on_sig(evt):
+                            raw = evt.data if isinstance(evt.data, str) else ""
+                            if raw.startswith("signals "):
+                                raw = raw[8:]
                             try:
-                                import extensions.datastar as ds2
-                                ds2._signals.update(d)
-                            except:
-                                pass
-                            # callbacks
-                            if "character-state-update" in d and self.on_character_state:
-                                self.on_character_state(d.get("character-state-update", {}).get("updates", []) or d.get("updates", []))
-                        except Exception as pe:
-                            print(f"[mp] signal parse fail {pe}")
-                    self._es.addEventListener("datastar-patch-signals", _on_sig)
-                    self._es.onopen = lambda e: print("[mp] SSE OPEN")
-                    self._es.onerror = lambda e: print(f"[mp] SSE ERROR {e}")
+                                d = json.loads(raw)
+                                # Update signals dict directly without import
+                                if _has_ds and _ds_mod and hasattr(_ds_mod, '_signals'):
+                                    try:
+                                        _ds_mod._signals.update(d)
+                                    except:
+                                        pass
+                                # Also update window._bgs_signals for BGS
+                                try:
+                                    if isinstance(d, dict):
+                                        for k,v in d.items():
+                                            window._bgs_signals[k] = v
+                                except:
+                                    pass
+                            except Exception as pe:
+                                print(f"[mp] signal parse fail {pe}")
+                        self._es.addEventListener("datastar-patch-signals", _on_sig)
+                        self._es.onopen = lambda e: print("[mp] SSE OPEN")
+                        self._es.onerror = lambda e: print(f"[mp] SSE ERROR {e}")
+                    except Exception as sse_e:
+                        print(f"[mp] SSE direct failed {sse_e}")
                 print(f"[mp] Joined client_id={self.client_id} sid={self.session_id} sync={self.is_synchronizer}")
                 return data
             except Exception as e:
