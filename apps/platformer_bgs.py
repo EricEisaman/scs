@@ -5,12 +5,12 @@
 from scs import *
 from browser import window, aio
 
-__version__ = "0.1.5"
-__build__ = "2026-09-26-v0.1.5-proper-datastar"
+__version__ = "0.1.6"
+__build__ = "2026-09-26-v0.1.6-python-dict"
 
 try:
     from browser import window as _w
-    _w.console.log(f"[BGS] platformer_bgs.py version {__version__} build {__build__} - PROPER DATASTAR SINGLE SOURCE")
+    _w.console.log(f"[BGS] platformer_bgs.py version {__version__} build {__build__} - MUST BE PYTHON DICT")
 except:
     print(f"[BGS] version {__version__}")
 
@@ -18,77 +18,81 @@ import math
 import random
 import json as py_json
 
-# PROPER DATASTAR: Single source of truth - no duplicate _bgs_signals_py
+# PROPER DATASTAR v0.1.6: Single source, MUST BE PYTHON DICT, no JS Object.get crash
 window._bgs_signals = {}
 window._bgs_es = None
 
 def _bgs_on_datastar_patch(evt):
-    # PROPER DATASTAR: evt is datastar-patch-signals, data = "signals {json}"
-    # Spec: https://data-star.dev - SSE event, patch signals
-    # ZERO Brython json.loads - only window.JSON.parse, ZERO duplicate
+    # PROPER: signals {json} -> JS parse -> stringify each value -> Python dict
+    # Must be python dict so .get() works, not JS Object
     try:
         raw = evt.data
         if not raw:
             return
         if isinstance(raw, str) and raw.startswith("signals "):
             raw = raw[8:]
-        # JS parse only - crash-proof vs Array(2) / (2) [{..}, 231]
         try:
             js_parsed = window.JSON.parse(raw)
         except:
             return
-        # js_parsed = {signalName: value} - store directly
         try:
             keys = window.Object.keys(js_parsed)
             for i in range(len(keys)):
                 k = keys[i]
                 try:
-                    window._bgs_signals[k] = js_parsed[k]
+                    v = js_parsed[k]
+                    # Convert JS value to Python dict via JSON roundtrip - MUST BE PYTHON
+                    try:
+                        json_str = window.JSON.stringify(v)
+                        if json_str:
+                            py_v = py_json.loads(json_str)
+                            window._bgs_signals[k] = py_v
+                        else:
+                            window._bgs_signals[k] = {}
+                    except Exception as e:
+                        # Fallback: try to keep as is but convert to dict if possible
+                        try:
+                            window._bgs_signals[k] = dict(v) if hasattr(v, 'keys') else {}
+                        except:
+                            window._bgs_signals[k] = {}
                 except:
-                    pass
+                    continue
         except:
             pass
     except:
         pass
 
-def _js_get(obj, key, default=None):
-    if obj is None:
-        return default
-    try:
-        if isinstance(obj, dict):
-            return obj.get(key, default)
-        try:
-            v = obj[key]
-            return default if v is None else v
-        except:
-            return default
-    except:
-        return default
-
-def _js_get_list(obj, key):
-    if obj is None:
-        return []
-    try:
-        val = _js_get(obj, key, [])
-        if val is None:
-            return []
-        if isinstance(val, list):
-            return val
-        try:
-            if window.Array.isArray(val):
-                return [val[i] for i in range(int(val.length))]
-        except:
-            pass
-        return []
-    except:
-        return []
-
 def get_signal(n, d=None):
-    # PROPER: Single source - window._bgs_signals only
+    # MUST BE PYTHON - returns dict with .get()
     try:
         v = window._bgs_signals[n]
         if v is not None:
-            return v
+            # Ensure it's Python dict
+            if isinstance(v, dict):
+                return v
+            # If JS object slipped through, convert
+            try:
+                return py_json.loads(window.JSON.stringify(v))
+            except:
+                return v
+    except:
+        pass
+    try:
+        return window._bgs_signals.get(n, d)
+    except:
+        return d
+
+def get_signal(n, d=None):
+    # MUST BE PYTHON - returns dict with .get()
+    try:
+        v = window._bgs_signals[n]
+        if v is not None:
+            if isinstance(v, dict):
+                return v
+            try:
+                return py_json.loads(window.JSON.stringify(v))
+            except:
+                return v
     except:
         pass
     try:
@@ -408,14 +412,14 @@ def onStep(app):
         try:
             sig=get_signal("character-state-update")
             if sig:
-                updates = _js_get_list(sig, "updates")
+                updates = sig.get("updates", []) if isinstance(sig, dict) else []
                 for u in updates:
-                    cid=_js_get(u, "clientId")
+                    cid=u.get("clientId") if isinstance(u, dict) else None
                     if cid and cid != app.client_id:
                         app.remote_players[cid]=u
                         if cid not in app.remote_visuals:
                             app.remote_visuals[cid]=RemoteVisual(clientId=cid, color=rgb(120,180,255))
-                        remote_coins = _js_get_list(u, "collectedCoins")
+                        remote_coins = u.get("collectedCoins", []) if isinstance(u, dict) else []
                         if remote_coins:
                             for rc_id in remote_coins:
                                 for coin in app.world.coins:
@@ -425,25 +429,25 @@ def onStep(app):
                                         coin["collectedBy"]=cid
             item_sig = get_signal("item-state-update")
             if item_sig:
-                updates = _js_get_list(item_sig, "updates")
-                collections = _js_get_list(item_sig, "collections")
+                updates = item_sig.get("updates", []) if isinstance(item_sig, dict) else []
+                collections = item_sig.get("collections", []) if isinstance(item_sig, dict) else []
                 for upd in updates:
-                    inst_id = _js_get(upd, "instanceId") or _js_get(upd, "id")
-                    if _js_get(upd, "isCollected"):
+                    inst_id = upd.get("instanceId") if isinstance(upd, dict) else None or upd.get("id") if isinstance(upd, dict) else None
+                    if upd.get("isCollected") if isinstance(upd, dict) else False:
                         for coin in app.world.coins:
                             if coin["id"]==inst_id or coin["instanceId"]==inst_id:
                                 if not coin.get("collected"):
                                     coin["collected"]=True
                                     coin["isCollected"]=True
-                                    coin["collectedBy"]=_js_get(upd, "collectedByClientId","remote")
+                                    coin["collectedBy"]=upd.get("collectedByClientId","remote") if isinstance(upd, dict) else "remote"
                 for coll in collections:
-                    inst_id = _js_get(coll, "instanceId")
+                    inst_id = coll.get("instanceId") if isinstance(coll, dict) else None
                     for coin in app.world.coins:
                         if coin["id"]==inst_id or coin["instanceId"]==inst_id:
                             if not coin.get("collected"):
                                 coin["collected"]=True
                                 coin["isCollected"]=True
-                                coin["collectedBy"]=_js_get(coll, "collectedByClientId","remote")
+                                coin["collectedBy"]=coll.get("collectedByClientId","remote") if isinstance(coll, dict) else "remote"
             app.datastar_connected=is_datastar_connected()
         except:
             pass
