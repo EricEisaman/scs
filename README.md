@@ -13,7 +13,7 @@ Live demo:
 <a href="https://ericeisaman.github.io/scs/" target="_blank" rel="noopener noreferrer">
   https://ericeisaman.github.io/scs/
 </a>
-— loads <code>apps/app.py</code>
+- loads <code>apps/app.py</code>
 
 <br>
 
@@ -37,15 +37,15 @@ SCS is a drop-in browser runtime for CMU Graphics / `cmu_graphics` coursework. Y
 
 This repo includes:
 
-- **`scs.py`** — the full API shim (`Rect`, `Oval`, `Circle`, `Label`, `Line`, `Polygon`, `Group`, `Image`, `Sound`, `draw*`, `rgb()`, `gradient()`, `distance()`, `angleTo()`, etc.) with **align as a true general property**
-- **`index.html`** — production viewer. Loads apps from `apps/` via URL param `?app=` — now with auto-start + `window.fetch` loader
-- **`sandbox.html`** — live editor. Edit code in a textarea and hit Run — also auto-starts
-- **`extensions/`** — **NEW: SCS Extensions System** — pure Model-layer libraries that bring the browser to your CMU app
-- **`apps/`** — all runnable apps. No root duplication.
+- **`scs.py`**: the full API shim (`Rect`, `Oval`, `Circle`, `Label`, `Line`, `Polygon`, `Group`, `Image`, `Sound`, `draw*`, `rgb()`, `gradient()`, `distance()`, `angleTo()`, etc.) with **align as a true general property**
+- **`index.html`**: production viewer. Loads apps from `apps/` via URL param `?app=`, with auto-start and a `window.fetch` loader
+- **`sandbox.html`**: live editor. Edit code in a textarea and hit Run. It also auto-starts
+- **`extensions/`**: **NEW: SCS Extensions System**, pure Model-layer libraries that bring the browser to your CMU app
+- **`apps/`**: all runnable apps. No root duplication.
 
 ---
 
-## 🌟 NEW: The SCS Extensions System — The Browser Is Now Your Model
+## 🌟 NEW: The SCS Extensions System. The Browser Is Now Your Model
 
 We asked: what if CMU Graphics apps could talk to the real web without breaking MVC? What if you could `await fetch_json()` in `onAppStart` and still keep `redrawAll` pure?
 
@@ -91,8 +91,8 @@ No callbacks. No promises. Just `await`.
 **4. Bulletproof Brython loader**
 Brython tries `./extensions.py` before `./extensions/__init__.py` — classic footgun. We ship **both**:
 
-- `extensions.py` — root shim implementing full API and injecting `sys.modules['extensions.fetch']`
-- `extensions/__init__.py` + `extensions/fetch.py` — real package
+- `extensions.py`: root shim implementing full API and injecting `sys.modules['extensions.fetch']`
+- `extensions/__init__.py` + `extensions/fetch.py`: real package
 
 Result: `from extensions.fetch import fetch_json` **always** works, in `index.html` and `sandbox.html`.
 
@@ -176,6 +176,39 @@ Controls: `SPACE / R / Click` → new poem.
 
 ---
 
+## Multiplayer Platformer Sync
+
+`apps/platformer_multiplayer.py` is a playable 2D platformer that runs with the same game code in local mode or against the Datastar backend. It supports two to four local players, player movement and jumping, coins, platform collisions, and procedural game sounds.
+
+The optional backend in `scs-datastar-extension/` implements SCS-MP-SYNC over HTTPS, JSON, and Server-Sent Events (SSE). Clients join an environment, receive a session ID, subscribe to a live stream, and publish state through HTTP actions:
+
+- `POST /api/multiplayer/join` creates a client session and assigns the initial synchronizer.
+- `GET /api/multiplayer/stream?sid=<session_id>` sends the bootstrap snapshot and live Datastar signals.
+- `PATCH /api/multiplayer/character-state` publishes validated 2D character state.
+- `PATCH /api/multiplayer/item-state` publishes shared item poses and collection events.
+- `PATCH /api/multiplayer/item-authority-claim` and `item-authority-release` manage item ownership.
+- `POST /api/multiplayer/leave` closes a client session.
+
+The registry keeps updates isolated by environment, provides a 20 Hz server tick, validates finite 2D vectors, bootstraps new subscribers without an event gap, and handles synchronizer and item-authority failover. Signals include character and item updates, client join and leave events, synchronizer changes, and authority changes. See [the synchronization protocol](https://github.com/EricEisaman/babylon-game-starter/blob/main/MULTIPLAYER_SYNCH.md) and [the multiplayer tests](scs-datastar-extension/tests/test_multiplayer_sync.py).
+
+## Procedural Sound System
+
+The procedural audio extension in `extensions/proc_audio.py` builds deterministic sound effects in the browser with the Web Audio API. The live [PROCAUDIO demo](https://ericeisaman.github.io/scs/PROCAUDIO.html) provides the quickest way to hear and inspect the system.
+
+Use the high-level API for preset playback:
+
+```python
+from extensions.proc_audio import AudioEngine
+
+audio = AudioEngine(quality="high", seed=90210)
+audio.resume()  # call after a user gesture
+audio.play("character.jump", seed=42, spatial=True, position={"x": 0, "y": 0})
+```
+
+For custom sounds, `Patch` provides a declarative graph and chainable builder for oscillators, pitch envelopes, filters, ADSR envelopes, distortion, macros, routing, tags, and JSON serialization. Seeded randomization keeps variations reproducible. The engine also includes master and category buses, polyphony limits with voice stealing, burst protection, stereo or full spatial profiles, reverb and convolution, analyser data, AudioWorklet DSP, `OfflineAudioContext` baking, and recording.
+
+Quality profiles are `low`, `medium`, `high`, and `cinematic`. Presets and routing metadata are published in [the procedural audio manifest](extensions/proc_audio_manifest.json), while the demo app is available at `?app=proc_audio_demo`.
+
 ### ✨ Catalog Your Creations in the apps Directory
 
 Default: `apps/app.py`
@@ -241,23 +274,25 @@ Click for new joke. No backend.
 
 ```
 /
-├── index.html          # Viewer — loads from apps/ via ?app=, auto-start, window.fetch
-├── sandbox.html        # Editor — edit + Run, auto-start, pythonpath=['.']
+├── index.html          # Viewer: loads apps via ?app=, auto-start, window.fetch
+├── sandbox.html        # Editor: edit + Run, auto-start, pythonpath=['.']
 ├── scs.py              # CMU Graphics API (Brython)
 ├── app.py              # DEPRECATED placeholder (see apps/app.py)
-├── extensions.py        # Root shim — makes `import extensions` work in Brython
-├── extensions/         # SCS Extensions System (NEW!)
+├── extensions.py        # Root shim: makes `import extensions` work in Brython
+├── extensions/         # SCS Extensions System
 │   ├── __init__.py     # Package marker
-│   └── fetch.py        # Async Fetch — browser-aligned, Model-only
+│   └── fetch.py        # Async Fetch: browser-aligned, Model-only
 └── apps/
     ├── app.py              → Joukowski Aerofoil Wind Tunnel (default)
     ├── rabbit_sim.py       → Rabbit Meadow Population Dynamics
     ├── rabbit_valid_cmu.py → Original valid CMU version
     ├── rabbit_fixed.py     → Fixed anim-every-frame version
-    └── fetch_demo.py       → Extensions.fetch — PoetryDB live (NEW!)
+    ├── fetch_demo.py       → Extensions.fetch: PoetryDB live
+    ├── platformer_multiplayer.py → Datastar multiplayer platformer
+    └── proc_audio_demo.py  → Procedural audio workbench
 ```
 
-No root `app.py` duplication — real apps are **only** in `apps/`.
+No root `app.py` duplication. Real apps are **only** in `apps/`.
 
 ### 🧪 Apps Included
 

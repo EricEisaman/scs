@@ -109,3 +109,23 @@ class MultiplayerClient:
             })
         except Exception as e:
             print(f"[mp] send_character_state failed {e}")
+
+    async def switch_environment(self, environment_name):
+        if not self.client_id or not environment_name:
+            return False
+        response = await window.fetch(
+            f"{self.base_url}/api/multiplayer/switch-environment",
+            {
+                "method": "POST",
+                "headers": {
+                    "Content-Type": "application/json",
+                    "X-Client-ID": self.client_id,
+                },
+                "body": window.JSON.stringify({"environment_name": environment_name}),
+                "mode": "cors",
+            },
+        )
+        if not response.ok:
+            raise Exception(f"HTTP {response.status}")
+        self.environment_name = environment_name
+        return True

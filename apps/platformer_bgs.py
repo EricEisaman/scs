@@ -479,6 +479,7 @@ def onAppStart(app):
     app.item_send_inflight=False
     app.item_retry_ms=500
     app.pending_coin_collections={}
+    app.item_state_reconciled=False
     app.dynamic_coin_seq=0
     initialize_game_audio(app,seed=1201)
 
@@ -564,9 +565,15 @@ def onKeyPress(app, key):
 def onMousePress(app, mouseX, mouseY):
     unlock_game_audio(app)
 
-def apply_item_state_update(app, update):
+def apply_item_state_update(app, update, initial_reconciliation=False):
     if not isinstance(update, dict):
         return
+    if initial_reconciliation:
+        app.pending_coin_collections.clear()
+        for coin in app.world.coins:
+            coin["collected"]=False
+            coin["isCollected"]=False
+            coin["collectedByClientId"]=""
     collected_by_id={}
     for row in update.get("updates",[]):
         if isinstance(row, dict) and row.get("isCollected"):
@@ -660,7 +667,8 @@ def onStep(app):
                             app.remote_timestamps[cid]=timestamp
             item_sig=get_signal("item-state-update")
             if item_sig and item_sig.get("timestamp",-1)!=app.last_item_signal_timestamp:
-                apply_item_state_update(app,item_sig)
+                apply_item_state_update(app,item_sig,not app.item_state_reconciled)
+                app.item_state_reconciled=True
                 app.last_item_signal_timestamp=item_sig.get("timestamp",-1)
             app.datastar_connected=is_datastar_connected()
         except:

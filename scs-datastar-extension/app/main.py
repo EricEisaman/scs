@@ -67,6 +67,7 @@ class MultiplayerRegistry:
         self.base_synchronizer: Optional[str] = None
         self.character_cache: Dict[str, CharacterState] = {}  # client_id -> last CharacterState
         self.item_cache: Dict[str, ItemInstanceState] = {}  # instanceId -> last state
+        self.item_environments: Dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._tick_task: Optional[asyncio.Task] = None
         self.running = True
@@ -187,6 +188,73 @@ class MultiplayerRegistry:
             return None
         return self.clients.get(client_id)
 
+    async def switch_environment(self, client_id: str, environment: str):
+        async with self._lock:
+            client = self.clients.get(client_id)
+            if not client:
+                raise HTTPException(403, "Unknown client")
+            if not environment or environment == client.environment:
+                return client.environment
+
+            previous_environment = client.environment
+            previous_clients = sum(
+                session.environment == previous_environment
+                for session in self.clients.values()
+            ) - 1
+            authority_events = self.authority.client_leaves(client_id)
+            self.character_cache.pop(client_id, None)
+            self.freshness.client_leaves(previous_environment, client_id)
+            client.environment = environment
+            authority_event = self.authority.client_arrives(client_id, environment)
+            self.freshness.client_enters(environment, client_id, list(self.item_cache))
+
+            await self._broadcast_signal("client-left", {
+                "eventType": "left",
+                "clientId": client_id,
+                "totalClients": previous_clients,
+                "reason": "env_switch",
+                "timestamp": int(time.time()*1000),
+            }, environment=previous_environment)
+            for event in authority_events:
+                if event["type"] == "env-authority-changed":
+                    event["reason"] = "env_switch"
+                    await self._broadcast_signal(
+                        "env-item-authority-changed", event,
+                        environment=previous_environment,
+                    )
+                elif event["type"] == "item-authority-changed":
+                    event["reason"] = "env_switch"
+                    await self._broadcast_signal(
+                        "item-authority-changed", event,
+                        environment=previous_environment,
+                    )
+
+            await self._broadcast_signal("client-joined", {
+                "eventType": "joined",
+                "clientId": client_id,
+                "environment": environment,
+                "character": client.character_name,
+                "totalClients": sum(
+                    session.environment == environment
+                    for session in self.clients.values()
+                ),
+                "reason": "env_switch",
+                "timestamp": int(time.time()*1000),
+            }, environment=environment)
+            if authority_event.get("became_authority"):
+                await self._broadcast_signal("env-item-authority-changed", {
+                    "environmentName": environment,
+                    "previousAuthorityId": None,
+                    "newAuthorityId": client_id,
+                    "reason": "env_switch",
+                    "timestamp": int(time.time()*1000),
+                }, environment=environment)
+
+            if client.sse_queue:
+                for signal_name, payload in self._bootstrap_for_client(client):
+                    self._enqueue_signal(client.sse_queue, signal_name, payload)
+            return environment
+
     @staticmethod
     def _enqueue_signal(queue: asyncio.Queue, signal_name: str, payload: Dict[str, Any]):
         try:
@@ -208,58 +276,66 @@ class MultiplayerRegistry:
                 self._enqueue_signal(client.sse_queue, "__close__", {})
             queue = asyncio.Queue(maxsize=64)
             client.sse_queue = queue
-            env_name = client.environment
-            now = int(time.time()*1000)
-            bootstrap = [("connectionState", {
-                "connectionState": "connected",
-                "clientId": client.client_id,
-                "sessionId": client.session_id,
-                "isSynchronizer": client.is_synchronizer,
-                "environment": env_name,
-                "serverTick": 0,
-                "datastarConnected": True,
-            })]
-            for existing in self.clients.values():
-                if existing.environment == env_name and existing.client_id != client_id:
-                    bootstrap.append(("client-joined", {
-                        "eventType": "joined",
-                        "clientId": existing.client_id,
-                        "environment": env_name,
-                        "character": existing.character_name,
-                        "totalClients": sum(s.environment == env_name for s in self.clients.values()),
-                        "timestamp": now,
-                    }))
-            env_authority = self.authority.envAuthority.get(env_name)
-            if env_authority:
-                bootstrap.append(("envAuthority", {
+            bootstrap = self._bootstrap_for_client(client)
+            return queue, bootstrap
+
+    def _bootstrap_for_client(self, client: ClientSession):
+        env_name = client.environment
+        now = int(time.time()*1000)
+        bootstrap = [("connectionState", {
+            "connectionState": "connected",
+            "clientId": client.client_id,
+            "sessionId": client.session_id,
+            "isSynchronizer": client.is_synchronizer,
+            "environment": env_name,
+            "serverTick": 0,
+            "datastarConnected": True,
+        })]
+        for existing in self.clients.values():
+            if existing.environment == env_name and existing.client_id != client.client_id:
+                bootstrap.append(("client-joined", {
+                    "eventType": "joined",
+                    "clientId": existing.client_id,
+                    "environment": env_name,
+                    "character": existing.character_name,
+                    "totalClients": sum(s.environment == env_name for s in self.clients.values()),
+                    "timestamp": now,
+                }))
+        env_authority = self.authority.envAuthority.get(env_name)
+        if env_authority:
+            bootstrap.append(("envAuthority", {
                     "environmentName": env_name,
                     "previousAuthorityId": None,
                     "newAuthorityId": env_authority,
                     "reason": "arrival",
                     "timestamp": now,
+            }))
+        for instance_id, owner in self.authority.itemOwners.items():
+            if self._item_belongs_to_environment(instance_id, env_name):
+                bootstrap.append(("itemAuthority", {
+                    "instanceId": instance_id,
+                    "previousOwnerId": None,
+                    "newOwnerId": owner["ownerClientId"],
+                    "reason": "claim",
+                    "timestamp": now,
                 }))
-            for instance_id, owner in self.authority.itemOwners.items():
-                if self._item_belongs_to_environment(instance_id, env_name):
-                    bootstrap.append(("itemAuthority", {
-                        "instanceId": instance_id,
-                        "previousOwnerId": None,
-                        "newOwnerId": owner["ownerClientId"],
-                        "reason": "claim",
-                        "timestamp": now,
-                    }))
-            characters = [state.to_dict() for owner_id, state in self.character_cache.items()
-                          if owner_id in self.clients and self.clients[owner_id].environment == env_name]
-            if characters:
-                bootstrap.append(("character-state-update", {"updates": characters, "timestamp": now}))
-            items = [row for instance_id, row in self.item_cache.items()
-                     if self._item_belongs_to_environment(instance_id, env_name)]
-            if items:
-                bootstrap.append(("item-state-update", {"updates": items, "collections": [], "timestamp": now}))
-            return queue, bootstrap
+        characters = [state.to_dict() for owner_id, state in self.character_cache.items()
+                      if owner_id in self.clients and self.clients[owner_id].environment == env_name]
+        if characters:
+            bootstrap.append(("character-state-update", {"updates": characters, "timestamp": now}))
+        items = [row for instance_id, row in self.item_cache.items()
+                 if self._item_belongs_to_environment(instance_id, env_name)]
+        bootstrap.append(("item-state-update", {"updates": items, "collections": [], "timestamp": now}))
+        return bootstrap
 
-    @staticmethod
-    def _item_belongs_to_environment(instance_id: str, environment: str) -> bool:
+    def _item_belongs_to_environment(self, instance_id: str, environment: str) -> bool:
+        item_environment = self.item_environments.get(str(instance_id))
+        if item_environment:
+            return item_environment == environment
         return str(instance_id).startswith(environment + ":")
+
+    def _bind_item_environment(self, instance_id: str, environment: str):
+        self.item_environments.setdefault(str(instance_id), environment)
 
     async def unsubscribe_sse(self, client_id: str, queue: asyncio.Queue):
         async with self._lock:
@@ -312,14 +388,28 @@ class MultiplayerRegistry:
                 iid = row.get("instanceId")
                 if not iid:
                     continue
+                if iid not in self.item_environments and row.get("environment") == env_name:
+                    self._bind_item_environment(iid, env_name)
+                if not self._item_belongs_to_environment(iid, env_name):
+                    continue
+                if row.get("environment") not in (None, env_name):
+                    continue
                 resolved = self.authority.get_resolved_owner(iid, env_name)
                 if resolved != client_id:
                     # Silently drop per §7.5
                     continue
+                cached = self.item_cache.get(iid)
+                if cached and cached.get("isCollected"):
+                    row = dict(row)
+                    row["isCollected"] = True
+                    row["collectedByClientId"] = cached.get("collectedByClientId", "")
+                row = dict(row)
+                row["environment"] = env_name
                 # Dirty filter
                 if self.dirty_filter.is_dirty(iid, row):
                     accepted_updates.append(row)
                     self.item_cache[iid] = row
+                    self._bind_item_environment(iid, env_name)
                     # Freshness: mark stale for others, fresh for owner
                     all_clients_in_env = [cid for cid, s in self.clients.items() if s.environment == env_name]
                     self.freshness.mark_dirty(env_name, iid, client_id, all_clients_in_env)
@@ -336,19 +426,35 @@ class MultiplayerRegistry:
                 iid = coll.get("instanceId")
                 if not iid:
                     continue
+                if iid not in self.item_environments and coll.get("environment") == env_name:
+                    self._bind_item_environment(iid, env_name)
+                if not self._item_belongs_to_environment(iid, env_name):
+                    continue
+                if coll.get("environment") not in (None, env_name):
+                    continue
                 cached = self.item_cache.get(iid)
                 if cached and cached.get("isCollected"):
                     continue
                 if coll.get("collectedByClientId") != client_id:
                     continue
                 # Accept
-                accepted_collections.append(coll)
+                accepted_collection = dict(coll)
+                accepted_collection["isCollected"] = True
+                accepted_collection["environment"] = env_name
+                accepted_collections.append(accepted_collection)
                 # Mark collected in cache
                 if iid in self.item_cache:
                     self.item_cache[iid]["isCollected"] = True
                     self.item_cache[iid]["collectedByClientId"] = client_id
+                    self.item_cache[iid]["environment"] = env_name
                 else:
-                    self.item_cache[iid] = {"instanceId": iid, "isCollected": True, "collectedByClientId": client_id}
+                    self.item_cache[iid] = {
+                        "instanceId": iid,
+                        "isCollected": True,
+                        "collectedByClientId": client_id,
+                        "environment": env_name,
+                    }
+                self._bind_item_environment(iid, env_name)
 
             if accepted_updates or accepted_collections:
                 await self._broadcast_signal("item-state-update", {
@@ -365,6 +471,8 @@ class MultiplayerRegistry:
             iid = claim.get("instanceId")
             if not iid:
                 raise HTTPException(400, "Missing instanceId")
+            if not self._item_belongs_to_environment(iid, session.environment):
+                return {"ok": False, "accepted": False, "instanceId": iid, "reason": "wrong_environment"}
             result = self.authority.claim(iid, client_id, idle_timeout_ms=10000)
             if result["accepted"]:
                 if not result.get("already_owned"):
@@ -399,6 +507,8 @@ class MultiplayerRegistry:
             iid = release.get("instanceId")
             if not iid:
                 raise HTTPException(400, "Missing instanceId")
+            if not self._item_belongs_to_environment(iid, session.environment):
+                return {"ok": False, "released": False, "instanceId": iid, "reason": "wrong_environment"}
             result = self.authority.release(iid, client_id)
             if result.get("released"):
                 await self._broadcast_signal("item-authority-changed", {
@@ -446,6 +556,9 @@ class JoinBody(BaseModel):
     environment_name: str
     character_name: str
 
+class EnvironmentSwitchBody(BaseModel):
+    environment_name: str
+
 @bgs_router.post("/join")
 async def join(request: Request, body: JoinBody):
     registry: MultiplayerRegistry = request.app.state.mp
@@ -465,6 +578,15 @@ async def leave(request: Request, x_client_id: Optional[str] = Header(None, alia
     registry: MultiplayerRegistry = request.app.state.mp
     await registry.leave(cid)
     return {"ok": True}
+
+@bgs_router.post("/switch-environment")
+async def switch_environment(request: Request, body: EnvironmentSwitchBody, x_client_id: Optional[str] = Header(None, alias="X-Client-ID")):
+    cid = x_client_id or request.headers.get("X-Client-ID")
+    if not cid:
+        raise HTTPException(400, "Missing X-Client-ID")
+    registry: MultiplayerRegistry = request.app.state.mp
+    environment = await registry.switch_environment(cid, body.environment_name)
+    return {"ok": True, "environment": environment}
 
 @bgs_router.get("/stream")
 async def stream(request: Request, sid: Optional[str] = None, x_session_id: Optional[str] = Header(None, alias="X-Session-ID")):

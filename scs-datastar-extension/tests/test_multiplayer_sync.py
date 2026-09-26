@@ -86,6 +86,96 @@ class MultiplayerRegistryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(name, "character-state-update")
         self.assertEqual(update["updates"][0]["position"], [3.0, 4.0])
 
+    async def test_collected_coin_is_bootstrapped_to_late_joiner(self):
+        registry = MultiplayerRegistry()
+        first = await registry.join(JoinRequest("level-a", "First"))
+        coin_id = "level-a:coin_1"
+
+        await registry.handle_item_state(
+            first.client_id,
+            [],
+            [{
+                "instanceId": coin_id,
+                "collectedByClientId": first.client_id,
+                "timestamp": 1,
+            }],
+        )
+
+        second = await registry.join(JoinRequest("level-a", "Second"))
+        _, bootstrap = await registry.subscribe_sse(second.client_id)
+        item_signal = next(payload for name, payload in bootstrap if name == "item-state-update")
+        self.assertEqual(item_signal["updates"][0]["instanceId"], coin_id)
+        self.assertTrue(item_signal["updates"][0]["isCollected"])
+        self.assertEqual(item_signal["updates"][0]["collectedByClientId"], first.client_id)
+
+    async def test_item_collection_is_environment_scoped_and_terminal(self):
+        registry = MultiplayerRegistry()
+        first = await registry.join(JoinRequest("level-a", "First"))
+        other = await registry.join(JoinRequest("level-b", "Other"))
+        coin_id = "level-a:coin_1"
+
+        await registry.handle_item_state(
+            other.client_id,
+            [],
+            [{"instanceId": coin_id, "collectedByClientId": other.client_id, "timestamp": 1}],
+        )
+        self.assertNotIn(coin_id, registry.item_cache)
+
+        await registry.handle_item_state(
+            first.client_id,
+            [],
+            [{"instanceId": coin_id, "collectedByClientId": first.client_id, "timestamp": 2}],
+        )
+        await registry.handle_item_state(
+            first.client_id,
+            [{"instanceId": coin_id, "isCollected": False, "x": 10}],
+            [],
+        )
+        self.assertTrue(registry.item_cache[coin_id]["isCollected"])
+        self.assertEqual(registry.item_cache[coin_id]["collectedByClientId"], first.client_id)
+
+    async def test_switch_environment_replaces_room_snapshot(self):
+        registry = MultiplayerRegistry()
+        switching = await registry.join(JoinRequest("level-a", "Switching"))
+        old_room = await registry.join(JoinRequest("level-a", "OldRoom"))
+        new_room = await registry.join(JoinRequest("level-b", "NewRoom"))
+        old_queue, _ = await registry.subscribe_sse(old_room.client_id)
+        new_queue, _ = await registry.subscribe_sse(new_room.client_id)
+        switching_queue, _ = await registry.subscribe_sse(switching.client_id)
+
+        await registry.handle_item_state(
+            old_room.client_id,
+            [],
+            [{"instanceId": "level-a:coin_1", "collectedByClientId": old_room.client_id, "timestamp": 1}],
+        )
+        await registry.handle_item_state(
+            new_room.client_id,
+            [],
+            [{"instanceId": "level-b:coin_1", "collectedByClientId": new_room.client_id, "timestamp": 2}],
+        )
+        while not old_queue.empty():
+            await old_queue.get()
+        while not new_queue.empty():
+            await new_queue.get()
+        while not switching_queue.empty():
+            await switching_queue.get()
+        await registry.switch_environment(switching.client_id, "level-b")
+
+        self.assertEqual(registry.clients[switching.client_id].environment, "level-b")
+        old_signal, old_payload = await old_queue.get()
+        self.assertEqual(old_signal, "client-left")
+        self.assertEqual(old_payload["clientId"], switching.client_id)
+        new_signal, new_payload = await new_queue.get()
+        self.assertEqual(new_signal, "client-joined")
+        self.assertEqual(new_payload["clientId"], switching.client_id)
+
+        switched_items = []
+        while not switching_queue.empty():
+            signal, payload = await switching_queue.get()
+            if signal == "item-state-update":
+                switched_items.extend(payload["updates"])
+        self.assertEqual([row["instanceId"] for row in switched_items], ["level-b:coin_1"])
+
 
 if __name__ == "__main__":
     unittest.main()
