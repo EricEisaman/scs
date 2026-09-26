@@ -66,14 +66,31 @@ def _on_datastar_patch(evt):
     signals_json, only_if_missing = _parse_datastar_patch(raw)
     if signals_json == None:
         return
+    # FIX: Use window.JSON.parse to avoid Brython json bug with scientific notation like 6.88e-15
     try:
-        patch = py_json.loads(signals_json)
-    except Exception as exc:
+        # First try JS parser
+        js_patch = window.JSON.parse(signals_json)
+        # Convert JS object to Python via one-shot stringify/parse
         try:
-            window.console.error("[BGS] Invalid Datastar signal JSON:", exc, signals_json[:500])
+            patch = py_json.loads(window.JSON.stringify(js_patch))
         except:
-            pass
-        return
+            patch = js_patch
+    except Exception as exc:
+        # Fallback to Python parser for old format
+        try:
+            patch = py_json.loads(signals_json)
+        except Exception as exc2:
+            try:
+                window.console.error("[BGS] Invalid Datastar signal JSON:", exc2, signals_json[:500])
+            except:
+                pass
+            return
+    if not isinstance(patch, dict):
+        # If js_patch is JS object, try convert
+        try:
+            patch = py_json.loads(window.JSON.stringify(patch))
+        except:
+            return
     if not isinstance(patch, dict):
         return
     if only_if_missing:
@@ -95,7 +112,6 @@ def get_signal(name, default=None):
 def is_connected(max_silence_ms=10000):
     try:
         es = window._bgs_es
-        # Avoid $B.$is - use truthiness and == None
         if not es:
             return False
         try:
@@ -120,7 +136,6 @@ def attach_to_eventsource(es):
     if not es:
         raise ValueError("attach_to_eventsource requires an EventSource")
     try:
-        # Avoid `is` - use == for JS objects
         if _attached_es and es == _attached_es:
             return
     except:

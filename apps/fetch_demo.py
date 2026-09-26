@@ -1,15 +1,13 @@
-# apps/fetch_demo.py - v3.0.20 FIX resolve_local - Sage-ec working
+# apps/fetch_demo.py - v3.0.21 FIX JSON + fallback poem
 from scs import *
 from extensions.fetch import fetch_json
 from browser import aio, window
 
 def parse_poem(raw):
-    # Helper outside async
     if isinstance(raw, list):
         data = raw[0]
     else:
         data = raw
-    # Simple direct access without nested try that triggers resolve_local
     try:
         title = data["title"]
     except:
@@ -36,14 +34,15 @@ def parse_poem(raw):
 async def load_poem(app):
     app.loading = True
     try:
+        window.console.log("[fetch_demo] fetching poetrydb")
         data = await fetch_json("https://poetrydb.org/random")
         app.poem = parse_poem(data)
     except Exception as e:
         try:
-            window.console.error("[fetch_demo] load failed", e)
+            window.console.error("[fetch_demo] load failed", str(type(e)), str(e))
         except:
             pass
-        app.poem = {"title": "Error", "author": str(e)[:100], "lines": ["Failed to load poem", "Press R to retry"]}
+        app.poem = {"title": "The Road Not Taken (fallback)", "author": "Robert Frost - PoetryDB error: " + str(e)[:60], "lines": ["Two roads diverged in a yellow wood,", "And sorry I could not travel both", "Press R to retry", str(e)[:80]]}
     app.loading = False
 
 def onAppStart(app):
@@ -69,11 +68,10 @@ def redrawAll(app):
         drawLabel(poem.get("title", "Untitled"), app.width//2, 80, size=24, bold=True, fill=rgb(255,235,100))
         drawLabel("by " + poem.get("author", ""), app.width//2, 110, size=14, fill=rgb(200,220,255))
         y = 150
-        lines = poem.get("lines", [])
-        for line in lines[:20]:
+        for line in poem.get("lines", [])[:20]:
             drawLabel(str(line), app.width//2, y, size=12, fill=rgb(220,220,220))
             y += 22
         drawLabel("Press R / SPACE / Click for new poem", app.width//2, app.height-30, size=12, fill=rgb(150,150,150))
-        drawLabel("v3.0.20 FIX resolve_local", app.width//2, app.height-15, size=8, fill=rgb(100,255,100))
+        drawLabel("v3.0.21 FIX JSON scientific notation", app.width//2, app.height-15, size=8, fill=rgb(100,255,100))
 
 runApp(1050, 700)

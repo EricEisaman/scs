@@ -5,10 +5,13 @@ class FetchError(RuntimeError):
     pass
 
 def _convert_js(js_data):
-    # Pure helper outside async
     try:
         json_str = window.JSON.stringify(js_data)
-        return py_json.loads(json_str)
+        try:
+            js_obj = window.JSON.parse(json_str)
+            return py_json.loads(window.JSON.stringify(js_obj))
+        except:
+            return py_json.loads(json_str)
     except Exception:
         return js_data
 

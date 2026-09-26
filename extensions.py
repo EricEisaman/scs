@@ -12,7 +12,12 @@ except:
 def _convert_js(js_data):
     try:
         json_str = window.JSON.stringify(js_data)
-        return py_json.loads(json_str)
+        # Use JS parser first to avoid Brython scientific notation bug
+        try:
+            js_obj = window.JSON.parse(json_str)
+            return py_json.loads(window.JSON.stringify(js_obj))
+        except:
+            return py_json.loads(json_str)
     except Exception:
         return js_data
 
@@ -83,10 +88,20 @@ async def fetch(url, method="GET", headers=None, body=None, mode="cors"):
         return FetchResponse(js_resp, is_aio=False)
     except Exception as e1:
         try:
-            aio_resp = await aio.fetch(url, method=method)
-            return FetchResponse(aio_resp, is_aio=True)
-        except Exception as e2:
-            raise FetchError(f"fetch failed {url}: {e1} / {e2}")
+            window.console.warn("[fetch] window.fetch failed, trying without mode", str(e1)[:200])
+            opts2 = {"method": method}
+            if headers:
+                opts2["headers"] = headers
+            if body != None:
+                opts2["body"] = body
+            js_resp = await window.fetch(url, opts2)
+            return FetchResponse(js_resp, is_aio=False)
+        except Exception as e1b:
+            try:
+                aio_resp = await aio.fetch(url, method=method)
+                return FetchResponse(aio_resp, is_aio=True)
+            except Exception as e2:
+                raise FetchError(f"fetch failed {url}: {e1} / {e1b} / {e2}")
 
 async def fetch_json(url):
     resp = await fetch(url)
@@ -228,13 +243,25 @@ def _on_datastar_patch(evt):
     if signals_json == None:
         return
     try:
-        patch = py_json.loads(signals_json)
+        js_patch = window.JSON.parse(signals_json)
+        try:
+            patch = py_json.loads(window.JSON.stringify(js_patch))
+        except:
+            patch = js_patch
     except Exception as exc:
         try:
-            window.console.error("[BGS] Invalid Datastar signal JSON:", exc, signals_json[:500])
+            patch = py_json.loads(signals_json)
+        except Exception as exc2:
+            try:
+                window.console.error("[BGS] Invalid Datastar signal JSON:", exc2, signals_json[:500])
+            except:
+                pass
+            return
+    if not isinstance(patch, dict):
+        try:
+            patch = py_json.loads(window.JSON.stringify(patch))
         except:
-            pass
-        return
+            return
     if not isinstance(patch, dict):
         return
     if only_if_missing:
@@ -316,6 +343,6 @@ except:
     pass
 
 try:
-    window.console.log("[extensions.py] v3.0.20 FIX resolve_local - NO $B.$is - DUAL BACKEND")
+    window.console.log("[extensions.py] v3.0.21 FIX JSON scientific notation + DUAL BACKEND")
 except:
     pass
