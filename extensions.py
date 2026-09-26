@@ -6,7 +6,7 @@ try:
 except: pass
 # Only pre-create placeholders for original extensions - NOT proc_audio
 # Pre-creating placeholder for proc_audio blocks real file from loading
-for _n in ['fetch','datastar','multiplayer']:
+for _n in ['datastar','multiplayer']:
     _f = f'extensions.{_n}'
     if _f not in sys.modules:
         try:
