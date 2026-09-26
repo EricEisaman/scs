@@ -14,7 +14,6 @@ class FetchResponse:
         except:
             self.statusText = ""
     async def json(self):
-        # Old working: return JS data directly, no conversion - let app convert
         js_data = await self._js.json()
         return js_data
     async def text(self):
@@ -34,11 +33,10 @@ async def fetch_json(url):
     if not resp.ok:
         raise FetchError(f"HTTP {resp.status}")
     js_data = await resp.json()
-    # Convert here with one-shot
     try:
+        # One-shot conversion
         return py_json.loads(window.JSON.stringify(js_data))
     except:
-        # Fallback to js_data if conversion fails
         return js_data
 
 async def fetch_text(url):
