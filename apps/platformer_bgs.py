@@ -5,12 +5,12 @@
 from scs import *
 from browser import window, aio
 
-__version__ = "0.1.6"
-__build__ = "2026-09-26-v0.1.6-python-dict"
+__version__ = "0.1.7"
+__build__ = "2026-09-26-v0.1.7-no-loads"
 
 try:
     from browser import window as _w
-    _w.console.log(f"[BGS] platformer_bgs.py version {__version__} build {__build__} - MUST BE PYTHON DICT")
+    _w.console.log(f"[BGS] platformer_bgs.py version {__version__} build {__build__} - NO JSON.LOADS CRASH")
 except:
     print(f"[BGS] version {__version__}")
 
@@ -18,13 +18,53 @@ import math
 import random
 import json as py_json
 
-# PROPER DATASTAR v0.1.6: Single source, MUST BE PYTHON DICT, no JS Object.get crash
+# PROPER DATASTAR v0.1.7: MUST BE PYTHON, NO json.loads in hot path (crash-proof)
 window._bgs_signals = {}
 window._bgs_es = None
 
+def _js_to_py_safe(js_val, depth=0):
+    # CRASH-PROOF: Convert JS to Python without json.loads
+    # Handles Array(2) / (2) [{..}, 230] that crashes Brython loads
+    if depth > 20:
+        return None
+    try:
+        if js_val is None:
+            return None
+        # Already Python primitives
+        if isinstance(js_val, (str, int, float, bool)):
+            return js_val
+        if isinstance(js_val, dict):
+            return {k: _js_to_py_safe(v, depth+1) for k, v in js_val.items()}
+        if isinstance(js_val, (list, tuple)):
+            return [_js_to_py_safe(x, depth+1) for x in js_val]
+        # JS Array?
+        try:
+            if window.Array.isArray(js_val):
+                length = int(js_val.length)
+                return [_js_to_py_safe(js_val[i], depth+1) for i in range(length)]
+        except:
+            pass
+        # JS Object -> Python dict via Object.keys
+        try:
+            keys = window.Object.keys(js_val)
+            result = {}
+            for i in range(len(keys)):
+                k = keys[i]
+                try:
+                    v = js_val[k]
+                    result[k] = _js_to_py_safe(v, depth+1)
+                except:
+                    continue
+            return result
+        except:
+            pass
+        # Fallback
+        return js_val
+    except:
+        return None
+
 def _bgs_on_datastar_patch(evt):
-    # PROPER: signals {json} -> JS parse -> stringify each value -> Python dict
-    # Must be python dict so .get() works, not JS Object
+    # PROPER DATASTAR: signals {json} -> JS parse only, then safe JS->PY without loads
     try:
         raw = evt.data
         if not raw:
@@ -41,20 +81,12 @@ def _bgs_on_datastar_patch(evt):
                 k = keys[i]
                 try:
                     v = js_parsed[k]
-                    # Convert JS value to Python dict via JSON roundtrip - MUST BE PYTHON
-                    try:
-                        json_str = window.JSON.stringify(v)
-                        if json_str:
-                            py_v = py_json.loads(json_str)
-                            window._bgs_signals[k] = py_v
-                        else:
-                            window._bgs_signals[k] = {}
-                    except Exception as e:
-                        # Fallback: try to keep as is but convert to dict if possible
-                        try:
-                            window._bgs_signals[k] = dict(v) if hasattr(v, 'keys') else {}
-                        except:
-                            window._bgs_signals[k] = {}
+                    # CRASH-PROOF: No py_json.loads here, use _js_to_py_safe
+                    py_v = _js_to_py_safe(v)
+                    if py_v is not None:
+                        window._bgs_signals[k] = py_v
+                    else:
+                        window._bgs_signals[k] = {}
                 except:
                     continue
         except:
@@ -63,42 +95,20 @@ def _bgs_on_datastar_patch(evt):
         pass
 
 def get_signal(n, d=None):
-    # MUST BE PYTHON - returns dict with .get()
+    # MUST BE PYTHON DICT - returns dict with .get()
     try:
-        v = window._bgs_signals[n]
+        v = window._bgs_signals.get(n, d)
         if v is not None:
-            # Ensure it's Python dict
-            if isinstance(v, dict):
-                return v
-            # If JS object slipped through, convert
-            try:
-                return py_json.loads(window.JSON.stringify(v))
-            except:
-                return v
+            return v
     except:
-        pass
-    try:
-        return window._bgs_signals.get(n, d)
-    except:
-        return d
+        try:
+            v = window._bgs_signals[n]
+            return v if v is not None else d
+        except:
+            return d
+    return d
 
-def get_signal(n, d=None):
-    # MUST BE PYTHON - returns dict with .get()
-    try:
-        v = window._bgs_signals[n]
-        if v is not None:
-            if isinstance(v, dict):
-                return v
-            try:
-                return py_json.loads(window.JSON.stringify(v))
-            except:
-                return v
-    except:
-        pass
-    try:
-        return window._bgs_signals.get(n, d)
-    except:
-        return d
+
 
 def is_datastar_connected():
     try:
