@@ -1,5 +1,5 @@
-# apps/platformer_bgs.py - v0.1.0 FIXED TRAIL + JS-ONLY DATASTAR
-# Version: 0.1.0 - Fixed trail size, opacity fade, Dict.transition crash
+# apps/platformer_bgs.py - v0.1.1 FIXED TRAIL + JS-ONLY DATASTAR
+# Version: 0.1.1 - Fixed trail size, opacity fade, Dict.transition crash
 # apps/platformer_bgs.py - FINAL WITH OPACITY - REMOTE TRAIL VISIBLE - EXACT PROP MATCH
 # Uses opacity as required per SCS spec - requires patched scs.py with opacity support
 # Trail is direction-dependent, uses opacity fading, works for both local and remote
@@ -7,8 +7,8 @@
 from scs import *
 from browser import window, aio
 
-__version__ = "0.1.0"
-__build__ = "2026-09-26-fixed-trail-js-only"
+__version__ = "0.1.1"
+__build__ = "2026-09-26-v0.1.1-V4-patch"
 
 # Log version immediately
 try:
@@ -27,221 +27,47 @@ _bgs_signals_py = {}
 window._bgs_signals = {}
 window._bgs_es = None
 
-def _safe_js_to_py(js_val, depth=0):
-    """Safely convert JS value to Python, no crash, max depth 10"""
-    if depth > 10:
-        return None
-    try:
-        # None / null
-        if js_val is None:
-            return None
-        # Check JS type
-        try:
-            js_type = window.eval(f"typeof arguments[0]", js_val)
-            # Actually need to check via typeof
-            pass
-        except:
-            pass
-        
-        # Try to detect if it's already Python
-        if isinstance(js_val, (str, int, float, bool, list, dict)):
-            # Already Python, but might contain JS inside
-            if isinstance(js_val, list):
-                return [_safe_js_to_py(x, depth+1) for x in js_val]
-            if isinstance(js_val, dict):
-                return {k: _safe_js_to_py(v, depth+1) for k, v in js_val.items()}
-            return js_val
-        
-        # Try JSON roundtrip for simple values - safest for remote peers
-        try:
-            # Stringify then parse as Python JSON
-            json_str = window.JSON.stringify(js_val)
-            if json_str:
-                import json as _jj
-                return _jj.loads(json_str)
-        except:
-            pass
-        
-        # Fallback: try to iterate as object
-        try:
-            # Check if array-like
-            try:
-                is_array = window.Array.isArray(js_val)
-                if is_array:
-                    length = int(js_val.length)
-                    result = []
-                    for i in range(length):
-                        try:
-                            item = js_val[i]
-                            result.append(_safe_js_to_py(item, depth+1))
-                        except:
-                            result.append(None)
-                    return result
-            except:
-                pass
-            
-            # Object - get keys
-            try:
-                keys = window.Object.keys(js_val)
-                result = {}
-                for i in range(len(keys)):
-                    k = keys[i]
-                    try:
-                        v = js_val[k]
-                        result[k] = _safe_js_to_py(v, depth+1)
-                    except:
-                        result[k] = None
-                return result
-            except:
-                pass
-        except:
-            pass
-        
-        # Last resort - return as is
-        return js_val
-    except Exception as e:
-        try:
-            window.console.log(f"[BGS] js_to_py fail depth={depth}: {e}")
-        except:
-            pass
-        return None
-
+# OLD WORKING V4 PATCH HANDLING - this worked for remote peers
 def _bgs_on_datastar_patch(evt):
-    # FIXED: Safe conversion, no Dict.transition crash, remote peers work
     try:
         raw = evt.data
-        if not raw:
-            return
         if isinstance(raw, str) and raw.startswith("signals "):
             raw = raw[8:]
-        
-        # Parse raw
-        js_obj = None
         try:
-            if isinstance(raw, str):
-                js_obj = window.JSON.parse(raw)
-            else:
-                js_obj = raw
-        except Exception as e:
-            # Try Python json as fallback
+            import json as _jj
+            parsed = _jj.loads(raw)
+        except:
             try:
-                import json as _jj
-                if isinstance(raw, str):
-                    js_obj = _jj.loads(raw)
+                parsed = window.JSON.parse(raw)
+                import json as _jj2
+                parsed = _jj2.loads(window.JSON.stringify(parsed))
             except:
-                return
-        
-        if js_obj is None:
-            return
-        
-        # Convert and store
-        try:
-            # Get keys via JS
-            try:
-                js_keys = window.Object.keys(js_obj)
-            except:
-                # Might already be Python dict
-                if isinstance(js_obj, dict):
-                    js_keys = list(js_obj.keys())
-                    for k in js_keys:
-                        v = js_obj[k]
-                        try:
-                            window._bgs_signals[k] = v
-                        except:
-                            pass
-                        # Safe convert
-                        py_v = _safe_js_to_py(v)
-                        if py_v is not None:
-                            _bgs_signals_py[k] = py_v
-                        else:
-                            _bgs_signals_py[k] = v
-                    return
-                else:
-                    return
-            
-            for i in range(len(js_keys)):
-                k = js_keys[i]
+                # Final fallback - try direct
                 try:
-                    v = js_obj[k]
+                    parsed = window.JSON.parse(raw)
                 except:
-                    continue
-                
-                # Store JS version
+                    return
+        if isinstance(parsed, dict):
+            for kk, vv in parsed.items():
+                _bgs_signals_py[kk] = vv
                 try:
-                    window._bgs_signals[k] = v
+                    window._bgs_signals[kk] = vv
                 except:
                     pass
-                
-                # Store Python version via safe converter
-                try:
-                    py_v = _safe_js_to_py(v)
-                    if py_v is not None:
-                        _bgs_signals_py[k] = py_v
-                    else:
-                        # Fallback to raw
-                        _bgs_signals_py[k] = v
-                except Exception as e:
-                    try:
-                        _bgs_signals_py[k] = v
-                    except:
-                        pass
-        except Exception as e:
-            try:
-                window.console.log(f"[BGS] patch store fail: {e}")
-            except:
-                pass
-    except Exception as e:
-        try:
-            window.console.log(f"[BGS] patch outer fail: {e}")
-        except:
-            pass
+    except Exception as ex:
+        pass
 
-def get_signal(n, d=None):
-    # FIXED: Always returns Python dict for remote peers
+def get_signal(n,d=None):
     try:
-        # Try Python cache first
+        # V4: try Python global first (reliable) - this worked
         if n in _bgs_signals_py:
-            val = _bgs_signals_py.get(n, d)
-            # If it's already dict, return it
-            if isinstance(val, dict):
-                return val
-            # If it's JS object stored as Python, convert
-            py_val = _safe_js_to_py(val)
-            if py_val is not None:
-                return py_val
-            return val
+            return _bgs_signals_py.get(n,d)
+        return window._bgs_signals.get(n,d)
     except:
-        pass
-    
-    try:
-        # Try JS cache
-        js_val = None
         try:
-            js_val = window._bgs_signals[n]
+            return _bgs_signals_py.get(n,d)
         except:
-            try:
-                js_val = window._bgs_signals.get(n, None)
-            except:
-                pass
-        
-        if js_val is not None:
-            py_val = _safe_js_to_py(js_val)
-            if py_val is not None:
-                # Cache it
-                try:
-                    _bgs_signals_py[n] = py_val
-                except:
-                    pass
-                return py_val
-            return js_val
-    except:
-        pass
-    
-    try:
-        return _bgs_signals_py.get(n, d)
-    except:
-        return d
-
+            return d
 
 def is_datastar_connected():
     try:
