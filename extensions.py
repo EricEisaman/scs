@@ -1,6 +1,8 @@
-# extensions.py - SCS Extensions System - v3.0.17 STABLE
-# fetch + multiplayer ultra minimal (fix resolve_local), datastar proper spec
-# fetch_demo safe, MUST USE MP EXTENSION, apps frozen
+# extensions.py - SCS Extensions System - v3.0.17 FINAL - per expert sister
+# fetch: top-level json, no **kw, dict auto-converts, one-shot conversion
+# datastar: Python-owned _signals_store, debug JSON string, recursive onlyIfMissing, str(raw), single attached ES
+# multiplayer: one-shot conversion
+# Apps frozen, scs frozen
 
 import sys
 import types
@@ -13,48 +15,52 @@ except:
     _ext_pkg = types.ModuleType('extensions')
     sys.modules['extensions'] = _ext_pkg
 
-# --- fetch - ULTRA MINIMAL - fetch_demo safe ---
+# --- fetch ---
+class FetchError(RuntimeError):
+    pass
+
 class FetchResponse:
-    def __init__(self, js_resp):
-        self._js = js_resp
-        self.ok = bool(js_resp.ok)
-        self.status = int(js_resp.status)
+    def __init__(self, js_response):
+        self._js = js_response
+        self.ok = bool(js_response.ok)
+        self.status = int(js_response.status)
         try:
-            self.statusText = str(js_resp.statusText)
-        except:
+            self.statusText = str(js_response.statusText)
+        except Exception:
             self.statusText = ""
-        self.headers = {}
     async def json(self):
-        js_data = await self._js.json()
-        return js_data
+        js_value = await self._js.json()
+        try:
+            return py_json.loads(window.JSON.stringify(js_value))
+        except Exception as exc:
+            try:
+                window.console.error("[fetch] response JSON conversion failed", exc)
+            except Exception:
+                pass
+            return js_value
     async def text(self):
         return await self._js.text()
 
-async def fetch(url, method="GET", headers=None, body=None, mode=None):
-    opts = {"method": method}
-    if headers:
-        opts["headers"] = headers
+async def fetch(url, method="GET", headers=None, body=None):
+    options = {"method": method}
+    if headers is not None:
+        options["headers"] = headers
     if body is not None:
-        opts["body"] = body
-    if mode:
-        opts["mode"] = mode
-    js_resp = await window.fetch(url, opts)
-    return FetchResponse(js_resp)
+        options["body"] = body
+    js_response = await window.fetch(url, options)
+    return FetchResponse(js_response)
 
-async def fetch_json(url, **kw):
-    resp = await fetch(url, **kw)
-    if not resp.ok:
-        raise RuntimeError("fetch_json HTTP " + str(resp.status))
-    return await resp.json()
+async def fetch_json(url):
+    response = await fetch(url)
+    if not response.ok:
+        raise FetchError("fetch_json HTTP " + str(response.status) + " " + response.statusText)
+    return await response.json()
 
-async def fetch_text(url, **kw):
-    resp = await fetch(url, **kw)
-    if not resp.ok:
-        raise RuntimeError("fetch_text HTTP " + str(resp.status))
-    return await resp.text()
-
-class FetchError(RuntimeError):
-    pass
+async def fetch_text(url):
+    response = await fetch(url)
+    if not response.ok:
+        raise FetchError("fetch_text HTTP " + str(response.status) + " " + response.statusText)
+    return await response.text()
 
 _mod_ft = types.ModuleType('extensions.fetch')
 _mod_ft.fetch = fetch
@@ -68,7 +74,7 @@ try:
 except:
     pass
 
-# --- multiplayer - ULTRA MINIMAL - COMMITTED API ---
+# --- multiplayer ---
 BASE_URL_DEFAULT = "https://scs-207.onrender.com"
 
 class MultiplayerClient:
@@ -84,36 +90,31 @@ class MultiplayerClient:
         base_url = self.base_url
         url = base_url + "/api/multiplayer/join"
         payload = {"environment_name": self.environment_name, "character_name": self.character_name}
-        resp = await window.fetch(url, {"method": "POST", "headers": {"Content-Type": "application/json"}, "body": window.JSON.stringify(payload)})
+        resp = await window.fetch(url, {
+            "method": "POST",
+            "headers": {"Content-Type": "application/json"},
+            "body": window.JSON.stringify(payload)
+        })
         if not resp.ok:
             raise RuntimeError("join HTTP " + str(resp.status))
         js_data = await resp.json()
         try:
-            cid = js_data.client_id
-        except:
+            data = py_json.loads(window.JSON.stringify(js_data))
+        except Exception as exc:
             try:
-                cid = js_data["client_id"]
+                window.console.error("[MP] join JSON conversion failed", exc)
             except:
-                cid = None
-        try:
-            sid = js_data.session_id
-        except:
-            try:
-                sid = js_data["session_id"]
-            except:
-                sid = None
-        try:
-            is_sync = js_data.is_synchronizer
-        except:
-            try:
-                is_sync = js_data["is_synchronizer"]
-            except:
-                is_sync = False
+                pass
+            data = {}
+        cid = data.get("client_id")
+        sid = data.get("session_id")
+        is_sync = bool(data.get("is_synchronizer", False))
+        env_name = data.get("environment_name", self.environment_name)
         if not cid or not sid:
             raise RuntimeError("missing ids")
         self.client_id = str(cid)
         self.session_id = str(sid)
-        self.is_synchronizer = bool(is_sync)
+        self.is_synchronizer = is_sync
         try:
             stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
             es_obj = window.EventSource.new(stream_url)
@@ -133,14 +134,6 @@ class MultiplayerClient:
                     pass
             except:
                 pass
-        env_name = self.environment_name
-        try:
-            env_name = js_data.environment_name
-        except:
-            try:
-                env_name = js_data["environment_name"]
-            except:
-                pass
         return {"client_id": str(cid), "session_id": str(sid), "is_synchronizer": bool(is_sync), "environment_name": env_name}
 
 _mod_mp = types.ModuleType('extensions.multiplayer')
@@ -152,29 +145,39 @@ try:
 except:
     pass
 
-# --- datastar - PROPER SPEC - line-prefix parsing, Python-native, merge, null deletion, onlyIfMissing ---
-if not hasattr(window, "_bgs_signals"):
-    window._bgs_signals = {}
+# --- datastar ---
+_signals_store = {}
+_attached_es = None
+
 if not hasattr(window, "_bgs_es"):
     window._bgs_es = None
 if not hasattr(window, "_bgs_last_patch_ms"):
     window._bgs_last_patch_ms = 0
+if not hasattr(window, "_bgs_signals_json"):
+    window._bgs_signals_json = "{}"
 
-_attached_es_ids = set()
-
-def _extract_signals_json(raw):
-    if not isinstance(raw, str):
-        return None
-    for line in raw.splitlines():
-        if line.startswith("signals "):
-            return line[len("signals "):]
-    return None
+def _sync_debug_signals():
+    try:
+        window._bgs_signals_json = py_json.dumps(_signals_store)
+    except Exception:
+        try:
+            window._bgs_signals_json = "{}"
+        except:
+            pass
+    try:
+        window._bgs_signals_debug = window.JSON.parse(window._bgs_signals_json)
+    except:
+        pass
 
 def _parse_datastar_patch(raw):
+    if raw is None:
+        return None, False
+    try:
+        raw = str(raw)
+    except Exception:
+        return None, False
     signals_json = None
     only_if_missing = False
-    if not isinstance(raw, str):
-        return None, False
     for line in raw.splitlines():
         if line.startswith("signals "):
             signals_json = line[len("signals "):]
@@ -194,6 +197,15 @@ def _merge_patch(target, patch):
             _merge_patch(existing, value)
         else:
             target[key] = value
+
+def _merge_if_missing(target, patch):
+    for key, value in patch.items():
+        if key not in target:
+            target[key] = value
+            continue
+        current = target[key]
+        if isinstance(current, dict) and isinstance(value, dict):
+            _merge_if_missing(current, value)
 
 def _on_datastar_patch(evt):
     raw = getattr(evt, "data", None)
@@ -217,21 +229,20 @@ def _on_datastar_patch(evt):
             pass
         return
     if only_if_missing:
-        filtered = {}
-        for k, v in patch.items():
-            if k not in window._bgs_signals:
-                filtered[k] = v
+        filtered = {k: v for k, v in patch.items() if v is not None}
         if not filtered:
             return
-        patch = filtered
-    _merge_patch(window._bgs_signals, patch)
+        _merge_if_missing(_signals_store, filtered)
+    else:
+        _merge_patch(_signals_store, patch)
     try:
         window._bgs_last_patch_ms = int(window.Date.now())
     except:
         pass
+    _sync_debug_signals()
 
 def get_signal(name, default=None):
-    return window._bgs_signals.get(name, default)
+    return _signals_store.get(name, default)
 
 def is_connected(max_silence_ms=10000):
     try:
@@ -250,37 +261,26 @@ def is_connected(max_silence_ms=10000):
         return False
 
 def attach_to_eventsource(es):
+    global _attached_es
     if es is None:
         raise ValueError("attach_to_eventsource requires an EventSource")
-    try:
-        if getattr(es, "_bgs_listener_attached", False):
-            window._bgs_es = es
-            return
-    except:
-        pass
-    try:
-        es_id = id(es)
-        if es_id in _attached_es_ids and window._bgs_es is es:
-            return
-    except:
-        pass
+    if es is _attached_es:
+        return
+    if _attached_es is not None:
+        try:
+            _attached_es.removeEventListener("datastar-patch-signals", _on_datastar_patch)
+        except Exception:
+            pass
     try:
         es.addEventListener("datastar-patch-signals", _on_datastar_patch)
-        try:
-            es._bgs_listener_attached = True
-        except:
-            pass
-        try:
-            _attached_es_ids.add(id(es))
-        except:
-            pass
-        window._bgs_es = es
     except Exception as exc:
         try:
             window.console.error("[BGS] Failed to attach datastar listener:", exc)
         except:
             pass
         raise
+    _attached_es = es
+    window._bgs_es = es
 
 _mod_ds = types.ModuleType('extensions.datastar')
 _mod_ds.get_signal = get_signal
@@ -294,6 +294,6 @@ except:
     pass
 
 try:
-    window.console.log("[extensions.py] v3.0.17 PROPER DATASTAR SPEC + ULTRA MINIMAL MP/FETCH - apps frozen")
+    window.console.log("[extensions.py] v3.0.17 FINAL - sister expert fixes - apps frozen")
 except:
     pass

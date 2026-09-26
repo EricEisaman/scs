@@ -1,4 +1,5 @@
-from browser import window, aio
+from browser import window
+import json as py_json
 
 BASE_URL_DEFAULT = "https://scs-207.onrender.com"
 
@@ -13,44 +14,36 @@ class MultiplayerClient:
         self._es = None
 
     async def join(self):
-        # ULTRA MINIMAL - single attempt, no retry loop, no py_json, direct JS access
-        # Fixes Brython resolve_local bug
+        # Clean separation: dict for options (auto-converted), JSON text for body
         base_url = self.base_url
         url = base_url + "/api/multiplayer/join"
         payload = {"environment_name": self.environment_name, "character_name": self.character_name}
-        # Use window.fetch with JS object - Brython will convert dict to JS
-        resp = await window.fetch(url, {"method": "POST", "headers": {"Content-Type": "application/json"}, "body": window.JSON.stringify(payload)})
+        resp = await window.fetch(url, {
+            "method": "POST",
+            "headers": {"Content-Type": "application/json"},
+            "body": window.JSON.stringify(payload)
+        })
         if not resp.ok:
             raise RuntimeError("join HTTP " + str(resp.status))
         js_data = await resp.json()
-        # Direct JS property access - no py_json
+        # One-shot Python-native conversion at boundary - not JS property probing
         try:
-            cid = js_data.client_id
-        except:
+            data = py_json.loads(window.JSON.stringify(js_data))
+        except Exception as exc:
             try:
-                cid = js_data["client_id"]
+                window.console.error("[MP] join JSON conversion failed", exc)
             except:
-                cid = None
-        try:
-            sid = js_data.session_id
-        except:
-            try:
-                sid = js_data["session_id"]
-            except:
-                sid = None
-        try:
-            is_sync = js_data.is_synchronizer
-        except:
-            try:
-                is_sync = js_data["is_synchronizer"]
-            except:
-                is_sync = False
+                pass
+            data = {}
+        cid = data.get("client_id")
+        sid = data.get("session_id")
+        is_sync = bool(data.get("is_synchronizer", False))
+        env_name = data.get("environment_name", self.environment_name)
         if not cid or not sid:
             raise RuntimeError("missing ids")
         self.client_id = str(cid)
         self.session_id = str(sid)
-        self.is_synchronizer = bool(is_sync)
-        # EventSource
+        self.is_synchronizer = is_sync
         try:
             stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
             es_obj = window.EventSource.new(stream_url)
@@ -68,14 +61,6 @@ class MultiplayerClient:
                     window._bgs_es = es_obj
                 except:
                     pass
-            except:
-                pass
-        env_name = self.environment_name
-        try:
-            env_name = js_data.environment_name
-        except:
-            try:
-                env_name = js_data["environment_name"]
             except:
                 pass
         return {"client_id": str(cid), "session_id": str(sid), "is_synchronizer": bool(is_sync), "environment_name": env_name}
