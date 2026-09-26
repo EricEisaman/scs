@@ -15,22 +15,42 @@ window._bgs_es = None
 def _bgs_on_datastar_patch(evt):
     try:
         raw = evt.data
+        if not raw:
+            return
         if isinstance(raw, str) and raw.startswith("signals "):
             raw = raw[8:]
+        parsed = None
         try:
             import json as _jj
-            parsed = _jj.loads(raw)
+            if isinstance(raw, str):
+                parsed = _jj.loads(raw)
+            else:
+                parsed = raw
         except:
-            parsed = window.JSON.parse(raw)
-        import json as _jj2
-        parsed = _jj2.loads(window.JSON.stringify(parsed))
-        if isinstance(parsed, dict):
-            for kk, vv in parsed.items():
-                _bgs_signals_py[kk] = vv
+            try:
+                if isinstance(raw, str):
+                    parsed = window.JSON.parse(raw)
+                else:
+                    parsed = raw
+            except:
+                return
+        try:
+            if parsed is not None:
                 try:
-                    window._bgs_signals[kk] = vv
+                    json_str = window.JSON.stringify(parsed)
+                    import json as _jj2
+                    parsed = _jj2.loads(json_str)
                 except:
                     pass
+                if isinstance(parsed, dict):
+                    for kk, vv in parsed.items():
+                        _bgs_signals_py[kk] = vv
+                        try:
+                            window._bgs_signals[kk] = vv
+                        except:
+                            pass
+        except:
+            pass
     except:
         pass
 
@@ -680,3 +700,13 @@ def redrawAll(app):
         drawLabel("scs.py patched",hx,hy+96,size=8,fill=rgb(100,255,100))
     drawRect(app.width//2,app.height-18,app.width,36,fill=rgb(0,0,0))
     drawLabel("OPACITY TRAIL: drawCircle(...,opacity=15-90) drawLine(...,opacity=10-70) | EXACT PROP MATCH + REMOTE VISIBLE",app.width//2,app.height-18,size=7,fill=rgb(120,255,180))
+
+
+# FIXED: Explicit runApp call
+def run():
+    try:
+        runApp(1050, 700)
+    except:
+        pass
+
+run()
