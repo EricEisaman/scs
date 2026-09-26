@@ -9,6 +9,8 @@ import json as py_json
 _bgs_signals_py = {}
 window._bgs_signals = {}
 window._bgs_es = None
+ds_ext = None
+USE_EXTENSION_SIGNAL_STORE = False
 
 def _bgs_on_datastar_patch(evt):
     try:
@@ -33,6 +35,11 @@ def _bgs_on_datastar_patch(evt):
         pass
 
 def get_signal(n,d=None):
+    if USE_EXTENSION_SIGNAL_STORE and ds_ext:
+        try:
+            return ds_ext.get_signal(n,d)
+        except:
+            pass
     try:
         # V24: try Python global first (reliable)
         if n in _bgs_signals_py:
@@ -45,6 +52,11 @@ def get_signal(n,d=None):
             return d
 
 def is_datastar_connected():
+    if USE_EXTENSION_SIGNAL_STORE and ds_ext:
+        try:
+            return ds_ext.is_datastar_connected()
+        except:
+            pass
     try:
         es = window._bgs_es
         # FIXED: avoid 'is None' entirely - use truthiness to dodge $B.$is null __class__ bug
@@ -66,6 +78,7 @@ try:
     if not hasattr(mp_ext, 'MultiplayerClient'):
         raise AttributeError("cached mp_ext has no MultiplayerClient")
     MultiplayerClient = mp_ext.MultiplayerClient
+    USE_EXTENSION_SIGNAL_STORE = True
     # use our global get_signal even if import works, to avoid closure bug
     HAS_MP = True
     print("[BGS] MP imports OK from extensions/ - using V4 handlers")
@@ -446,7 +459,12 @@ def onAppStart(app):
     app.remote_visuals={}  # clientId -> remote rendering state
     app.authority={}  # instanceId -> ownerId
     app.last_send_ms=0
+    app.last_character_state=None
+    app.last_item_signal_timestamp=-1
+    app.remote_timestamps={}
     app.last_item_send_ms=0
+    app.item_send_inflight=False
+    app.item_retry_ms=500
     app.pending_coin_collections={}
     app.dynamic_coin_seq=0
 
@@ -568,6 +586,31 @@ def send_bgs_patch(app, path, payload):
         print(f"[BGS] PATCH {path} failed: {ex}")
         return False
 
+async def send_coin_collection_batch(app, events):
+    try:
+        url=app.mp_client.base_url+"/api/multiplayer/item-state"
+        headers={"Content-Type":"application/json","X-Client-ID":str(app.client_id)}
+        payload={"updates":[],"collections":events,"timestamp":int(events[-1]["timestamp"])}
+        response=await window.fetch(url,{
+            "method":"PATCH",
+            "headers":headers,
+            "body":py_json.dumps(payload,separators=(",",":")),
+            "mode":"cors",
+        })
+        if not response.ok:
+            raise Exception("HTTP "+str(response.status))
+        for event in events:
+            instance_id=event.get("instanceId")
+            pending=app.pending_coin_collections.get(instance_id)
+            if pending and pending.get("timestamp")==event.get("timestamp"):
+                app.pending_coin_collections.pop(instance_id,None)
+        app.item_retry_ms=500
+    except Exception as ex:
+        app.item_retry_ms=min(8000,app.item_retry_ms*2)
+        print(f"[BGS] Coin collection PATCH failed; retry in {app.item_retry_ms}ms: {ex}")
+    finally:
+        app.item_send_inflight=False
+
 def onKeyHold(app, keys):
     app.keys_held=set(keys)
     # Local input -> world only. NO network here - Datastar rule: send in onStep throttled
@@ -590,10 +633,14 @@ def onStep(app):
                 for u in sig.get("updates",[]):
                     cid=u.get("clientId")
                     if cid and cid != app.client_id:
-                        app.remote_players[cid]=u
+                        timestamp=u.get("timestamp",0)
+                        if timestamp>app.remote_timestamps.get(cid,-1):
+                            app.remote_players[cid]=u
+                            app.remote_timestamps[cid]=timestamp
             item_sig=get_signal("item-state-update")
-            if item_sig:
+            if item_sig and item_sig.get("timestamp",-1)!=app.last_item_signal_timestamp:
                 apply_item_state_update(app,item_sig)
+                app.last_item_signal_timestamp=item_sig.get("timestamp",-1)
             app.datastar_connected=is_datastar_connected()
         except:
             pass
@@ -614,13 +661,15 @@ def onStep(app):
                 for coin in app.world.coins:
                     if coin.get("instanceId")==instance_id:
                         coin["collectedByClientId"]=str(app.client_id)
-        if app.pending_coin_collections and now-app.last_item_send_ms>500:
+        if app.pending_coin_collections and not app.item_send_inflight and now-app.last_item_send_ms>=app.item_retry_ms:
             app.last_item_send_ms=now
-            send_bgs_patch(app,"/api/multiplayer/item-state",{
-                "updates":[],
-                "collections":list(app.pending_coin_collections.values()),
-                "timestamp":now,
-            })
+            app.item_send_inflight=True
+            try:
+                aio.run(send_coin_collection_batch(app,list(app.pending_coin_collections.values())))
+            except Exception as ex:
+                app.item_send_inflight=False
+                app.item_retry_ms=min(8000,app.item_retry_ms*2)
+                print(f"[BGS] Could not start coin collection PATCH: {ex}")
     for cid, remote in list(app.remote_players.items()):
         try:
             update_remote_visual(app,cid,remote)
@@ -636,9 +685,18 @@ def onStep(app):
             now=int(window.Date.now())
         except:
             now=app.world.tick*16
-        if now - app.last_send_ms > 100:
+        lp=app.world.players["local_0"]
+        state=(
+            round(float(lp.x),2),round(float(lp.y),2),
+            round(float(lp.vx),2),round(float(lp.vy),2),
+            str(lp.state),bool(not lp.on_ground),int(lp.facing),
+            int(lp.score),bool(lp.on_ground),
+        )
+        changed=state!=app.last_character_state
+        heartbeat_due=now-app.last_send_ms>=1000
+        if now-app.last_send_ms>=100 and (changed or heartbeat_due):
             app.last_send_ms=now
-            lp=app.world.players["local_0"]
+            app.last_character_state=state
             timestamp=now
             send_bgs_patch(app,"/api/multiplayer/character-state",{
                 "updates":[{
@@ -647,7 +705,7 @@ def onStep(app):
                     "position":[float(lp.x),float(lp.y)],
                     "velocity":[float(lp.vx),float(lp.vy)],
                     "animationState":str(lp.state),
-                    "animationFrame":float(app.world.tick),
+                    "animationFrame":0.0,
                     "isJumping":bool(not lp.on_ground),
                     "facing":int(lp.facing),
                     "score":int(lp.score),
