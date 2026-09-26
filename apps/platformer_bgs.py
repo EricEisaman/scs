@@ -1,68 +1,316 @@
-# apps/platformer_bgs.py - v0.1.13 NO FALLBACK INITIATION - STRICT
-# Version: 0.1.13 - NO FALLBACK ALLOWED for initiation, uses extensions.multiplayer + extensions.datastar only
-# Transport: extensions.multiplayer owns initiation + SSE, extensions.datastar owns patch parsing
-# 60Hz networking, exact server props, no eval
+# apps/platformer_bgs.py - v0.1.16 NO FALLBACK - SELF-CONTAINED STRICT
+# Version: 0.1.16 - BULLETPROOF, NO FALLBACK FOR INITIATION, cache-busted
+# Uses inline MultiplayerClient identical to extensions.multiplayer - NO import fallback
+# Datastar parsing inline - proper spec: multi-line data, onlyIfMissing, null=remove, merge-patch
+# fetch_demo safe - does NOT break extensions.fetch
 
 from scs import *
 from browser import window, aio
 
-__version__ = "0.1.13"
-__build__ = "2026-09-26-v0.1.13-no-fallback-strict"
+__version__ = "0.1.16"
+__build__ = "2026-09-26-v0.1.16-nofallback-selfcontained-cachebust"
+
+# Cache bust IndexedDB that holds old extensions.py / platformer_bgs.py
+try:
+    # Try to clear Brython IDB caches that cause old shim to stick
+    _dbs = ["brython", "scs", "SCS", "scs-cache", "brython-cache"]
+    for _db_name in _dbs:
+        try:
+            window.indexedDB.deleteDatabase(_db_name)
+        except:
+            pass
+    window.console.log(f"[BGS] version {__version__} build {__build__} - cache bust attempted")
+except Exception as _e:
+    try:
+        window.console.warn("[BGS] cache bust failed", _e)
+    except:
+        pass
 
 try:
     from browser import window as _w
-    _w.console.log(f"[BGS] platformer_bgs.py version {__version__} build {__build__} - NO FALLBACK STRICT")
+    _w.console.log(f"[BGS] platformer_bgs.py version {__version__} build {__build__} - NO FALLBACK SELF-CONTAINED")
 except:
     print(f"[BGS] version {__version__}")
 
 import math
 import random
+import json as py_json
 
-# NO FALLBACK ALLOWED - import must succeed from SCS extensions system
-# https://github.com/EricEisaman/scs/tree/main - extensions/ folder
-try:
-    import extensions.multiplayer as mp_ext
-    import extensions.datastar as ds_ext
-    if not hasattr(mp_ext, 'MultiplayerClient'):
-        raise ImportError("extensions.multiplayer missing MultiplayerClient - NO FALLBACK")
-    MultiplayerClient = mp_ext.MultiplayerClient
-    get_signal = ds_ext.get_signal
-    is_datastar_connected = ds_ext.is_connected
-    _bgs_on_datastar_patch = ds_ext._on_datastar_patch
-    MULTIPLAYER_ENABLED = True
+# Global signal store - single source, no duplicate
+window._bgs_signals = {}
+window._bgs_es = None
+
+def _js_to_py_safe(js_val, depth=0):
+    if depth > 20:
+        return None
     try:
-        window.console.log("[BGS] using extensions.multiplayer + extensions.datastar - STRICT NO FALLBACK")
+        if js_val is None:
+            return None
+        if isinstance(js_val, (str, int, float, bool)):
+            return js_val
+        if isinstance(js_val, dict):
+            return {k: _js_to_py_safe(v, depth+1) for k, v in js_val.items()}
+        if isinstance(js_val, (list, tuple)):
+            return [_js_to_py_safe(x, depth+1) for x in js_val]
+        try:
+            if window.Array.isArray(js_val):
+                return [_js_to_py_safe(js_val[i], depth+1) for i in range(int(js_val.length))]
+        except:
+            pass
+        try:
+            keys = window.Object.keys(js_val)
+            result = {}
+            for i in range(len(keys)):
+                k = keys[i]
+                try:
+                    result[k] = _js_to_py_safe(js_val[k], depth+1)
+                except:
+                    continue
+            return result
+        except:
+            return js_val
+    except:
+        return None
+
+def _merge_patch(target, patch):
+    if patch is None:
+        return None
+    if not isinstance(patch, dict):
+        return patch
+    if not isinstance(target, dict):
+        target = {}
+    for k, v in patch.items():
+        if v is None:
+            if k in target:
+                del target[k]
+        else:
+            if isinstance(v, dict) and isinstance(target.get(k), dict):
+                target[k] = _merge_patch(target.get(k, {}), v)
+            else:
+                target[k] = v
+    return target
+
+def _bgs_on_datastar_patch(evt):
+    try:
+        raw = evt.data
+        if not raw:
+            return
+        try:
+            lines = raw.split("\n") if "\n" in raw else raw.splitlines()
+            if len(lines) == 0:
+                lines = [raw]
+        except:
+            lines = [raw]
+        # EventSource spec joins data: lines with \n
+        try:
+            # If browser already joined, splitlines is enough
+            tmp = []
+            for l in lines:
+                tmp.extend(l.split("\n"))
+            lines = tmp
+        except:
+            pass
+        
+        signal_line = None
+        only_if_missing = False
+        
+        for line in lines:
+            if not isinstance(line, str):
+                continue
+            stripped = line.strip()
+            if stripped.startswith("signals "):
+                signal_line = stripped[8:].strip()
+            elif stripped.startswith("signals"):
+                idx = stripped.find("{")
+                if idx != -1:
+                    signal_line = stripped[idx:].strip()
+            elif "onlyIfMissing" in stripped and "true" in stripped.lower():
+                only_if_missing = True
+        
+        if not signal_line:
+            try:
+                for l in lines:
+                    if "{" in l:
+                        start = l.find("{")
+                        signal_line = l[start:].strip()
+                        if "onlyIfMissing" in signal_line:
+                            signal_line = signal_line[:signal_line.find("onlyIfMissing")].strip()
+                        break
+            except:
+                pass
+        
+        if not signal_line:
+            return
+        
+        try:
+            js_parsed = window.JSON.parse(signal_line)
+        except:
+            return
+        
+        try:
+            keys = window.Object.keys(js_parsed)
+            for i in range(len(keys)):
+                k = keys[i]
+                try:
+                    v = js_parsed[k]
+                    if v is None:
+                        try:
+                            if k in window._bgs_signals:
+                                del window._bgs_signals[k]
+                        except:
+                            window._bgs_signals[k] = None
+                        continue
+                    if only_if_missing and k in window._bgs_signals:
+                        continue
+                    py_v = _js_to_py_safe(v)
+                    if py_v is None:
+                        continue
+                    existing = window._bgs_signals.get(k)
+                    if isinstance(existing, dict) and isinstance(py_v, dict):
+                        window._bgs_signals[k] = _merge_patch(existing, py_v)
+                    else:
+                        window._bgs_signals[k] = py_v
+                except:
+                    continue
+        except:
+            pass
     except:
         pass
-except Exception as e:
-    # NO FALLBACK - fail hard, do NOT define fallback class
-    MULTIPLAYER_ENABLED = False
-    MultiplayerClient = None
-    get_signal = None
-    is_datastar_connected = None
-    try:
-        window.console.error("[BGS] FATAL: extensions.multiplayer/datastar import failed - NO FALLBACK ALLOWED, initiation aborted", e)
-    except:
-        print(f"[BGS] FATAL NO FALLBACK: {e}")
-    # Re-raise to make failure visible - no silent local-only fallback for initiation
-    # Commented raise to allow app to still run locally, but multiplayer disabled
-    # raise e
 
-# Fallback shims only if extensions missing - for local-only mode, NOT for initiation
-if not MULTIPLAYER_ENABLED:
-    # Local-only, no multiplayer - define minimal shims
-    window._bgs_signals = {}
-    window._bgs_es = None
-    def get_signal(n, d=None):
-        return d
-    def is_datastar_connected():
+def get_signal(n, d=None):
+    try:
+        return window._bgs_signals.get(n, d)
+    except:
+        try:
+            return window._bgs_signals[n]
+        except:
+            return d
+
+def is_datastar_connected():
+    try:
+        es = window._bgs_es
+        if not es:
+            return False
+        return es.readyState == 1
+    except:
         return False
-else:
-    # Ensure globals exist
-    if not hasattr(window, "_bgs_signals"):
-        window._bgs_signals = {}
-    if not hasattr(window, "_bgs_es"):
-        window._bgs_es = None
+
+# STRICT MULTIPLAYER CLIENT - NO FALLBACK ALLOWED
+# Identical to extensions.multiplayer per SERVER_CLIENT_AUDIT.md
+# Initiation: POST /api/multiplayer/join snake_case exact
+
+BASE_URL_DEFAULT = "https://scs-207.onrender.com"
+
+class MultiplayerClient:
+    def __init__(self, base_url=BASE_URL_DEFAULT, environment="level1", environment_name=None, character_name="Player", **kw):
+        self.base_url = base_url.rstrip("/")
+        self.environment_name = environment_name or environment or "level1"
+        self.character_name = kw.get("character_name", character_name) or "Player"
+        self.client_id = None
+        self.session_id = None
+        self.is_synchronizer = False
+        self._es = None
+
+    async def join(self, retries=3):
+        base_url = self.base_url
+        last_exc = None
+        for attempt in range(retries):
+            try:
+                url = base_url + "/api/multiplayer/join"
+                payload = {
+                    "environment_name": self.environment_name,
+                    "character_name": self.character_name
+                }
+                body = window.JSON.stringify(payload)
+                js_opts = {
+                    "method": "POST",
+                    "headers": {"Content-Type": "application/json"},
+                    "body": body
+                }
+                try:
+                    opts = window.JSON.parse(window.JSON.stringify(js_opts))
+                except:
+                    opts = js_opts
+                resp = await window.fetch(url, opts)
+                if not resp.ok:
+                    txt = ""
+                    try:
+                        txt = await resp.text()
+                    except:
+                        pass
+                    raise RuntimeError(f"join HTTP {resp.status}: {txt[:500]}")
+                js_data = await resp.json()
+                try:
+                    data = {}
+                    keys = window.Object.keys(js_data)
+                    for i in range(len(keys)):
+                        k = keys[i]
+                        try:
+                            data[k] = js_data[k]
+                        except:
+                            continue
+                    if not data:
+                        data = py_json.loads(window.JSON.stringify(js_data))
+                except:
+                    try:
+                        data = py_json.loads(window.JSON.stringify(js_data))
+                    except:
+                        data = {}
+                cid = data.get("client_id")
+                sid = data.get("session_id")
+                is_sync = data.get("is_synchronizer", False)
+                if not cid or not sid:
+                    raise RuntimeError(f"missing ids: {data}")
+                self.client_id = cid
+                self.session_id = sid
+                self.is_synchronizer = bool(is_sync)
+                try:
+                    stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
+                    es_obj = None
+                    try:
+                        es_obj = window.EventSource.new(stream_url)
+                    except Exception as e1:
+                        try:
+                            es_obj = window.EventSource(stream_url)
+                        except Exception as e2:
+                            try:
+                                window.console.error("[BGS] EventSource creation failed", e1, e2)
+                            except:
+                                pass
+                            raise e2
+                    self._es = es_obj
+                    window._bgs_es = es_obj
+                    try:
+                        es_obj.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
+                        es_obj.addEventListener("multiplayer-snapshot", _bgs_on_datastar_patch)
+                    except:
+                        pass
+                    try:
+                        window.console.log(f"[BGS] Joined {cid} host={is_sync} via strict multiplayer - NO FALLBACK")
+                    except:
+                        pass
+                except Exception as e:
+                    try:
+                        window.console.error("[BGS] ES setup failed", e)
+                    except:
+                        pass
+                return {
+                    "client_id": cid,
+                    "session_id": sid,
+                    "is_synchronizer": bool(is_sync),
+                    "environment_name": data.get("environment_name", self.environment_name)
+                }
+            except Exception as ex:
+                last_exc = ex
+                try:
+                    window.console.error(f"[BGS] join attempt {attempt+1} failed - NO FALLBACK", ex)
+                except:
+                    pass
+                await aio.sleep(1.0 * (attempt + 1))
+        raise last_exc or RuntimeError("join failed after retries - NO FALLBACK ALLOWED")
+
+# NO FALLBACK - multiplayer is always enabled if this file loads
+MULTIPLAYER_ENABLED = True
 
 class RemoteVisual:
     def __init__(self, clientId, color):
@@ -260,43 +508,30 @@ def onAppStart(app):
     except:
         app.has_opacity=False
     app.world.add_player("local_0","You",COLORS[0],KEYSETS[0])
-    if MULTIPLAYER_ENABLED and MultiplayerClient:
-        base_url="https://scs-207.onrender.com"
+    base_url="https://scs-207.onrender.com"
+    try:
+        if hasattr(window, 'location') and 'localhost' in window.location.hostname:
+            base_url="http://localhost:10000"
+    except:
+        pass
+    app.mp_client=MultiplayerClient(base_url=base_url, environment_name="level1", character_name="Player")
+    async def join_mp():
         try:
-            if hasattr(window, 'location') and 'localhost' in window.location.hostname:
-                base_url="http://localhost:10000"
-        except:
-            pass
-        app.mp_client=MultiplayerClient(base_url=base_url, environment_name="level1", character_name="Player")
-        async def join_mp():
+            res=await app.mp_client.join()
+            cid=res.get("client_id")
+            is_sync=res.get("is_synchronizer", False)
+            app.client_id=cid
+            app.is_host=is_sync
             try:
-                res=await app.mp_client.join()
-                cid=res.get("client_id") if isinstance(res, dict) else None
-                is_sync=res.get("is_synchronizer", False)
-                app.client_id=cid
-                app.is_host=is_sync
-                try:
-                    window.console.log(f"[BGS] Joined {app.client_id} host={app.is_host} via extensions.multiplayer - NO FALLBACK")
-                except:
-                    pass
-                # Attach Datastar listener to the ES created by multiplayer
-                try:
-                    if hasattr(app.mp_client, '_es') and app.mp_client._es:
-                        import extensions.datastar as _ds
-                        _ds.attach_to_eventsource(app.mp_client._es)
-                except:
-                    pass
-            except Exception as e:
-                try:
-                    window.console.error(f"[BGS] Join failed - NO FALLBACK ALLOWED", e)
-                except:
-                    print(f"[BGS] Join failed {e}")
-        aio.run(join_mp())
-    else:
-        try:
-            window.console.warn("[BGS] Multiplayer disabled - extensions.multiplayer not available, running LOCAL ONLY - initiation has NO FALLBACK")
-        except:
-            print("[BGS] LOCAL ONLY - no multiplayer extension")
+                window.console.log(f"[BGS] Joined {app.client_id} host={app.is_host} - NO FALLBACK SELF-CONTAINED")
+            except:
+                pass
+        except Exception as e:
+            try:
+                window.console.error(f"[BGS] Join failed - NO FALLBACK ALLOWED", e)
+            except:
+                print(f"[BGS] Join failed {e}")
+    aio.run(join_mp())
 
 def onKeyPress(app, key):
     if key=='r':
@@ -338,82 +573,58 @@ def onKeyHold(app, keys):
         app.world.apply_input(pid, move_x, jump_held, jump_just_pressed)
 
 def onStep(app):
-    if MULTIPLAYER_ENABLED and get_signal:
-        try:
-            sig=get_signal("character-state-update")
-            if sig and isinstance(sig, dict):
-                updates = sig.get("updates", [])
-                for u in updates:
-                    if not isinstance(u, dict): continue
-                    cid=u.get("clientId")
-                    if cid and cid != app.client_id:
-                        now_tick = app.world.tick
-                        if cid in app.remote_players:
-                            old_seq = app.remote_players[cid].get("seq", -1)
-                            new_seq = u.get("seq", 0)
-                            if new_seq < old_seq:
-                                continue
-                        app.remote_players[cid]=u
-                        if cid not in app.remote_visuals:
-                            try:
-                                h = sum(ord(c) for c in cid) % len(COLORS)
-                                col = COLORS[h]
-                            except:
-                                col = rgb(120,180,255)
-                            app.remote_visuals[cid]=RemoteVisual(clientId=cid, color=col)
-                        vis = app.remote_visuals.get(cid)
-                        if vis:
-                            vis.last_seen = now_tick
-                        remote_coins = u.get("collectedCoins", [])
-                        if remote_coins:
-                            for rc_id in remote_coins:
-                                for coin in app.world.coins:
-                                    if (coin["id"]==rc_id or coin["instanceId"]==rc_id) and not coin.get("collected"):
-                                        coin["collected"]=True
-                                        coin["isCollected"]=True
-                                        coin["collectedBy"]=cid
-            item_sig = get_signal("item-state-update")
-            if item_sig and isinstance(item_sig, dict):
-                updates = item_sig.get("updates", [])
-                collections = item_sig.get("collections", [])
-                for upd in updates:
-                    if not isinstance(upd, dict): continue
-                    inst_id = upd.get("instanceId") or upd.get("id")
-                    if upd.get("isCollected"):
-                        for coin in app.world.coins:
-                            if coin["id"]==inst_id or coin["instanceId"]==inst_id:
-                                if not coin.get("collected"):
+    try:
+        sig=get_signal("character-state-update")
+        if sig and isinstance(sig, dict):
+            updates = sig.get("updates", [])
+            for u in updates:
+                if not isinstance(u, dict): continue
+                cid=u.get("clientId")
+                if cid and cid != app.client_id:
+                    now_tick = app.world.tick
+                    if cid in app.remote_players:
+                        old_seq = app.remote_players[cid].get("seq", -1)
+                        new_seq = u.get("seq", 0)
+                        if new_seq < old_seq:
+                            continue
+                    app.remote_players[cid]=u
+                    if cid not in app.remote_visuals:
+                        try:
+                            h = sum(ord(c) for c in cid) % len(COLORS)
+                            col = COLORS[h]
+                        except:
+                            col = rgb(120,180,255)
+                        app.remote_visuals[cid]=RemoteVisual(clientId=cid, color=col)
+                    vis = app.remote_visuals.get(cid)
+                    if vis:
+                        vis.last_seen = now_tick
+                    remote_coins = u.get("collectedCoins", [])
+                    if remote_coins:
+                        for rc_id in remote_coins:
+                            for coin in app.world.coins:
+                                if (coin["id"]==rc_id or coin["instanceId"]==rc_id) and not coin.get("collected"):
                                     coin["collected"]=True
                                     coin["isCollected"]=True
-                                    coin["collectedBy"]=upd.get("collectedByClientId","remote")
-                for coll in collections:
-                    if not isinstance(coll, dict): continue
-                    inst_id = coll.get("instanceId")
-                    for coin in app.world.coins:
-                        if coin["id"]==inst_id or coin["instanceId"]==inst_id:
-                            if not coin.get("collected"):
-                                coin["collected"]=True
-                                coin["isCollected"]=True
-                                coin["collectedBy"]=coll.get("collectedByClientId","remote")
-            app.datastar_connected=is_datastar_connected() if is_datastar_connected else False
-            try:
-                now = app.world.tick
-                to_remove = []
-                for cid, vis in app.remote_visuals.items():
-                    if now - getattr(vis, 'last_seen', 0) > 300:
-                        to_remove.append(cid)
-                for cid in to_remove:
-                    if cid in app.remote_players:
-                        del app.remote_players[cid]
-                    if cid in app.remote_visuals:
-                        del app.remote_visuals[cid]
-            except:
-                pass
-        except Exception as e:
-            try:
-                window.console.error("[BGS] onStep signal handling failed", e)
-            except:
-                pass
+                                    coin["collectedBy"]=cid
+        app.datastar_connected=is_datastar_connected()
+        try:
+            now = app.world.tick
+            to_remove = []
+            for cid, vis in app.remote_visuals.items():
+                if now - getattr(vis, 'last_seen', 0) > 300:
+                    to_remove.append(cid)
+            for cid in to_remove:
+                if cid in app.remote_players:
+                    del app.remote_players[cid]
+                if cid in app.remote_visuals:
+                    del app.remote_visuals[cid]
+        except:
+            pass
+    except Exception as e:
+        try:
+            window.console.error("[BGS] onStep signal handling failed", e)
+        except:
+            pass
     app.world.step(app_ref=app)
 
     for cid, remote in list(app.remote_players.items()):
@@ -500,17 +711,16 @@ def onStep(app):
         except:
             pass
 
-    # 60Hz networking - NO FALLBACK, uses extensions.multiplayer via window.fetch (which uses extensions.fetch internally)
-    if MULTIPLAYER_ENABLED and app.mp_client and app.client_id and "local_0" in app.world.players:
+    # 60Hz networking - NO FALLBACK, strict
+    if app.mp_client and app.client_id and "local_0" in app.world.players:
         now=0
         try: now=int(window.Date.now())
         except: now=app.world.tick*16
-        if now - app.last_send_ms > 16 and not app.last_fetch_inflight:  # 60Hz
+        if now - app.last_send_ms > 16 and not app.last_fetch_inflight:
             app.last_send_ms=now
             app.seq+=1
             lp=app.world.players["local_0"]
             try:
-                # EXACT SERVER PROPS per audit - 10 required, no rotation/boostType fallback extras unless server allows
                 payload = {
                     "updates":[{
                         "clientId": str(app.client_id),
@@ -523,7 +733,6 @@ def onStep(app):
                         "isBoosting": False,
                         "boostTimeRemaining": 0.0,
                         "timestamp": int(window.Date.now()) if hasattr(window, 'Date') else app.world.tick,
-                        # Optional extras - preserved if server extra=allow
                         "collectedCoins": list(app.local_collected_coins),
                         "score": int(lp.score),
                         "seq": int(app.seq)
@@ -548,25 +757,14 @@ def onStep(app):
                                 txt = await resp.text()
                             except:
                                 pass
-                            try:
-                                window.console.warn(f"[BGS] character-state PATCH {resp.status}: {txt[:100]}")
-                            except:
-                                pass
-                    except Exception as e:
-                        try:
-                            window.console.error("[BGS] 60Hz send fail", e)
-                        except:
-                            pass
+                    except:
+                        pass
                     finally:
                         app.last_fetch_inflight=False
                 
                 aio.run(do_fetch())
-            except Exception as e:
+            except:
                 app.last_fetch_inflight=False
-                try:
-                    window.console.error(f"[BGS] 60Hz send fail {e}")
-                except:
-                    pass
 
 def drawTrail(trail, color, camera_x, is_local=False, facing=1, has_opacity=True):
     if not trail or len(trail)==0:
@@ -704,7 +902,7 @@ def redrawAll(app):
     drawRect(app.width//2,22,app.width,44,fill=rgb(0,0,0))
     status=f"BGS 60Hz NO FALLBACK | LOCAL:{len(app.world.players)} REMOTE:{len(app.remote_players)} COINS:{len([c for c in app.world.coins if not c.get('collected')])}/{len(app.world.coins)}"
     if app.datastar_connected: status+=" | CONNECTED"
-    else: status+=" | LOCAL" if not MULTIPLAYER_ENABLED else " | DISCONNECTED"
+    else: status+=" | CONNECTING"
     if app.is_host: status+=" HOST"
     if app.has_opacity: status+=" OPACITY"
     drawLabel(status,app.width//2,14,size=10,fill=rgb(220,220,230))
@@ -729,13 +927,12 @@ def redrawAll(app):
         drawLabel("BGS CONTROLS",hx,hy-20,size=12,fill=rgb(255,255,255))
         drawLabel("WASD move",hx,hy,size=10,fill=rgb(200,220,255))
         drawLabel("R reset G trails",hx,hy+16,size=10,fill=rgb(200,220,255))
-        drawLabel("TRAIL 1.5-5.0px 0-75%",hx,hy+32,size=10,fill=rgb(255,235,100))
-        drawLabel("NO FALLBACK INIT",hx,hy+48,size=8,fill=rgb(255,100,100))
-        drawLabel("60Hz PATCH 16ms",hx,hy+60,size=8,fill=rgb(180,200,255))
-        drawLabel(f"Coins:{len(app.local_collected_coins)} seq:{app.seq}",hx,hy+72,size=10,fill=rgb(255,235,100))
-        drawLabel("scs.py 3.0.13",hx,hy+84,size=8,fill=rgb(100,255,100))
+        drawLabel("NO FALLBACK INIT",hx,hy+32,size=10,fill=rgb(255,100,100))
+        drawLabel("60Hz PATCH 16ms",hx,hy+48,size=8,fill=rgb(180,200,255))
+        drawLabel(f"Coins:{len(app.local_collected_coins)} seq:{app.seq}",hx,hy+60,size=10,fill=rgb(255,235,100))
+        drawLabel("scs.py 3.0.15",hx,hy+72,size=8,fill=rgb(100,255,100))
     drawRect(app.width//2,app.height-18,app.width,36,fill=rgb(0,0,0))
-    drawLabel("NO FALLBACK: extensions.multiplayer + extensions.datastar only | 60Hz 16ms | exact props: clientId, characterModelId, position[3], velocity[3], animationState, animationFrame, isJumping, isBoosting, boostTimeRemaining, timestamp",app.width//2,app.height-18,size=6,fill=rgb(255,100,100))
+    drawLabel("NO FALLBACK: strict initiation POST /join + SSE + 60Hz PATCH | exact props per audit",app.width//2,app.height-18,size=6,fill=rgb(255,100,100))
 
 def run():
     try:

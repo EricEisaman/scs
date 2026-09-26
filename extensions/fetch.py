@@ -1,7 +1,3 @@
-"""
-extensions.fetch - SCS Fetch Extension
-"""
-
 from browser import window
 import json as py_json
 
@@ -22,7 +18,10 @@ class FetchResponse:
             result = {}
             for i in range(len(keys)):
                 k = keys[i]
-                result[k] = js_data[k]
+                try:
+                    result[k] = js_data[k]
+                except:
+                    continue
             return result
         except:
             try:
@@ -53,16 +52,14 @@ async def fetch(url, method="GET", headers=None, body=None, mode=None):
 async def fetch_json(url, **kw):
     resp = await fetch(url, **kw)
     if not resp.ok:
-        raise RuntimeError(f"fetch_json HTTP {resp.status}")
+        raise RuntimeError("fetch_json HTTP " + str(resp.status))
     return await resp.json()
 
 async def fetch_text(url, **kw):
     resp = await fetch(url, **kw)
     if not resp.ok:
-        raise RuntimeError(f"fetch_text HTTP {resp.status}")
+        raise RuntimeError("fetch_text HTTP " + str(resp.status))
     return await resp.text()
 
 class FetchError(RuntimeError):
     pass
-
-__all__ = ["fetch", "fetch_json", "fetch_text", "FetchResponse", "FetchError"]

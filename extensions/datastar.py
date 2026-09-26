@@ -1,11 +1,5 @@
-"""
-extensions.datastar - SCS Datastar Extension - Model-only
-Handles Datastar SSE protocol: data: signals {...} + data: onlyIfMissing, merge-patch, null=remove
-"""
-
 from browser import window
 
-# Global signal store - single source
 if not hasattr(window, "_bgs_signals"):
     window._bgs_signals = {}
 if not hasattr(window, "_bgs_es"):
@@ -67,15 +61,13 @@ def _on_datastar_patch(evt):
         if not raw:
             return
         try:
-            lines = evt.data.splitlines()
+            lines = raw.splitlines()
             if len(lines) == 0:
                 lines = [raw]
         except:
             lines = [raw]
-
         signal_line = None
         only_if_missing = False
-
         for line in lines:
             if not isinstance(line, str):
                 continue
@@ -88,7 +80,6 @@ def _on_datastar_patch(evt):
                     signal_line = stripped[idx:].strip()
             elif "onlyIfMissing" in stripped and "true" in stripped.lower():
                 only_if_missing = True
-
         if not signal_line:
             try:
                 for l in lines:
@@ -100,15 +91,12 @@ def _on_datastar_patch(evt):
                         break
             except:
                 pass
-
         if not signal_line:
             return
-
         try:
             js_parsed = window.JSON.parse(signal_line)
         except:
             return
-
         try:
             keys = window.Object.keys(js_parsed)
             for i in range(len(keys)):
@@ -160,9 +148,6 @@ def is_connected():
 def attach_to_eventsource(es):
     try:
         es.addEventListener("datastar-patch-signals", _on_datastar_patch)
-        es.addEventListener("multiplayer-snapshot", _on_datastar_patch)
         window._bgs_es = es
     except:
         pass
-
-__all__ = ["get_signal", "is_connected", "attach_to_eventsource", "_on_datastar_patch"]
