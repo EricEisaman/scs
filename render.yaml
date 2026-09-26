@@ -1,5 +1,4 @@
 services:
-  # Your existing datastar extension - KEEP AS IS
   - type: web
     name: scs-datastar-extension
     runtime: docker
@@ -17,8 +16,6 @@ services:
       - key: SESSION_SECRET
         generateValue: true
 
-  # NEW: Static site that serves EVERYTHING - index.html, sandbox.html, PROCAUDIO.html, scs.py, apps/, extensions/
-  # This is what you asked for - CDN clears immediately on deploy
   - type: web
     name: scs
     env: static
@@ -66,4 +63,3 @@ services:
       - path: /*.html
         name: Cache-Control
         value: public, max-age=0, must-revalidate
-
