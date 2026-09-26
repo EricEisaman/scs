@@ -151,7 +151,7 @@ class World:
                 is_moving = abs(float(p.vx)) > 0.5 or abs(float(p.vy)) > 0.5
                 add = False
                 if is_moving:
-                    if p.last_trail_x is None:
+                    if p.last_trail_x == None:
                         add = True
                     else:
                         dx = trail_x - p.last_trail_x
@@ -362,7 +362,7 @@ def onStep(app):
             px = float(pos[0]); py = float(pos[1])
             vx = float(vel[0]) if len(vel)>0 else 0.0
             yaw = float(rot[1]) if len(rot)>1 else 0.0
-            if vis.target_pos is None:
+            if vis.target_pos == None:
                 vis.target_pos = (px, py)
                 vis.prev_pos = (px, py)
                 vis.interp_t = 1.0
@@ -394,10 +394,10 @@ def onStep(app):
                 is_moving = True
             should_add = False
             if is_moving:
-                if vis.last_px is None:
+                if vis.last_px == None:
                     should_add = True
                 else:
-                    dist = math.hypot(trail_x - vis.last_px, trail_y - vis.last_py) if vis.last_px is not None else 999
+                    dist = math.hypot(trail_x - vis.last_px, trail_y - vis.last_py) if vis.last_px != None else 999
                     if dist > 3.0:
                         should_add = True
             else:
