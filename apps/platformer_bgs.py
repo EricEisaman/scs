@@ -196,6 +196,50 @@ class RemoteVisual:
         self.render_pos=None
         self.interp_t=0.0
 
+def update_remote_visual(app, client_id, remote):
+    if not isinstance(remote, dict):
+        return
+    pos=remote.get("position")
+    if not pos or len(pos)<2:
+        return
+    vis=app.remote_visuals.get(client_id)
+    if not vis:
+        color_index=sum(ord(char) for char in client_id)%len(COLORS)
+        vis=RemoteVisual(client_id,COLORS[color_index])
+        app.remote_visuals[client_id]=vis
+    px=float(pos[0])
+    py=float(pos[1])
+    velocity=remote.get("velocity",[0,0,0])
+    vx=float(velocity[0]) if len(velocity)>0 else 0.0
+    vy=float(velocity[1]) if len(velocity)>1 else 0.0
+    if abs(vx)>0.3:
+        vis.facing=1 if vx>0 else -1
+    if not vis.target_pos:
+        vis.previous_pos=(px,py)
+        vis.target_pos=(px,py)
+        vis.render_pos=(px,py)
+        vis.interp_t=1.0
+    elif abs(px-vis.target_pos[0])>0.1 or abs(py-vis.target_pos[1])>0.1:
+        vis.previous_pos=vis.render_pos or vis.target_pos
+        vis.target_pos=(px,py)
+        vis.interp_t=0.0
+    vis.interp_t=min(1.0,vis.interp_t+0.2)
+    vis.render_pos=(
+        vis.previous_pos[0]+(vis.target_pos[0]-vis.previous_pos[0])*vis.interp_t,
+        vis.previous_pos[1]+(vis.target_pos[1]-vis.previous_pos[1])*vis.interp_t,
+    )
+    render_x,render_y=vis.render_pos
+    moving=abs(vx)>0.5 or abs(vy)>0.5
+    if moving:
+        trail_pos=(render_x,render_y)
+        if not vis.last_trail_pos or math.hypot(trail_pos[0]-vis.last_trail_pos[0],trail_pos[1]-vis.last_trail_pos[1])>0.1:
+            vis.trail.append(trail_pos)
+            vis.last_trail_pos=trail_pos
+    elif vis.trail:
+        vis.trail.pop(0)
+    if len(vis.trail)>8:
+        vis.trail.pop(0)
+
 class World:
     def __init__(self, width=2400, height=700):
         self.width=width
@@ -478,51 +522,10 @@ def onStep(app):
             pass
     app.world.step()
     for cid, remote in list(app.remote_players.items()):
-        if not isinstance(remote, dict):
-            continue
-        pos=remote.get("position")
-        if not pos or len(pos)<2:
-            continue
-        vis=app.remote_visuals.get(cid)
-        if not vis:
-            color_index=sum(ord(char) for char in cid)%len(COLORS)
-            vis=RemoteVisual(cid,COLORS[color_index])
-            app.remote_visuals[cid]=vis
         try:
-            px=float(pos[0])
-            py=float(pos[1])
-            velocity=remote.get("velocity",[0,0,0])
-            vx=float(velocity[0]) if len(velocity)>0 else 0.0
-            vy=float(velocity[1]) if len(velocity)>1 else 0.0
-        except:
-            continue
-        if abs(vx)>0.3:
-            vis.facing=1 if vx>0 else -1
-        if not vis.target_pos:
-            vis.previous_pos=(px,py)
-            vis.target_pos=(px,py)
-            vis.render_pos=(px,py)
-            vis.interp_t=1.0
-        elif abs(px-vis.target_pos[0])>0.1 or abs(py-vis.target_pos[1])>0.1:
-            vis.previous_pos=vis.render_pos or vis.target_pos
-            vis.target_pos=(px,py)
-            vis.interp_t=0.0
-        vis.interp_t=min(1.0,vis.interp_t+0.2)
-        vis.render_pos=(
-            vis.previous_pos[0]+(vis.target_pos[0]-vis.previous_pos[0])*vis.interp_t,
-            vis.previous_pos[1]+(vis.target_pos[1]-vis.previous_pos[1])*vis.interp_t,
-        )
-        render_x,render_y=vis.render_pos
-        moving=abs(vx)>0.5 or abs(vy)>0.5
-        if moving:
-            trail_pos=(render_x,render_y)
-            if not vis.last_trail_pos or math.hypot(trail_pos[0]-vis.last_trail_pos[0],trail_pos[1]-vis.last_trail_pos[1])>0.1:
-                vis.trail.append(trail_pos)
-                vis.last_trail_pos=trail_pos
-        elif vis.trail:
-            vis.trail.pop(0)
-        if len(vis.trail)>8:
-            vis.trail.pop(0)
+            update_remote_visual(app,cid,remote)
+        except Exception as ex:
+            print(f"[BGS] Remote visual update failed for {cid}: {ex}")
     if "local_0" in app.world.players:
         target=app.world.players["local_0"].x-app.width//2
         app.camera_x=app.camera_x*0.85+target*0.15
@@ -610,7 +613,9 @@ def redrawAll(app):
             continue
         vis=app.remote_visuals.get(cid)
         if not vis:
-            continue
+            color_index=sum(ord(char) for char in cid)%len(COLORS)
+            vis=RemoteVisual(cid,COLORS[color_index])
+            app.remote_visuals[cid]=vis
         if vis.render_pos:
             x=vis.render_pos[0]-app.camera_x
             y=vis.render_pos[1]
