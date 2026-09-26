@@ -2,6 +2,7 @@ import os
 import json
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse
+from pathlib import Path
 
 PORT = int(os.environ.get('PORT', '10000'))
 ALLOWED_ORIGINS = os.getenv('ALLOWED_ORIGINS', 'https://ericeisaman.github.io,https://scs-207.onrender.com,http://localhost:8000,https://scs-2qah.onrender.com').split(',')
@@ -12,15 +13,12 @@ class Handler(SimpleHTTPRequestHandler):
         origin = self.headers.get('Origin', '')
         if not origin:
             return '*'
-        # If origin is in allowed list or contains github.io/localhost/onrender, allow it
         if origin in ALLOWED_ORIGINS or 'ericeisaman.github.io' in origin or 'localhost' in origin or 'onrender.com' in origin:
             return origin
         return origin
 
     def end_headers(self):
-        # Single place for CORS - no duplicate
         origin = self.get_cors_origin()
-        # Only one Allow-Origin header
         self.send_header('Access-Control-Allow-Origin', origin)
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With')
@@ -53,11 +51,25 @@ class Handler(SimpleHTTPRequestHandler):
             resp = {
                 "peer_id": f"peer_{os.urandom(4).hex()}",
                 "room": "default",
-                "status": "ok",
-                "message": "multiplayer join stub - CORS fixed single header"
+                "status": "ok"
             }
             self.wfile.write(json.dumps(resp).encode())
             return
+        
+        # Favicon handling - serve from root regardless of /scs/ prefix or .ico/.png
+        if 'favicon' in path_lower:
+            # Try root favicon.png, favicon.ico, scs.jpg, etc.
+            for candidate in ['favicon.png', 'favicon.ico', 'scs.jpg', 'scs.png']:
+                if Path(candidate).exists():
+                    self.path = f'/{candidate}'
+                    break
+            # Also handle /scs/favicon.png -> /favicon.png
+            if path_lower in ('/scs/favicon.png', '/scs/favicon.ico', '/favicon.png', '/favicon.ico'):
+                for candidate in ['favicon.png', 'favicon.ico']:
+                    if Path(candidate).exists():
+                        self.path = f'/{candidate}'
+                        break
+            return super().do_GET()
         
         if path_lower in ('/sandbox', '/sandbox/'):
             self.path = '/sandbox.html'
@@ -90,6 +102,5 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
-print(f'Serving ALL static + API + /healthz on {PORT} with SINGLE CORS header')
-print(f'Allowed: {ALLOWED_ORIGINS}')
+print(f'Serving ALL static + favicon + API + /healthz on {PORT}')
 HTTPServer(('0.0.0.0', PORT), Handler).serve_forever()
