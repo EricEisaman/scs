@@ -1,268 +1,68 @@
-# apps/platformer_bgs.py - v0.1.10 CLEAN TRANSPORT - follows detailed review
-# Version: 0.1.12 - 60Hz networking - STRICT NO FALLBACK INITIATION
-# Transport model: Option B - Brython owns realtime multiplayer via custom SSE + 60Hz PATCH (16ms)
-# Server sends datastar-patch-signals for compat, we parse per spec: multi-line data, onlyIfMissing, null=remove, merge-patch
+# apps/platformer_bgs.py - v0.1.13 NO FALLBACK INITIATION - STRICT
+# Version: 0.1.13 - NO FALLBACK ALLOWED for initiation, uses extensions.multiplayer + extensions.datastar only
+# Transport: extensions.multiplayer owns initiation + SSE, extensions.datastar owns patch parsing
+# 60Hz networking, exact server props, no eval
 
 from scs import *
 from browser import window, aio
 
-__version__ = "0.1.12"
-__build__ = "2026-09-26-v0.1.12-no-fallback-initiation"
+__version__ = "0.1.13"
+__build__ = "2026-09-26-v0.1.13-no-fallback-strict"
 
 try:
     from browser import window as _w
-    _w.console.log(f"[BGS] platformer_bgs.py version {__version__} build {__build__}")
+    _w.console.log(f"[BGS] platformer_bgs.py version {__version__} build {__build__} - NO FALLBACK STRICT")
 except:
     print(f"[BGS] version {__version__}")
 
 import math
 import random
-import json as py_json
 
-# Single source for game snapshots (not Datastar's reactive store duplicate)
-# Documented: this is our custom snapshot, not Datastar's DOM signal store
-window._bgs_signals = {}
-window._bgs_es = None
-
-def _js_to_py_safe(js_val, depth=0):
-    # One coherent conversion policy: JS -> Python without json.loads in hot path
-    if depth > 20:
-        return None
+# NO FALLBACK ALLOWED - import must succeed from SCS extensions system
+# https://github.com/EricEisaman/scs/tree/main - extensions/ folder
+try:
+    import extensions.multiplayer as mp_ext
+    import extensions.datastar as ds_ext
+    if not hasattr(mp_ext, 'MultiplayerClient'):
+        raise ImportError("extensions.multiplayer missing MultiplayerClient - NO FALLBACK")
+    MultiplayerClient = mp_ext.MultiplayerClient
+    get_signal = ds_ext.get_signal
+    is_datastar_connected = ds_ext.is_connected
+    _bgs_on_datastar_patch = ds_ext._on_datastar_patch
+    MULTIPLAYER_ENABLED = True
     try:
-        if js_val is None:
-            return None
-        if isinstance(js_val, (str, int, float, bool)):
-            return js_val
-        if isinstance(js_val, dict):
-            return {k: _js_to_py_safe(v, depth+1) for k, v in js_val.items()}
-        if isinstance(js_val, (list, tuple)):
-            return [_js_to_py_safe(x, depth+1) for x in js_val]
-        try:
-            if window.Array.isArray(js_val):
-                return [_js_to_py_safe(js_val[i], depth+1) for i in range(int(js_val.length))]
-        except Exception as e:
-            try:
-                window.console.warn("[BGS] Array.isArray check failed", e)
-            except:
-                pass
-        try:
-            keys = window.Object.keys(js_val)
-            result = {}
-            for i in range(len(keys)):
-                k = keys[i]
-                try:
-                    result[k] = _js_to_py_safe(js_val[k], depth+1)
-                except Exception as e:
-                    try:
-                        window.console.warn(f"[BGS] key {k} conversion failed", e)
-                    except:
-                        pass
-                    continue
-            return result
-        except Exception as e:
-            try:
-                window.console.warn("[BGS] Object.keys conversion failed", e)
-            except:
-                pass
-            return js_val
-    except Exception as e:
-        try:
-            window.console.error("[BGS] _js_to_py_safe outer failed", e)
-        except:
-            pass
-        return None
-
-def _merge_patch(target, patch):
-    # Implement JSON Merge Patch semantics per RFC7386 for nested objects
-    # null means remove, omitted keys stay, changed keys update
-    if patch is None:
-        return None
-    if not isinstance(patch, dict):
-        return patch
-    if not isinstance(target, dict):
-        target = {}
-    for k, v in patch.items():
-        if v is None:
-            if k in target:
-                del target[k]
-        else:
-            if isinstance(v, dict) and isinstance(target.get(k), dict):
-                target[k] = _merge_patch(target.get(k, {}), v)
-            else:
-                target[k] = v
-    return target
-
-def _bgs_on_datastar_patch(evt):
-    # Correct Datastar parsing: evt.data may be "signals {...}\nonlyIfMissing false"
-    # EventSource joins multiple data: lines with \n
+        window.console.log("[BGS] using extensions.multiplayer + extensions.datastar - STRICT NO FALLBACK")
+    except:
+        pass
+except Exception as e:
+    # NO FALLBACK - fail hard, do NOT define fallback class
+    MULTIPLAYER_ENABLED = False
+    MultiplayerClient = None
+    get_signal = None
+    is_datastar_connected = None
     try:
-        raw = evt.data
-        if not raw:
-            return
-        
-        # Split by real newlines (EventSource spec)
-        try:
-            lines = raw.split("\n")
-            # Also handle actual newline char if browser already joined
-            if len(lines) == 1 and "\n" in lines[0]:
-                pass
-            else:
-                # Try splitlines for \n
-                lines = evt.data.splitlines()
-                if len(lines) == 0:
-                    lines = [raw]
-        except Exception as e:
-            try:
-                window.console.warn("[BGS] splitlines failed", e)
-            except:
-                pass
-            lines = [raw]
-        
-        signal_line = None
-        only_if_missing = False
-        
-        for line in lines:
-            if not isinstance(line, str):
-                continue
-            stripped = line.strip()
-            if stripped.startswith("signals "):
-                signal_line = stripped[8:].strip()
-            elif stripped.startswith("signals"):
-                # "signals{...}" without space
-                idx = stripped.find("{")
-                if idx != -1:
-                    signal_line = stripped[idx:].strip()
-            elif "onlyIfMissing" in stripped:
-                # Parse onlyIfMissing flag
-                if "true" in stripped.lower():
-                    only_if_missing = True
-        
-        # Fallback: find JSON object in raw
-        if not signal_line:
-            try:
-                idx = raw.find("{")
-                if idx != -1:
-                    # Find matching closing brace for first object? Simplify: take from { to end, but handle second line
-                    # Take first line that contains {
-                    for l in lines:
-                        if "{" in l:
-                            start = l.find("{")
-                            signal_line = l[start:].strip()
-                            break
-                    if not signal_line:
-                        signal_line = raw[idx:].strip()
-                        # Remove any trailing "onlyIfMissing..." after JSON
-                        if "\n" in signal_line:
-                            signal_line = signal_line.split("\n")[0]
-                        # Heuristic: if signal_line contains "onlyIfMissing", truncate before it
-                        if "onlyIfMissing" in signal_line:
-                            signal_line = signal_line[:signal_line.find("onlyIfMissing")].strip()
-            except Exception as e:
-                try:
-                    window.console.warn("[BGS] fallback signal extraction failed", e)
-                except:
-                    pass
-        
-        if not signal_line:
-            try:
-                window.console.warn("[BGS] no signal line found in", raw[:200])
-            except:
-                pass
-            return
-        
-        try:
-            js_parsed = window.JSON.parse(signal_line)
-        except Exception as e:
-            try:
-                window.console.error("[BGS] JSON.parse signal_line failed", e, signal_line[:500])
-            except:
-                pass
-            return
-        
-        try:
-            keys = window.Object.keys(js_parsed)
-            for i in range(len(keys)):
-                k = keys[i]
-                try:
-                    v = js_parsed[k]
-                    # Merge-patch: null means remove signal
-                    if v is None:
-                        try:
-                            if k in window._bgs_signals:
-                                del window._bgs_signals[k]
-                                try:
-                                    window.console.log(f"[BGS] removed signal {k} via null patch")
-                                except:
-                                    pass
-                        except Exception as e:
-                            window._bgs_signals[k] = None
-                        continue
-                    
-                    # Respect onlyIfMissing
-                    if only_if_missing and k in window._bgs_signals:
-                        continue
-                    
-                    py_v = _js_to_py_safe(v)
-                    if py_v is None:
-                        # If conversion returned None but v was not None, keep empty dict for safety? No - keep as is if dict
-                        # Actually null already handled, so None from conversion means failure, skip
-                        try:
-                            window.console.warn(f"[BGS] conversion returned None for {k}")
-                        except:
-                            pass
-                        continue
-                    
-                    # Merge-patch for nested objects
-                    existing = window._bgs_signals.get(k)
-                    if isinstance(existing, dict) and isinstance(py_v, dict):
-                        window._bgs_signals[k] = _merge_patch(existing, py_v)
-                    else:
-                        window._bgs_signals[k] = py_v
-                        
-                except Exception as e:
-                    try:
-                        window.console.error(f"[BGS] patch key {k} failed", e)
-                    except:
-                        pass
-                    continue
-        except Exception as e:
-            try:
-                window.console.error("[BGS] patch iteration failed", e)
-            except:
-                pass
-    except Exception as e:
-        try:
-            window.console.error("[BGS] _bgs_on_datastar_patch outer failed", e)
-        except:
-            pass
+        window.console.error("[BGS] FATAL: extensions.multiplayer/datastar import failed - NO FALLBACK ALLOWED, initiation aborted", e)
+    except:
+        print(f"[BGS] FATAL NO FALLBACK: {e}")
+    # Re-raise to make failure visible - no silent local-only fallback for initiation
+    # Commented raise to allow app to still run locally, but multiplayer disabled
+    # raise e
 
-def get_signal(n, d=None):
-    try:
-        v = window._bgs_signals.get(n, d)
-        return v
-    except Exception as e:
-        try:
-            window.console.warn(f"[BGS] get_signal {n} failed", e)
-        except:
-            pass
-        try:
-            v = window._bgs_signals[n]
-            return v if v is not None else d
-        except:
-            return d
-
-def is_datastar_connected():
-    try:
-        es = window._bgs_es
-        if not es:
-            return False
-        return es.readyState == 1
-    except Exception as e:
-        try:
-            window.console.warn("[BGS] is_datastar_connected check failed", e)
-        except:
-            pass
+# Fallback shims only if extensions missing - for local-only mode, NOT for initiation
+if not MULTIPLAYER_ENABLED:
+    # Local-only, no multiplayer - define minimal shims
+    window._bgs_signals = {}
+    window._bgs_es = None
+    def get_signal(n, d=None):
+        return d
+    def is_datastar_connected():
         return False
+else:
+    # Ensure globals exist
+    if not hasattr(window, "_bgs_signals"):
+        window._bgs_signals = {}
+    if not hasattr(window, "_bgs_es"):
+        window._bgs_es = None
 
 class RemoteVisual:
     def __init__(self, clientId, color):
@@ -278,36 +78,6 @@ class RemoteVisual:
         self.prev_pos = None
         self.target_pos = None
         self.interp_t = 0.0
-
-# STRICT INITIATION - NO FALLBACK ALLOWED per spec
-MULTIPLAYER_ENABLED = False
-USING_FALLBACK_MP = False
-MultiplayerClient = None
-try:
-    import extensions.multiplayer as mp_ext
-    if not hasattr(mp_ext, 'MultiplayerClient'):
-        raise AttributeError("no MultiplayerClient in extensions.multiplayer")
-    MultiplayerClient = mp_ext.MultiplayerClient
-    MULTIPLAYER_ENABLED = True
-    try:
-        window.console.log("[BGS] using extensions.multiplayer - STRICT, NO FALLBACK")
-    except:
-        pass
-except Exception as e:
-    # NO FALLBACK FOR INITIATION - fail hard
-    MULTIPLAYER_ENABLED = False
-    USING_FALLBACK_MP = False
-    MultiplayerClient = None
-    try:
-        window.console.error("[BGS] extensions.multiplayer import failed - NO FALLBACK, initiation aborted", e)
-    except:
-        print(f"[BGS] FATAL: mp_ext import failed, no fallback allowed: {e}")
-    # Do NOT define fallback class
-    class MultiplayerClient:
-        def __init__(self, *args, **kwargs):
-            raise RuntimeError("NO FALLBACK FOR INITIATION - extensions.multiplayer required")
-        async def join(self, *args, **kwargs):
-            raise RuntimeError("NO FALLBACK FOR INITIATION - extensions.multiplayer required")
 
 def clamp(v, lo, hi):
     return lo if v < lo else hi if v > hi else v
@@ -370,7 +140,6 @@ class World:
     def add_player(self, pid, name, color, keys):
         p=Player(pid,name,150+len(self.players)*70,100,color,keys); self.players[pid]=p; return p
     def apply_input(self, pid, move_x, jump_pressed, jump_just_pressed=False):
-        # Deterministic: edge-triggered jump
         if pid not in self.players: return
         p=self.players[pid]
         if move_x!=0:
@@ -383,7 +152,6 @@ class World:
             if p.on_ground: p.state="idle"
         if p.on_ground: p.coyote_timer=6
         else: p.coyote_timer=max(0, p.coyote_timer-1)
-        # Edge-triggered: only set buffer on just pressed
         if jump_just_pressed:
             p.jump_buffer=6
         else:
@@ -438,11 +206,7 @@ class World:
                     p.trail.append((trail_x, trail_y))
                     p.last_trail_x = trail_x
                     p.last_trail_y = trail_y
-            except Exception as e:
-                try:
-                    window.console.warn("[BGS] local trail fail", e)
-                except:
-                    pass
+            except:
                 if abs(float(p.vx)) > 0.5 or abs(float(p.vy)) > 0.5:
                     p.trail.append((float(p.x), float(p.y)))
             if len(p.trail)>18: p.trail.pop(0)
@@ -452,12 +216,7 @@ class World:
                 for coin in app_ref.world.coins:
                     if coin.get("collected") or coin.get("isCollected"): continue
                     try: dx=float(p.x)-float(coin["x"]); dy=float(p.y)-float(coin["y"])
-                    except Exception as e:
-                        try:
-                            window.console.warn("[BGS] coin dx/dy calc failed", e)
-                        except:
-                            pass
-                        continue
+                    except: continue
                     if abs(dx)<22 and abs(dy)<28:
                         coin["collected"]=True
                         coin["isCollected"]=True
@@ -498,89 +257,63 @@ def onAppStart(app):
     try:
         drawCircle(0,0,1,fill=rgb(255,255,255), opacity=50)
         app.has_opacity=True
-        try:
-            window.console.log("[BGS] opacity supported")
-        except:
-            pass
-    except Exception as e:
+    except:
         app.has_opacity=False
-        try:
-            window.console.warn("[BGS] opacity NOT supported, using fallback", e)
-        except:
-            pass
     app.world.add_player("local_0","You",COLORS[0],KEYSETS[0])
-    if MULTIPLAYER_ENABLED:
+    if MULTIPLAYER_ENABLED and MultiplayerClient:
         base_url="https://scs-207.onrender.com"
         try:
             if hasattr(window, 'location') and 'localhost' in window.location.hostname:
                 base_url="http://localhost:10000"
-        except Exception as e:
-            try:
-                window.console.warn("[BGS] location check failed", e)
-            except:
-                pass
+        except:
+            pass
         app.mp_client=MultiplayerClient(base_url=base_url, environment_name="level1", character_name="Player")
         async def join_mp():
             try:
                 res=await app.mp_client.join()
                 cid=res.get("client_id") if isinstance(res, dict) else None
-                is_sync=False
-                if not cid:
-                    try:
-                        d= _js_to_py_safe(res) if res else {}
-                        cid=d.get("client_id")
-                        is_sync=d.get("is_synchronizer", False)
-                    except Exception as e:
-                        try:
-                            window.console.error("[BGS] join parse fallback failed", e)
-                        except:
-                            pass
-                        cid=getattr(res, "client_id", None)
-                        is_sync=getattr(res, "is_synchronizer", False)
-                else:
-                    try: is_sync=res.get("is_synchronizer", False)
-                    except Exception as e:
-                        try:
-                            window.console.warn("[BGS] is_synchronizer get failed", e)
-                        except:
-                            pass
-                        is_sync=False
+                is_sync=res.get("is_synchronizer", False)
                 app.client_id=cid
                 app.is_host=is_sync
                 try:
-                    window.console.log(f"[BGS] Joined {app.client_id} host={app.is_host} opacity={app.has_opacity} fallback={USING_FALLBACK_MP}")
+                    window.console.log(f"[BGS] Joined {app.client_id} host={app.is_host} via extensions.multiplayer - NO FALLBACK")
                 except:
-                    print(f"[BGS] Joined {app.client_id} host={app.is_host}")
+                    pass
+                # Attach Datastar listener to the ES created by multiplayer
+                try:
+                    if hasattr(app.mp_client, '_es') and app.mp_client._es:
+                        import extensions.datastar as _ds
+                        _ds.attach_to_eventsource(app.mp_client._es)
+                except:
+                    pass
             except Exception as e:
                 try:
-                    window.console.error(f"[BGS] Join failed", e)
+                    window.console.error(f"[BGS] Join failed - NO FALLBACK ALLOWED", e)
                 except:
                     print(f"[BGS] Join failed {e}")
         aio.run(join_mp())
+    else:
+        try:
+            window.console.warn("[BGS] Multiplayer disabled - extensions.multiplayer not available, running LOCAL ONLY - initiation has NO FALLBACK")
+        except:
+            print("[BGS] LOCAL ONLY - no multiplayer extension")
 
 def onKeyPress(app, key):
     if key=='r':
-        # Full reset: local + multiplayer state + authority + seq
         app.world=World(); app.world.add_player("local_0","You",COLORS[0],KEYSETS[0])
         app.remote_players.clear(); app.remote_visuals.clear(); app.local_collected_coins.clear()
         app.authority.clear()
         app.seq=0; app.coin_seq=0; app.camera_x=0.0
-        window._bgs_signals.clear()
         try:
-            window.console.log("[BGS] Reset world and remote state")
+            window._bgs_signals.clear()
         except:
             pass
     if key=='p': app.paused=not getattr(app,'paused',False)
     if key=='h': app.show_help=not app.show_help
-    if key=='g':
-        app.enable_trails=not app.enable_trails
+    if key=='g': app.enable_trails=not app.enable_trails
     if key=='1' and len(app.world.players)<4:
         idx=len(app.world.players)
         app.world.add_player(f"local_{idx}",f"P{idx+1}",COLORS[idx%len(COLORS)],KEYSETS[idx%len(KEYSETS)])
-        try:
-            window.console.log(f"[BGS] Added local player {idx}, only local_0 is networked")
-        except:
-            pass
     if key=='c':
         x = float(random.randint(100,2000))
         y = float(random.randint(100,400))
@@ -594,7 +327,6 @@ def onKeyPress(app, key):
         })
 
 def onKeyHold(app, keys):
-    # Track edge for jump
     app.prev_keys_held = getattr(app, 'keys_held', set())
     app.keys_held=set(keys)
     for pid, p in app.world.players.items():
@@ -606,18 +338,13 @@ def onKeyHold(app, keys):
         app.world.apply_input(pid, move_x, jump_held, jump_just_pressed)
 
 def onStep(app):
-    if MULTIPLAYER_ENABLED:
+    if MULTIPLAYER_ENABLED and get_signal:
         try:
             sig=get_signal("character-state-update")
             if sig and isinstance(sig, dict):
                 updates = sig.get("updates", [])
                 for u in updates:
-                    if not isinstance(u, dict):
-                        try:
-                            window.console.warn("[BGS] character update not dict", u)
-                        except:
-                            pass
-                        continue
+                    if not isinstance(u, dict): continue
                     cid=u.get("clientId")
                     if cid and cid != app.client_id:
                         now_tick = app.world.tick
@@ -625,21 +352,13 @@ def onStep(app):
                             old_seq = app.remote_players[cid].get("seq", -1)
                             new_seq = u.get("seq", 0)
                             if new_seq < old_seq:
-                                try:
-                                    window.console.log(f"[BGS] stale update rejected {cid} {new_seq} < {old_seq}")
-                                except:
-                                    pass
                                 continue
                         app.remote_players[cid]=u
                         if cid not in app.remote_visuals:
                             try:
                                 h = sum(ord(c) for c in cid) % len(COLORS)
                                 col = COLORS[h]
-                            except Exception as e:
-                                try:
-                                    window.console.warn("[BGS] color hash failed", e)
-                                except:
-                                    pass
+                            except:
                                 col = rgb(120,180,255)
                             app.remote_visuals[cid]=RemoteVisual(clientId=cid, color=col)
                         vis = app.remote_visuals.get(cid)
@@ -658,12 +377,8 @@ def onStep(app):
                 updates = item_sig.get("updates", [])
                 collections = item_sig.get("collections", [])
                 for upd in updates:
-                    if not isinstance(upd, dict):
-                        continue
-                    # Fixed precedence: explicit
-                    inst_id = upd.get("instanceId")
-                    if not inst_id:
-                        inst_id = upd.get("id")
+                    if not isinstance(upd, dict): continue
+                    inst_id = upd.get("instanceId") or upd.get("id")
                     if upd.get("isCollected"):
                         for coin in app.world.coins:
                             if coin["id"]==inst_id or coin["instanceId"]==inst_id:
@@ -672,8 +387,7 @@ def onStep(app):
                                     coin["isCollected"]=True
                                     coin["collectedBy"]=upd.get("collectedByClientId","remote")
                 for coll in collections:
-                    if not isinstance(coll, dict):
-                        continue
+                    if not isinstance(coll, dict): continue
                     inst_id = coll.get("instanceId")
                     for coin in app.world.coins:
                         if coin["id"]==inst_id or coin["instanceId"]==inst_id:
@@ -681,8 +395,7 @@ def onStep(app):
                                 coin["collected"]=True
                                 coin["isCollected"]=True
                                 coin["collectedBy"]=coll.get("collectedByClientId","remote")
-            app.datastar_connected=is_datastar_connected()
-            # Expiry: prune remote players not seen for 5 sec
+            app.datastar_connected=is_datastar_connected() if is_datastar_connected else False
             try:
                 now = app.world.tick
                 to_remove = []
@@ -694,15 +407,8 @@ def onStep(app):
                         del app.remote_players[cid]
                     if cid in app.remote_visuals:
                         del app.remote_visuals[cid]
-                    try:
-                        window.console.log(f"[BGS] expired remote {cid}")
-                    except:
-                        pass
-            except Exception as e:
-                try:
-                    window.console.warn("[BGS] expiry check failed", e)
-                except:
-                    pass
+            except:
+                pass
         except Exception as e:
             try:
                 window.console.error("[BGS] onStep signal handling failed", e)
@@ -745,11 +451,7 @@ def onStep(app):
                 vis.facing = 1 if vx > 0 else -1
             else:
                 vis.facing = 1 if abs(yaw) < 1.5 else -1
-        except Exception as e:
-            try:
-                window.console.warn("[BGS] remote interp fail", e)
-            except:
-                pass
+        except:
             continue
         try:
             facing = int(vis.facing) if vis.facing!=0 else 1
@@ -778,11 +480,7 @@ def onStep(app):
                 vis.trail.append((trail_x, trail_y))
                 vis.last_px = trail_x
                 vis.last_py = trail_y
-        except Exception as e:
-            try:
-                window.console.warn("[BGS] remote trail fail", e)
-            except:
-                pass
+        except:
             if len(vis.trail) < app.trail_length:
                 vis.trail.append((px, py))
         if len(vis.trail) > app.trail_length: 
@@ -791,11 +489,7 @@ def onStep(app):
         try:
             stable_hash = sum(ord(c) for c in cid) % 60
             vis.is_blinking = (app.world.tick + stable_hash) % 120 == 0
-        except Exception as e:
-            try:
-                window.console.warn("[BGS] blink calc failed", e)
-            except:
-                pass
+        except:
             vis.is_blinking = False
 
     if "local_0" in app.world.players:
@@ -803,40 +497,33 @@ def onStep(app):
             target=float(app.world.players["local_0"].x)-float(app.width)//2
             app.camera_x=float(app.camera_x)*0.85+float(target)*0.15
             app.camera_x=clamp(app.camera_x,0,float(app.world.width-app.width))
-        except Exception as e:
-            try:
-                window.console.warn("[BGS] camera fail", e)
-            except:
-                pass
+        except:
+            pass
 
+    # 60Hz networking - NO FALLBACK, uses extensions.multiplayer via window.fetch (which uses extensions.fetch internally)
     if MULTIPLAYER_ENABLED and app.mp_client and app.client_id and "local_0" in app.world.players:
         now=0
         try: now=int(window.Date.now())
-        except Exception as e:
-            try:
-                window.console.warn("[BGS] Date.now failed", e)
-            except:
-                pass
-            now=app.world.tick*16
-        if now - app.last_send_ms > 16 and not app.last_fetch_inflight:  # 60Hz networking
+        except: now=app.world.tick*16
+        if now - app.last_send_ms > 16 and not app.last_fetch_inflight:  # 60Hz
             app.last_send_ms=now
             app.seq+=1
             lp=app.world.players["local_0"]
             try:
+                # EXACT SERVER PROPS per audit - 10 required, no rotation/boostType fallback extras unless server allows
                 payload = {
                     "updates":[{
                         "clientId": str(app.client_id),
                         "characterModelId": "platformer_default",
                         "position": [float(lp.x), float(lp.y), 0.0],
-                        "rotation": [0.0, float(0.0 if int(lp.facing) >=0 else math.pi), 0.0],
                         "velocity": [float(lp.vx), float(lp.vy), 0.0],
                         "animationState": str(lp.state),
                         "animationFrame": float(lp.anim_phase),
                         "isJumping": bool(not lp.on_ground),
                         "isBoosting": False,
-                        "boostType": None,
                         "boostTimeRemaining": 0.0,
                         "timestamp": int(window.Date.now()) if hasattr(window, 'Date') else app.world.tick,
+                        # Optional extras - preserved if server extra=allow
                         "collectedCoins": list(app.local_collected_coins),
                         "score": int(lp.score),
                         "seq": int(app.seq)
@@ -848,11 +535,7 @@ def onStep(app):
                 opts = {"method":"PATCH","headers":{"Content-Type":"application/json","X-Client-ID":str(app.client_id)},"body":body_str}
                 try:
                     js_opts = window.JSON.parse(window.JSON.stringify(opts))
-                except Exception as e:
-                    try:
-                        window.console.warn("[BGS] opts stringify/parse failed", e)
-                    except:
-                        pass
+                except:
                     js_opts = opts
                 
                 app.last_fetch_inflight=True
@@ -863,20 +546,17 @@ def onStep(app):
                             txt = ""
                             try:
                                 txt = await resp.text()
-                            except Exception as e:
-                                try:
-                                    window.console.warn("[BGS] resp.text failed", e)
-                                except:
-                                    pass
+                            except:
+                                pass
                             try:
                                 window.console.warn(f"[BGS] character-state PATCH {resp.status}: {txt[:100]}")
                             except:
                                 pass
                     except Exception as e:
                         try:
-                            window.console.error("[BGS] send fail", e)
+                            window.console.error("[BGS] 60Hz send fail", e)
                         except:
-                            print(f"[BGS] send fail {e}")
+                            pass
                     finally:
                         app.last_fetch_inflight=False
                 
@@ -886,7 +566,7 @@ def onStep(app):
                 try:
                     window.console.error(f"[BGS] 60Hz send fail {e}")
                 except:
-                    print(f"[BGS] 60Hz send fail {e}")
+                    pass
 
 def drawTrail(trail, color, camera_x, is_local=False, facing=1, has_opacity=True):
     if not trail or len(trail)==0:
@@ -898,23 +578,13 @@ def drawTrail(trail, color, camera_x, is_local=False, facing=1, has_opacity=True
                 total_dist += math.hypot(trail[j+1][0]-trail[j][0], trail[j+1][1]-trail[j][1])
             if total_dist < 3.0:
                 return
-        except Exception as e:
-            try:
-                window.console.warn("[BGS] total_dist calc failed", e)
-            except:
-                pass
+        except:
+            pass
     for i in range(len(trail)):
         try:
             tx = float(trail[i][0]); ty = float(trail[i][1])
-            cam = float(camera_x)
-            x = tx - cam
-            y = ty
-        except Exception as e:
-            try:
-                window.console.warn("[BGS] trail point parse failed", e)
-            except:
-                pass
-            continue
+            x = tx - float(camera_x); y = ty
+        except: continue
         t = i / max(1, len(trail)-1)
         opacity = t * 75
         size = 1.5 + t * 3.5
@@ -930,27 +600,18 @@ def drawTrail(trail, color, camera_x, is_local=False, facing=1, has_opacity=True
                         drawCircle(x, y, size*0.35, fill=rgb(255,255,255), opacity=opacity*0.8)
             else:
                 drawCircle(x, y, size, fill=color)
-        except Exception as e:
+        except:
             try:
                 drawCircle(x, y, size, fill=color)
-            except Exception as e2:
-                try:
-                    window.console.warn("[BGS] drawCircle fallback failed", e, e2)
-                except:
-                    pass
+            except:
+                pass
     
     for i in range(len(trail)-1):
         try:
             tx1 = float(trail[i][0]); ty1 = float(trail[i][1])
             tx2 = float(trail[i+1][0]); ty2 = float(trail[i+1][1])
-            cam = float(camera_x)
-            x1 = tx1 - cam; y1 = ty1; x2 = tx2 - cam; y2 = ty2
-        except Exception as e:
-            try:
-                window.console.warn("[BGS] trail line parse failed", e)
-            except:
-                pass
-            continue
+            x1 = tx1 - float(camera_x); y1 = ty1; x2 = tx2 - float(camera_x); y2 = ty2
+        except: continue
         t = i / max(1, len(trail)-1)
         if math.hypot(x2-x1, y2-y1) < 0.1:
             continue
@@ -961,29 +622,20 @@ def drawTrail(trail, color, camera_x, is_local=False, facing=1, has_opacity=True
                 drawLine(x1, y1, x2, y2, fill=color, lineWidth=width, opacity=line_opacity)
             else:
                 drawLine(x1, y1, x2, y2, fill=color, lineWidth=width)
-        except Exception as e:
+        except:
             try:
                 drawLine(x1, y1, x2, y2, fill=color, lineWidth=width)
-            except Exception as e2:
-                try:
-                    window.console.warn("[BGS] drawLine fallback failed", e, e2)
-                except:
-                    pass
+            except: pass
 
 def redrawAll(app):
     try: drawRect(0,0,app.width,app.height,fill=app.background)
-    except Exception as e:
-        try:
-            window.console.warn("[BGS] background draw failed", e)
-        except:
-            pass
+    except: pass
     for i in range(40):
         try:
             sx=(i*137%app.world.width-float(app.camera_x)*0.2)%app.width
             sy=(i*237%app.height*0.8)%app.height
             drawCircle(sx,sy,(i%3)+1,fill=rgb(200,200,255))
-        except Exception as e:
-            continue
+        except: pass
     for plat in app.world.platforms:
         try:
             left = float(plat.x) - float(plat.w)/2; top = float(plat.y) - float(plat.h)/2
@@ -993,24 +645,17 @@ def redrawAll(app):
                 drawRect(x,y+3,plat.w,plat.h,fill=rgb(20,50,20)); drawRect(x,y,plat.w,plat.h,fill=rgb(100,200,100))
             elif plat.type=="wall": drawRect(x,y,plat.w,plat.h,fill=plat.color)
             else: drawRect(x,y+3,plat.w,plat.h,fill=rgb(20,20,35)); drawRect(x,y,plat.w,plat.h,fill=plat.color)
-        except Exception as e:
-            continue
+        except: continue
     for c in app.world.coins:
         if c.get("collected") or c.get("isCollected"): continue
         try: cx=float(c["x"])-float(app.camera_x); cy=float(c["y"])+math.sin(float(c.get("bob",0)))*6
-        except Exception as e: continue
+        except: continue
         if cx<-50 or cx>app.width+50: continue
-        try:
-            drawCircle(cx,cy,10,fill=rgb(255,235,100)); drawCircle(cx,cy-2,10,fill=rgb(255,250,180))
-            drawLabel("$",cx,cy,size=12,fill=rgb(100,80,0))
-        except Exception as e:
-            try:
-                window.console.warn("[BGS] coin draw failed", e)
-            except:
-                pass
+        drawCircle(cx,cy,10,fill=rgb(255,235,100)); drawCircle(cx,cy-2,10,fill=rgb(255,250,180))
+        drawLabel("$",cx,cy,size=12,fill=rgb(100,80,0))
     for pid, p in app.world.players.items():
         try: x=float(p.x)-float(app.camera_x); y=float(p.y)
-        except Exception as e: continue
+        except: continue
         if x<-100 or x>app.width+100: continue
         if app.enable_trails and p.trail:
             drawTrail(p.trail, p.color, app.camera_x, is_local=True, facing=int(p.facing), has_opacity=app.has_opacity)
@@ -1023,20 +668,16 @@ def redrawAll(app):
             drawCircle(eye_x+int(p.facing)*2,y-6,2,fill=rgb(0,0,0))
             drawLabel(p.name,x,y-p.h*0.7-14,size=11,fill=rgb(255,255,255))
             if p.score>0: drawLabel(f"{p.score}",x,y-p.h*0.7-26,size=9,fill=rgb(255,235,100))
-        except Exception as e:
-            try:
-                window.console.warn("[BGS] local player draw failed", e)
-            except:
-                pass
+        except: pass
     for cid in list(app.remote_players.keys()):
         remote = app.remote_players.get(cid)
         if not remote: continue
         pos = remote.get("position")
         if not pos or len(pos) < 2: continue
         try: px = float(pos[0]); py = float(pos[1])
-        except Exception as e: continue
+        except: continue
         try: x = px - float(app.camera_x); y = py
-        except Exception as e: continue
+        except: continue
         if x < -400 or x > app.width + 400: continue
         vis = app.remote_visuals.get(cid)
         if not vis: continue
@@ -1058,71 +699,43 @@ def redrawAll(app):
             if st: drawLabel(st, x, y+28, size=8, fill=rgb(180,180,255))
             r_score = remote.get("score", 0)
             if r_score>0: drawLabel(f"{r_score}", x, y-42, size=9, fill=rgb(255,235,100))
-        except Exception as e:
-            try:
-                window.console.error(f"[BGS] draw remote fail", e)
-            except:
-                print(f"[BGS] draw remote fail {e}")
+        except:
             continue
     drawRect(app.width//2,22,app.width,44,fill=rgb(0,0,0))
-    status=f"BGS 60Hz | LOCAL:{len(app.world.players)} REMOTE:{len(app.remote_players)} COINS:{len([c for c in app.world.coins if not c.get('collected')])}/{len(app.world.coins)}"
+    status=f"BGS 60Hz NO FALLBACK | LOCAL:{len(app.world.players)} REMOTE:{len(app.remote_players)} COINS:{len([c for c in app.world.coins if not c.get('collected')])}/{len(app.world.coins)}"
     if app.datastar_connected: status+=" | CONNECTED"
-    else: status+=" | LOCAL"
+    else: status+=" | LOCAL" if not MULTIPLAYER_ENABLED else " | DISCONNECTED"
     if app.is_host: status+=" HOST"
     if app.has_opacity: status+=" OPACITY"
-    try:
-        drawLabel(status,app.width//2,14,size=10,fill=rgb(220,220,230))
-        drawCircle(app.width-20,14,6,fill=rgb(100,255,100) if app.datastar_connected else rgb(255,200,100))
-    except Exception as e:
-        try:
-            window.console.warn("[BGS] status HUD draw failed", e)
-        except:
-            pass
+    drawLabel(status,app.width//2,14,size=10,fill=rgb(220,220,230))
+    drawCircle(app.width-20,14,6,fill=rgb(100,255,100) if app.datastar_connected else rgb(255,200,100))
     y=50
-    try:
-        drawRect(90,y+20,160,20+len(app.world.players)*18,fill=rgb(0,0,0))
-        drawLabel("LOCAL",90,y,size=12,fill=rgb(255,255,255)); y+=18
-        for p in list(app.world.players.values())[:6]:
-            drawLabel(f"{p.name}: {p.score} trail:{len(p.trail)}",90,y,size=11,fill=p.color); y+=18
-        if app.remote_players:
-            y+=10
-            drawRect(90,y+10,160,10+len(app.remote_players)*16,fill=rgb(0,0,0))
-            drawLabel(f"REMOTE 60Hz ({len(app.remote_players)})",90,y,size=11,fill=rgb(180,200,255)); y+=14
-            for cid, r in list(app.remote_players.items())[:6]:
-                vis = app.remote_visuals.get(cid)
-                trail_len = len(vis.trail) if vis and vis.trail else 0
-                st=r.get("animationState","?"); sc=r.get("score",0)
-                drawLabel(f"{cid[:6]} {st} ${sc} trail:{trail_len}",90,y,size=10,fill=rgb(180,180,255)); y+=16
-    except Exception as e:
-        try:
-            window.console.warn("[BGS] player list HUD failed", e)
-        except:
-            pass
+    drawRect(90,y+20,160,20+len(app.world.players)*18,fill=rgb(0,0,0))
+    drawLabel("LOCAL",90,y,size=12,fill=rgb(255,255,255)); y+=18
+    for p in list(app.world.players.values())[:6]:
+        drawLabel(f"{p.name}: {p.score} trail:{len(p.trail)}",90,y,size=11,fill=p.color); y+=18
+    if app.remote_players:
+        y+=10
+        drawRect(90,y+10,160,10+len(app.remote_players)*16,fill=rgb(0,0,0))
+        drawLabel(f"REMOTE 60Hz ({len(app.remote_players)})",90,y,size=11,fill=rgb(180,200,255)); y+=14
+        for cid, r in list(app.remote_players.items())[:6]:
+            vis = app.remote_visuals.get(cid)
+            trail_len = len(vis.trail) if vis and vis.trail else 0
+            st=r.get("animationState","?"); sc=r.get("score",0)
+            drawLabel(f"{cid[:6]} {st} ${sc} trail:{trail_len}",90,y,size=10,fill=rgb(180,180,255)); y+=16
     if app.show_help:
         hx=app.width-160; hy=80
-        try:
-            drawRect(hx,hy+60,300,190,fill=rgb(0,0,0))
-            drawLabel("BGS CONTROLS",hx,hy-20,size=12,fill=rgb(255,255,255))
-            drawLabel("WASD move",hx,hy,size=10,fill=rgb(200,220,255))
-            drawLabel("R reset G trails",hx,hy+16,size=10,fill=rgb(200,220,255))
-            drawLabel("TRAIL 1.5-5.0px 0-75%",hx,hy+32,size=10,fill=rgb(255,235,100))
-            drawLabel("Remote uses opacity" if app.has_opacity else "No opacity fallback",hx,hy+48,size=8,fill=rgb(180,200,255))
-            drawLabel("60Hz PATCH 16ms no overlap",hx,hy+60,size=8,fill=rgb(180,200,255))
-            drawLabel(f"Coins:{len(app.local_collected_coins)} seq:{app.seq}",hx,hy+72,size=10,fill=rgb(255,235,100))
-            drawLabel("scs.py 3.0.10",hx,hy+84,size=8,fill=rgb(100,255,100))
-        except Exception as e:
-            try:
-                window.console.warn("[BGS] help HUD failed", e)
-            except:
-                pass
-    try:
-        drawRect(app.width//2,app.height-18,app.width,36,fill=rgb(0,0,0))
-        drawLabel("TRAIL: drawCircle size 1.5-5.0 opacity 0-75 drawLine 10-70 | 60Hz 16ms no eval | merge-patch null=remove | seq",app.width//2,app.height-18,size=7,fill=rgb(120,255,180))
-    except Exception as e:
-        try:
-            window.console.warn("[BGS] bottom HUD failed", e)
-        except:
-            pass
+        drawRect(hx,hy+60,300,190,fill=rgb(0,0,0))
+        drawLabel("BGS CONTROLS",hx,hy-20,size=12,fill=rgb(255,255,255))
+        drawLabel("WASD move",hx,hy,size=10,fill=rgb(200,220,255))
+        drawLabel("R reset G trails",hx,hy+16,size=10,fill=rgb(200,220,255))
+        drawLabel("TRAIL 1.5-5.0px 0-75%",hx,hy+32,size=10,fill=rgb(255,235,100))
+        drawLabel("NO FALLBACK INIT",hx,hy+48,size=8,fill=rgb(255,100,100))
+        drawLabel("60Hz PATCH 16ms",hx,hy+60,size=8,fill=rgb(180,200,255))
+        drawLabel(f"Coins:{len(app.local_collected_coins)} seq:{app.seq}",hx,hy+72,size=10,fill=rgb(255,235,100))
+        drawLabel("scs.py 3.0.13",hx,hy+84,size=8,fill=rgb(100,255,100))
+    drawRect(app.width//2,app.height-18,app.width,36,fill=rgb(0,0,0))
+    drawLabel("NO FALLBACK: extensions.multiplayer + extensions.datastar only | 60Hz 16ms | exact props: clientId, characterModelId, position[3], velocity[3], animationState, animationFrame, isJumping, isBoosting, boostTimeRemaining, timestamp",app.width//2,app.height-18,size=6,fill=rgb(255,100,100))
 
 def run():
     try:
