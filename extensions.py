@@ -34,7 +34,14 @@ class FetchResponse:
                 pass
             raise
     async def text(self):
-        return await self._js.text()
+        try:
+            return await self._js.text()
+        except Exception as exc:
+            try:
+                window.console.error("[fetch] text() failed", exc)
+            except:
+                pass
+            raise
 
 async def fetch(url, method="GET", headers=None, body=None):
     options = {"method": method}
@@ -42,19 +49,34 @@ async def fetch(url, method="GET", headers=None, body=None):
         options["headers"] = headers
     if body != None:
         options["body"] = body
-    js_response = await window.fetch(url, options)
+    try:
+        js_response = await window.fetch(url, options)
+    except Exception as exc:
+        try:
+            window.console.error("[fetch] window.fetch threw", exc, url)
+        except:
+            pass
+        raise FetchError(f"fetch failed {url}: {exc}")
     return FetchResponse(js_response)
 
 async def fetch_json(url):
     response = await fetch(url)
     if not response.ok:
-        raise FetchError("fetch_json HTTP " + str(response.status) + " " + response.statusText)
+        try:
+            txt = await response.text()
+        except:
+            txt = ""
+        raise FetchError(f"fetch_json HTTP {response.status} {response.statusText} {txt[:200]} url={url}")
     return await response.json()
 
 async def fetch_text(url):
     response = await fetch(url)
     if not response.ok:
-        raise FetchError("fetch_text HTTP " + str(response.status) + " " + response.statusText)
+        try:
+            txt = await response.text()
+        except:
+            txt = ""
+        raise FetchError(f"fetch_text HTTP {response.status} {response.statusText} {txt[:200]} url={url}")
     return await response.text()
 
 _mod_ft = types.ModuleType('extensions.fetch')
