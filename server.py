@@ -1,7 +1,8 @@
 import os
 import json
+import time
 from http.server import HTTPServer, SimpleHTTPRequestHandler
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 from pathlib import Path
 
 PORT = int(os.environ.get('PORT', '10000'))
@@ -36,12 +37,42 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         path_lower = path.lower()
+        query = parse_qs(parsed.query)
         
         if path == '/healthz':
             self.send_response(200)
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
             self.wfile.write(b'ok')
+            return
+        
+        # SSE stream for multiplayer - MUST be text/event-stream
+        if path.startswith('/api/multiplayer/stream'):
+            sid = query.get('sid', ['unknown'])[0]
+            self.send_response(200)
+            self.send_header('Content-type', 'text/event-stream')
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Connection', 'keep-alive')
+            self.end_headers()
+            
+            # Send initial connected event
+            self.wfile.write(b': connected\n\n')
+            self.wfile.flush()
+            
+            # Keep connection open with periodic keepalives and empty datastar patches
+            # Simple stub that sends heartbeat and allows client to stay connected
+            try:
+                for i in range(60):  # 60 * 15s = 15 min max
+                    # Send datastar-patch-signals event with empty updates to keep client happy
+                    # Format: event: datastar-patch-signals\ndata: signals {...}\n\n
+                    # For now, send empty remote players to indicate connected
+                    event_data = json.dumps({"updates": []})
+                    sse_msg = f"event: datastar-patch-signals\ndata: signals {event_data}\n\n"
+                    self.wfile.write(sse_msg.encode())
+                    self.wfile.flush()
+                    time.sleep(15)
+            except:
+                pass
             return
         
         if path.startswith('/api/multiplayer/join'):
@@ -54,6 +85,8 @@ class Handler(SimpleHTTPRequestHandler):
                 "client_id": cid,
                 "session_id": sid,
                 "peer_id": cid,
+                "clientId": cid,
+                "sessionId": sid,
                 "room": "level1",
                 "status": "ok"
             }
@@ -68,12 +101,13 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps(resp).encode())
             return
         
+        # Favicon
         if 'favicon' in path_lower:
-            for candidate in ['favicon.png', 'favicon.ico', 'scs.jpg', 'scs.png']:
+            for candidate in ['favicon.png', 'favicon.ico']:
                 if Path(candidate).exists():
                     self.path = f'/{candidate}'
                     break
-            if path_lower in ('/scs/favicon.png', '/scs/favicon.ico', '/favicon.png', '/favicon.ico'):
+            if path_lower in ('/scs/favicon.png', '/scs/favicon.ico'):
                 for candidate in ['favicon.png', 'favicon.ico']:
                     if Path(candidate).exists():
                         self.path = f'/{candidate}'
@@ -119,17 +153,12 @@ class Handler(SimpleHTTPRequestHandler):
         
         if path.startswith('/api/'):
             content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length) if content_length else b''
+            self.rfile.read(content_length)
             
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
-            
-            resp = {
-                "status": "ok",
-                "received": len(body)
-            }
-            self.wfile.write(json.dumps(resp).encode())
+            self.wfile.write(json.dumps({"status": "ok"}).encode())
             return
         
         self.send_response(404)
@@ -152,5 +181,5 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
-print(f'Serving ALL static + favicon + API + /healthz on {PORT} with client_id/session_id')
+print(f'Serving ALL + SSE text/event-stream + favicon + API + /healthz on {PORT}')
 HTTPServer(('0.0.0.0', PORT), Handler).serve_forever()
