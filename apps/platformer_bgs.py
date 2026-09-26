@@ -472,7 +472,7 @@ def onStep(app):
                         if hasattr(app.mp_client, 'send_character_state'):
                             await app.mp_client.send_character_state(app.client_id, payload)
                         else:
-                            await aio.fetch(url, method="PATCH", headers={"Content-Type":"application/json","X-Client-ID":str(app.client_id)}, data=body_str)
+                            await app.mp_client.send_character_state(app.client_id, payload)
                     except Exception as e:
                         try:
                             window.console.error("[BGS] send failed", str(e))

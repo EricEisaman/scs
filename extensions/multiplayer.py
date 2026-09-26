@@ -4,16 +4,13 @@ import json as py_json
 BASE_URL_DEFAULT = "https://scs-207.onrender.com"
 
 def _parse_join_data(js_data):
-    cid = None
-    sid = None
-    is_sync = False
-    env_name = "level1"
     if isinstance(js_data, dict):
         cid = js_data.get("client_id")
         sid = js_data.get("session_id")
         is_sync = js_data.get("is_synchronizer", False)
         env_name = js_data.get("environment_name", "level1")
-    return cid, sid, is_sync, env_name
+        return cid, sid, is_sync, env_name
+    return None, None, False, "level1"
 
 class MultiplayerClient:
     def __init__(self, base_url=BASE_URL_DEFAULT, environment="level1", environment_name=None, character_name="Player", **kw):
@@ -29,28 +26,48 @@ class MultiplayerClient:
         base_url = self.base_url
         url = base_url + "/api/multiplayer/join"
         payload = {"environment_name": self.environment_name, "character_name": self.character_name}
+        data_str = py_json.dumps(payload)
         try:
-            resp = await aio.fetch(url, method="POST", headers={"Content-Type": "application/json"}, data=py_json.dumps(payload))
+            # Use aio.post - NOT aio.fetch (module not callable)
+            resp = await aio.post(url, headers={"Content-Type": "application/json"}, data=data_str)
         except Exception as e:
-            raise RuntimeError(f"join aio.fetch failed {e}")
+            raise RuntimeError(f"join aio.post failed {e}")
         try:
-            ok = bool(resp.ok)
+            status = int(resp.status)
+            ok = 200 <= status < 300
         except:
             try:
-                ok = 200 <= int(resp.status) < 300
+                ok = bool(resp.ok)
             except:
                 ok = True
+            status = getattr(resp, 'status', 200)
         if not ok:
-            try:
-                status = resp.status
-            except:
-                status = "unknown"
             raise RuntimeError(f"join HTTP {status}")
         try:
-            js_data = await resp.json()
-        except:
-            txt = await resp.text()
-            js_data = py_json.loads(txt)
+            # aio response: data may be dict or string
+            raw = getattr(resp, 'data', None)
+            if raw is None:
+                raw = getattr(resp, 'text', None)
+            if isinstance(raw, dict):
+                js_data = raw
+            elif isinstance(raw, str):
+                js_data = py_json.loads(raw)
+            else:
+                # try json method
+                try:
+                    js_data = await resp.json()
+                except:
+                    txt = await resp.text() if hasattr(resp, 'text') else str(raw)
+                    js_data = py_json.loads(txt)
+        except Exception as e:
+            try:
+                txt = await resp.text()
+            except:
+                txt = str(getattr(resp, 'data', ''))
+            try:
+                js_data = py_json.loads(txt)
+            except:
+                raise RuntimeError(f"join parse failed {e} data={txt[:200]}")
         cid, sid, is_sync, env_name = _parse_join_data(js_data)
         if not cid or not sid:
             raise RuntimeError(f"missing ids in join response: {js_data}")
@@ -79,12 +96,16 @@ class MultiplayerClient:
         except:
             body_str = str(state_payload)
         try:
-            resp = await aio.fetch(url, method="PATCH", headers={"Content-Type": "application/json", "X-Client-ID": str(client_id)}, data=body_str)
+            # PATCH via aio.ajax if available, else POST fallback
+            if hasattr(aio, 'ajax'):
+                resp = await aio.ajax("PATCH", url, headers={"Content-Type": "application/json", "X-Client-ID": str(client_id)}, data=body_str)
+            else:
+                resp = await aio.post(url, headers={"Content-Type": "application/json", "X-Client-ID": str(client_id), "X-HTTP-Method-Override": "PATCH"}, data=body_str)
             try:
-                return bool(resp.ok)
+                return 200 <= int(resp.status) < 300
             except:
                 try:
-                    return 200 <= int(resp.status) < 300
+                    return bool(resp.ok)
                 except:
                     return True
         except Exception:
