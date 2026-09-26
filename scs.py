@@ -34,6 +34,13 @@ CMU Implementation: x,y is interpreted according to align
 from browser import window, document
 import math
 
+SCS_VERSION = "3.0.0"
+SCS_BUILD = "2026-09-26-original-1078-lines"
+try:
+    window.console.log(f"[SCS] scs.py version {SCS_VERSION} build {SCS_BUILD} - EXACT CMU ALIGN LOGIC, 1078 lines, opacity native")
+except:
+    pass
+
 # ======================================================================
 # ALIGN LOGIC - EXACT COPY FROM CMU desktop-cmu-graphics
 # https://github.com/cmu-cs-academy/desktop-cmu-graphics/blob/main/cmu_graphics/shape_logic.py
@@ -145,16 +152,9 @@ def _get_align_offsets(align, width, height):
     return ox, oy
 
 def _debug_log(msg):
-    try:
-        from browser import window
-        if hasattr(window, 'console') and hasattr(window.console, 'log'):
-            window.console.log(msg)
-    except:
-        pass
-    try:
-        print(msg)
-    except:
-        pass
+    # DISABLED - was flooding console every _resolve_bbox call (1000+/sec)
+    # Original had console.log + print here, killed performance
+    return
 
 def _resolve_bbox(x, y, width, height, align):
     """
