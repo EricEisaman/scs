@@ -1,6 +1,5 @@
-# apps/fetch_demo.py - v3.0.23 FIX module callable
+# apps/fetch_demo.py - v3.0.24 FIX module callable
 from scs import *
-from extensions.fetch import fetch_json
 from browser import window
 
 def parse_poem(raw):
@@ -11,31 +10,24 @@ def parse_poem(raw):
     try:
         title = data["title"]
     except:
-        try:
-            title = getattr(data, "title", "Untitled")
-        except:
-            title = "Untitled"
+        title = "Untitled"
     try:
         author = data["author"]
     except:
-        try:
-            author = getattr(data, "author", "Unknown")
-        except:
-            author = "Unknown"
+        author = "Unknown"
     try:
         lines = data["lines"]
     except:
-        try:
-            lines = getattr(data, "lines", [])
-        except:
-            lines = []
+        lines = []
     return {"title": title, "author": author, "lines": lines}
 
 async def load_poem(app):
     app.loading = True
     try:
-        window.console.log("[fetch_demo] fetching poetrydb")
+        window.console.log("[fetch_demo] fetching poetrydb via extensions.fetch")
+        from extensions.fetch import fetch_json
         data = await fetch_json("https://poetrydb.org/random")
+        window.console.log("[fetch_demo] got data", str(type(data)))
         app.poem = parse_poem(data)
     except Exception as e:
         try:
@@ -45,39 +37,39 @@ async def load_poem(app):
         app.poem = {"title": "The Road Not Taken (fallback)", "author": "Robert Frost - error: " + str(e)[:60], "lines": ["Two roads diverged", "Press R to retry", str(e)[:80]]}
     app.loading = False
 
+def _run_async(coro):
+    try:
+        from browser import aio
+        # aio.run is function
+        aio.run(coro)
+    except Exception as e:
+        try:
+            window.console.error("[_run_async] aio.run failed", str(e))
+        except:
+            pass
+        try:
+            import asyncio
+            asyncio.ensure_future(coro)
+        except Exception as e2:
+            try:
+                window.console.error("[_run_async] asyncio failed", str(e2))
+            except:
+                pass
+
 def onAppStart(app):
     app.width = 1050
     app.height = 700
     app.background = gradient(rgb(15, 17, 21), rgb(26, 29, 36), start="top")
     app.loading = True
     app.poem = {"title": "", "author": "", "lines": []}
-    # Use browser.aio via window to avoid module callable issue
-    try:
-        from browser import aio
-        aio.run(load_poem(app))
-    except Exception as e:
-        try:
-            window.console.error("[fetch_demo] aio.run failed", e)
-            # Fallback: use asyncio
-            import asyncio
-            asyncio.ensure_future(load_poem(app))
-        except:
-            pass
+    _run_async(load_poem(app))
 
 def onMousePress(app, x, y):
-    try:
-        from browser import aio
-        aio.run(load_poem(app))
-    except:
-        pass
+    _run_async(load_poem(app))
 
 def onKeyPress(app, key):
     if key.lower() in ("r", " ", "space"):
-        try:
-            from browser import aio
-            aio.run(load_poem(app))
-        except:
-            pass
+        _run_async(load_poem(app))
 
 def redrawAll(app):
     if getattr(app, "loading", False):
@@ -91,6 +83,6 @@ def redrawAll(app):
             drawLabel(str(line), app.width//2, y, size=12, fill=rgb(220,220,220))
             y += 22
         drawLabel("Press R / SPACE / Click for new poem", app.width//2, app.height-30, size=12, fill=rgb(150,150,150))
-        drawLabel("v3.0.23 FIX null rich_comp", app.width//2, app.height-15, size=8, fill=rgb(100,255,100))
+        drawLabel("v3.0.24 FIX e-15 SAFE", app.width//2, app.height-15, size=8, fill=rgb(100,255,100))
 
 runApp(1050, 700)

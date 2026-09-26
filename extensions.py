@@ -1,7 +1,6 @@
-# extensions.py - v3.0.23 - FIX null rich_comp + module callable
+# extensions.py - v3.0.24 - FIX e-15 without py_json.loads
 import sys, types
 from browser import window
-import json as py_json
 
 try:
     import extensions as _ext_pkg
@@ -9,87 +8,103 @@ except:
     _ext_pkg = types.ModuleType('extensions')
     sys.modules['extensions'] = _ext_pkg
 
-def _is_null_js(js_obj):
-    # Safe null check without == None rich_comp
+def _js_to_py_safe(js_obj):
+    # Safe conversion that NEVER uses py_json.loads - for datastar patches with e-15
     try:
         if js_obj is None:
-            return True
+            return None
     except:
         pass
     try:
-        # JS null check via typeof and == null in JS
-        return bool(window.JSON.stringify(js_obj) == "null")
-    except:
-        try:
-            return window.typeof(js_obj) == "object" and not bool(js_obj)
-        except:
-            return False
-
-def _js_to_py(js_obj):
-    try:
-        if _is_null_js(js_obj):
+        # JS null is stringified as "null"
+        if window.JSON.stringify(js_obj) == "null":
             return None
-        # Get type string safely
+    except:
+        pass
+    try:
+        t = window.typeof(js_obj)
+    except:
+        t = ""
+    if t == "number":
         try:
-            type_str = window.typeof(js_obj)
+            # float(str()) handles e-15
+            return float(str(js_obj))
         except:
-            type_str = ""
-        if type_str == "number":
-            try:
-                return float(str(js_obj))
-            except:
-                return 0.0
-        if type_str == "string":
-            return str(js_obj)
-        if type_str == "boolean":
-            return bool(js_obj)
-        # For objects/arrays, try JSON roundtrip with Python json (works for PoetryDB, may fail for e-15)
+            return 0.0
+    if t == "string":
+        return str(js_obj)
+    if t == "boolean":
+        return bool(js_obj)
+    if t == "object":
         try:
-            json_str = window.JSON.stringify(js_obj)
-            # Python json can handle e-15, Brython's cannot, so try Python json first
-            # Use py_json which is Python's json module re-exported
-            # If it contains e- or E- with small exponent, Python json handles it
-            return py_json.loads(json_str)
-        except Exception:
-            # Fallback: try JS parse then manual iteration without == None
-            try:
-                # If it's array
-                if hasattr(js_obj, 'length'):
+            # Check if array
+            if bool(window.Array.isArray(js_obj)):
+                result = []
+                ln = int(js_obj.length)
+                for i in range(ln):
                     try:
-                        length = int(js_obj.length)
-                        result = []
-                        for i in range(length):
-                            try:
-                                result.append(_js_to_py(js_obj[i]))
-                            except:
-                                result.append(None)
-                        return result
+                        result.append(_js_to_py_safe(js_obj[i]))
                     except:
-                        pass
-                # If it's object, use Object.keys
+                        result.append(None)
+                return result
+            # Object
+            keys = window.Object.keys(js_obj)
+            result = {}
+            kl = int(keys.length)
+            for idx in range(kl):
                 try:
-                    keys = window.Object.keys(js_obj)
-                    result = {}
-                    # keys is JS array, iterate via index
-                    kl = int(keys.length)
-                    for idx in range(kl):
-                        try:
-                            k = keys[idx]
-                            py_k = str(k)
-                            result[py_k] = _js_to_py(js_obj[k])
-                        except:
-                            continue
-                    return result
+                    k = keys[idx]
+                    result[str(k)] = _js_to_py_safe(js_obj[k])
                 except:
-                    pass
+                    continue
+            return result
+        except Exception as e:
+            try:
+                window.console.log("[_js_to_py_safe] fallback error", str(e))
             except:
                 pass
-        return js_obj
-    except Exception:
-        try:
-            return str(js_obj)
-        except:
+    return None
+
+def _js_to_py_simple(js_obj):
+    # For fetch - uses window.JSON roundtrip but with Python float handling
+    try:
+        if js_obj is None:
             return None
+    except:
+        pass
+    try:
+        if window.JSON.stringify(js_obj) == "null":
+            return None
+    except:
+        pass
+    try:
+        t = window.typeof(js_obj)
+        if t == "number":
+            return float(str(js_obj))
+        if t == "string":
+            return str(js_obj)
+        if t == "boolean":
+            return bool(js_obj)
+    except:
+        pass
+    try:
+        # For PoetryDB, data is simple, use direct JS to Python via iteration
+        if bool(window.Array.isArray(js_obj)):
+            res = []
+            for i in range(int(js_obj.length)):
+                res.append(_js_to_py_simple(js_obj[i]))
+            return res
+        # Check if object
+        if window.typeof(js_obj) == "object":
+            keys = window.Object.keys(js_obj)
+            res = {}
+            for idx in range(int(keys.length)):
+                k = keys[idx]
+                res[str(k)] = _js_to_py_simple(js_obj[k])
+            return res
+    except Exception:
+        pass
+    return js_obj
 
 def _parse_join_data(js_data):
     cid = None
@@ -150,7 +165,7 @@ async def fetch(url, method="GET", headers=None, body=None):
     opts = {"method": method, "mode": "cors"}
     if headers:
         opts["headers"] = headers
-    if body != None:
+    if body is not None:
         opts["body"] = body
     js_resp = await window.fetch(url, opts)
     return FetchResponse(js_resp)
@@ -161,7 +176,7 @@ async def fetch_json(url):
         txt = await resp.text()
         raise FetchError(f"HTTP {resp.status} {txt[:200]}")
     js_data = await resp.json()
-    return _js_to_py(js_data)
+    return _js_to_py_simple(js_data)
 
 async def fetch_text(url):
     resp = await fetch(url)
@@ -241,7 +256,8 @@ if not hasattr(window, "_bgs_signals_json"):
 
 def _sync_debug_signals():
     try:
-        window._bgs_signals_json = py_json.dumps(_signals_store)
+        import json as _j
+        window._bgs_signals_json = _j.dumps(_signals_store)
     except:
         window._bgs_signals_json = "{}"
     try:
@@ -250,7 +266,7 @@ def _sync_debug_signals():
         pass
 
 def _parse_datastar_patch(raw):
-    if raw == None:
+    if raw is None:
         return None, False
     try:
         raw = str(raw)
@@ -296,7 +312,7 @@ def _on_datastar_patch(evt):
         return
     try:
         js_patch = window.JSON.parse(signals_json)
-        patch = _js_to_py(js_patch)
+        patch = _js_to_py_safe(js_patch)
     except Exception as exc:
         try:
             window.console.error("[BGS] Invalid Datastar signal JSON:", exc, signals_json[:500])
@@ -387,6 +403,6 @@ except:
     pass
 
 try:
-    window.console.log("[extensions.py] v3.0.23 FIX null rich_comp")
+    window.console.log("[extensions.py] v3.0.24 FIX e-15 SAFE - no py_json.loads")
 except:
     pass

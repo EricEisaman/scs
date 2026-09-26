@@ -1,5 +1,5 @@
+
 from browser import window
-import json as py_json
 
 _signals_store = {}
 _attached_es = None
@@ -11,63 +11,62 @@ if not hasattr(window, "_bgs_last_patch_ms"):
 if not hasattr(window, "_bgs_signals_json"):
     window._bgs_signals_json = "{}"
 
-def _is_null_js(js_obj):
+def _js_to_py_safe(js_obj):
     try:
         if js_obj is None:
-            return True
+            return None
     except:
         pass
     try:
-        return bool(window.JSON.stringify(js_obj) == "null")
-    except:
-        return False
-
-def _js_to_py(js_obj):
-    try:
-        if _is_null_js(js_obj):
+        if window.JSON.stringify(js_obj) == "null":
             return None
+    except:
+        pass
+    try:
+        t = window.typeof(js_obj)
+    except:
+        t = ""
+    if t == "number":
         try:
-            type_str = window.typeof(js_obj)
-        except:
-            type_str = ""
-        if type_str == "number":
             return float(str(js_obj))
-        if type_str == "string":
-            return str(js_obj)
-        if type_str == "boolean":
-            return bool(js_obj)
+        except:
+            return 0.0
+    if t == "string":
+        return str(js_obj)
+    if t == "boolean":
+        return bool(js_obj)
+    if t == "object":
         try:
-            json_str = window.JSON.stringify(js_obj)
-            return py_json.loads(json_str)
-        except Exception:
-            try:
-                if hasattr(js_obj, 'length'):
-                    length = int(js_obj.length)
-                    result = []
-                    for i in range(length):
-                        try:
-                            result.append(_js_to_py(js_obj[i]))
-                        except:
-                            result.append(None)
-                    return result
-                keys = window.Object.keys(js_obj)
-                result = {}
-                for idx in range(int(keys.length)):
+            if bool(window.Array.isArray(js_obj)):
+                result = []
+                ln = int(js_obj.length)
+                for i in range(ln):
                     try:
-                        k = keys[idx]
-                        result[str(k)] = _js_to_py(js_obj[k])
+                        result.append(_js_to_py_safe(js_obj[i]))
                     except:
-                        continue
+                        result.append(None)
                 return result
+            keys = window.Object.keys(js_obj)
+            result = {}
+            kl = int(keys.length)
+            for idx in range(kl):
+                try:
+                    k = keys[idx]
+                    result[str(k)] = _js_to_py_safe(js_obj[k])
+                except:
+                    continue
+            return result
+        except Exception as e:
+            try:
+                window.console.log("[_js_to_py_safe] error", str(e))
             except:
                 pass
-        return js_obj
-    except Exception:
-        return None
+    return None
 
 def _sync_debug_signals():
     try:
-        window._bgs_signals_json = py_json.dumps(_signals_store)
+        import json as _j
+        window._bgs_signals_json = _j.dumps(_signals_store)
     except:
         window._bgs_signals_json = "{}"
     try:
@@ -76,7 +75,7 @@ def _sync_debug_signals():
         pass
 
 def _parse_datastar_patch(raw):
-    if raw == None:
+    if raw is None:
         return None, False
     try:
         raw = str(raw)
@@ -122,7 +121,7 @@ def _on_datastar_patch(evt):
         return
     try:
         js_patch = window.JSON.parse(signals_json)
-        patch = _js_to_py(js_patch)
+        patch = _js_to_py_safe(js_patch)
     except Exception as exc:
         try:
             window.console.error("[BGS] Invalid Datastar signal JSON:", exc, signals_json[:500])

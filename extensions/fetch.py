@@ -1,62 +1,46 @@
+
 from browser import window
-import json as py_json
 
 class FetchError(RuntimeError):
     pass
 
-def _is_null_js(js_obj):
+def _js_to_py_simple(js_obj):
     try:
         if js_obj is None:
-            return True
+            return None
     except:
         pass
     try:
-        return bool(window.JSON.stringify(js_obj) == "null")
-    except:
-        return False
-
-def _js_to_py(js_obj):
-    try:
-        if _is_null_js(js_obj):
+        if window.JSON.stringify(js_obj) == "null":
             return None
-        try:
-            type_str = window.typeof(js_obj)
-        except:
-            type_str = ""
-        if type_str == "number":
+    except:
+        pass
+    try:
+        t = window.typeof(js_obj)
+        if t == "number":
             return float(str(js_obj))
-        if type_str == "string":
+        if t == "string":
             return str(js_obj)
-        if type_str == "boolean":
+        if t == "boolean":
             return bool(js_obj)
-        try:
-            json_str = window.JSON.stringify(js_obj)
-            return py_json.loads(json_str)
-        except Exception:
-            try:
-                if hasattr(js_obj, 'length'):
-                    length = int(js_obj.length)
-                    result = []
-                    for i in range(length):
-                        try:
-                            result.append(_js_to_py(js_obj[i]))
-                        except:
-                            result.append(None)
-                    return result
-                keys = window.Object.keys(js_obj)
-                result = {}
-                for idx in range(int(keys.length)):
-                    try:
-                        k = keys[idx]
-                        result[str(k)] = _js_to_py(js_obj[k])
-                    except:
-                        continue
-                return result
-            except:
-                pass
-        return js_obj
-    except Exception:
-        return None
+    except:
+        pass
+    try:
+        if bool(window.Array.isArray(js_obj)):
+            res = []
+            for i in range(int(js_obj.length)):
+                res.append(_js_to_py_simple(js_obj[i]))
+            return res
+        if window.typeof(js_obj) == "object":
+            keys = window.Object.keys(js_obj)
+            res = {}
+            for idx in range(int(keys.length)):
+                k = keys[idx]
+                res[str(k)] = _js_to_py_simple(js_obj[k])
+            return res
+    except:
+        pass
+    return js_obj
 
 class FetchResponse:
     def __init__(self, js_response):
@@ -79,7 +63,7 @@ async def fetch(url, method="GET", headers=None, body=None):
     opts = {"method": method, "mode": "cors"}
     if headers:
         opts["headers"] = headers
-    if body != None:
+    if body is not None:
         opts["body"] = body
     js_resp = await window.fetch(url, opts)
     return FetchResponse(js_resp)
@@ -90,7 +74,7 @@ async def fetch_json(url):
         txt = await resp.text()
         raise FetchError(f"HTTP {resp.status} {txt[:200]}")
     js_data = await resp.json()
-    return _js_to_py(js_data)
+    return _js_to_py_simple(js_data)
 
 async def fetch_text(url):
     resp = await fetch(url)
