@@ -195,8 +195,6 @@ class RemoteVisual:
         self.target_pos=None
         self.render_pos=None
         self.interp_t=0.0
-        self.blink_offset=sum(ord(char) for char in client_id)%120
-        self.is_blinking=False
 
 class World:
     def __init__(self, width=2400, height=700):
@@ -500,7 +498,7 @@ def onStep(app):
             continue
         if abs(vx)>0.3:
             vis.facing=1 if vx>0 else -1
-        if vis.target_pos is None:
+        if not vis.target_pos:
             vis.previous_pos=(px,py)
             vis.target_pos=(px,py)
             vis.render_pos=(px,py)
@@ -518,15 +516,13 @@ def onStep(app):
         moving=abs(vx)>0.5 or abs(vy)>0.5
         if moving:
             trail_pos=(render_x,render_y)
-            if vis.last_trail_pos is None or math.hypot(trail_pos[0]-vis.last_trail_pos[0],trail_pos[1]-vis.last_trail_pos[1])>0.1:
+            if not vis.last_trail_pos or math.hypot(trail_pos[0]-vis.last_trail_pos[0],trail_pos[1]-vis.last_trail_pos[1])>0.1:
                 vis.trail.append(trail_pos)
                 vis.last_trail_pos=trail_pos
         elif vis.trail:
             vis.trail.pop(0)
         if len(vis.trail)>8:
             vis.trail.pop(0)
-        vis.is_blinking=(app.world.tick+vis.blink_offset)%120<5
-
     if "local_0" in app.world.players:
         target=app.world.players["local_0"].x-app.width//2
         app.camera_x=app.camera_x*0.85+target*0.15
@@ -615,20 +611,16 @@ def redrawAll(app):
         vis=app.remote_visuals.get(cid)
         if not vis:
             continue
-        if vis.render_pos is not None:
+        if vis.render_pos:
             x=vis.render_pos[0]-app.camera_x
             y=vis.render_pos[1]
         for i,(trail_x,trail_y) in enumerate(vis.trail):
             drawCircle(trail_x-app.camera_x,trail_y,2+i*0.6,fill=vis.color)
         drawRect(x-15,y-20,30,40,fill=vis.color)
         facing=vis.facing
-        if vis.is_blinking:
-            drawLine(x-12,y-6,x-2,y-6,fill=rgb(20,20,30),lineWidth=2)
-            drawLine(x+2,y-6,x+12,y-6,fill=rgb(20,20,30),lineWidth=2)
-        else:
-            eye_x=x+facing*6
-            drawCircle(eye_x,y-6,5,fill=rgb(255,255,255))
-            drawCircle(eye_x+facing*2,y-6,2,fill=rgb(0,0,0))
+        eye_x=x+facing*6
+        drawCircle(eye_x,y-6,5,fill=rgb(255,255,255))
+        drawCircle(eye_x+facing*2,y-6,2,fill=rgb(0,0,0))
         drawLabel(cid[:4],x,y-30,size=10,fill=rgb(200,220,255))
 
     # UI - BGS status bar
