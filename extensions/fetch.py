@@ -16,21 +16,21 @@ class FetchResponse:
 
     async def json(self):
         js_value = await self._js.json()
+        # Diagnostic loud version per sister
+        json_text = window.JSON.stringify(js_value)
         try:
-            # One-shot Python-native conversion at network boundary
-            return py_json.loads(window.JSON.stringify(js_value))
+            return py_json.loads(json_text)
         except Exception as exc:
             try:
-                window.console.error("[fetch] response JSON conversion failed", exc)
-            except Exception:
+                window.console.error("[fetch] Python JSON conversion failed", exc, json_text[:500])
+            except:
                 pass
-            return js_value
+            raise
 
     async def text(self):
         return await self._js.text()
 
 async def fetch(url, method="GET", headers=None, body=None):
-    # Brython: Python dict passed to JS is auto-converted to JS object
     options = {"method": method}
     if headers is not None:
         options["headers"] = headers

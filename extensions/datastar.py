@@ -112,7 +112,12 @@ def get_signal(name, default=None):
 def is_connected(max_silence_ms=10000):
     try:
         es = window._bgs_es
-        if es is None or es.readyState != 1:
+        if not es:
+            return False
+        try:
+            if es.readyState != 1:
+                return False
+        except:
             return False
         last = getattr(window, "_bgs_last_patch_ms", 0)
         if last == 0:
@@ -127,11 +132,15 @@ def is_connected(max_silence_ms=10000):
 
 def attach_to_eventsource(es):
     global _attached_es
-    if es is None:
+    if not es:
         raise ValueError("attach_to_eventsource requires an EventSource")
-    if es is _attached_es:
-        return
-    if _attached_es is not None:
+    try:
+        if _attached_es is not None and es == _attached_es:
+            return
+    except:
+        if _attached_es == es:
+            return
+    if _attached_es:
         try:
             _attached_es.removeEventListener("datastar-patch-signals", _on_datastar_patch)
         except Exception:
