@@ -1,5 +1,4 @@
 from browser import window
-import json as py_json
 
 class FetchResponse:
     def __init__(self, js_resp):
@@ -12,13 +11,10 @@ class FetchResponse:
             self.statusText = ""
         self.headers = {}
     async def json(self):
+        # Return JS object directly - fetch_demo handles JS dict/list
+        # Avoid py_json inside async (causes $B.$import bug)
         js_data = await self._js.json()
-        try:
-            # Most reliable: JSON round-trip handles arrays and dicts
-            txt = window.JSON.stringify(js_data)
-            return py_json.loads(txt)
-        except:
-            return js_data
+        return js_data
     async def text(self):
         return await self._js.text()
 
@@ -27,18 +23,10 @@ async def fetch(url, method="GET", headers=None, body=None, mode=None):
     if headers:
         opts["headers"] = headers
     if body is not None:
-        if isinstance(body, (dict, list)):
-            opts["body"] = window.JSON.stringify(body)
-        else:
-            opts["body"] = body
+        opts["body"] = body
     if mode:
         opts["mode"] = mode
-    js_opts = opts
-    try:
-        js_opts = window.JSON.parse(window.JSON.stringify(opts))
-    except:
-        pass
-    js_resp = await window.fetch(url, js_opts)
+    js_resp = await window.fetch(url, opts)
     return FetchResponse(js_resp)
 
 async def fetch_json(url, **kw):

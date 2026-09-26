@@ -1,5 +1,4 @@
 from browser import window, aio
-import json as py_json
 
 BASE_URL_DEFAULT = "https://scs-207.onrender.com"
 
@@ -13,62 +12,70 @@ class MultiplayerClient:
         self.is_synchronizer = False
         self._es = None
 
-    async def join(self, retries=3):
+    async def join(self):
+        # ULTRA MINIMAL - single attempt, no retry loop, no py_json, direct JS access
+        # Fixes Brython resolve_local bug
         base_url = self.base_url
-        last_exc = None
-        for attempt in range(retries):
+        url = base_url + "/api/multiplayer/join"
+        payload = {"environment_name": self.environment_name, "character_name": self.character_name}
+        # Use window.fetch with JS object - Brython will convert dict to JS
+        resp = await window.fetch(url, {"method": "POST", "headers": {"Content-Type": "application/json"}, "body": window.JSON.stringify(payload)})
+        if not resp.ok:
+            raise RuntimeError("join HTTP " + str(resp.status))
+        js_data = await resp.json()
+        # Direct JS property access - no py_json
+        try:
+            cid = js_data.client_id
+        except:
             try:
-                url = base_url + "/api/multiplayer/join"
-                payload = {"environment_name": self.environment_name, "character_name": self.character_name}
-                body = window.JSON.stringify(payload)
-                js_opts = {"method": "POST", "headers": {"Content-Type": "application/json"}, "body": body}
-                opts = js_opts
+                cid = js_data["client_id"]
+            except:
+                cid = None
+        try:
+            sid = js_data.session_id
+        except:
+            try:
+                sid = js_data["session_id"]
+            except:
+                sid = None
+        try:
+            is_sync = js_data.is_synchronizer
+        except:
+            try:
+                is_sync = js_data["is_synchronizer"]
+            except:
+                is_sync = False
+        if not cid or not sid:
+            raise RuntimeError("missing ids")
+        self.client_id = str(cid)
+        self.session_id = str(sid)
+        self.is_synchronizer = bool(is_sync)
+        # EventSource
+        try:
+            stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
+            es_obj = window.EventSource.new(stream_url)
+            self._es = es_obj
+            try:
+                window._bgs_es = es_obj
+            except:
+                pass
+        except:
+            try:
+                stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
+                es_obj = window.EventSource(stream_url)
+                self._es = es_obj
                 try:
-                    opts = window.JSON.parse(window.JSON.stringify(js_opts))
+                    window._bgs_es = es_obj
                 except:
                     pass
-                resp = await window.fetch(url, opts)
-                if not resp.ok:
-                    txt = ""
-                    try:
-                        txt = await resp.text()
-                    except:
-                        pass
-                    raise RuntimeError("join HTTP " + str(resp.status))
-                js_data = await resp.json()
-                # Simple JSON round-trip - avoids resolve_local bug
-                try:
-                    data = py_json.loads(window.JSON.stringify(js_data))
-                except:
-                    data = {}
-                cid = data.get("client_id")
-                sid = data.get("session_id")
-                is_sync = data.get("is_synchronizer", False)
-                if not cid or not sid:
-                    raise RuntimeError("missing ids")
-                self.client_id = cid
-                self.session_id = sid
-                self.is_synchronizer = bool(is_sync)
-                try:
-                    stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
-                    es_obj = None
-                    try:
-                        es_obj = window.EventSource.new(stream_url)
-                    except:
-                        try:
-                            es_obj = window.EventSource(stream_url)
-                        except:
-                            es_obj = None
-                    self._es = es_obj
-                    if es_obj is not None:
-                        try:
-                            window._bgs_es = es_obj
-                        except:
-                            pass
-                except:
-                    pass
-                return {"client_id": cid, "session_id": sid, "is_synchronizer": bool(is_sync), "environment_name": data.get("environment_name", self.environment_name)}
-            except Exception as ex:
-                last_exc = ex
-                await aio.sleep(1.0 * (attempt + 1))
-        raise last_exc or RuntimeError("join failed")
+            except:
+                pass
+        env_name = self.environment_name
+        try:
+            env_name = js_data.environment_name
+        except:
+            try:
+                env_name = js_data["environment_name"]
+            except:
+                pass
+        return {"client_id": str(cid), "session_id": str(sid), "is_synchronizer": bool(is_sync), "environment_name": env_name}

@@ -1,6 +1,6 @@
-# extensions.py - SCS Extensions System - Stable API v3.0.17 - MINIMAL BULLETPROOF
-# No recursion, no complex loops, JSON round-trip only - avoids Brython resolve_local bug
-# fetch_demo safe, MUST USE MP EXTENSION
+# extensions.py - SCS Extensions System - v3.0.17 STABLE
+# fetch + multiplayer ultra minimal (fix resolve_local), datastar proper spec
+# fetch_demo safe, MUST USE MP EXTENSION, apps frozen
 
 import sys
 import types
@@ -13,7 +13,7 @@ except:
     _ext_pkg = types.ModuleType('extensions')
     sys.modules['extensions'] = _ext_pkg
 
-# --- fetch ---
+# --- fetch - ULTRA MINIMAL - fetch_demo safe ---
 class FetchResponse:
     def __init__(self, js_resp):
         self._js = js_resp
@@ -26,11 +26,7 @@ class FetchResponse:
         self.headers = {}
     async def json(self):
         js_data = await self._js.json()
-        try:
-            txt = window.JSON.stringify(js_data)
-            return py_json.loads(txt)
-        except:
-            return js_data
+        return js_data
     async def text(self):
         return await self._js.text()
 
@@ -39,18 +35,10 @@ async def fetch(url, method="GET", headers=None, body=None, mode=None):
     if headers:
         opts["headers"] = headers
     if body is not None:
-        if isinstance(body, (dict, list)):
-            opts["body"] = window.JSON.stringify(body)
-        else:
-            opts["body"] = body
+        opts["body"] = body
     if mode:
         opts["mode"] = mode
-    js_opts = opts
-    try:
-        js_opts = window.JSON.parse(window.JSON.stringify(opts))
-    except:
-        pass
-    js_resp = await window.fetch(url, js_opts)
+    js_resp = await window.fetch(url, opts)
     return FetchResponse(js_resp)
 
 async def fetch_json(url, **kw):
@@ -80,7 +68,7 @@ try:
 except:
     pass
 
-# --- multiplayer ---
+# --- multiplayer - ULTRA MINIMAL - COMMITTED API ---
 BASE_URL_DEFAULT = "https://scs-207.onrender.com"
 
 class MultiplayerClient:
@@ -92,59 +80,68 @@ class MultiplayerClient:
         self.session_id = None
         self.is_synchronizer = False
         self._es = None
-    async def join(self, retries=3):
+    async def join(self):
         base_url = self.base_url
-        last_exc = None
-        for attempt in range(retries):
+        url = base_url + "/api/multiplayer/join"
+        payload = {"environment_name": self.environment_name, "character_name": self.character_name}
+        resp = await window.fetch(url, {"method": "POST", "headers": {"Content-Type": "application/json"}, "body": window.JSON.stringify(payload)})
+        if not resp.ok:
+            raise RuntimeError("join HTTP " + str(resp.status))
+        js_data = await resp.json()
+        try:
+            cid = js_data.client_id
+        except:
             try:
-                url = base_url + "/api/multiplayer/join"
-                payload = {"environment_name": self.environment_name, "character_name": self.character_name}
-                body = window.JSON.stringify(payload)
-                js_opts = {"method": "POST", "headers": {"Content-Type": "application/json"}, "body": body}
-                opts = js_opts
+                cid = js_data["client_id"]
+            except:
+                cid = None
+        try:
+            sid = js_data.session_id
+        except:
+            try:
+                sid = js_data["session_id"]
+            except:
+                sid = None
+        try:
+            is_sync = js_data.is_synchronizer
+        except:
+            try:
+                is_sync = js_data["is_synchronizer"]
+            except:
+                is_sync = False
+        if not cid or not sid:
+            raise RuntimeError("missing ids")
+        self.client_id = str(cid)
+        self.session_id = str(sid)
+        self.is_synchronizer = bool(is_sync)
+        try:
+            stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
+            es_obj = window.EventSource.new(stream_url)
+            self._es = es_obj
+            try:
+                window._bgs_es = es_obj
+            except:
+                pass
+        except:
+            try:
+                stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
+                es_obj = window.EventSource(stream_url)
+                self._es = es_obj
                 try:
-                    opts = window.JSON.parse(window.JSON.stringify(js_opts))
+                    window._bgs_es = es_obj
                 except:
                     pass
-                resp = await window.fetch(url, opts)
-                if not resp.ok:
-                    raise RuntimeError("join HTTP " + str(resp.status))
-                js_data = await resp.json()
-                try:
-                    data = py_json.loads(window.JSON.stringify(js_data))
-                except:
-                    data = {}
-                cid = data.get("client_id")
-                sid = data.get("session_id")
-                is_sync = data.get("is_synchronizer", False)
-                if not cid or not sid:
-                    raise RuntimeError("missing ids")
-                self.client_id = cid
-                self.session_id = sid
-                self.is_synchronizer = bool(is_sync)
-                try:
-                    stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
-                    es_obj = None
-                    try:
-                        es_obj = window.EventSource.new(stream_url)
-                    except:
-                        try:
-                            es_obj = window.EventSource(stream_url)
-                        except:
-                            es_obj = None
-                    self._es = es_obj
-                    if es_obj is not None:
-                        try:
-                            window._bgs_es = es_obj
-                        except:
-                            pass
-                except:
-                    pass
-                return {"client_id": cid, "session_id": sid, "is_synchronizer": bool(is_sync), "environment_name": data.get("environment_name", self.environment_name)}
-            except Exception as ex:
-                last_exc = ex
-                await aio.sleep(1.0 * (attempt + 1))
-        raise last_exc or RuntimeError("join failed")
+            except:
+                pass
+        env_name = self.environment_name
+        try:
+            env_name = js_data.environment_name
+        except:
+            try:
+                env_name = js_data["environment_name"]
+            except:
+                pass
+        return {"client_id": str(cid), "session_id": str(sid), "is_synchronizer": bool(is_sync), "environment_name": env_name}
 
 _mod_mp = types.ModuleType('extensions.multiplayer')
 _mod_mp.MultiplayerClient = MultiplayerClient
@@ -155,113 +152,135 @@ try:
 except:
     pass
 
-# --- datastar ---
+# --- datastar - PROPER SPEC - line-prefix parsing, Python-native, merge, null deletion, onlyIfMissing ---
 if not hasattr(window, "_bgs_signals"):
     window._bgs_signals = {}
 if not hasattr(window, "_bgs_es"):
     window._bgs_es = None
+if not hasattr(window, "_bgs_last_patch_ms"):
+    window._bgs_last_patch_ms = 0
+
+_attached_es_ids = set()
+
+def _extract_signals_json(raw):
+    if not isinstance(raw, str):
+        return None
+    for line in raw.splitlines():
+        if line.startswith("signals "):
+            return line[len("signals "):]
+    return None
+
+def _parse_datastar_patch(raw):
+    signals_json = None
+    only_if_missing = False
+    if not isinstance(raw, str):
+        return None, False
+    for line in raw.splitlines():
+        if line.startswith("signals "):
+            signals_json = line[len("signals "):]
+        elif line.startswith("onlyIfMissing "):
+            only_if_missing = line[len("onlyIfMissing "):].strip().lower() == "true"
+    return signals_json, only_if_missing
 
 def _merge_patch(target, patch):
-    if patch is None:
-        return None
-    if not isinstance(patch, dict):
-        return patch
-    if not isinstance(target, dict):
-        target = {}
-    for k in patch:
-        v = patch[k]
-        if v is None:
-            if k in target:
-                del target[k]
+    for key, value in patch.items():
+        if value is None:
+            target.pop(key, None)
+        elif isinstance(value, dict):
+            existing = target.get(key)
+            if not isinstance(existing, dict):
+                existing = {}
+                target[key] = existing
+            _merge_patch(existing, value)
         else:
-            tv = target.get(k)
-            if isinstance(v, dict) and isinstance(tv, dict):
-                target[k] = _merge_patch(tv, v)
-            else:
-                target[k] = v
-    return target
+            target[key] = value
 
 def _on_datastar_patch(evt):
+    raw = getattr(evt, "data", None)
+    if not raw:
+        return
+    signals_json, only_if_missing = _parse_datastar_patch(raw)
+    if signals_json is None:
+        return
     try:
-        raw = evt.data
-        if not raw:
-            return
-        lines = raw.split("\n")
-        tmp = []
-        for l in lines:
-            tmp.extend(l.splitlines())
-        lines = tmp
-        signal_line = None
-        only_if_missing = False
-        for line in lines:
-            if not isinstance(line, str):
-                continue
-            s = line.strip()
-            if s.startswith("signals "):
-                signal_line = s[8:].strip()
-            elif s.startswith("signals"):
-                idx = s.find("{")
-                if idx != -1:
-                    signal_line = s[idx:].strip()
-            if "onlyIfMissing" in s and "true" in s.lower():
-                only_if_missing = True
-        if not signal_line:
-            for l in lines:
-                if "{" in l:
-                    idx = l.find("{")
-                    signal_line = l[idx:].strip()
-                    break
-        if not signal_line:
-            return
+        patch = py_json.loads(signals_json)
+    except Exception as exc:
         try:
-            js_parsed = window.JSON.parse(signal_line)
-            data = py_json.loads(window.JSON.stringify(js_parsed))
+            window.console.error("[BGS] Invalid Datastar signal JSON:", exc, signals_json[:500])
         except:
+            pass
+        return
+    if not isinstance(patch, dict):
+        try:
+            window.console.warn("[BGS] Signal patch was not an object:", patch)
+        except:
+            pass
+        return
+    if only_if_missing:
+        filtered = {}
+        for k, v in patch.items():
+            if k not in window._bgs_signals:
+                filtered[k] = v
+        if not filtered:
             return
-        for k in data:
-            try:
-                v = data[k]
-                if v is None:
-                    try:
-                        if k in window._bgs_signals:
-                            del window._bgs_signals[k]
-                    except:
-                        pass
-                    continue
-                if only_if_missing and k in window._bgs_signals:
-                    continue
-                existing = window._bgs_signals.get(k)
-                if isinstance(existing, dict) and isinstance(v, dict):
-                    window._bgs_signals[k] = _merge_patch(existing, v)
-                else:
-                    window._bgs_signals[k] = v
-            except:
-                continue
+        patch = filtered
+    _merge_patch(window._bgs_signals, patch)
+    try:
+        window._bgs_last_patch_ms = int(window.Date.now())
     except:
         pass
 
 def get_signal(name, default=None):
-    try:
-        return window._bgs_signals.get(name, default)
-    except:
-        return default
+    return window._bgs_signals.get(name, default)
 
-def is_connected():
+def is_connected(max_silence_ms=10000):
     try:
         es = window._bgs_es
-        if not es:
+        if es is None or es.readyState != 1:
             return False
-        return es.readyState == 1
+        last = getattr(window, "_bgs_last_patch_ms", 0)
+        if last == 0:
+            return True
+        try:
+            now = int(window.Date.now())
+            return (now - last) <= max_silence_ms
+        except:
+            return True
     except:
         return False
 
 def attach_to_eventsource(es):
+    if es is None:
+        raise ValueError("attach_to_eventsource requires an EventSource")
     try:
-        es.addEventListener("datastar-patch-signals", _on_datastar_patch)
-        es.addEventListener("multiplayer-snapshot", _on_datastar_patch)
-        window._bgs_es = es
+        if getattr(es, "_bgs_listener_attached", False):
+            window._bgs_es = es
+            return
     except:
         pass
+    try:
+        es_id = id(es)
+        if es_id in _attached_es_ids and window._bgs_es is es:
+            return
+    except:
+        pass
+    try:
+        es.addEventListener("datastar-patch-signals", _on_datastar_patch)
+        try:
+            es._bgs_listener_attached = True
+        except:
+            pass
+        try:
+            _attached_es_ids.add(id(es))
+        except:
+            pass
+        window._bgs_es = es
+    except Exception as exc:
+        try:
+            window.console.error("[BGS] Failed to attach datastar listener:", exc)
+        except:
+            pass
+        raise
 
 _mod_ds = types.ModuleType('extensions.datastar')
 _mod_ds.get_signal = get_signal
@@ -275,6 +294,6 @@ except:
     pass
 
 try:
-    window.console.log("[extensions.py] STABLE MINIMAL v3.0.17 - MUST USE MP, fetch_demo safe - resolve_local fix")
+    window.console.log("[extensions.py] v3.0.17 PROPER DATASTAR SPEC + ULTRA MINIMAL MP/FETCH - apps frozen")
 except:
     pass

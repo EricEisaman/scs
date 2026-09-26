@@ -1,110 +1,146 @@
 from browser import window
-import json as py_json
+import json
 
+# Shared state - Python-native dict
 if not hasattr(window, "_bgs_signals"):
     window._bgs_signals = {}
 if not hasattr(window, "_bgs_es"):
     window._bgs_es = None
+if not hasattr(window, "_bgs_last_patch_ms"):
+    window._bgs_last_patch_ms = 0
+
+# Python-side guard for duplicate listeners (in case JS property on ES proxy fails)
+_attached_es_ids = set()
+
+def _extract_signals_json(raw):
+    """Extract signals JSON by Datastar spec: line starting with 'signals '"""
+    if not isinstance(raw, str):
+        return None
+    for line in raw.splitlines():
+        if line.startswith("signals "):
+            return line[len("signals "):]
+    return None
+
+def _parse_datastar_patch(raw):
+    """Parse Datastar patch lines per spec: signals + onlyIfMissing"""
+    signals_json = None
+    only_if_missing = False
+    if not isinstance(raw, str):
+        return None, False
+    for line in raw.splitlines():
+        if line.startswith("signals "):
+            signals_json = line[len("signals "):]
+        elif line.startswith("onlyIfMissing "):
+            only_if_missing = line[len("onlyIfMissing "):].strip().lower() == "true"
+    return signals_json, only_if_missing
 
 def _merge_patch(target, patch):
-    if patch is None:
-        return None
-    if not isinstance(patch, dict):
-        return patch
-    if not isinstance(target, dict):
-        target = {}
-    for k in patch:
-        v = patch[k]
-        if v is None:
-            if k in target:
-                del target[k]
+    """JSON Merge Patch-like semantics with null = deletion"""
+    for key, value in patch.items():
+        if value is None:
+            # Datastar: null/undefined = remove signal
+            target.pop(key, None)
+        elif isinstance(value, dict):
+            existing = target.get(key)
+            if not isinstance(existing, dict):
+                existing = {}
+                target[key] = existing
+            _merge_patch(existing, value)
         else:
-            tv = target.get(k)
-            if isinstance(v, dict) and isinstance(tv, dict):
-                target[k] = _merge_patch(tv, v)
-            else:
-                target[k] = v
-    return target
+            target[key] = value
 
 def _on_datastar_patch(evt):
+    raw = getattr(evt, "data", None)
+    if not raw:
+        return
+    signals_json, only_if_missing = _parse_datastar_patch(raw)
+    if signals_json is None:
+        # Not a signals patch, ignore
+        return
     try:
-        raw = evt.data
-        if not raw:
-            return
-        lines = raw.split("\n")
-        # Handle both \n joined and actual newlines
-        tmp = []
-        for l in lines:
-            tmp.extend(l.splitlines())
-        lines = tmp
-        signal_line = None
-        only_if_missing = False
-        for line in lines:
-            if not isinstance(line, str):
-                continue
-            s = line.strip()
-            if s.startswith("signals "):
-                signal_line = s[8:].strip()
-            elif s.startswith("signals"):
-                idx = s.find("{")
-                if idx != -1:
-                    signal_line = s[idx:].strip()
-            if "onlyIfMissing" in s and "true" in s.lower():
-                only_if_missing = True
-        if not signal_line:
-            for l in lines:
-                if "{" in l:
-                    idx = l.find("{")
-                    signal_line = l[idx:].strip()
-                    break
-        if not signal_line:
-            return
+        patch = json.loads(signals_json)
+    except Exception as exc:
         try:
-            js_parsed = window.JSON.parse(signal_line)
-            data = py_json.loads(window.JSON.stringify(js_parsed))
+            window.console.error("[BGS] Invalid Datastar signal JSON:", exc, signals_json[:500])
         except:
+            pass
+        return
+    if not isinstance(patch, dict):
+        try:
+            window.console.warn("[BGS] Signal patch was not an object:", patch)
+        except:
+            pass
+        return
+    # Handle onlyIfMissing semantics
+    if only_if_missing:
+        # Only keep keys that don't exist in current store
+        filtered = {}
+        for k, v in patch.items():
+            if k not in window._bgs_signals:
+                filtered[k] = v
+        if not filtered:
             return
-        for k in data:
-            try:
-                v = data[k]
-                if v is None:
-                    try:
-                        if k in window._bgs_signals:
-                            del window._bgs_signals[k]
-                    except:
-                        pass
-                    continue
-                if only_if_missing and k in window._bgs_signals:
-                    continue
-                existing = window._bgs_signals.get(k)
-                if isinstance(existing, dict) and isinstance(v, dict):
-                    window._bgs_signals[k] = _merge_patch(existing, v)
-                else:
-                    window._bgs_signals[k] = v
-            except:
-                continue
+        patch = filtered
+    _merge_patch(window._bgs_signals, patch)
+    try:
+        window._bgs_last_patch_ms = int(window.Date.now())
     except:
         pass
 
 def get_signal(name, default=None):
-    try:
-        return window._bgs_signals.get(name, default)
-    except:
-        return default
+    """Returns Python-native values (dict/list/str/int/bool/None)"""
+    return window._bgs_signals.get(name, default)
 
-def is_connected():
+def is_connected(max_silence_ms=10000):
+    """True if EventSource OPEN and recent data (or just OPEN if no data yet)"""
     try:
         es = window._bgs_es
-        if not es:
+        if es is None or es.readyState != 1:
             return False
-        return es.readyState == 1
-    except:
+        last = getattr(window, "_bgs_last_patch_ms", 0)
+        if last == 0:
+            # Connected but no patch yet - still considered connected for backward compat
+            return True
+        try:
+            now = int(window.Date.now())
+            return (now - last) <= max_silence_ms
+        except:
+            return True
+    except Exception:
         return False
 
 def attach_to_eventsource(es):
+    """Attach once, guard against duplicates"""
+    if es is None:
+        raise ValueError("attach_to_eventsource requires an EventSource")
+    # JS property guard
     try:
-        es.addEventListener("datastar-patch-signals", _on_datastar_patch)
-        es.addEventListener("multiplayer-snapshot", _on_datastar_patch)
-        window._bgs_es = es
+        if getattr(es, "_bgs_listener_attached", False):
+            window._bgs_es = es
+            return
     except:
         pass
+    # Python-side guard using id
+    try:
+        es_id = id(es)
+        if es_id in _attached_es_ids and window._bgs_es is es:
+            return
+    except:
+        pass
+    try:
+        es.addEventListener("datastar-patch-signals", _on_datastar_patch)
+        try:
+            es._bgs_listener_attached = True
+        except:
+            pass
+        try:
+            _attached_es_ids.add(id(es))
+        except:
+            pass
+        window._bgs_es = es
+    except Exception as exc:
+        try:
+            window.console.error("[BGS] Failed to attach datastar listener:", exc)
+        except:
+            pass
+        raise
