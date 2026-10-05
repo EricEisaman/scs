@@ -614,7 +614,7 @@ def redrawAll(app):
     drawInstructions(app)
     drawCartOverlay(app)
 
-    # acknowledgment banner small - view only, timer handled in onStep
+    # acknowledgment banner small - view only, timer decremented in onStep
     if app.messageTimer>0:
         drawRect(180, 42, 360, 22, fill=rgb(255,210,80), border=rgb(50,40,10), borderWidth=1)
         drawLabel("New target set — testing global asymptotic stability!", 360, 53, size=11, bold=True, fill=rgb(40,30,0))
@@ -624,7 +624,5 @@ def redrawAll(app):
         drawRect(0,0,700,700, fill=rgb(0,0,0), opacity=35, border=None)
         drawLabel("PAUSED — press SPACE", 350, 350, size=28, bold=True, fill=rgb(255,255,255))
 
-def main():
-    runApp(width=1050, height=700)
-
-main()
+# SCS loader will call runApp — do not call it here
+# App size is set in onAppStart: app.width=1050, app.height=700
