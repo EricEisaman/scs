@@ -2,12 +2,12 @@
 
 # SCS : Sigma Computer Science
 
-> A fast, faithful, Brython-powered implementation of the **CMU Graphics** API that runs natively in the browser. No install. No Python backend. Just open `index.html`.
+> A fast, faithful, Brython-powered implementation of the **CMU Graphics** API that runs in the browser. No server-side Python backend is required; scientific-computing labs load Pyodide and SciPy in a Web Worker when needed.
 
 [![Brython](https://img.shields.io/badge/Brython-3.11.3-blue)](https://brython.info/)
 [![CMU Graphics](https://img.shields.io/badge/API-CMU%20Graphics-red)](https://academy.cs.cmu.edu/)
 [![License](https://img.shields.io/badge/license-MIT-black)](LICENSE)
-[![Apps](https://img.shields.io/badge/apps-4-green)](#apps-included)
+[![Apps](https://img.shields.io/badge/apps-13-green)](#apps-included)
 
 Live demo:
 <a href="https://ericeisaman.github.io/scs/" target="_blank" rel="noopener noreferrer">
@@ -30,6 +30,18 @@ Sandbox: <code>/sandbox</code> →
 </a>
 
 ---
+
+## New Interactive Labs
+
+SCS now pairs its CMU Graphics runtime with focused visual and scientific-computing experiences:
+
+| Lab | Explore |
+| --- | --- |
+| [Nonlinear Solver](https://ericeisaman.github.io/scs/?app=linear_solver) | Solve nonlinear equation systems with SciPy's `optimize.root`. |
+| [Eigenvectors](https://ericeisaman.github.io/scs/?app=eigenvalue) | See how stretch, shear, rotation, and reflection transform vectors and eigenvector spans. |
+| [Image Processing](https://ericeisaman.github.io/scs/?app=image_processing) | Apply Gaussian filtering, Sobel edges, and binary morphology to an image. |
+
+Brython remains the rendering runtime. Scientific operations run in an optional Pyodide worker, while the reusable `extensions.file_loader` handles local image files and image URLs.
 
 ### What is this?
 
@@ -286,16 +298,19 @@ Click for new joke. No backend.
 │   ├── pyodide.py      # Lazy SciPy API: Pyodide Web Worker, Model-only
 │   └── pyodide_worker.js # Worker runtime and serialized SciPy operations
 └── apps/
+    ├── acceleration_academy.py
     ├── app.py              → Joukowski Aerofoil Wind Tunnel (default)
-    ├── rabbit_sim.py       → Rabbit Meadow Population Dynamics
-    ├── rabbit_valid_cmu.py → Original valid CMU version
-    ├── rabbit_fixed.py     → Fixed anim-every-frame version
-    ├── fetch_demo.py       → Extensions.fetch: PoetryDB live
-    ├── linear_solver.py    → SciPy nonlinear root finder: Pyodide worker
+    ├── drone_control_theory.py
     ├── eigenvalue.py       → Visual eigenvectors and plane transformations
+    ├── fetch_demo.py       → Extensions.fetch: PoetryDB live
     ├── image_processing.py → scipy.ndimage image filtering and morphology
-    ├── platformer_multiplayer.py → Datastar multiplayer platformer
-    └── proc_audio_demo.py  → Procedural audio workbench
+    ├── linear_solver.py    → SciPy nonlinear root finder: Pyodide worker
+    ├── Motorsliver.py
+    ├── momentum_mayhem.py
+    ├── platformer_bgs.py
+    ├── proc_audio_demo.py  → Procedural audio workbench
+    ├── rabbit_sim.py       → Rabbit Meadow Population Dynamics
+    └── swila.py
 ```
 
 No root `app.py` duplication. Real apps are **only** in `apps/`.
