@@ -281,13 +281,19 @@ Click for new joke. No backend.
 ├── extensions.py        # Root shim: makes `import extensions` work in Brython
 ├── extensions/         # SCS Extensions System
 │   ├── __init__.py     # Package marker
-│   └── fetch.py        # Async Fetch: browser-aligned, Model-only
+│   ├── fetch.py        # Async Fetch: browser-aligned, Model-only
+│   ├── file_loader.py  # Browser image loading and RGBA extraction, Model-only
+│   ├── pyodide.py      # Lazy SciPy API: Pyodide Web Worker, Model-only
+│   └── pyodide_worker.js # Worker runtime and serialized SciPy operations
 └── apps/
     ├── app.py              → Joukowski Aerofoil Wind Tunnel (default)
     ├── rabbit_sim.py       → Rabbit Meadow Population Dynamics
     ├── rabbit_valid_cmu.py → Original valid CMU version
     ├── rabbit_fixed.py     → Fixed anim-every-frame version
     ├── fetch_demo.py       → Extensions.fetch: PoetryDB live
+    ├── linear_solver.py    → SciPy nonlinear root finder: Pyodide worker
+    ├── eigenvalue.py       → Visual eigenvectors and plane transformations
+    ├── image_processing.py → scipy.ndimage image filtering and morphology
     ├── platformer_multiplayer.py → Datastar multiplayer platformer
     └── proc_audio_demo.py  → Procedural audio workbench
 ```
@@ -324,6 +330,26 @@ Proof that Extensions work. Fetches random poem from PoetryDB.org.
 - Handles JS-object vs Python-dict edge cases
 - MVC strict: no drawing in fetch, no fetching in redrawAll
 - 1050×700, gradient background, click/space for new poem
+
+#### `apps/linear_solver.py` — Nonlinear Root Finder
+Enter one LaTeX-style equation per line, name the variables, and provide an initial guess. SciPy's `optimize.root` runs in a lazily started Pyodide Web Worker; Brython remains responsible for the controls and CMU canvas.
+
+- Supports powers, fractions, square roots, and common trigonometric/log functions
+- Displays the solution, residuals, evaluation count, and before/after residual norm
+- Open with `/?app=linear_solver`; the first solve downloads Pyodide and SciPy
+
+#### `apps/eigenvalue.py` — Eigenvectors as Geometric Directions
+Compare a vector with its image under stretch, shear, 90-degree rotation, and reflection. Drag or click in the plane to move the test vector; dashed lines mark eigenvector spans and the sidebar reports whether the direction is preserved.
+
+- Includes positive, negative, and repeated eigenvalue examples, plus a rotation with no real eigenvectors
+- Select transformations with the on-screen buttons or keys `1`-`4`
+- Open with `/?app=eigenvalue`
+
+#### `apps/image_processing.py` — Image Processing Lab
+Load the bundled `scs.jpg`, choose a local image, or enter a CORS-enabled image URL. Compare the source and result for Gaussian blur, Sobel edge magnitude, or binary opening with foreground-area measurement. Image loading is provided by `extensions.file_loader`; SciPy processing runs in the optional Pyodide worker.
+
+- Resizes input to a maximum 384-pixel edge before processing
+- Open with `/?app=image_processing`
 
 ### 🛠 Creating a New App
 

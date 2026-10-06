@@ -21,6 +21,10 @@ try:
     sys.modules['extensions.fetch'].FetchResponse = FetchResponse
 except: pass
 try:
+    import extensions.file_loader as _file_loader
+    sys.modules['extensions.file_loader'] = _file_loader
+except: pass
+try:
     from extensions.datastar import get_signal, set_signal, get_game_snapshot, is_datastar_connected
     sys.modules['extensions.datastar'].get_signal = get_signal
     sys.modules['extensions.datastar'].set_signal = set_signal
@@ -37,4 +41,8 @@ except: pass
 try:
     import extensions.proc_audio as _real_pa
     sys.modules['extensions.proc_audio'] = _real_pa
+except: pass
+try:
+    import extensions.pyodide as _pyodide
+    sys.modules['extensions.pyodide'] = _pyodide
 except: pass
