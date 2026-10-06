@@ -1,6 +1,6 @@
-![SCS : Sigma Computer Science](scs.jpg)
+![SCS : Scientific Computing System](scs.jpg)
 
-# SCS : Sigma Computer Science
+# SCS : Scientific Computing System
 
 > A fast, faithful, Brython-powered implementation of the **CMU Graphics** API that runs in the browser. No server-side Python backend is required; scientific-computing labs load Pyodide and SciPy in a Web Worker when needed.
 
