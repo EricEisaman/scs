@@ -24,9 +24,9 @@ Try: <code>?app=rabbit_sim</code> →
 
 <br>
 
-Sandbox: <code>/sandbox</code> →
-<a href="https://ericeisaman.github.io/scs/sandbox" target="_blank" rel="noopener noreferrer">
-  https://ericeisaman.github.io/scs/sandbox
+Sandbox: <code>/sandbox/</code> →
+<a href="https://ericeisaman.github.io/scs/sandbox/" target="_blank" rel="noopener noreferrer">
+  https://ericeisaman.github.io/scs/sandbox/
 </a>
 
 ---
@@ -38,10 +38,11 @@ SCS now pairs its CMU Graphics runtime with focused visual and scientific-comput
 | Lab | Explore |
 | --- | --- |
 | [Nonlinear Solver](https://ericeisaman.github.io/scs/?app=linear_solver) | Solve nonlinear equation systems with SciPy's `optimize.root`. |
+| [ODE Solver](https://ericeisaman.github.io/scs/?app=ode) | Integrate and animate six physics, mechanics, and chemistry ODE presets with SciPy. |
 | [Eigenvectors](https://ericeisaman.github.io/scs/?app=eigenvalue) | See how stretch, shear, rotation, and reflection transform vectors and eigenvector spans. |
 | [Image Processing](https://ericeisaman.github.io/scs/?app=image_processing) | Apply Gaussian filtering, Sobel edges, and binary morphology to an image. |
 
-Brython remains the rendering runtime. Scientific operations run in an optional Pyodide worker, while the reusable `extensions.file_loader` handles local image files and image URLs.
+Brython remains the rendering runtime. SciPy computations run in an optional Pyodide worker; the ODE lab animates successfully returned samples locally in Brython. The reusable `extensions.file_loader` handles local image files and image URLs.
 
 ### What is this?
 
@@ -305,6 +306,7 @@ Click for new joke. No backend.
     ├── fetch_demo.py       → Extensions.fetch: PoetryDB live
     ├── image_processing.py → scipy.ndimage image filtering and morphology
     ├── linear_solver.py    → SciPy nonlinear root finder: Pyodide worker
+    ├── ode.py              → SciPy ODE solver with animated preset systems
     ├── Motorsliver.py
     ├── momentum_mayhem.py
     ├── platformer_bgs.py
@@ -352,6 +354,14 @@ Enter one LaTeX-style equation per line, name the variables, and provide an init
 - Supports powers, fractions, square roots, and common trigonometric/log functions
 - Displays the solution, residuals, evaluation count, and before/after residual norm
 - Open with `/?app=linear_solver`; the first solve downloads Pyodide and SciPy
+
+#### `apps/ode.py` — Animated ODE Solver
+Integrate a selected initial-value system with SciPy's `solve_ivp` in the Pyodide worker. Brython animates the returned samples locally, without making a worker request on each frame. The six presets cover a nonlinear pendulum, Lorenz attractor, mass-spring-damper, Duffing oscillator, consecutive A→B→C reactions, and the Brusselator.
+
+- Choose a preset or edit the initial state, time span, and integration method, then select **Integrate**
+- Playback advances through the computed samples; press `Space` to pause/resume and `R` to restart
+- Open with `/?app=ode`; the first solve downloads Pyodide and SciPy
+- Known limitation: Lorenz and consecutive-reaction results currently fail during result decoding in Brython 3.11.3; the other four presets have been verified
 
 #### `apps/eigenvalue.py` — Eigenvectors as Geometric Directions
 Compare a vector with its image under stretch, shear, 90-degree rotation, and reflection. Drag or click in the plane to move the test vector; dashed lines mark eigenvector spans and the sidebar reports whether the direction is preserved.

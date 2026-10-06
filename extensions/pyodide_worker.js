@@ -30,11 +30,11 @@ _allowed_nodes = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Add, ast.Sub,
     ast.Name, ast.Call, ast.Load)
 _functions = {
     'abs': np.abs, 'sqrt': np.sqrt, 'sin': np.sin, 'cos': np.cos,
-  'tan': np.tan, 'sec': lambda x: 1 / np.cos(x),
-  'csc': lambda x: 1 / np.sin(x), 'cot': lambda x: np.cos(x) / np.sin(x),
-  'asin': np.arcsin, 'acos': np.arccos, 'atan': np.arctan,
-  'exp': np.exp, 'log': lambda x, base=10: np.log(x) / np.log(base),
-  'ln': np.log, 'log10': np.log10,
+    'tan': np.tan, 'sec': lambda x: 1 / np.cos(x),
+    'csc': lambda x: 1 / np.sin(x), 'cot': lambda x: np.cos(x) / np.sin(x),
+    'asin': np.arcsin, 'acos': np.arccos, 'atan': np.arctan,
+    'exp': np.exp, 'log': lambda x, base=10: np.log(x) / np.log(base),
+    'ln': np.log, 'log10': np.log10,
     'sinh': np.sinh, 'cosh': np.cosh, 'tanh': np.tanh,
     'pi': np.pi, 'e': np.e
 }
@@ -48,9 +48,9 @@ for _tree in _trees:
         if isinstance(_node, ast.Call) and (not isinstance(_node.func, ast.Name) or _node.func.id not in _functions):
             raise ValueError('Unsupported function call')
 def _system(_x):
-    _environment = dict(_functions)
-    _environment.update({name: _x[i] for i, name in enumerate(_names)})
-    return [eval(compile(tree, '<equation>', 'eval'), {'__builtins__': {}}, _environment) for tree in _trees]
+    _env = dict(_functions)
+    _env.update({name: _x[i] for i, name in enumerate(_names)})
+    return [eval(compile(tree, '<equation>', 'eval'), {'__builtins__': {}}, _env) for tree in _trees]
 _initial = _system(np.asarray(_payload['x0'], dtype=float))
 _result = _scipy_root(_system, _payload['x0'])
 json.dumps({
@@ -82,6 +82,147 @@ json.dumps({
     'message': str(_result.message),
     'status': int(_result.status),
     'nit': int(_result.nit)
+})
+`;
+  return JSON.parse(await pyodide.runPythonAsync(code));
+}
+
+async function solveODE(pyodide, payload) {
+  const code = `
+import ast, json, numpy as np
+from scipy.integrate import solve_ivp as _sp_solve_ivp
+_payload = json.loads(${encodePayload(payload)})
+_odes = _payload['odes']
+_y0 = np.asarray(_payload['y0'], dtype=float)
+_t_span = tuple(_payload['t_span'])
+_params = _payload.get('params', {}) or {}
+_method = _payload.get('method', 'RK45')
+_t_eval_raw = _payload.get('t_eval')
+_allowed_methods = {'RK45','RK23','DOP853','BDF','Radau','LSODA'}
+if _method not in _allowed_methods:
+    raise ValueError('Unsupported method: ' + str(_method))
+if _t_eval_raw is None:
+    _t_eval = np.linspace(_t_span[0], _t_span[1], 500)
+elif isinstance(_t_eval_raw, int):
+    _n = max(10, min(2000, int(_t_eval_raw)))
+    _t_eval = np.linspace(_t_span[0], _t_span[1], _n)
+else:
+    _t_eval = np.asarray(_t_eval_raw, dtype=float)
+    if _t_eval.size < 2 or _t_eval.size > 2000:
+        raise ValueError('t_eval must have 2-2000 points')
+_functions = {
+    'abs': np.abs, 'sqrt': np.sqrt, 'sin': np.sin, 'cos': np.cos,
+    'tan': np.tan, 'sec': lambda x: 1/np.cos(x),
+    'csc': lambda x: 1/np.sin(x), 'cot': lambda x: np.cos(x)/np.sin(x),
+    'asin': np.arcsin, 'acos': np.arccos, 'atan': np.arctan,
+    'sinh': np.sinh, 'cosh': np.cosh, 'tanh': np.tanh,
+    'exp': np.exp, 'log': np.log, 'log10': np.log10, 'ln': np.log,
+    'pi': np.pi, 'e': np.e
+}
+_param_keys = set(_params.keys())
+_allowed_names = {'y','t'} | _param_keys | set(_functions.keys())
+_allowed_nodes = (
+    ast.Expression, ast.BinOp, ast.UnaryOp,
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod,
+    ast.USub, ast.UAdd,
+    ast.Constant, ast.Name, ast.Call, ast.Load,
+    ast.Subscript, ast.Tuple, ast.List
+)
+_trees = [ast.parse(eq, mode='eval') for eq in _odes]
+for _tree in _trees:
+    for _node in ast.walk(_tree):
+        if not isinstance(_node, _allowed_nodes):
+            if hasattr(ast, 'Index') and isinstance(_node, ast.Index):
+                continue
+            raise ValueError(f'Unsupported syntax in ODE: {type(_node).__name__}')
+        if isinstance(_node, ast.Name):
+            if _node.id not in _allowed_names:
+                raise ValueError(f'Unknown symbol in ODE: {_node.id}')
+        if isinstance(_node, ast.Subscript):
+            _val = _node.value
+            if not (isinstance(_val, ast.Name) and _val.id == 'y'):
+                raise ValueError('Only y[i] subscript allowed in ODE')
+        if isinstance(_node, ast.Call):
+            if not isinstance(_node.func, ast.Name) or _node.func.id not in _functions:
+                raise ValueError('Unsupported function call in ODE')
+_compiled = [compile(tree, '<ode>', 'eval') for tree in _trees]
+def _f(_t, _y):
+    _env = dict(_functions)
+    _env.update(_params)
+    _env['y'] = _y
+    _env['t'] = float(_t)
+    return [float(eval(c, {'__builtins__': {}}, _env)) for c in _compiled]
+_sol = _sp_solve_ivp(_f, _t_span, _y0, method=_method, t_eval=_t_eval, vectorized=False)
+json.dumps({
+    'kind': 'ode',
+    't': ','.join(repr(float(value)) for value in _sol.t),
+    'y': [','.join(repr(float(value)) for value in row) for row in _sol.y],
+    'success': bool(_sol.success),
+    'message': str(_sol.message),
+    'nfev': int(_sol.nfev),
+    'njev': int(getattr(_sol, 'njev', 0)),
+    'status': int(_sol.status)
+})
+`;
+  return JSON.parse(await pyodide.runPythonAsync(code));
+}
+
+async function solveOdeint(pyodide, payload) {
+  const code = `
+import ast, json, numpy as np
+from scipy.integrate import odeint as _odeint
+_payload = json.loads(${encodePayload(payload)})
+_odes = _payload['odes']
+_y0 = np.asarray(_payload['y0'], dtype=float)
+_t = np.asarray(_payload['t'], dtype=float)
+_params = _payload.get('params', {}) or {}
+if _t.size < 2 or _t.size > 2000:
+    raise ValueError('t must have 2-2000 points')
+_functions = {
+    'abs': np.abs, 'sqrt': np.sqrt, 'sin': np.sin, 'cos': np.cos,
+    'tan': np.tan, 'exp': np.exp, 'log': np.log, 'log10': np.log10, 'ln': np.log,
+    'sinh': np.sinh, 'cosh': np.cosh, 'tanh': np.tanh,
+    'pi': np.pi, 'e': np.e
+}
+_allowed_names = {'y','t'} | set(_params.keys()) | set(_functions.keys())
+_allowed_nodes = (
+    ast.Expression, ast.BinOp, ast.UnaryOp,
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod,
+    ast.USub, ast.UAdd,
+    ast.Constant, ast.Name, ast.Call, ast.Load,
+    ast.Subscript, ast.Tuple, ast.List
+)
+_trees = [ast.parse(eq, mode='eval') for eq in _odes]
+for _tree in _trees:
+    for _node in ast.walk(_tree):
+        if not isinstance(_node, _allowed_nodes):
+            if hasattr(ast, 'Index') and isinstance(_node, ast.Index):
+                continue
+            raise ValueError(f'Unsupported syntax: {type(_node).__name__}')
+        if isinstance(_node, ast.Name) and _node.id not in _allowed_names:
+            raise ValueError(f'Unknown symbol: {_node.id}')
+        if isinstance(_node, ast.Subscript):
+            if not (isinstance(_node.value, ast.Name) and _node.value.id == 'y'):
+                raise ValueError('Only y[i] subscript allowed')
+        if isinstance(_node, ast.Call):
+            if not isinstance(_node.func, ast.Name) or _node.func.id not in _functions:
+                raise ValueError('Unsupported function call')
+_compiled = [compile(tree, '<ode>', 'eval') for tree in _trees]
+def _f(_y, _t):
+    _env = dict(_functions)
+    _env.update(_params)
+    _env['y'] = _y
+    _env['t'] = float(_t)
+    return [float(eval(c, {'__builtins__': {}}, _env)) for c in _compiled]
+_y = _odeint(_f, _y0, _t)
+_y_T = _y.T
+json.dumps({
+    't': _t.tolist(),
+    'y': _y_T.tolist(),
+    'success': True,
+    'message': 'odeint completed',
+    'nfev': 0,
+    'status': 0
 })
 `;
   return JSON.parse(await pyodide.runPythonAsync(code));
@@ -154,7 +295,9 @@ async function handleRequest({ id, operation, payload }) {
   if (operation === 'root') return solveRoot(pyodide, payload);
   if (operation === 'linprog') return solveLinearProgram(pyodide, payload);
   if (operation === 'ndimage') return solveNdimage(pyodide, payload);
-  throw new Error('Unsupported Pyodide operation');
+  if (operation === 'solve_ivp') return solveODE(pyodide, payload);
+  if (operation === 'odeint') return solveOdeint(pyodide, payload);
+  throw new Error('Unsupported Pyodide operation: ' + operation);
 }
 
 self.onmessage = ({ data }) => {
