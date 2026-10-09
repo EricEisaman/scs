@@ -2,8 +2,11 @@ from scs import *
 import math, random
 
 # ============================================================
-# LYAPUNOV DRONE LAB — PROPER LYAPUNOV (FIXED)
-# V = Vtrans + Vatt, Vdot = exact derivative, exponential dissipates
+# LYAPUNOV DRONE LAB — PROPER LASALLE ENERGY SHAPING (v3)
+# Drone: V = 0.5*kp|e|^2 + 0.5|v|^2 + 0.5*kTh*theta_err^2 + 0.5*w^2
+#        Vdot = exact derivative, exponential = -kd|v|^2 -kOm*w^2 + cross <=0
+# Cart-pole: theta 0=DOWN, pi=UP, E=0.5*w^2 + (1-cos theta), E0=2
+#            u = -k*(E-E0)*w*cos(theta), V=0.5*(E-E0)^2, Vdot=-k*(E-E0)^2*w^2*cos^2 <=0
 # ============================================================
 
 def getGains(mode):
@@ -59,11 +62,17 @@ def onAppStart(app):
     app.Vdot = 0
     app.Vprev = 0
     app.Vhistory = []
-    app.showCartOverlay = False
+    app.showCartOverlay = True
     app.paused = False
     app.messageTimer = 0
-    app.poleAngle = math.pi
+    # Cart-pole proper: theta 0 = DOWN, pi = UP
+    app.poleAngle = 0.05
     app.poleOmega = 0
+    app.poleE = 0
+    app.poleV = 0
+    app.poleVdot = 0
+    app.poleK = 1.2
+    app.poleU = 0
 
 def resetDrone(app):
     app.droneX = 350 + random.uniform(-140, 140)
@@ -78,6 +87,8 @@ def resetDrone(app):
     app.gust = 0
     app.prevThetaDes = 0
     app.thetaDes = 0
+    app.poleAngle = 0.05
+    app.poleOmega = 0
 
 def onMousePress(app, mx, my):
     if mx < 700:
@@ -154,7 +165,6 @@ def onStep(app):
     ex = app.droneX - app.targetX
     ey = app.droneY - app.targetY
 
-    # Proper Lyapunov controller
     ax_des = -kp*ex - kd*app.vx
     ay_des = -kp*ey - kd*app.vy
     thetaDes = ax_des / g
@@ -231,16 +241,22 @@ def onStep(app):
     if len(app.bowlTrail) > 70:
         app.bowlTrail.pop(0)
 
-    if app.showCartOverlay:
-        g2 = 9.8
-        l = 1.0
-        E = 0.5*app.poleOmega*app.poleOmega + (1 - math.cos(app.poleAngle))
-        E_tilde = E - 2.0
-        k = 1.2
-        u = k*E_tilde*app.poleOmega*math.cos(app.poleAngle)
-        th_ddot = -g2/l*math.sin(app.poleAngle) + u*math.cos(app.poleAngle)
-        app.poleOmega += th_ddot*dt
-        app.poleAngle += app.poleOmega*dt
+    # --- PROPER Cart-pole energy shaping + LaSalle ---
+    E0 = 2.0
+    th = app.poleAngle
+    w = app.poleOmega
+    E = 0.5*w*w + (1 - math.cos(th))
+    app.poleE = E
+    Etilde = E - E0
+    Vp = 0.5*Etilde*Etilde
+    app.poleV = Vp
+    u = -app.poleK * Etilde * w * math.cos(th)
+    app.poleU = u
+    th_ddot = -math.sin(th) + u*math.cos(th)
+    app.poleOmega += th_ddot*dt
+    app.poleAngle += app.poleOmega*dt
+    Vpdot = -app.poleK * Etilde*Etilde * w*w * (math.cos(th)**2)
+    app.poleVdot = Vpdot
 
 def drawSky(app):
     for y in range(0, 580, 4):
@@ -296,17 +312,15 @@ def drawDrone(app):
     def rot(lx, ly):
         c = math.cos(th); s = math.sin(th)
         return x + lx*c - ly*s, y + lx*s + ly*c
-    thrust = -app.vy
-    if thrust > 8 or app.mode!=0:
-        for side in (-1,1):
-            flameLen = 6 + abs(app.vy)*0.08 + abs(app.vx)*0.05
-            if app.mode==0:
-                flameLen *= 0.3
-            fx1, fy1 = rot(side*22-3, 10)
-            fx2, fy2 = rot(side*22+3, 10)
-            fx3, fy3 = rot(side*22, 10+flameLen)
-            drawPolygon(fx1,fy1,fx2,fy2,fx3,fy3, fill=rgb(120,200,255), opacity=70, border=None)
-            drawPolygon(fx1,fy1,fx2,fy2,fx3,fy3, fill=rgb(255,230,120), opacity=45, border=None)
+    for side in (-1,1):
+        flameLen = 6 + abs(app.vy)*0.08 + abs(app.vx)*0.05
+        if app.mode==0:
+            flameLen *= 0.3
+        fx1, fy1 = rot(side*22-3, 10)
+        fx2, fy2 = rot(side*22+3, 10)
+        fx3, fy3 = rot(side*22, 10+flameLen)
+        drawPolygon(fx1,fy1,fx2,fy2,fx3,fy3, fill=rgb(120,200,255), opacity=70, border=None)
+        drawPolygon(fx1,fy1,fx2,fy2,fx3,fy3, fill=rgb(255,230,120), opacity=45, border=None)
     leftArmX1, leftArmY1 = rot(-18, 0)
     leftArmX2, leftArmY2 = rot(-32, 0)
     rightArmX1, rightArmY1 = rot(18, 0)
@@ -318,7 +332,6 @@ def drawDrone(app):
     bx3, by3 = rot(26, 8)
     bx4, by4 = rot(-26, 8)
     drawPolygon(bx1,by1,bx2,by2,bx3,by3,bx4,by4, fill=rgb(25,25,30), border=rgb(60,60,70), borderWidth=2)
-    drawPolygon(bx1,by1,bx2,by2,bx3,by3,bx4,by4, fill=rgb(45,45,55), opacity=70, border=None)
     if app.Vdot > 2:
         ledCol = rgb(255,60,60)
     elif abs(app.Vdot) < 0.6:
@@ -350,36 +363,28 @@ def drawBowlPanel(app):
     drawLabel("V = Vtrans+Vatt, positive-def • radially unbounded", 875, 40, size=10, fill=rgb(150,160,190))
     cx = 875
     cy = 210
-    bowlW = 240
     for i in range(6):
         t = i/5
-        r = bowlW/2 * (1 - t*0.15)
+        r = 120 * (1 - t*0.15)
         h = 110 * (t**2)
         shade = int(35 + t*55)
         drawOval(cx, cy+h, r*2, r*0.55, fill=rgb(shade, shade+8, shade+18), border=rgb(70,75,95), borderWidth=1, opacity=85)
-    ptsLeft = []
+    pts = []
     for ix in range(-120, 121, 6):
         y = cy + (ix*ix)/120 + 6
-        ptsLeft.append((cx+ix, y))
+        pts.append((cx+ix, y))
     poly = []
-    for p in ptsLeft:
+    for p in pts:
         poly.extend(p)
     poly.extend([cx+120, cy+125, cx-120, cy+125])
     drawPolygon(*poly, fill=rgb(45,52,72), border=None, opacity=90)
-    for ix in range(-120, 121, 10):
-        y = cy + (ix*ix)/120 + 6
-        if ix%30==0:
-            drawLine(cx+ix, y, cx+ix, y+4, fill=rgb(100,110,150), lineWidth=1, opacity=40)
     drawLabel("V → ∞ as |x| → ∞", cx, cy+138, size=10, bold=True, fill=rgb(120,200,255))
-    drawLine(cx-120, cy+95, cx-145, cy+60, fill=rgb(120,200,255), lineWidth=1.5, arrowEnd=True, opacity=70)
-    drawLine(cx+120, cy+95, cx+145, cy+60, fill=rgb(120,200,255), lineWidth=1.5, arrowEnd=True, opacity=70)
     ex = app.droneX - app.targetX
     ballX = cx + max(-110, min(110, ex*0.55))
-    ballY = cy + ( (ex*0.55)**2 )/120 + 6
-    isFlat = abs(app.vx) < 6 and abs(app.vy) < 6 and math.hypot(ex, app.droneY-app.targetY) > 20
-    if isFlat and app.mode in (1,3):
+    ballY = cy + ((ex*0.55)**2)/120 + 6
+    if abs(app.vx) < 6 and abs(app.vy) < 6 and math.hypot(ex, app.droneY-app.targetY) > 20 and app.mode in (1,3):
         drawRect(ballX-28, ballY-2, 56, 6, fill=rgb(255,210,80), opacity=55, border=None)
-        drawLabel("LaSalle flat — invariant set?", ballX, ballY-18, size=9, fill=rgb(255,220,120))
+        drawLabel("LaSalle flat — not invariant, slides off", ballX, ballY-18, size=9, fill=rgb(255,220,120))
     for i, rn in enumerate(app.bowlTrail[-30:]):
         op = int(10 + i*2.2)
         bx = cx + (1 if i%2==0 else -1)*abs(rn)*100
@@ -388,7 +393,6 @@ def drawBowlPanel(app):
     glowCol = rgb(60,255,130) if app.Vdot < -0.5 else rgb(255,220,80) if abs(app.Vdot)<0.6 else rgb(255,80,80)
     drawCircle(ballX, ballY, 11, fill=glowCol, opacity=22, border=None)
     drawCircle(ballX, ballY, 7, fill=rgb(240,245,255), border=rgb(30,30,40), borderWidth=1.5)
-    drawCircle(ballX-1.5, ballY-1.5, 2.5, fill=rgb(255,255,255), border=None)
     drawLabel(f"V = {app.V:0.1f}  (energy)", cx, 352, size=13, bold=True, fill=rgb(230,235,255))
     vdotCol = rgb(80,255,130) if app.Vdot < -0.5 else rgb(255,230,90) if abs(app.Vdot)<0.6 else rgb(255,90,90)
     drawLabel(f"dV/dt = {app.Vdot:+0.2f}", cx, 372, size=12, bold=True, fill=vdotCol)
@@ -397,9 +401,9 @@ def drawBowlPanel(app):
     elif app.mode==1:
         drawLabel("dV/dt ≤ 0 → decays (asymptotic)", cx, 390, size=10, fill=rgb(180,185,205))
     elif app.mode==2:
-        drawLabel(f"dV/dt ≤ -{getGains(app.mode)[4]:0.1f}·V  (exponential)", cx, 390, size=10, fill=rgb(180,185,205))
+        drawLabel(f"dV/dt ≤ -αV  (exponential)", cx, 390, size=10, fill=rgb(180,185,205))
     else:
-        drawLabel("Global + LaSalle handles flats & any start", cx, 390, size=10, fill=rgb(180,185,205))
+        drawLabel("Global + LaSalle: largest invariant set = origin", cx, 390, size=10, fill=rgb(180,185,205))
     drawRect(720, 410, 310, 62, fill=rgb(28,31,42), border=rgb(55,60,80), borderWidth=1)
     drawLabel("Lyapunov decay over time", 875, 416, size=10, fill=rgb(150,160,190))
     if len(app.Vhistory)>2:
@@ -411,11 +415,6 @@ def drawBowlPanel(app):
             y2 = 465 - (app.Vhistory[i]/maxV)*48
             col = rgb(80,220,255) if app.mode!=0 else rgb(255,210,80)
             drawLine(x1, y1, x2, y2, fill=col, lineWidth=2)
-            if app.mode==2:
-                env = maxV*math.exp(-getGains(app.mode)[4]*i*0.06)
-                ey = 465 - (env/maxV)*48
-                if i%6==0:
-                    drawCircle(x2, ey, 1, fill=rgb(255,100,100), opacity=50, border=None)
     drawLabel("STABILITY PROOF MODE — press 1-4", 875, 485, size=11, bold=True, fill=rgb(200,210,240))
     modes = [
         (0, "1: ISL (frictionless)"),
@@ -453,8 +452,8 @@ def drawInstructions(app):
     drawRect(0, 600, 700, 100, fill=rgb(15,17,26), opacity=82, border=None)
     lines = [
         "CLICK/DRAG to set TARGET anywhere — test GLOBAL stability (radially unbounded bowl).",
-        "Keys: 1-4 stability modes | W windstorm (icy + gusts) | G gust | R reset | C cart-pole overlay | SPACE pause",
-        "Bussin Sigma Scholars @ Edward Little High — V is your fuel gauge, dV/dt is friction draining it."
+        "Keys: 1-4 modes | W windstorm | G gust | R reset | C cart-pole overlay | SPACE pause",
+        "Bussin Sigma Scholars — V fuel gauge, dV/dt friction. LaSalle escapes flats."
     ]
     for i,txt in enumerate(lines):
         drawLabel(txt, 12, 614+i*16, size=11, fill=rgb(210,215,235), align='left', bold=(i==0))
@@ -462,22 +461,29 @@ def drawInstructions(app):
 def drawCartOverlay(app):
     if not app.showCartOverlay:
         return
-    drawRect(12, 398, 210, 148, fill=rgb(20,22,32), border=rgb(70,75,95), borderWidth=1.5)
-    drawLabel("Cart-Pole Swing-Up — Energy Shaping + LaSalle", 117, 410, size=10, bold=True, fill=rgb(220,225,245))
-    drawLine(22, 500, 212, 500, fill=rgb(120,130,160), lineWidth=2)
-    cartX = 117 + math.sin(app.time*0.6)*50
+    drawRect(12, 360, 250, 198, fill=rgb(20,22,32), border=rgb(70,75,95), borderWidth=1.5)
+    drawLabel("Cart-Pole Swing-Up — Proper Energy Shaping", 137, 372, size=11, bold=True, fill=rgb(220,225,245))
+    drawLabel("θ=0 DOWN, π=UP | E=½ω²+(1-cosθ), E0=2", 137, 386, size=9, fill=rgb(150,160,190))
+    drawLine(22, 500, 242, 500, fill=rgb(120,130,160), lineWidth=2)
+    cartX = 137 + app.poleU*8
+    cartX = max(30, min(220, cartX))
     drawRect(cartX-18, 486, 36, 14, fill=rgb(200,200,210), border=rgb(50,50,60), borderWidth=1)
     px = cartX
     py = 486
     ang = app.poleAngle
-    poleLen = 52
+    poleLen = 62
     ex = px + math.sin(ang)*poleLen
-    ey = py - math.cos(ang)*poleLen
+    ey = py + math.cos(ang)*poleLen
     drawLine(px, py, ex, ey, fill=rgb(255,90,90), lineWidth=4)
     drawCircle(ex, ey, 7, fill=rgb(255,180,60), border=None)
-    E = 0.5*app.poleOmega*app.poleOmega + (1 - math.cos(app.poleAngle))
-    drawLabel(f"E={E:0.2f} target=2.0  Ẽ={E-2:0.2f}", 117, 525, size=9, fill=rgb(170,180,200))
-    drawLabel("V=½Ẽ² → dV/dt ≤0  LaSalle → upright", 117, 537, size=8, fill=rgb(120,200,255))
+    drawLabel(f"E={app.poleE:0.2f} E0=2.0  Ẽ={app.poleE-2.0:+0.2f}", 137, 522, size=10, fill=rgb(170,180,200))
+    drawLabel(f"V=½Ẽ²={app.poleV:0.3f}  Vdot={app.poleVdot:+0.3f} ≤0", 137, 537, size=10, bold=True, fill=rgb(120,255,130) if app.poleVdot<=-0.001 else rgb(255,220,80))
+    drawLabel(f"Vdot=-k·Ẽ²·ω²·cos²θ ≤0", 137, 551, size=9, fill=rgb(120,200,255))
+    if abs(app.poleOmega) < 0.15 and abs(math.cos(app.poleAngle)) < 0.15:
+        drawLabel("Flat: ω≈0 or cos≈0 → Vdot=0", 137, 565, size=8, fill=rgb(255,210,80))
+        drawLabel("Not invariant → gravity slides off", 137, 577, size=8, fill=rgb(255,220,120))
+    else:
+        drawLabel("LaSalle: only invariant in Vdot=0 is Ẽ=0 → UP", 137, 571, size=8, fill=rgb(150,200,255))
 
 def redrawAll(app):
     drawSky(app)
