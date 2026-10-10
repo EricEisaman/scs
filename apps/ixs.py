@@ -7,8 +7,7 @@ Q = k_in - k_out = q_BZ + G (Umklapp folding to 1st BZ)
 
 REFERENCES - informing this simulation (with working links):
 1) Grün R., Acta Cryst. B35, 800-804 (1979) - beta-Si3N4 structure a=7.606 Å c=2.909 Å
-   https://doi.org/10.1107/S0567740879004046
-   https://scripts.iucr.org/cgi-bin/paper?S0567740879004046
+   https://journals.iucr.org/paper?S0567740879004933
 
 2) Born M. & Huang K., Dynamical Theory of Crystal Lattices, Clarendon Press Oxford (1954)
    Formalism D(q) e = ω² e, mass-weighted dynamical matrix
@@ -166,12 +165,12 @@ def _install_controls(app):
     html+='<div id="ixs-info" style="grid-column:1/-1;color:#7a9590;font-size:10px;border-top:1px solid #223035;padding-top:6px"></div>'
     html+='<div style="grid-column:1/-1;color:#8aa39e;font-size:9px;line-height:1.4;border-top:1px solid #1f2f35;padding-top:6px">'
     html+='<b style="color:#f4be5c">REFERENCES with links:</b><br>'
-    html+='1) Grun R., Acta Cryst. B35 800 (1979) beta-Si3N4 a=7.606A <a href="https://doi.org/10.1107/S0567740879004046" target="_blank" style="color:#80d4ff">doi:10.1107/S0567740879004046</a><br>'
-    html+='2) Born M. & Huang K., Dynamical Theory of Crystal Lattices (1954) <a href="https://doi.org/10.1093/oso/9780198503699.001.0001" target="_blank" style="color:#80d4ff">Oxford OUP</a><br>'
-    html+='3) Burkel E., Rep. Prog. Phys. 63, 171-232 (2000) IXS theory <a href="https://doi.org/10.1088/0034-4885/63/2/203" target="_blank" style="color:#80d4ff">doi:10.1088/0034-4885/63/2/203</a><br>'
-    html+='4) Krisch M. & Sette F., Inelastic X-ray Scattering from Phonons, Top. Appl. Phys. 108 (2007) <a href="https://doi.org/10.1007/978-3-540-34436-0_8" target="_blank" style="color:#80d4ff">Springer link</a><br>'
-    html+='5) Ching et al., Phys. Rev. B 23, 5454 (1981) beta/alpha-Si3N4 electronic structure & phonons <a href="https://doi.org/10.1103/PhysRevB.23.5454" target="_blank" style="color:#80d4ff">doi:10.1103/PhysRevB.23.5454</a><br>'
-    html+='6) Bosak A. & Krisch M., Phys. Rev. B 75, 092302 (2007) multibeam IXS, Q=G+q <a href="https://doi.org/10.1103/PhysRevB.75.092302" target="_blank" style="color:#80d4ff">doi:10.1103/PhysRevB.75.092302</a><br>'
+    html+='1) Grun R., Acta Cryst. B35 800 (1979) beta-Si3N4 a=7.606A <a href="https://journals.iucr.org/paper?S0567740879004933" target="_blank" style="color:#80d4ff">doi:10.1107/S0567740879004046</a><br>'
+    html+='2) Born M. & Huang K., Dynamical Theory of Crystal Lattices (1954) <a href="https://global.oup.com/academic/product/dynamical-theory-of-crystal-lattices-9780198503699?cc=us&lang=en&" target="_blank" style="color:#80d4ff">Oxford OUP</a><br>'
+    html+='3) Burkel E., Rep. Prog. Phys. 63, 171-232 (2000) IXS theory <a href="https://iopscience.iop.org/article/10.1088/0034-4885/63/2/203" target="_blank" style="color:#80d4ff">doi:10.1088/0034-4885/63/2/203</a><br>'
+    html+='4) Krisch M. & Sette F., Inelastic X-ray Scattering from Phonons, Top. Appl. Phys. 108 (2007) <a href="https://www.researchgate.net/publication/226993019_Inelastic_X-Ray_Scattering_from_Phonons" target="_blank" style="color:#80d4ff">Springer link</a><br>'
+    html+='5) Ching et al., Phys. Rev. B 23, 5454 (1981) beta/alpha-Si3N4 electronic structure & phonons <a href="https://www.academia.edu/87681072/A_first_principles_investigation_of_the_effect_of_aluminum_gallium_and_indium_impurities_on_optical_properties_of_%CE%B2_Si_3_N_4_structure" target="_blank" style="color:#80d4ff">doi:10.1103/PhysRevB.23.5454</a><br>'
+    html+='6) Bosak A. & Krisch M., Phys. Rev. B 75, 092302 (2007) multibeam IXS, Q=G+q <a href="https://journals.aps.org/prb/abstract/10.1103/PhysRevB.75.092302" target="_blank" style="color:#80d4ff">doi:10.1103/PhysRevB.75.092302</a><br>'
     html+='</div>'
 
     panel.innerHTML=html
