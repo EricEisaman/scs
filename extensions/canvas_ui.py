@@ -59,15 +59,37 @@ def _drawRoundedRectImpl(x, y, w, h, r, fill, opacity=100):
 
 def _drawRect(x,y,w,h,fill=None,border=None,borderWidth=1,roundness=0,opacity=100):
     try:
-        from scs import drawRect
-        if fill and roundness and roundness>0:
-            _drawRoundedRectImpl(x,y,w,h,roundness,fill,opacity)
+        from scs import drawRect, drawCircle
+        # Your rounded rect sandbox for all cases
+        if roundness and roundness>0:
+            r = max(0, min(roundness, w/2, h/2))
             if border and borderWidth>0:
-                try:
-                    drawRect(x,y,w,h,fill=None,border=border,borderWidth=borderWidth,roundness=roundness,opacity=opacity)
-                except: pass
-        else:
-            drawRect(x,y,w,h,fill=fill,border=border,borderWidth=borderWidth,roundness=roundness,opacity=opacity)
+                # outer with border color
+                if w > 2*r:
+                    drawRect(x+r, y, w-2*r, h, fill=border, opacity=opacity)
+                if h > 2*r:
+                    drawRect(x, y+r, w, h-2*r, fill=border, opacity=opacity)
+                for cx in (x+r, x+w-r):
+                    for cy in (y+r, y+h-r):
+                        drawCircle(cx, cy, r, fill=border, opacity=opacity)
+                # inner with fill
+                if fill is not None:
+                    ir = max(0, r-borderWidth)
+                    ix = x+borderWidth; iy = y+borderWidth; iw = w-2*borderWidth; ih = h-2*borderWidth
+                    if iw>0 and ih>0:
+                        if iw > 2*ir:
+                            drawRect(ix+ir, iy, iw-2*ir, ih, fill=fill, opacity=opacity)
+                        if ih > 2*ir:
+                            drawRect(ix, iy+ir, iw, ih-2*ir, fill=fill, opacity=opacity)
+                        for cx in (ix+ir, ix+iw-ir):
+                            for cy in (iy+ir, iy+ih-ir):
+                                drawCircle(cx, cy, ir, fill=fill, opacity=opacity)
+            else:
+                # fill only rounded
+                _drawRoundedRectImpl(x,y,w,h,roundness,fill,opacity)
+            return
+        # sharp rect
+        drawRect(x,y,w,h,fill=fill,border=border,borderWidth=borderWidth,roundness=roundness,opacity=opacity)
     except: pass
 
 def _drawLabel(text,x,y,size=14,fill="black",bold=False,align="center"):
