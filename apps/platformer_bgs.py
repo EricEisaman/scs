@@ -855,7 +855,7 @@ def redrawAll(app):
 
     if app.remote_players:
         y+=10
-        drawRect(90,y+10,160,10+len(app.remote_players)*16,fill=rgb(0,0,0))
+        drawRect(10,y+10,160,10+len(app.remote_players)*16,fill=rgb(0,0,0))
         drawLabel("REMOTE (BGS)",90,y,size=11,fill=rgb(180,200,255))
         y+=14
         for cid, r in list(app.remote_players.items())[:6]:
@@ -866,7 +866,7 @@ def redrawAll(app):
     if app.show_help:
         hx=app.width-160
         hy=80
-        drawRect(hx,hy+60,300,140,fill=rgb(0,0,0))
+        drawRect(app.width-310,hy+60,300,140,fill=rgb(0,0,0))
         drawLabel("BGS CONTROLS",hx,hy-20,size=12,fill=rgb(255,255,255))
         drawLabel("WASD / Arrows move",hx,hy,size=10,fill=rgb(200,220,255))
         drawLabel("R reset P pause 1 add",hx,hy+16,size=10,fill=rgb(200,220,255))
@@ -875,5 +875,5 @@ def redrawAll(app):
         drawLabel("Env-authority + item-claim",hx,hy+64,size=10,fill=rgb(78,205,196))
 
     # footer - spec reminder
-    drawRect(app.width//2,app.height-18,app.width,36,fill=rgb(0,0,0))
+    drawRect(0,app.height-18,app.width,36,fill=rgb(0,0,0))
     drawLabel("BGS-MP-SYNC Python: PATCH /api/multiplayer/character-state + SSE character-state-update | Datastar patch_signals | No WebSockets",app.width//2,app.height-18,size=9,fill=rgb(120,255,180))
