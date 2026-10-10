@@ -72,77 +72,78 @@ _ALIGN_ALIASES = {
     'centre': 'center',
 }
 
+_VALID_ALIGNS = {
+    'left-top', 'top', 'right-top',
+    'left', 'center', 'right',
+    'left-bottom', 'bottom', 'right-bottom'
+}
+
+_ALIGN_ALIASES = {
+    'lefttop': 'left-top',
+    'topleft': 'left-top',
+    'righttop': 'right-top',
+    'topright': 'right-top',
+    'leftbottom': 'left-bottom',
+    'bottomleft': 'left-bottom',
+    'rightbottom': 'right-bottom',
+    'bottomright': 'right-bottom',
+    'topcenter': 'top',
+    'centertop': 'top',
+    'bottomcenter': 'bottom',
+    'centerbottom': 'bottom',
+    'leftcenter': 'left',
+    'centerleft': 'left',
+    'rightcenter': 'right',
+    'centerright': 'right',
+    'centre': 'center',
+    'middle': 'center',
+}
+
 def _normalize_align(align):
-    """
-    Normalize align string to canonical 9 positions.
-    CMU does: lower, strip, replace _ with -, handle aliases.
-    """
     if not align:
         return 'center'
-    a = str(align).strip().lower().replace('_', '-').replace(' ', '-')
-    # Handle camelCase like leftTop -> left-top
-    # Do simple replacement for known camelCases
-    # Convert to lower kebab first
-    # leftTop -> lefttop -> left-top via alias
-    a_nospace = a.replace('-', '')
+    a = str(align).strip().lower().replace('_','-').replace(' ','-')
+    a_nospace = a.replace('-','')
     if a_nospace in _ALIGN_ALIASES:
         return _ALIGN_ALIASES[a_nospace]
     if a in _ALIGN_ALIASES:
         return _ALIGN_ALIASES[a]
     if a in _VALID_ALIGNS:
         return a
-    # Try to infer from substrings if still not valid
-    # This handles weird inputs gracefully like CMU does
+    # substring fallback like CMU
     has_left = 'left' in a
     has_right = 'right' in a
     has_top = 'top' in a
     has_bottom = 'bottom' in a
-    has_center = 'center' in a or 'centre' in a
-    if has_left and has_top:
-        return 'left-top'
-    if has_right and has_top:
-        return 'right-top'
-    if has_left and has_bottom:
-        return 'left-bottom'
-    if has_right and has_bottom:
-        return 'right-bottom'
-    if has_left:
-        return 'left'
-    if has_right:
-        return 'right'
-    if has_top:
-        return 'top'
-    if has_bottom:
-        return 'bottom'
-    if has_center:
-        return 'center'
-    # Default fallback per CMU: center for most shapes, left-top for Rect
-    # Caller will provide appropriate default, so return center here
+    if has_left and has_top: return 'left-top'
+    if has_right and has_top: return 'right-top'
+    if has_left and has_bottom: return 'left-bottom'
+    if has_right and has_bottom: return 'right-bottom'
+    if has_left: return 'left'
+    if has_right: return 'right'
+    if has_top: return 'top'
+    if has_bottom: return 'bottom'
     return 'center'
 
 def _get_align_offsets(align, width, height):
-    """
-    Given align and bbox width/height, return (ox, oy) offset of reference point
-    inside bbox. This is the core of CMU's align logic.
-    For Rect with align='left-top', ox=0, oy=0, so left=x, top=y
-    For Rect with align='center', ox=w/2, oy=h/2, so left=x-w/2, top=y-h/2
-    """
     a = _normalize_align(align)
-    # Horizontal offset
     if a in ('left-top', 'left', 'left-bottom'):
         ox = 0
     elif a in ('right-top', 'right', 'right-bottom'):
         ox = width
-    else:  # top, center, bottom
-        ox = width / 2
-    # Vertical offset
+    else:
+        ox = width/2
     if a in ('left-top', 'top', 'right-top'):
         oy = 0
     elif a in ('left-bottom', 'bottom', 'right-bottom'):
         oy = height
-    else:  # left, center, right
-        oy = height / 2
+    else:
+        oy = height/2
     return ox, oy
+
+def _resolve_bbox(x, y, width, height, align):
+    ox, oy = _get_align_offsets(align, width, height)
+    return x - ox, y - oy
 
 def _debug_log(msg):
     try:
