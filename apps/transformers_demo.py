@@ -360,9 +360,21 @@ def _task_grid_rows(app):
     return (len(app.tasks) + app.buttonsPerRow - 1) // app.buttonsPerRow
 
 def _layout_dom_controls(app):
+    canvas = document['cmu-canvas']
+    container = document['canvas-container']
+    canvas.width = app.width
+    canvas.height = app.height
+    canvas.style.width = f'{app.width}px'
+    canvas.style.height = f'{app.height}px'
+    container.style.width = f'{app.width}px'
+    container.style.height = f'{app.height}px'
     app.generateButtonX = app.width - 18 - app.generateButtonW
     app.generateControl.set_bounds(app.generateButtonX, app.generateButtonY, app.generateButtonW, app.generateButtonH)
     _sync_input_editor(app)
+    try:
+        print(f"[transformers demo] canvas layout: app={app.width}x{app.height} canvas={canvas.width}x{canvas.height} container={container.getBoundingClientRect().width:.1f}px")
+    except Exception as error:
+        print(f"[transformers demo] canvas layout measurement failed: {error}")
 
 def _sync_input_editor(app):
     task_def = app.tasks[app.selectedIdx]
