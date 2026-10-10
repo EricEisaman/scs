@@ -855,7 +855,7 @@ def redrawAll(app):
 
     if app.remote_players:
         y+=10
-        drawRect(10,y+10,160,10+len(app.remote_players)*16,fill=rgb(0,0,0))
+        drawRect(90,y+10,160,10+len(app.remote_players)*16,fill=rgb(0,0,0),align='center')
         drawLabel("REMOTE (BGS)",90,y,size=11,fill=rgb(180,200,255))
         y+=14
         for cid, r in list(app.remote_players.items())[:6]:
