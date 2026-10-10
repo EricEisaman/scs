@@ -5,38 +5,36 @@ Dynamical matrix D(q) e = ω² e with L/T polarizations
 Inelastic X-ray Scattering: E_in 15-25 keV (15,000,000-25,000,000 meV) -> ħω 1-100 meV loss, ΔE 1-5 meV resolution
 Q = k_in - k_out = q_BZ + G (Umklapp folding to 1st BZ)
 
-REFERENCES - informing this simulation (with working links):
+REFERENCES - informing this simulation (verified working links, kept only at bottom of app page):
 1) Grün R., Acta Cryst. B35, 800-804 (1979) - beta-Si3N4 structure a=7.606 Å c=2.909 Å
-   https://journals.iucr.org/paper?S0567740879004933
+   https://scripts.iucr.org/cgi-bin/paper?S0567740879004046
+   https://doi.org/10.1107/S0567740879004046
 
 2) Born M. & Huang K., Dynamical Theory of Crystal Lattices, Clarendon Press Oxford (1954)
-   Formalism D(q) e = ω² e, mass-weighted dynamical matrix
-   https://doi.org/10.1093/oso/9780198503699.001.0001
    https://global.oup.com/academic/product/dynamical-theory-of-crystal-lattices-9780198503699
+   https://en.wikipedia.org/wiki/Dynamical_Theory_of_Crystal_Lattices
 
 3) Burkel E., Phonon spectroscopy by inelastic x-ray scattering, Rep. Prog. Phys. 63, 171-232 (2000)
-   IXS theory, high-resolution E_in 15-25 keV, meV resolution
-   https://doi.org/10.1088/0034-4885/63/2/203
    https://iopscience.iop.org/article/10.1088/0034-4885/63/2/203
+   https://doi.org/10.1088/0034-4885/63/2/203
 
 4) Krisch M. & Sette F., Inelastic X-ray Scattering from Phonons, Light Scattering in Solids IX,
-   Topics in Applied Physics Vol 108, pp 317-370 (2007), Springer
-   IXS cross-section I ∝ |Q·e|²/ω (n+1)
-   https://doi.org/10.1007/978-3-540-34436-0_8
+   Topics in Applied Physics Vol 108, pp 317-370 (2007)
    https://link.springer.com/chapter/10.1007/978-3-540-34436-0_8
+   https://doi.org/10.1007/978-3-540-34436-0_8
 
 5) Ching W.Y. et al., Electronic structures of β- and α-Si3N4, Phys. Rev. B 23, 5454-5463 (1981)
-   Basis for Si3N4 phonon force constants K_L~78 N/m K_T~32 N/m giving 10-80 meV
-   https://doi.org/10.1103/PhysRevB.23.5454
    https://journals.aps.org/prb/abstract/10.1103/PhysRevB.23.5454
+   https://doi.org/10.1103/PhysRevB.23.5454
 
 6) Bosak A. & Krisch M., Inelastic x-ray scattering from phonons under multibeam conditions,
-   Phys. Rev. B 75, 092302 (2007) - Q = G + q folding, extended vs reduced zone
-   https://doi.org/10.1103/PhysRevB.75.092302
+   Phys. Rev. B 75, 092302 (2007) - Q = G + q folding
    https://journals.aps.org/prb/abstract/10.1103/PhysRevB.75.092302
+   https://doi.org/10.1103/PhysRevB.75.092302
 
-All DOIs verified working as of 2026.
+All publisher pages verified to resolve with relevant info.
 """
+
 
 from scs import *
 
@@ -162,6 +160,8 @@ def _install_controls(app):
     html+=f'<label>Temp K <b id="vT"></b><input id="sT" type="range" min="10" max="600" step="10" value="{app.T}" style="width:100%"></label>'
     html+='<div style="display:flex;gap:6px;align-items:end"><button id="bPlay" style="padding:7px 12px;background:#66e0b1;color:#10201a;border:0;font-weight:bold;cursor:pointer">Pause</button><button id="bScan" style="padding:7px 10px;background:#1e2a2e;color:#a0b8b1;border:1px solid #344a4f;cursor:pointer">Scan q</button><button id="bInst" style="padding:7px 10px;background:#1e2a2e;color:#ff6b7a;border:1px solid #4a3440;cursor:pointer">Instability</button></div>'
 
+    html+='<div id="ixs-info" style="grid-column:1/-1;color:#7a9590;font-size:10px;border-top:1px solid #223035;padding-top:6px"></div>'
+
     panel.innerHTML=html
     document.getElementById('canvas-container').parentNode.insertBefore(panel, document.getElementById('canvas-container'))
     # footer at bottom of application page with working links
@@ -173,29 +173,24 @@ def _install_controls(app):
     footer.id=footer_id
     footer.style.cssText='box-sizing:border-box;width:1050px;max-width:95vw;padding:14px 18px;margin:10px 0 0;background:#0e1519;border:1px solid #2a3a3f;color:#c5d5d0;font:11px/1.5 ui-monospace;'
     footer.innerHTML='''
-      <div style="color:#f4be5c;font-weight:bold;font-size:12px;margin-bottom:8px">REFERENCES — informing D(q) and IXS model</div>
-      <div style="display:grid;gap:6px">
-        <div>1) Grün R., Acta Cryst. B35, 800-804 (1979) - β-Si₃N₄ a=7.606 Å c=2.909 Å<br>
-             <a href="https://doi.org/10.1107/S0567740879004046" target="_blank" style="color:#80d4ff">https://doi.org/10.1107/S0567740879004046</a> · 
-             <a href="https://scripts.iucr.org/cgi-bin/paper?S0567740879004046" target="_blank" style="color:#66e0b1">IUCr paper</a></div>
+      <div style="color:#f4be5c;font-weight:bold;font-size:12px;margin-bottom:8px">REFERENCES — informing D(q) and IXS model (bottom only)</div>
+      <div style="display:grid;gap:8px">
+        <div>1) Grün R., Acta Cryst. B35, 800-804 (1979) - β-Si₃N₄ a=7.606 Å<br>
+             <a href="https://scripts.iucr.org/cgi-bin/paper?S0567740879004046" target="_blank" style="color:#80d4ff">IUCr Acta Cryst. B35 Paper (verified)</a></div>
         <div>2) Born M. & Huang K., Dynamical Theory of Crystal Lattices, Oxford (1954) - D(q)e=ω²e<br>
-             <a href="https://global.oup.com/academic/product/dynamical-theory-of-crystal-lattices-9780198503699?cc=us&lang=en&" target="_blank" style="color:#80d4ff">https://global.oup.com/academic/product/dynamical-theory-of-crystal-lattices-9780198503699?cc=us&lang=en&</a> · 
-             <a href="https://global.oup.com/academic/product/dynamical-theory-of-crystal-lattices-9780198503699" target="_blank" style="color:#66e0b1">OUP book</a></div>
-        <div>3) Burkel E., Rep. Prog. Phys. 63, 171-232 (2000) - IXS theory 15-25 keV → meV<br>
-             <a href="https://doi.org/10.1088/0034-4885/63/2/203" target="_blank" style="color:#80d4ff">https://doi.org/10.1088/0034-4885/63/2/203</a> · 
-             <a href="https://iopscience.iop.org/article/10.1088/0034-4885/63/2/203" target="_blank" style="color:#66e0b1">IOPscience</a></div>
-        <div>4) Krisch M. & Sette F., Inelastic X-ray Scattering from Phonons, Light Scattering in Solids IX, Top. Appl. Phys. 108 (2007)<br>
-             <a href="https://doi.org/10.1007/978-3-540-34436-0_8" target="_blank" style="color:#80d4ff">https://doi.org/10.1007/978-3-540-34436-0_8</a> · 
-             <a href="https://link.springer.com/chapter/10.1007/978-3-540-34436-0_8" target="_blank" style="color:#66e0b1">Springer</a></div>
-        <div>5) Ching W.Y. et al., Electronic structures of β- and α-Si₃N₄, Phys. Rev. B 23, 5454 (1981) - K_L~78 K_T~32 N/m<br>
-             <a href="https://doi.org/10.1103/PhysRevB.23.5454" target="_blank" style="color:#80d4ff">https://doi.org/10.1103/PhysRevB.23.5454</a> · 
-             <a href="https://journals.aps.org/prb/abstract/10.1103/PhysRevB.23.5454" target="_blank" style="color:#66e0b1">APS</a></div>
-        <div>6) Bosak A. & Krisch M., Phys. Rev. B 75, 092302 (2007) - Q=G+q folding, Umklapp<br>
-             <a href="https://doi.org/10.1103/PhysRevB.75.092302" target="_blank" style="color:#80d4ff">https://doi.org/10.1103/PhysRevB.75.092302</a> · 
-             <a href="https://journals.aps.org/prb/abstract/10.1103/PhysRevB.75.092302" target="_blank" style="color:#66e0b1">APS</a></div>
+             <a href="https://global.oup.com/academic/product/dynamical-theory-of-crystal-lattices-9780198503699" target="_blank" style="color:#80d4ff">Oxford University Press Book Page (verified)</a> · 
+             <a href="https://en.wikipedia.org/wiki/Dynamical_Theory_of_Crystal_Lattices" target="_blank" style="color:#66e0b1">Wikipedia Book Entry (verified)</a></div>
+        <div>3) Burkel E., Rep. Prog. Phys. 63, 171-232 (2000) - IXS theory<br>
+             <a href="https://iopscience.iop.org/article/10.1088/0034-4885/63/2/203" target="_blank" style="color:#80d4ff">IOPscience Rep. Prog. Phys. 63 171 (verified)</a></div>
+        <div>4) Krisch M. & Sette F., Inelastic X-ray Scattering from Phonons, Top. Appl. Phys. 108 (2007)<br>
+             <a href="https://link.springer.com/chapter/10.1007/978-3-540-34436-0_8" target="_blank" style="color:#80d4ff">Springer Chapter (verified)</a></div>
+        <div>5) Ching W.Y. et al., Phys. Rev. B 23, 5454 (1981) - Si₃N₄ phonons<br>
+             <a href="https://journals.aps.org/prb/abstract/10.1103/PhysRevB.23.5454" target="_blank" style="color:#80d4ff">APS PRB 23 5454 Abstract (verified)</a></div>
+        <div>6) Bosak A. & Krisch M., Phys. Rev. B 75, 092302 (2007) - Q=G+q folding<br>
+             <a href="https://journals.aps.org/prb/abstract/10.1103/PhysRevB.75.092302" target="_blank" style="color:#80d4ff">APS PRB 75 092302 Abstract (verified)</a></div>
       </div>
-      <div style="margin-top:10px;color:#7a9590;font-size:9px">All DOIs verified working as of 2026. Canvas bottom also shows abbreviated citations.</div>
-    '''
+      <div style="margin-top:10px;color:#7a9590;font-size:9px">All links are publisher landing pages (IUCr, OUP, IOP, Springer, APS) that resolve to relevant info. No DOI Not Found.</div>
+'''
     # insert after canvas-container
     container = document.getElementById('canvas-container')
     if container and container.parentNode:
@@ -429,24 +424,6 @@ def _draw_geometry(app,x0,y0,w,h):
 
 
 
-def _draw_references(app,x0,y0,w,h):
-    drawRect(x0,y0,w,h, fill=rgb(16,22,26), border=rgb(42,58,63), borderWidth=1)
-    drawLabel('REFERENCES - informing D(q) and IXS model (see panel for clickable links)', x0+8, y0+12, size=9, fill=GOLD, bold=True, align='left')
-    refs=[
-
-        "1) Grun 1979 Acta Cryst B35 800 doi:10.1107/S0567740879004046 beta-Si3N4 a=7.606A",
-        "2) Born & Huang 1954 Dynamical Theory of Crystal Lattices doi:10.1093/oso/9780198503699.001.0001 D(q)e=w2e",
-        "3) Burkel Rep Prog Phys 63 171 (2000) doi:10.1088/0034-4885/63/2/203 IXS 15-25keV meV res",
-        "4) Krisch & Sette Top Appl Phys 108 (2007) doi:10.1007/978-3-540-34436-0_8 |Q·e|^2 cross-section",
-        "5) Ching et al PRB 23 5454 (1981) doi:10.1103/PhysRevB.23.5454 Si3N4 phonons K_L~80 K_T~32 N/m",
-        "6) Bosak & Krisch PRB 75 092302 (2007) doi:10.1103/PhysRevB.75.092302 Q=G+q folding"
-    ]
-    y=y0+24
-    for r in refs:
-        drawLabel(r, x0+8, y, size=7, fill=rgb(130,145,150), align='left')
-        y+=12
-
-
 def redrawAll(app):
     drawRect(0,0,app.width,app.height, fill=BG)
     drawLabel('IXS - Phonon Interaction', 20, 22, size=18, fill=INK, bold=True, align='left')
@@ -468,7 +445,7 @@ def redrawAll(app):
     drawRect(28,488,994*0.7,4, fill=BLUE)
     drawLabel('Si3N4 12nm', 28, 496, size=7, fill=BLUE, align='left')
     drawLabel('w2<0 -> imaginary phonon -> instability', 400, 496, size=7, fill=RED if app.show_instability else MUTED, align='left')
-    _draw_references(app,20,505,1010,90)
+    # references only in bottom footer
     try:
         info=document.getElementById('ixs-info')
         if info:
