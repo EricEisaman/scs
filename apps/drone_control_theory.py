@@ -2,7 +2,7 @@ from scs import *
 import math, random
 
 # ============================================================
-# LYAPUNOV DRONE LAB — PROPER LASALLE ENERGY SHAPING (v3)
+# LYAPUNOV DRONE LAB — (v3)
 # Drone: V = 0.5*kp|e|^2 + 0.5|v|^2 + 0.5*kTh*theta_err^2 + 0.5*w^2
 #        Vdot = exact derivative, exponential = -kd|v|^2 -kOm*w^2 + cross <=0
 # Cart-pole: theta 0=DOWN, pi=UP, E=0.5*w^2 + (1-cos theta), E0=2
@@ -462,7 +462,7 @@ def drawCartOverlay(app):
     if not app.showCartOverlay:
         return
     drawRect(12, 360, 250, 198, fill=rgb(20,22,32), border=rgb(70,75,95), borderWidth=1.5)
-    drawLabel("Cart-Pole Swing-Up — Proper Energy Shaping", 137, 372, size=11, bold=True, fill=rgb(220,225,245))
+    drawLabel("Cart-Pole Swing-Up", 137, 372, size=11, bold=True, fill=rgb(220,225,245))
     drawLabel("θ=0 DOWN, π=UP | E=½ω²+(1-cosθ), E0=2", 137, 386, size=9, fill=rgb(150,160,190))
     drawLine(22, 500, 242, 500, fill=rgb(120,130,160), lineWidth=2)
     cartX = 137 + app.poleU*8
