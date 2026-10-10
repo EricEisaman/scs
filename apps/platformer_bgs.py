@@ -846,7 +846,7 @@ def redrawAll(app):
 
     # Scoreboard + BGS authority
     y=50
-    drawRect(90,y+20,160,20+len(app.world.players)*18,fill=rgb(0,0,0))
+    drawRect(90,y+20,160,20+len(app.world.players)*18,fill=rgb(0,0,0), align='center')
     drawLabel("LOCAL",90,y,size=12,fill=rgb(255,255,255))
     y+=18
     for p in list(app.world.players.values())[:6]:
