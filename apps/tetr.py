@@ -1,14 +1,9 @@
 """
-apps/tetr.py — V7 TETR.IO AUTHENTIC — Only required canvas_ui, true layout
-Matches:
-- solo.png replay layout: HOLD welded to board frame, NEXT welded, beige chamfered border, black grid, stats left (B2B, combo star, PIECES, ATTACK, TIME), garbage meter
-- Screenshot current abomination fixed: no overlapping sliders/tags/callouts, no ghost/hold switches clutter
-
-Uses only 7 canvas_ui components (required):
-- WaBreadcrumb, WaTabGroup, WaInput, WaAvatar, WaButton, WaBadge, WaDialog
-No switches, sliders, tags, callouts, dividers, dropdowns in main view
-
-TETR.IO accurate mechanics retained: 10x40, SRS+, Multiplier combo, B2B Charging Surge, Opener, change-on-attack, single opponent lock tetr_1v1, SOLO ZEN (no top-out)
+apps/tetr.py — V10 TETR.IO TITLE SCREEN + Rounded Rect Everywhere
+- Title screen matching screenshot: HOME bar, TETRISWIKI, star banner, MP/SOLO/TC/CONFIG/ABOUT blocks
+- Space bar no scroll fix
+- Your rounded rect sandbox integrated into EVERY draw: board frames, HOLD/NEXT, title menu, buttons, badges
+- Only 7 canvas_ui components used in gameplay, title uses custom rounded draws
 """
 
 from scs import *
@@ -16,13 +11,10 @@ from browser import window, aio
 import math, random, json as py_json, time
 
 try:
-    from extensions.canvas_ui import (
-        WaBreadcrumb, WaTabGroup, WaInput, WaAvatar, WaButton, WaBadge, WaDialog
-    )
+    from extensions.canvas_ui import WaBreadcrumb, WaTabGroup, WaInput, WaAvatar, WaButton, WaBadge, WaDialog
 except:
     from canvas_ui import WaBreadcrumb, WaTabGroup, WaInput, WaAvatar, WaButton, WaBadge, WaDialog
 
-# BGS
 _bgs_signals_py = {}
 try: window._bgs_signals = {}
 except: pass
@@ -101,13 +93,33 @@ def send_bgs_patch(app,path,payload):
         window.eval(script); return True
     except: return False
 
-# Mechanics
+# ===== YOUR ROUNDED RECT SANDBOX — used everywhere =====
+def drawRoundedRect(x, y, width, height, radius, fill, border=None, borderWidth=1, opacity=100):
+    r = max(0, min(radius, width/2, height/2))
+    if r == 0:
+        drawRect(x, y, width, height, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity)
+        return
+    # fill with rects + circles
+    if fill:
+        if width > 2*r:
+            drawRect(x+r, y, width-2*r, height, fill=fill, opacity=opacity)
+        if height > 2*r:
+            drawRect(x, y+r, width, height-2*r, fill=fill, opacity=opacity)
+        for cx in (x+r, x+width-r):
+            for cy in (y+r, y+height-r):
+                drawCircle(cx, cy, r, fill=fill, opacity=opacity)
+    # border — use SCS border with same radius
+    if border and borderWidth>0:
+        try:
+            drawRect(x, y, width, height, fill=None, border=border, borderWidth=borderWidth, roundness=r, opacity=opacity)
+        except:
+            pass
+
 BOARD_W, BOARD_H_INTERNAL = 10, 40
 BOARD_H_VISIBLE = 20
 CELL = 28
 PREVIEW_CELL = 14
 TETROMINOES = {'I':[[0,0,0,0],[1,1,1,1],[0,0,0,0],[0,0,0,0]],'J':[[1,0,0],[1,1,1],[0,0,0]],'L':[[0,0,1],[1,1,1],[0,0,0]],'O':[[1,1],[1,1]],'S':[[0,1,1],[1,1,0],[0,0,0]],'T':[[0,1,0],[1,1,1],[0,0,0]],'Z':[[1,1,0],[0,1,1],[0,0,0]]}
-# TETR.IO authentic colors (from wiki)
 COLORS = {'I':rgb(0,212,212),'J':rgb(0,75,212),'L':rgb(212,127,0),'O':rgb(212,212,0),'S':rgb(0,212,0),'T':rgb(138,0,212),'Z':rgb(212,0,0),'G':rgb(80,80,80)}
 KICKS_JLSTZ={(0,1):[(0,0),(-1,0),(-1,1),(0,-2),(-1,-2)],(1,0):[(0,0),(1,0),(1,-1),(0,2),(1,2)],(1,2):[(0,0),(1,0),(1,-1),(0,2),(1,2)],(2,1):[(0,0),(-1,0),(-1,1),(0,-2),(-1,-2)],(2,3):[(0,0),(1,0),(1,1),(0,-2),(1,-2)],(3,2):[(0,0),(-1,0),(-1,-1),(0,2),(-1,2)],(3,0):[(0,0),(-1,0),(-1,-1),(0,2),(-1,2)],(0,3):[(0,0),(1,0),(1,1),(0,-2),(1,-2)]}
 KICKS_I={(0,1):[(0,0),(-2,0),(1,0),(-2,-1),(1,2)],(1,0):[(0,0),(2,0),(-1,0),(2,1),(-1,-2)],(1,2):[(0,0),(-1,0),(2,0),(-1,2),(2,-1)],(2,1):[(0,0),(1,0),(-2,0),(1,-2),(-2,1)],(2,3):[(0,0),(2,0),(-1,0),(2,1),(-1,-2)],(3,2):[(0,0),(-2,0),(1,0),(-2,-1),(1,2)],(3,0):[(0,0),(1,0),(-2,0),(1,-2),(-2,1)],(0,3):[(0,0),(-1,0),(2,0),(-1,2),(2,-1)]}
@@ -116,9 +128,7 @@ def calc_attack(base,combo,mode="DOWN"):
     if combo<=0: return base
     if base==0: val=math.log(1+1.25*combo) if combo>=2 else 0
     else: val=base*(1+0.25*combo)
-    if mode=="DOWN": return math.floor(val)
-    else: f=math.floor(val); frac=val-f; return f+(1 if random.random()<frac else 0)
-
+    return math.floor(val) if mode=="DOWN" else math.floor(val)+(1 if random.random()<(val-math.floor(val)) else 0)
 def make_empty_match(local_id="local"):
     return {"version":"tetr_mp_v1_single","match_id":f"tetr_{int(time.time()*1000)}_{random.randint(1000,9999)}","environment":"tetr_1v1","max_players":2,"opponent_lock":True,"players":{"local":{"id":local_id,"tr":12500.0},"opponent":None},"queue":{"status":"idle"},"rules":{"garbage_target":"single_opponent_only","garbage_system":"change_on_attack","garbage_messiness":0.15,"passthrough":False,"b2b_system":"charging","combo_system":"multiplier","opener_phase":14,"playfield":"10x40"},"garbage":{"incoming":[],"outgoing":[]}}
 class SingleOpponentClient:
@@ -133,7 +143,6 @@ class SingleOpponentClient:
         self.match["players"]["opponent"]=opp; self.match["queue"]["status"]="matched"; return True
     def cancelSearch(self):
         if not self.hasOpponent(): self.match["queue"]["status"]="idle"; self.search_timer=0
-
 def rotate_matrix(mat,dir):
     if dir==1: return [list(reversed(col)) for col in zip(*mat)]
     elif dir==-1:
@@ -210,15 +219,10 @@ class TetrGame:
         if not self.bag: self.bag=new_bag()
         self.next_queue.append(self.bag.pop())
         self.hold_piece=None; self.ghost_y=0; self.lock_delay=0; self.lock_max=45 if mode=="zen" else 30; self.gravity_timer=0
-        if mode=="zen": self.gravity_speed=60
-        elif mode=="40lines": self.gravity_speed=22
-        elif mode=="blitz": self.gravity_speed=18
-        else: self.gravity_speed=40
+        self.gravity_speed=60 if mode=="zen" else 22 if mode=="40lines" else 18 if mode=="blitz" else 40
         self.das_left=0; self.das_right=0; self.soft_drop=False; self.game_over=False
         self.stats={"apm":0,"pps":0,"attack":0,"pieces":0,"start":time.time(),"lines":0,"score":0}
         self.rounding="DOWN" if mode not in ("quick_play","blitz") else "RNG"
-        self.last_combo=0; self.last_b2b=0
-        self.solo_target=40 if mode=="40lines" else None
     def spawn(self):
         k=self.next_queue.pop(0)
         if not self.bag: self.bag=new_bag()
@@ -268,24 +272,22 @@ class TetrGame:
         else:
             if cleared>0 and self.board.b2b_streak>=4: base+=self.board.surge_charged; self.board.surge_charged=0
             if cleared>0: self.board.b2b_streak=-1
-        cur_combo = self.board.combo + 1 if cleared>0 else self.board.combo
+        cur_combo=self.board.combo+1 if cleared>0 else self.board.combo
         attack=calc_attack(base,cur_combo,self.rounding)
         if self.mode=="quick_play" and cleared==1 and not is_tspin and self.board.combo<0: attack=max(attack,1)
         is_opener=self.board.pieces_placed<=14
         if cleared>0:
-            self.board.combo+=1; self.last_combo=self.board.combo+1; self.last_b2b=self.board.b2b_streak
+            self.board.combo+=1
             self.stats["lines"]+=cleared; self.stats["score"]+= [0,100,300,500,800][cleared] if cleared<=4 else 800
-        else:
-            self.board.combo=-1; self.last_combo=0
+        else: self.board.combo=-1
         self.board.attack=attack; self.board.lines+=cleared; self.stats["attack"]+=attack; self.stats["pieces"]+=1
         return attack,cleared,is_tspin,is_pc,is_opener,difficult
 
 def handle_piece_lock(app, attack, cleared, is_tspin, is_pc, is_opener, difficult):
-    inc = app.mp_wrapper.match["garbage"]["incoming"]
+    inc=app.mp_wrapper.match["garbage"]["incoming"]
     remaining=attack
     if app.tetr.mode in ("zen","40lines","blitz"):
-        app.tetr.board.attack=0
-        return
+        app.tetr.board.attack=0; return
     if is_opener and inc and remaining>0:
         pending=sum(g["lines"] for g in inc)
         if remaining < pending:
@@ -311,33 +313,47 @@ def handle_piece_lock(app, attack, cleared, is_tspin, is_pc, is_opener, difficul
         topped=app.tetr.board.add_garbage(g["lines"],g["hole"],0.15)
         if topped and not app.tetr.board.zen: app.tetr.game_over=True
 
-# APP — MINIMAL UI, TETR.IO AUTHENTIC
 def onAppStart(app):
     app.width=1120; app.height=700; app.stepsPerSecond=60
     app.background=rgb(18,19,23)
-    app.tetr=TetrGame(mode="tetra_league")
+    # space scroll fix
+    try:
+        window.eval('''if(!window._tetrio_space_fix){window._tetrio_space_fix=true; window.addEventListener("keydown", function(e){ const isSpace=e.code==="Space"||e.key===" "||e.keyCode===32; if(isSpace){ const ae=document.activeElement; const isInput=ae && (ae.tagName==="INPUT"||ae.tagName==="TEXTAREA"||ae.isContentEditable); if(!isInput){ e.preventDefault(); } } }, {passive:false, capture:true});}''')
+    except: pass
+
+    app.tetr=TetrGame(mode="zen")
     app.mp_wrapper=SingleOpponentClient(app)
-    app.game_state="menu"; app.username="Player1"
-    app.room_id="tetr_1v1"; app.client_id=None; app.mp_client=None; app.datastar_connected=False
+    app.game_state="title"  # START AT TITLE SCREEN like real TETR.IO
+    app.username="Player1"
+    app.room_id="tetr_zen"; app.client_id=None; app.mp_client=None; app.datastar_connected=False
     app.remote_players={}; app.single_opponent_id=None; app.single_opponent_board=None
     app.last_send_ms=0; app.last_character_state=None; app.remote_timestamps={}
-    # Layout — TETR.IO authentic centered
+
     BOARD_X=410; BOARD_Y=95
-    app.BOARD_X=BOARD_X; app.BOARD_Y=BOARD_Y
-    app.NEXT_X=BOARD_X+BOARD_W*CELL+14
-    app.HOLD_X=BOARD_X-114
-    app.OPP_X=app.NEXT_X+128+18
+    app.BOARD_X=BOARD_X; app.BOARD_Y=BOARD_Y; app.NEXT_X=BOARD_X+BOARD_W*CELL+14; app.HOLD_X=BOARD_X-114; app.OPP_X=app.NEXT_X+128+18
     app.board_x=BOARD_X; app.board_y=BOARD_Y; app.opp_board_x=app.OPP_X; app.opp_board_y=BOARD_Y
 
-    # Only required canvas_ui — 7 components
+    # Title menu items — matching screenshot
+    app.titleItems=[
+        {"id":"multiplayer","label":"MULTIPLAYER","sub":"PLAY ONLINE WITH FRIENDS AND FOES","icon":"MP","color":rgb(232,90,130),"dark":rgb(45,20,32),"y":120},
+        {"id":"solo","label":"SOLO","sub":"CHALLENGE YOURSELF AND TOP THE LEADERBOARDS","icon":"1P","color":rgb(130,120,220),"dark":rgb(25,25,45),"y":195},
+        {"id":"tetra","label":"TETRA CHANNEL","sub":"LEADERBOARDS, REPLAYS AND MORE","icon":"4CH","color":rgb(90,210,120),"dark":rgb(20,45,30),"y":270},
+        {"id":"config","label":"CONFIG","sub":"TWEAK YOUR TETR.IO EXPERIENCE","icon":"CFG","color":rgb(90,160,230),"dark":rgb(20,35,55),"y":345},
+        {"id":"about","label":"ABOUT","sub":"ALL ABOUT TETR.IO","icon":"ABT","color":rgb(140,140,150),"dark":rgb(35,35,38),"y":420},
+    ]
+
+    # Gameplay UI (only 7 components)
     app.breadcrumb=WaBreadcrumb(20,8,["Home","Arcade","TETR.IO 1v1","SOLO"])
     app.tabGroup=WaTabGroup(20,28,w=520,tabs=["Tetra League","Quick Play","ZEN","40 LINES","BLITZ"])
+    app.tabGroup.active=2
     app.avatarLocal=WaAvatar(20,68,size=36,initials="YOU",variant="brand")
     app.inputName=WaInput(66,72,w=150,h=28,placeholder="Player1",value="Player1",label="")
     app.avatarOpp=WaAvatar(20,110,size=36,initials="OPP",variant="neutral")
-    app.badgeOPP=WaBadge("NO OPP",66,118,variant="neutral")
+    app.badgeOPP=WaBadge("SOLO",66,118,variant="neutral")
     app.btnFind=WaButton("FIND OPPONENT (1v1 BGS)",20,156,w=200,h=36,variant="brand",onClick=lambda: start_search(app))
     app.btnCancel=WaButton("CANCEL",20,156,w=200,h=36,variant="neutral",appearance="outlined",onClick=lambda: cancel_search(app))
+    app.btnReset=WaButton("RESET (R)",20,156,w=200,h=36,variant="brand",onClick=lambda: reset_game(app))
+    app.btnBack=WaButton("BACK TO HOME",20,600,w=200,h=32,variant="neutral",appearance="outlined",onClick=lambda: go_title(app))
     app.badgeTR=WaBadge("TR 12500",20,204,variant="brand")
     app.badgeAPM=WaBadge("APM 0",100,204,variant="success")
     app.badgePPS=WaBadge("PPS 0",170,204,variant="warning")
@@ -368,13 +384,17 @@ def onAppStart(app):
         aio.run(join_mp())
 
     app.dialogGameOver=WaDialog("Match Finished","You topped out.",w=380,h=160,variant="danger")
-    app.dialogGameOver.buttons=[WaButton("RETRY (R)",0,0,w=110,h=36,variant="brand",onClick=lambda: reset_game(app)), WaButton("MENU",0,0,w=80,h=36,variant="neutral",appearance="outlined",onClick=lambda: go_menu(app))]
-
-    # DAS/ARR defaults — not shown in main UI (settings handled via keys)
+    app.dialogGameOver.buttons=[WaButton("RETRY (R)",0,0,w=110,h=36,variant="brand",onClick=lambda: reset_game(app)), WaButton("MENU",0,0,w=80,h=36,variant="neutral",appearance="outlined",onClick=lambda: go_title(app))]
     app.das=10; app.arr=2; app.sdf=6
 
+def go_title(app):
+    app.game_state="title"
+    app.dialogGameOver.hide()
+    app.single_opponent_id=None
+    app.mp_wrapper.match["queue"]["status"]="idle"
+    app.badgeOPP.text="HOME"
+
 def start_search(app):
-    if app.game_state=="searching": return
     tab=app.tabGroup.tabs[app.tabGroup.active]
     if "ZEN" in tab: mode="zen"; env="tetr_zen"
     elif "40" in tab: mode="40lines"; env="tetr_40l"
@@ -383,18 +403,17 @@ def start_search(app):
     else: mode="tetra_league"; env="tetr_1v1"
     app.room_id=env; app.tetr=TetrGame(mode=mode)
     if mode in ("zen","40lines","blitz"):
-        app.game_state="playing"; app.single_opponent_id=None; app.badgeOPP.text="SOLO"; app.mp_wrapper.match["queue"]["status"]="solo"
+        app.game_state="playing"; app.single_opponent_id=None; app.badgeOPP.text=f"SOLO {mode.upper()}"
     else:
         app.mp_wrapper.findOpponent(); app.game_state="searching"; app.single_opponent_id=None; app.badgeOPP.text="SEARCHING..."
 
 def cancel_search(app): app.mp_wrapper.cancelSearch(); app.game_state="menu"; app.single_opponent_id=None; app.badgeOPP.text="NO OPP"
 def reset_game(app):
     cur=app.tetr.mode; app.tetr=TetrGame(mode=cur); app.mp_wrapper.match["garbage"]["incoming"]=[]; app.dialogGameOver.hide()
-    if cur in ("zen","40lines","blitz"): app.game_state="playing"; app.badgeOPP.text="SOLO"
-    else: app.game_state="playing"; app.badgeOPP.text=f"OPP {str(app.single_opponent_id)[:4]}" if app.single_opponent_id else "NO OPP"
-def go_menu(app): app.dialogGameOver.hide(); app.game_state="menu"; app.mp_wrapper.match["players"]["opponent"]=None; app.mp_wrapper.match["queue"]["status"]="idle"; app.single_opponent_id=None; app.badgeOPP.text="NO OPP"
+    app.game_state="playing"
 
 def onStep(app):
+    if app.game_state=="title": return
     if HAS_MP:
         try:
             sig=get_signal("character-state-update")
@@ -440,7 +459,6 @@ def onStep(app):
     if app.tetr.mode=="blitz":
         elapsed=time.time()-app.tetr.stats["start"]
         if elapsed>=120: app.game_state="gameover"; app.dialogGameOver.title="BLITZ FINISH!"; app.dialogGameOver.message=f"Score: {app.tetr.stats['score']} lines {app.tetr.stats['lines']}"; app.dialogGameOver.show(); return
-
     app.tetr.gravity_timer+=1
     grav=app.tetr.gravity_speed
     if app.tetr.soft_drop: grav=max(1,40//max(1,int(app.sdf)))
@@ -487,24 +505,31 @@ def onStep(app):
             if app.tetr.board.attack>0: app.tetr.board.attack=0
 
 def redrawAll(app):
-    # Background like TETR.IO — dark with vignette
+    # === TITLE SCREEN ===
+    if app.game_state=="title":
+        drawTitleScreen(app)
+        return
+
     drawRect(0,0,app.width,app.height,fill=rgb(18,19,23))
-    # Top status
     app.breadcrumb.draw()
     app.tabGroup.draw()
-    # Left minimal panel
     app.avatarLocal.draw()
     app.inputName.draw()
     app.avatarOpp.draw()
     app.badgeOPP.draw()
-    if app.game_state=="searching": app.btnCancel.draw()
-    else: app.btnFind.draw()
+    if app.tetr.mode in ("zen","40lines","blitz") or app.tabGroup.tabs[app.tabGroup.active] in ("ZEN","40 LINES","BLITZ"):
+        if app.game_state=="playing": app.btnReset.draw()
+        elif app.game_state=="searching": app.btnCancel.draw()
+        else: app.btnReset.draw()
+    else:
+        if app.game_state=="searching": app.btnCancel.draw()
+        else: app.btnFind.draw()
+    app.btnBack.draw()
     app.badgeTR.draw()
     app.badgeAPM.draw()
     app.badgePPS.draw()
 
-    if app.game_state in ("playing","searching","gameover"):
-        # TETR.IO authentic frame
+    if app.game_state in ("playing","searching","gameover","menu"):
         draw_tetrio_frame(app)
         draw_board_tetrio(app,app.tetr.board,app.board_x,app.board_y,CELL,app.tetr.current,app.tetr.ghost_y,True)
         draw_hold_tetrio(app)
@@ -519,56 +544,82 @@ def redrawAll(app):
         app.dialogGameOver.buttons[0].x=cx-110; app.dialogGameOver.buttons[0].y=cy+30
         app.dialogGameOver.buttons[1].x=cx+10; app.dialogGameOver.buttons[1].y=cy+30
         for b in app.dialogGameOver.buttons: b.draw()
-
-    drawLabel(f"BGS-MP | ENV: {app.room_id} | OPP: {app.single_opponent_id or 'none'} | {app.tetr.mode.upper()} | 10x40 SRS+ | MULT + B2B CHARGING",app.width/2,app.height-10,size=8,fill=rgb(90,90,95))
+    drawLabel(f"BGS | {app.room_id} | {app.tetr.mode.upper()}",app.width/2,app.height-10,size=8,fill=rgb(90,90,95))
     drawCircle(app.width-16,12,4,fill=rgb(100,255,100) if app.datastar_connected else rgb(255,180,80))
 
+def drawTitleScreen(app):
+    # background dark with subtle trees silhouette
+    drawRect(0,0,app.width,app.height,fill=rgb(18,19,23))
+    drawRoundedRect(0,app.height-80,app.width,80,0,rgb(0,0,0),opacity=60)
+    # top bar
+    drawRoundedRect(0,0,app.width,28,0,rgb(25,26,32))
+    drawLabel("HOME",20,14,size=12,fill=rgb(200,200,210),bold=True,align="left-top")
+    drawLabel("TETRISWIKI  ANONYMOUS",app.width-20,14,size=10,fill=rgb(220,80,80),bold=True,align="right-top")
+    # star banner — orange dashed
+    banner_y=52
+    drawRoundedRect(120,banner_y,880,38,8,rgb(45,28,18),border=rgb(210,120,40),borderWidth=1,opacity=90)
+    # dashed effect — small rects
+    for i in range(0,880,16):
+        drawRect(120+i,banner_y,8,1,fill=rgb(210,120,40))
+        drawRect(120+i,banner_y+37,8,1,fill=rgb(210,120,40))
+    # star
+    drawLabel("★",app.width/2,banner_y-8,size=20,fill=rgb(255,200,80),bold=True)
+    drawLabel("DID YOU KNOW: TETR.IO IS DEVELOPED BY A SINGLE PERSON",app.width/2,banner_y+12,size=9,fill=rgb(220,180,160),bold=True)
+    drawLabel("PLEASE CONSIDER SUPPORTING THEM!",app.width/2,banner_y+24,size=9,fill=rgb(200,160,140))
+
+    # menu items
+    for item in app.titleItems:
+        x=120; y=item["y"]; w=880; h=58; r=8
+        is_hover=getattr(app,"_hoverTitle",None)==item["id"]
+        # shadow
+        drawRoundedRect(x+2,y+3,w,h,r,rgb(0,0,0),opacity=18)
+        # base dark tinted with color
+        drawRoundedRect(x,y,w,h,r,item["dark"],border=item["color"],borderWidth=1,opacity=95 if not is_hover else 100)
+        # left icon block
+        drawRoundedRect(x+6,y+6,78,h-12,6,item["color"],opacity=95)
+        drawLabel(item["icon"],x+45,y+h/2+2,size=22,fill="black",bold=True)
+        # label
+        drawLabel(item["label"],x+100,y+18,size=16,fill=rgb(235,230,240),bold=True,align="left-top")
+        drawLabel(item["sub"],x+100,y+36,size=9,fill=rgb(160,160,180),align="left-top")
+
+    # bottom
+    drawLabel("WELCOME TO TETR.IO!",14,app.height-12,size=10,fill=rgb(180,180,190),align="left-top")
+    drawLabel("TETR.IO",80,app.height-100,size=28,fill=rgb(50,50,60),bold=True,align="left-top")
+
 def draw_tetrio_frame(app):
-    # Outer beige frame with chamfer like solo.png — approximation with rects
     ox=app.board_x; oy=app.board_y; bw=BOARD_W*CELL; bh=BOARD_H_VISIBLE*CELL
-    frame=rgb(201,168,124) # TETR.IO tan
-    dark_frame=rgb(45,35,28)
-    # shadow
-    drawRect(ox-10,oy-10,bw+20+120+14,bh+20,fill=rgb(0,0,0),roundness=8,opacity=20)
-    # main board frame
-    drawRect(ox-8,oy-8,bw+16,bh+16,fill=frame,roundness=6)
-    drawRect(ox-6,oy-6,bw+12,bh+12,fill=rgb(0,0,0),roundness=4)
-    # HOLD frame welded left
+    frame=rgb(201,168,124)
+    drawRoundedRect(ox-10,oy-10,bw+20+120+14,bh+20,10,rgb(0,0,0),opacity=20)
+    drawRoundedRect(ox-8,oy-8,bw+16,bh+16,8,frame)
+    drawRoundedRect(ox-6,oy-6,bw+12,bh+12,6,rgb(0,0,0))
     hx=app.HOLD_X; hy=oy
-    drawRect(hx-6,hy-8,100+12,78+16,fill=frame,roundness=6)
-    drawRect(hx,hy,100,78,fill=rgb(0,0,0),roundness=4)
+    drawRoundedRect(hx-6,hy-8,100+12,78+16,8,frame)
+    drawRoundedRect(hx,hy,100,78,6,rgb(0,0,0))
     drawLabel("HOLD",hx+50,hy+10,size=11,fill=frame,bold=True)
-    # NEXT frame welded right
     nx=app.NEXT_X; ny=oy
-    drawRect(nx-6,ny-8,120+12,340+16,fill=frame,roundness=6)
-    drawRect(nx,ny,120,340,fill=rgb(0,0,0),roundness=4)
+    drawRoundedRect(nx-6,ny-8,120+12,340+16,8,frame)
+    drawRoundedRect(nx,ny,120,340,6,rgb(0,0,0))
     drawLabel("NEXT",nx+60,ny+12,size=11,fill=frame,bold=True)
 
 def draw_board_tetrio(app,board,ox,oy,cell,cur_piece=None,ghost_y=None,show_ghost=True):
     try:
-        # grid
         for y in range(BOARD_H_VISIBLE+1): drawLine(ox,oy+y*cell,ox+BOARD_W*cell,oy+y*cell,fill=rgb(35,32,28),lineWidth=1)
         for x in range(BOARD_W+1): drawLine(ox+x*cell,oy,ox+x*cell,oy+BOARD_H_VISIBLE*cell,fill=rgb(35,32,28),lineWidth=1)
         start_r=BOARD_H_INTERNAL-BOARD_H_VISIBLE
-        # placed
         for r in range(BOARD_H_VISIBLE):
             gr=start_r+r
             for c in range(BOARD_W):
                 k=board.grid[gr][c]
                 if k:
                     col=COLORS.get(k,rgb(60,60,60))
-                    # TETR.IO beveled block
-                    drawRect(ox+c*cell+1,oy+r*cell+1,cell-2,cell-2,fill=col,roundness=2)
-                    # inner highlight
-                    drawRect(ox+c*cell+3,oy+r*cell+3,cell-6,cell//3,fill="white",opacity=28,roundness=1)
-                    drawRect(ox+c*cell+3,oy+r*cell+cell-6,cell-6,2,fill="black",opacity=25,roundness=1)
-        if cur_piece and show_ghost and ghost_y is not None and app.tetr.mode!="zen":
+                    drawRoundedRect(ox+c*cell+1,oy+r*cell+1,cell-2,cell-2,2,col)
+        if cur_piece and show_ghost and ghost_y is not None:
             for r in range(len(cur_piece.shape)):
                 for c in range(len(cur_piece.shape[0])):
                     if cur_piece.shape[r][c]:
                         x=cur_piece.x+c; y=ghost_y+r; vy=y-start_r
                         if 0<=vy<BOARD_H_VISIBLE and 0<=x<BOARD_W:
-                            drawRect(ox+x*cell+1,oy+vy*cell+1,cell-2,cell-2,fill=None,border=COLORS[cur_piece.kind],borderWidth=2,roundness=2,opacity=32)
+                            drawRoundedRect(ox+x*cell+1,oy+vy*cell+1,cell-2,cell-2,2,None,border=COLORS[cur_piece.kind],borderWidth=2,opacity=32)
         if cur_piece:
             for r in range(len(cur_piece.shape)):
                 for c in range(len(cur_piece.shape[0])):
@@ -576,8 +627,7 @@ def draw_board_tetrio(app,board,ox,oy,cell,cur_piece=None,ghost_y=None,show_ghos
                         x=cur_piece.x+c; y=cur_piece.y+r; vy=y-start_r
                         if 0<=vy<BOARD_H_VISIBLE and 0<=x<BOARD_W:
                             col=COLORS[cur_piece.kind]
-                            drawRect(ox+x*cell+1,oy+vy*cell+1,cell-2,cell-2,fill=col,roundness=2)
-                            drawRect(ox+x*cell+3,oy+vy*cell+3,cell-6,cell//3,fill="white",opacity=30,roundness=1)
+                            drawRoundedRect(ox+x*cell+1,oy+vy*cell+1,cell-2,cell-2,2,col)
     except: pass
 
 def draw_hold_tetrio(app):
@@ -585,12 +635,14 @@ def draw_hold_tetrio(app):
         if not app.tetr.hold_piece: return
         hx=app.HOLD_X; hy=app.board_y
         shape=TETROMINOES[app.tetr.hold_piece]
-        # center piece in 100x78 box
         w=len(shape[0])*PREVIEW_CELL; h=len(shape)*PREVIEW_CELL
-        bx=hx+50 - w//2; by=hy+28
+        bx=hx+50 - w//2; by=hy+30
+        dim = not app.tetr.board.can_hold
         for r in range(len(shape)):
             for c in range(len(shape[0])):
-                if shape[r][c]: drawRect(bx+c*PREVIEW_CELL,by+r*PREVIEW_CELL,PREVIEW_CELL-1,PREVIEW_CELL-1,fill=COLORS[app.tetr.hold_piece],roundness=2)
+                if shape[r][c]:
+                    col=COLORS[app.tetr.hold_piece] if not dim else rgb(80,80,80)
+                    drawRoundedRect(bx+c*PREVIEW_CELL,by+r*PREVIEW_CELL,PREVIEW_CELL-1,PREVIEW_CELL-1,2,col)
     except: pass
 
 def draw_next_tetrio(app):
@@ -598,62 +650,56 @@ def draw_next_tetrio(app):
         nx=app.NEXT_X; ny=app.board_y
         for i,kind in enumerate(app.tetr.next_queue[:5]):
             shape=TETROMINOES[kind]
-            base_y=ny+32+i*58; base_x=nx+22
-            # center a bit
+            base_y=ny+34+i*58; base_x=nx+24
             for r in range(len(shape)):
                 for c in range(len(shape[0])):
-                    if shape[r][c]: drawRect(base_x+c*PREVIEW_CELL,base_y+r*PREVIEW_CELL,PREVIEW_CELL-1,PREVIEW_CELL-1,fill=COLORS[kind],roundness=2)
+                    if shape[r][c]: drawRoundedRect(base_x+c*PREVIEW_CELL,base_y+r*PREVIEW_CELL,PREVIEW_CELL-1,PREVIEW_CELL-1,2,COLORS[kind])
     except: pass
 
 def draw_opponent_tetrio(app):
     try:
-        if app.tetr.mode in ("zen","40lines","blitz"): 
-            # In SOLO, show no opponent, just ZEN info
-            ox=app.opp_board_x; oy=app.opp_board_y
-            drawRect(ox-6,oy-6,140,220,fill=rgb(0,0,0),border=rgb(201,168,124),borderWidth=1,roundness=6)
-            drawLabel("SOLO MODE",ox+70,oy+20,size=10,fill=rgb(201,168,124),bold=True)
-            if app.tetr.mode=="zen": drawLabel("ZEN\nRelaxed\nNo Game Over\nPractice",ox+70,oy+80,size=11,fill=rgb(120,200,140),bold=True)
-            elif app.tetr.mode=="40lines": drawLabel(f"40 LINES\n{app.tetr.stats['lines']}/40",ox+70,oy+80,size=12,fill="white",bold=True)
-            else: 
+        ox=app.opp_board_x; oy=app.opp_board_y
+        if app.tetr.mode in ("zen","40lines","blitz"):
+            drawRoundedRect(ox-6,oy-6,140,220,10,rgb(0,0,0),border=rgb(201,168,124),borderWidth=1)
+            drawLabel("SOLO MODE",ox+70,oy+18,size=10,fill=rgb(201,168,124),bold=True)
+            if app.tetr.mode=="zen":
+                drawLabel("ZEN",ox+70,oy+44,size=14,fill=rgb(120,255,150),bold=True)
+                drawLabel("Relaxed",ox+70,oy+62,size=10,fill=rgb(160,200,160))
+                drawLabel("No Game Over",ox+70,oy+78,size=9,fill=rgb(120,180,120))
+                drawLabel("Practice",ox+70,oy+94,size=9,fill=rgb(120,180,120))
+            elif app.tetr.mode=="40lines":
+                drawLabel("40 LINES",ox+70,oy+44,size=12,fill="white",bold=True)
+                drawLabel(f"{app.tetr.stats['lines']}/40",ox+70,oy+68,size=14,fill=rgb(220,200,180),bold=True)
+            else:
                 elapsed=int(time.time()-app.tetr.stats["start"])
-                drawLabel(f"BLITZ\n{120-elapsed}s\nScore {app.tetr.stats['score']}",ox+70,oy+80,size=11,fill="white",bold=True)
+                drawLabel("BLITZ",ox+70,oy+44,size=12,fill="white",bold=True)
+                drawLabel(f"{120-elapsed}s",ox+70,oy+66,size=12,fill=rgb(220,200,180),bold=True)
             return
-        ox=app.opp_board_x; oy=app.opp_board_y; cell=14
-        drawRect(ox-6,oy-6,BOARD_W*cell+12,BOARD_H_VISIBLE*cell//2+12,fill=rgb(0,0,0),border=rgb(201,168,124),borderWidth=1,roundness=6)
+        cell=14
+        drawRoundedRect(ox-6,oy-6,BOARD_W*cell+12,BOARD_H_VISIBLE*cell//2+12,8,rgb(0,0,0),border=rgb(201,168,124),borderWidth=1)
         drawLabel(f"OPP {str(app.single_opponent_id)[:6] if app.single_opponent_id else '---'}",ox+70,oy-12,size=9,fill=rgb(201,168,124),bold=True)
         board=app.single_opponent_board
         if board and len(board)>=200:
             for r in range(BOARD_H_VISIBLE//2):
                 for c in range(BOARD_W):
                     idx=r*BOARD_W+c
-                    if idx < len(board) and board[idx]: drawRect(ox+c*cell+1,oy+r*cell+1,cell-2,cell-2,fill=rgb(100,120,160),roundness=2)
-        inc=len(app.mp_wrapper.match["garbage"]["incoming"])
-        if inc:
-            drawRect(ox-6,oy+BOARD_H_VISIBLE*cell//2+10,BOARD_W*cell+12,8,fill=rgb(60,20,20),roundness=4)
-            drawRect(ox-6,oy+BOARD_H_VISIBLE*cell//2+10,min(BOARD_W*cell+12,inc*10),8,fill=rgb(220,50,50),roundness=4)
+                    if idx < len(board) and board[idx]: drawRoundedRect(ox+c*cell+1,oy+r*cell+1,cell-2,cell-2,2,rgb(100,120,160))
     except: pass
 
 def draw_stats_tetrio(app):
-    # Left of board stats like solo.png — B2B, combo star, PIECES, ATTACK, TIME
     try:
         ox=app.board_x; oy=app.board_y
-        # B2B x17
         if app.tetr.board.b2b_streak>=1:
             drawLabel(f"B2B x{app.tetr.board.b2b_streak}",ox-90,oy+160,size=13,fill=rgb(255,210,120),bold=True)
-        # Combo star — big yellow star with number like solo.png 14
         if app.tetr.board.combo>=1:
             combo_num=app.tetr.board.combo+1
-            # starburst
             cx=ox-70; cy=oy+190
-            drawCircle(cx,cy,28,fill=rgb(255,210,60),border=rgb(255,230,120))
-            # points
             for i in range(8):
                 ang=i*45*math.pi/180
-                x2=cx+math.cos(ang)*32; y2=cy+math.sin(ang)*32
-                drawLine(cx,cy,x2,y2,fill=rgb(255,210,60),lineWidth=6)
-            drawCircle(cx,cy,26,fill=rgb(255,210,60))
-            drawLabel(str(combo_num),cx,cy+2,size=22,fill="black",bold=True)
-        # Pieces, Attack, Time like bottom left in solo.png
+                x2=cx+math.cos(ang)*30; y2=cy+math.sin(ang)*30
+                drawLine(cx,cy,x2,y2,fill=rgb(255,210,60),lineWidth=7)
+            drawCircle(cx,cy,24,fill=rgb(255,210,60),border=rgb(255,230,120))
+            drawLabel(str(combo_num),cx,cy+2,size=20,fill="black",bold=True)
         elapsed=time.time()-app.tetr.stats["start"]
         pps=app.tetr.stats["pieces"]/max(1,elapsed)
         apm=int(app.tetr.stats["attack"]/max(1,elapsed)*60)
@@ -665,39 +711,61 @@ def draw_stats_tetrio(app):
         drawLabel(f"{apm}/M",ox-30,oy+324,size=10,fill=rgb(150,130,110))
         drawLabel(f"TIME",ox-90,oy+348,size=10,fill=rgb(201,168,124))
         drawLabel(f"{int(elapsed//60)}:{elapsed%60:06.3f}",ox-90,oy+366,size=16,fill=rgb(220,200,180),bold=True)
-        if app.tetr.mode=="zen":
-            drawLabel(f"ZEN",ox-90,oy+400,size=12,fill=rgb(120,255,150),bold=True)
-            drawLabel(f"No Top-Out",ox-90,oy+416,size=10,fill=rgb(100,180,120))
     except: pass
 
 def draw_garbage_meter(app):
-    # Vertical yellow meter left of board like TETR.IO
     try:
         ox=app.board_x; oy=app.board_y; bh=BOARD_H_VISIBLE*CELL
-        # track
-        drawRect(ox-12,oy,6,bh,fill=rgb(40,35,25),roundness=3)
+        drawRoundedRect(ox-12,oy,6,bh,3,rgb(40,35,25))
         inc=len(app.mp_wrapper.match["garbage"]["incoming"])
         if inc:
             h=min(bh,inc*18)
-            drawRect(ox-12,oy+bh-h,6,h,fill=rgb(220,200,80),roundness=3)
+            drawRoundedRect(ox-12,oy+bh-h,6,h,3,rgb(220,200,80))
     except: pass
 
 def onMousePress(app,mx,my):
+    if app.game_state=="title":
+        # check title items
+        for item in app.titleItems:
+            x=120; y=item["y"]; w=880; h=58
+            if x<=mx<=x+w and y<=my<=y+h:
+                if item["id"]=="multiplayer":
+                    app.game_state="menu"; app.tabGroup.active=0; start_search(app); app.game_state="searching"
+                elif item["id"]=="solo":
+                    app.game_state="menu"; app.tabGroup.active=2; app.tetr=TetrGame(mode="zen"); app.game_state="playing"; app.badgeOPP.text="SOLO ZEN"
+                elif item["id"] in ("tetra","config","about"):
+                    # for now just show message — go to solo as placeholder
+                    app.game_state="menu"; app.tabGroup.active=2; app.tetr=TetrGame(mode="zen"); app.game_state="playing"
+                return True
+        return False
     if app.dialogGameOver.open:
         for b in app.dialogGameOver.buttons:
             if b.contains(mx,my) and b.handlePress(mx,my): return True
     if app.tabGroup.handlePress(mx,my): start_search(app); return True
-    if app.btnFind.contains(mx,my) and app.btnFind.handlePress(mx,my): return True
-    if app.game_state=="searching" and app.btnCancel.contains(mx,my) and app.btnCancel.handlePress(mx,my): return True
+    if app.tetr.mode in ("zen","40lines","blitz") or app.tabGroup.tabs[app.tabGroup.active] in ("ZEN","40 LINES","BLITZ"):
+        if app.btnReset.contains(mx,my) and app.btnReset.handlePress(mx,my): return True
+        if app.btnCancel.contains(mx,my) and app.btnCancel.handlePress(mx,my): return True
+    else:
+        if app.btnFind.contains(mx,my) and app.btnFind.handlePress(mx,my): return True
+        if app.btnCancel.contains(mx,my) and app.btnCancel.handlePress(mx,my): return True
+    if app.btnBack.contains(mx,my) and app.btnBack.handlePress(mx,my): return True
     if app.inputName.contains(mx,my): app.inputName.focused=True; return True
     else: app.inputName.focused=False
     return False
+
 def onMouseMove(app,mx,my):
-    for comp in [app.btnFind, app.btnCancel, app.tabGroup, app.inputName]:
+    if app.game_state=="title":
+        hover=None
+        for item in app.titleItems:
+            x=120; y=item["y"]; w=880; h=58
+            if x<=mx<=x+w and y<=my<=y+h: hover=item["id"]
+        app._hoverTitle=hover
+        return False
+    for comp in [app.btnFind, app.btnCancel, app.btnReset, app.btnBack, app.tabGroup, app.inputName]:
         if hasattr(comp,'handleMove'): comp.handleMove(mx,my)
     return False
 def onMouseRelease(app,mx,my):
-    for comp in [app.btnFind, app.btnCancel]:
+    for comp in [app.btnFind, app.btnCancel, app.btnReset, app.btnBack]:
         if hasattr(comp,'handleRelease'): comp.handleRelease(mx,my)
     return False
 def onMouseDrag(app,mx,my): return onMouseMove(app,mx,my)
@@ -708,8 +776,13 @@ def _norm_key(k):
     return mapping.get(kl,kl)
 def onKeyPress(app,key):
     k=_norm_key(key)
+    if app.game_state=="title":
+        if k in ("enter"," "): # enter on title goes to solo
+            app.game_state="menu"; app.tabGroup.active=2; app.tetr=TetrGame(mode="zen"); app.game_state="playing"
+        return
     if app.game_state!="playing":
         if k=="r": reset_game(app)
+        if k=="escape": go_title(app)
         return
     if k in ("left","a"): app.tetr.try_move(-1,0)
     elif k in ("right","d"): app.tetr.try_move(1,0)
@@ -723,6 +796,7 @@ def onKeyPress(app,key):
         attack,cleared,tspin,is_pc,is_opener,difficult=app.tetr.lock()
         handle_piece_lock(app,attack,cleared,tspin,is_pc,is_opener,difficult)
         app.tetr.spawn(); app.tetr.lock_delay=0
+    elif k=="escape": go_title(app)
 def onKeyRelease(app,key):
     k=_norm_key(key)
     if k in ("left","a"): app.tetr.das_left=0

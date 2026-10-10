@@ -1,25 +1,14 @@
+
 """
-extensions/canvas_ui.py — V2 Clean — 20 WebAwesome components for dark SCS canvas
-Fixed: z-index layering, dark theme readability, dropdown overlay, spacing
+extensions/canvas_ui.py — V3 — Rounded rect sandbox integrated + dark TETR.IO theme
+Your sandbox:
+    drawRoundedRect(x,y,w,h,r,fill) using rects + 4 circles — avoids SCS roundness bugs
 
-WebAwesome principles retained:
-- variant: brand / neutral / success / warning / danger
-- appearance: filled / outlined / text
-- size: small / medium / large
-- radius, shadow, focus ring
-- Slots: header/body/footer
-- Accessible hit targets 32px+
+Now _drawRect uses that when roundness>0, else plain rect.
+Also includes _drawRoundedRectBorder for frames.
 
-Dark theme adaptation (TETR.IO style):
-- Cards / inputs use #1f2333 / #2a2e42 fills
-- Labels use #e2e8f0 light for readability on #0f1115 bg
-- Borders #353a50
-
-Top 20 WA components:
-1 Button, 2 Card, 3 Input, 4 Dialog, 5 Badge, 6 Callout, 7 Checkbox, 8 Select, 9 Textarea, 10 ProgressBar, 11 Spinner, 12 Tooltip, 13 TabGroup, 14 Dropdown, 15 Avatar, 16 Tag, 17 Switch, 18 Slider, 19 Breadcrumb, 20 Divider
-
-Usage: import and call draw() in redrawAll, handlePress in onMousePress.
-For overlay components (Select, Dropdown) call drawOverlay() after board to avoid under-draw.
+Uses only required components in V8: Breadcrumb, TabGroup, Input, Avatar, Button, Badge, Dialog
+But keeps all 20 for compatibility.
 """
 
 class WaTheme:
@@ -29,18 +18,17 @@ class WaTheme:
         "success": {"50":"#f0fdf4","500":"#00c950","600":"#16a34a"},
         "warning": {"50":"#fefce8","500":"#fdc700","600":"#d97706"},
         "danger":  {"50":"#fef2f2","500":"#fb2c36","600":"#dc2626"},
-        "dark": {"card":"#1f2333","card2":"#2a2e42","border":"#353a50","input":"#232738","text":"#e2e8f0","subtext":"#94a3b8"}
+        "dark": {"card":"#1f2333","card2":"#2a2e42","border":"#353a50","input":"#232738","text":"#e2e8f0","subtext":"#94a3b8"},
+        "tetrio": {"frame":"#c9a87c","frameDark":"#2d231c","bg":"#121317"}
     }
     radius = {"small":6, "medium":10, "large":16, "pill":999}
     @staticmethod
-    def variant_fill(v):
-        return WaTheme.colors.get(v, WaTheme.colors["brand"])["500"]
+    def variant_fill(v): return WaTheme.colors.get(v, WaTheme.colors["brand"])["500"]
     @staticmethod
-    def variant_soft(v):
-        return WaTheme.colors.get(v, WaTheme.colors["brand"])["50"]
+    def variant_soft(v): return WaTheme.colors.get(v, WaTheme.colors["brand"])["50"]
     @staticmethod
     def dark_soft(v):
-        mapd = {"brand":"#252a40","success":"#1e2f25","warning":"#2f2a1e","danger":"#2f1e25","neutral":"#252a3a"}
+        mapd={"brand":"#252a40","success":"#1e2f25","warning":"#2f2a1e","danger":"#2f1e25","neutral":"#252a3a"}
         return mapd.get(v,"#252a40")
 
 class WaComponent:
@@ -50,28 +38,54 @@ class WaComponent:
         self.size = size
         self.disabled = disabled
         self.hovered=False; self.pressed=False; self.focused=False
-    def contains(self,mx,my):
-        return self.x <= mx <= self.x+self.w and self.y <= my <= self.y+self.h
-    def handleMove(self,mx,my):
-        self.hovered=self.contains(mx,my)
+    def contains(self,mx,my): return self.x <= mx <= self.x+self.w and self.y <= my <= self.y+self.h
+    def handleMove(self,mx,my): self.hovered=self.contains(mx,my)
 
-def _drawRect(x,y,w,h,fill=None,border=None,borderWidth=1,roundness=8,opacity=100):
+def _drawRoundedRectImpl(x, y, w, h, r, fill, opacity=100):
+    try:
+        from scs import drawRect, drawCircle
+        r = max(0, min(r, w/2, h/2))
+        if r == 0:
+            drawRect(x, y, w, h, fill=fill, opacity=opacity)
+            return
+        if w > 2*r:
+            drawRect(x+r, y, w-2*r, h, fill=fill, opacity=opacity)
+        if h > 2*r:
+            drawRect(x, y+r, w, h-2*r, fill=fill, opacity=opacity)
+        for cx in (x+r, x+w-r):
+            for cy in (y+r, y+h-r):
+                drawCircle(cx, cy, r, fill=fill, opacity=opacity)
+    except: pass
+
+def _drawRect(x,y,w,h,fill=None,border=None,borderWidth=1,roundness=0,opacity=100):
     try:
         from scs import drawRect
-        drawRect(x,y,w,h,fill=fill,border=border,borderWidth=borderWidth,roundness=roundness,opacity=opacity)
+        if fill and roundness and roundness>0:
+            _drawRoundedRectImpl(x,y,w,h,roundness,fill,opacity)
+            if border and borderWidth>0:
+                try:
+                    drawRect(x,y,w,h,fill=None,border=border,borderWidth=borderWidth,roundness=roundness,opacity=opacity)
+                except: pass
+        else:
+            drawRect(x,y,w,h,fill=fill,border=border,borderWidth=borderWidth,roundness=roundness,opacity=opacity)
     except: pass
+
 def _drawLabel(text,x,y,size=14,fill="black",bold=False,align="center"):
     try:
         from scs import drawLabel
         drawLabel(text,x,y,size=size,fill=fill,bold=bold,align=align)
     except: pass
-def _drawCircle(x,y,r,fill=None,border=None):
+def _drawCircle(x,y,r,fill=None,border=None,opacity=100):
     try:
         from scs import drawCircle
-        drawCircle(x,y,r,fill=fill,border=border)
+        drawCircle(x,y,r,fill=fill,border=border,opacity=opacity)
+    except: pass
+def _drawLine(x1,y1,x2,y2,fill="black",lineWidth=1):
+    try:
+        from scs import drawLine
+        drawLine(x1,y1,x2,y2,fill=fill,lineWidth=lineWidth)
     except: pass
 
-# WaButton
 class WaButton(WaComponent):
     def __init__(self,label,x,y,w=140,h=40,variant="brand",appearance="filled",pill=False,onClick=None):
         super().__init__(x,y,w,h,variant)
@@ -99,7 +113,6 @@ class WaButton(WaComponent):
         return False
     def handleRelease(self,mx,my): self.pressed=False
 
-# WaCard
 class WaCard(WaComponent):
     def __init__(self,x,y,w,h,header="",footer="",variant="neutral"):
         super().__init__(x,y,w,h,variant)
@@ -115,7 +128,6 @@ class WaCard(WaComponent):
             _drawLabel(self.footer,self.x+12,self.y+self.h-14,size=10,fill=WaTheme.colors["dark"]["subtext"],align="left-top")
         if body_draw_fn: body_draw_fn(self.x+12,self.y+(48 if self.header else 12))
 
-# WaInput
 class WaInput(WaComponent):
     def __init__(self,x,y,w=220,h=36,placeholder="Enter...",label="",value="",variant="neutral"):
         super().__init__(x,y,w,h,variant)
@@ -131,170 +143,154 @@ class WaInput(WaComponent):
         col=WaTheme.colors["dark"]["text"] if self.value else WaTheme.colors["dark"]["subtext"]
         _drawLabel(txt,self.x+10,self.y+self.h/2+1,size=12,fill=col,align="left-top")
 
-# WaDialog
 class WaDialog(WaComponent):
-    def __init__(self,title,message,x=0,y=0,w=400,h=200,variant="brand"):
-        super().__init__(x,y,w,h,variant)
+    def __init__(self,title,message="",w=400,h=200,variant="neutral"):
+        super().__init__(0,0,w,h,variant)
         self.title=title; self.message=message; self.open=False; self.buttons=[]
     def show(self): self.open=True
     def hide(self): self.open=False
-    def draw(self,app_width=800,app_height=600):
+    def draw(self,screen_w,screen_h):
         if not self.open: return
-        _drawRect(0,0,app_width,app_height,fill="black",opacity=45)
-        cx=app_width/2-self.w/2; cy=app_height/2-self.h/2
-        _drawRect(cx+3,cy+4,self.w,self.h,fill="black",roundness=20,opacity=20)
-        _drawRect(cx,cy,self.w,self.h,fill=WaTheme.colors["dark"]["card"],border=WaTheme.colors["dark"]["border"],borderWidth=1,roundness=18)
-        _drawLabel(self.title,cx+20,cy+22,size=15,fill=WaTheme.colors["dark"]["text"],bold=True,align="left-top")
-        _drawLabel(self.message,cx+20,cy+48,size=12,fill=WaTheme.colors["dark"]["subtext"],align="left-top")
-        for b in self.buttons: b.draw()
+        try:
+            from scs import drawRect
+            drawRect(0,0,screen_w,screen_h,fill="black",opacity=55)
+        except: pass
+        cx=screen_w/2-self.w/2; cy=screen_h/2-self.h/2
+        self.x=cx; self.y=cy
+        _drawRect(cx+3,cy+4,self.w,self.h,fill="black",roundness=18,opacity=25)
+        _drawRect(cx,cy,self.w,self.h,fill=WaTheme.colors["dark"]["card2"],border=WaTheme.colors["dark"]["border"],borderWidth=1,roundness=18)
+        _drawLabel(self.title,cx+20,cy+24,size=14,fill=WaTheme.colors["dark"]["text"],bold=True,align="left-top")
+        _drawLabel(self.message,cx+20,cy+48,size=11,fill=WaTheme.colors["dark"]["subtext"],align="left-top")
 
-# WaBadge
 class WaBadge(WaComponent):
-    def __init__(self,text,x,y,variant="brand",pill=True):
-        super().__init__(x,y,24,20,variant)
-        self.text=str(text); self.pill=pill; self.w=max(28,len(self.text)*7+16)
+    def __init__(self,text,x,y,variant="neutral"):
+        super().__init__(x,y,len(text)*7+16,22,variant)
+        self.text=text
     def draw(self):
-        _drawRect(self.x,self.y,self.w,self.h,fill=WaTheme.variant_fill(self.variant),roundness=WaTheme.radius["pill"])
-        _drawLabel(self.text,self.x+self.w/2,self.y+self.h/2+1,size=10,fill="white",bold=True)
+        _drawRect(self.x,self.y,self.w,self.h,fill=WaTheme.dark_soft(self.variant),border=WaTheme.variant_fill(self.variant),borderWidth=1,roundness=7)
+        _drawLabel(self.text,self.x+self.w/2,self.y+self.h/2+1,size=10,fill=WaTheme.variant_fill(self.variant),bold=True)
 
-# WaCallout
 class WaCallout(WaComponent):
-    def __init__(self,x,y,w,message,variant="warning",title=""):
-        super().__init__(x,y,w,48,variant)
-        self.message=message; self.title=title; self.h=46+(18 if title else 0)
+    def __init__(self,x,y,w=240,message="",variant="brand",title=""):
+        super().__init__(x,y,w,60,variant)
+        self.message=message; self.title=title
     def draw(self):
-        _drawRect(self.x,self.y,self.w,self.h,fill=WaTheme.dark_soft(self.variant),border=WaTheme.variant_fill(self.variant),borderWidth=1.2,roundness=10)
+        _drawRect(self.x,self.y,self.w,self.h,fill=WaTheme.dark_soft(self.variant),border=WaTheme.variant_fill(self.variant),borderWidth=1,roundness=10)
         if self.title:
-            _drawLabel(self.title,self.x+10,self.y+10,size=11,fill=WaTheme.variant_fill(self.variant),bold=True,align="left-top")
-            _drawLabel(self.message,self.x+10,self.y+26,size=10,fill=WaTheme.colors["dark"]["subtext"],align="left-top")
+            _drawLabel(self.title,self.x+10,self.y+12,size=11,fill=WaTheme.variant_fill(self.variant),bold=True,align="left-top")
+            _drawLabel(self.message,self.x+10,self.y+28,size=10,fill=WaTheme.colors["dark"]["subtext"],align="left-top")
         else:
-            _drawLabel(self.message,self.x+10,self.y+self.h/2+1,size=10,fill=WaTheme.colors["dark"]["text"],align="left-top")
+            _drawLabel(self.message,self.x+10,self.y+18,size=10,fill=WaTheme.colors["dark"]["text"],align="left-top")
 
-# WaCheckbox
 class WaCheckbox(WaComponent):
     def __init__(self,x,y,label="",checked=False,variant="brand"):
         super().__init__(x,y,20,20,variant)
         self.label=label; self.checked=checked
     def draw(self):
-        fill=WaTheme.variant_fill(self.variant) if self.checked else WaTheme.colors["dark"]["card"]
-        border=WaTheme.variant_fill(self.variant) if self.checked else WaTheme.colors["dark"]["border"]
-        _drawRect(self.x,self.y,18,18,fill=fill,border=border,borderWidth=1.5,roundness=5)
-        if self.checked: _drawLabel("✓",self.x+9,self.y+9,size=11,fill="white",bold=True)
-        if self.label: _drawLabel(self.label,self.x+26,self.y+10,size=11,fill=WaTheme.colors["dark"]["text"],align="left-top")
+        _drawRect(self.x,self.y,18,18,fill=WaTheme.colors["dark"]["card"] if not self.checked else WaTheme.variant_fill(self.variant),border=WaTheme.colors["dark"]["border"],borderWidth=1,roundness=6)
+        if self.checked:
+            _drawLabel("✓",self.x+9,self.y+9,size=11,fill="white",bold=True)
+        if self.label:
+            _drawLabel(self.label,self.x+26,self.y+9,size=11,fill=WaTheme.colors["dark"]["text"],align="left-top")
     def toggle(self,mx,my):
-        if self.x-4 <= mx <= self.x+len(self.label)*6+30 and self.y-4 <= my <= self.y+20:
+        if self.x-2 <= mx <= self.x+self.w+len(self.label)*6+30 and self.y-2 <= my <= self.y+self.h+4:
             self.checked=not self.checked; return True
         return False
 
-# WaSelect with overlay
 class WaSelect(WaComponent):
-    def __init__(self,x,y,w=200,options=None,value=None,label=""):
-        super().__init__(x,y,w,36,"neutral")
-        self.options=options or ["Tetra League","Quick Play","40 Lines","Blitz"]
-        self.value=value or self.options[0]; self.label=label; self.expanded=False
+    def __init__(self,x,y,w=180,options=None,value=None,label="",variant="neutral"):
+        super().__init__(x,y,w,32,variant)
+        self.options=options or []; self.value=value or (self.options[0] if self.options else ""); self.label=label; self.expanded=False
     def draw(self):
         if self.label:
-            _drawLabel(self.label,self.x,self.y-8,size=10,fill=WaTheme.colors["dark"]["subtext"],bold=True,align="left-top")
-        _drawRect(self.x,self.y,self.w,self.h,fill=WaTheme.colors["dark"]["input"],border=WaTheme.colors["dark"]["border"],borderWidth=1,roundness=10)
-        _drawLabel(self.value,self.x+10,self.y+self.h/2+1,size=12,fill=WaTheme.colors["dark"]["text"],align="left-top")
-        _drawLabel("▾",self.x+self.w-16,self.y+self.h/2+1,size=12,fill=WaTheme.colors["dark"]["subtext"])
+            _drawLabel(self.label,self.x,self.y-8,size=11,fill=WaTheme.colors["dark"]["subtext"],bold=True,align="left-top")
+        _drawRect(self.x,self.y,self.w,32,fill=WaTheme.colors["dark"]["input"],border=WaTheme.colors["dark"]["border"],borderWidth=1,roundness=10)
+        _drawLabel(self.value+" ▾",self.x+10,self.y+16,size=12,fill=WaTheme.colors["dark"]["text"],align="left-top")
     def drawOverlay(self):
         if not self.expanded: return
         h=len(self.options)*30+8
-        _drawRect(self.x+2,self.y+self.h+6,self.w,h,fill="black",roundness=12,opacity=25)
-        _drawRect(self.x,self.y+self.h+4,self.w,h,fill=WaTheme.colors["dark"]["card2"],border=WaTheme.colors["dark"]["border"],borderWidth=1,roundness=12)
+        _drawRect(self.x+2,self.y+36,self.w,h,fill="black",roundness=12,opacity=25)
+        _drawRect(self.x,self.y+34,self.w,h,fill=WaTheme.colors["dark"]["card2"],border=WaTheme.colors["dark"]["border"],borderWidth=1,roundness=12)
         for i,opt in enumerate(self.options):
-            is_sel=opt==self.value
-            if is_sel:
-                _drawRect(self.x+3,self.y+self.h+8+i*30,self.w-6,26,fill=WaTheme.colors["brand"]["500"],roundness=8,opacity=20)
-            _drawLabel(opt,self.x+12,self.y+self.h+21+i*30,size=11,fill=WaTheme.colors["dark"]["text"] if not is_sel else "white",align="left-top",bold=is_sel)
+            y=self.y+38+i*30
+            _drawLabel(opt,self.x+12,y+10,size=11,fill=WaTheme.colors["dark"]["text"],align="left-top")
     def handlePress(self,mx,my):
         if self.contains(mx,my):
             self.expanded=not self.expanded; return True
         if self.expanded:
-            for i,opt in enumerate(self.options):
-                ry=self.y+self.h+8+i*30
-                if self.x <= mx <= self.x+self.w and ry <= my <= ry+26:
-                    self.value=opt; self.expanded=False; return True
-            self.expanded=False
-            return False
-        return False
+            for i in range(len(self.options)):
+                y=self.y+38+i*30
+                if self.x <= mx <= self.x+self.w and y <= my <= y+26:
+                    self.value=self.options[i]; self.expanded=False; return True
+        self.expanded=False; return False
 
-# WaTextarea
 class WaTextarea(WaComponent):
-    def __init__(self,x,y,w=260,h=80,placeholder="...",value="",label=""):
+    def __init__(self,x,y,w=240,h=80,placeholder="",value="",label=""):
         super().__init__(x,y,w,h)
         self.placeholder=placeholder; self.value=value; self.label=label
     def draw(self):
-        if self.label: _drawLabel(self.label,self.x,self.y-8,size=10,fill=WaTheme.colors["dark"]["subtext"],bold=True,align="left-top")
+        if self.label:
+            _drawLabel(self.label,self.x,self.y-8,size=11,fill=WaTheme.colors["dark"]["subtext"],bold=True,align="left-top")
         _drawRect(self.x,self.y,self.w,self.h,fill=WaTheme.colors["dark"]["input"],border=WaTheme.colors["dark"]["border"],borderWidth=1,roundness=10)
         txt=self.value if self.value else self.placeholder
-        col=WaTheme.colors["dark"]["text"] if self.value else WaTheme.colors["dark"]["subtext"]
-        for i,ln in enumerate(txt.split("\n")[:4]):
-            _drawLabel(ln,self.x+8,self.y+14+i*15,size=11,fill=col,align="left-top")
+        _drawLabel(txt,self.x+10,self.y+14,size=11,fill=WaTheme.colors["dark"]["text"],align="left-top")
 
-# WaProgressBar
 class WaProgressBar(WaComponent):
-    def __init__(self,x,y,w=200,h=8,value=0.45,variant="brand"):
+    def __init__(self,x,y,w=200,h=8,value=0.5,variant="brand"):
         super().__init__(x,y,w,h,variant)
-        self.value=max(0,min(1,value))
+        self.value=value
     def draw(self):
-        _drawRect(self.x,self.y,self.w,self.h,fill=WaTheme.colors["dark"]["border"],roundness=WaTheme.radius["pill"])
-        _drawRect(self.x,self.y,self.w*self.value,self.h,fill=WaTheme.variant_fill(self.variant),roundness=WaTheme.radius["pill"])
+        _drawRect(self.x,self.y,self.w,self.h,fill=WaTheme.colors["dark"]["border"],roundness=6)
+        _drawRect(self.x,self.y,self.w*self.value,self.h,fill=WaTheme.variant_fill(self.variant),roundness=6)
 
-# WaSpinner
 class WaSpinner(WaComponent):
     def __init__(self,x,y,size=24,variant="brand"):
         super().__init__(x,y,size,size,variant)
         self.angle=0
     def draw(self):
-        self.angle=(self.angle+12)%360
-        _drawCircle(self.x+self.w/2,self.y+self.h/2,self.w/2-2,border=WaTheme.colors["dark"]["border"])
-        try:
-            from scs import drawArc
-            drawArc(self.x+self.w/2,self.y+self.h/2,self.w/2-2,self.w/2-2,0+self.angle,270+self.angle,fill=None,border=WaTheme.variant_fill(self.variant),borderWidth=3)
-        except:
-            _drawLabel("◍",self.x+self.w/2,self.y+self.h/2,size=self.w,fill=WaTheme.variant_fill(self.variant))
+        _drawCircle(self.x+self.w/2,self.y+self.h/2,self.w/2,fill=None,border=WaTheme.colors["dark"]["border"])
+        import math
+        ax=self.x+self.w/2+math.cos(math.radians(self.angle))*self.w/2
+        ay=self.y+self.h/2+math.sin(math.radians(self.angle))*self.h/2
+        _drawCircle(ax,ay,4,fill=WaTheme.variant_fill(self.variant))
 
-# WaTooltip
 class WaTooltip(WaComponent):
-    def __init__(self,text,x,y,w=260):
-        super().__init__(x,y,w,28,"neutral")
+    def __init__(self,text,x,y,w=200,variant="neutral"):
+        super().__init__(x,y,w,30,variant)
         self.text=text; self.visible=False
     def draw(self):
         if not self.visible: return
-        _drawRect(self.x,self.y,self.w,24,fill=WaTheme.colors["neutral"]["900"],roundness=8,opacity=90)
-        _drawLabel(self.text,self.x+self.w/2,self.y+12,size=10,fill="white",align="center")
+        _drawRect(self.x,self.y,self.w,28,fill=WaTheme.colors["dark"]["card2"],border=WaTheme.colors["dark"]["border"],borderWidth=1,roundness=8)
+        _drawLabel(self.text,self.x+self.w/2,self.y+14,size=10,fill=WaTheme.colors["dark"]["subtext"])
 
-# WaTabGroup
 class WaTabGroup(WaComponent):
     def __init__(self,x,y,w=300,tabs=None):
-        super().__init__(x,y,w,36,"neutral")
-        self.tabs=tabs or ["Lobby","Tetra League","Config"]
-        self.active=0; self.tab_width=w//max(1,len(self.tabs))
+        super().__init__(x,y,w,32)
+        self.tabs=tabs or ["Tab1","Tab2"]; self.active=0
     def draw(self):
-        _drawRect(self.x,self.y,self.w,34,fill=WaTheme.colors["dark"]["card"],border=WaTheme.colors["dark"]["border"],borderWidth=1,roundness=10)
+        _drawRect(self.x,self.y,self.w,self.h,fill=WaTheme.colors["dark"]["card"],border=WaTheme.colors["dark"]["border"],borderWidth=1,roundness=10)
+        tw=self.w/len(self.tabs)
         for i,t in enumerate(self.tabs):
             is_active=i==self.active
             if is_active:
-                _drawRect(self.x+i*self.tab_width+2,self.y+2,self.tab_width-4,30,fill=WaTheme.colors["dark"]["card2"],border=WaTheme.colors["dark"]["border"],borderWidth=1,roundness=8)
-            _drawLabel(t,self.x+i*self.tab_width+self.tab_width/2,self.y+17,size=11,fill=WaTheme.colors["dark"]["text"] if is_active else WaTheme.colors["dark"]["subtext"],bold=is_active)
+                _drawRect(self.x+i*tw+2,self.y+2,tw-4,self.h-4,fill=WaTheme.colors["dark"]["card2"],roundness=8)
+            _drawLabel(t,self.x+i*tw+tw/2,self.y+self.h/2+1,size=11,fill=WaTheme.colors["dark"]["text"] if is_active else WaTheme.colors["dark"]["subtext"],bold=is_active)
     def handlePress(self,mx,my):
-        if self.y <= my <= self.y+36 and self.x <= mx <= self.x+self.w:
-            idx=int((mx-self.x)//self.tab_width)
-            if 0 <= idx < len(self.tabs):
-                self.active=idx; return True
+        if not self.contains(mx,my): return False
+        tw=self.w/len(self.tabs)
+        idx=int((mx-self.x)//tw)
+        if 0<=idx<len(self.tabs):
+            self.active=idx; return True
         return False
 
-# WaDropdown
 class WaDropdownItem:
-    def __init__(self,label,variant="neutral"): self.label=label; self.variant=variant
+    def __init__(self,label,variant="neutral"):
+        self.label=label; self.variant=variant
 
 class WaDropdown(WaComponent):
-    def __init__(self,x,y,w=140,items=None,label="More"):
-        super().__init__(x,y,w,32)
-        self.items=items or [WaDropdownItem("Profile"), WaDropdownItem("Settings"), WaDropdownItem("Report Bug","warning")]
-        self.label=label; self.open=False
+    def __init__(self,x,y,w=120,items=None,label="Menu",variant="neutral"):
+        super().__init__(x,y,w,32,variant)
+        self.items=items or []; self.label=label; self.open=False
     def draw(self):
         _drawRect(self.x,self.y,self.w,32,fill=WaTheme.colors["dark"]["card"],border=WaTheme.colors["dark"]["border"],borderWidth=1,roundness=10)
         _drawLabel(self.label+" ▾",self.x+self.w/2,self.y+16,size=11,fill=WaTheme.colors["dark"]["text"],bold=True)
@@ -317,7 +313,6 @@ class WaDropdown(WaComponent):
                     self.open=False; return self.items[i].label
         self.open=False; return False
 
-# WaAvatar
 class WaAvatar(WaComponent):
     def __init__(self,x,y,size=40,initials="P1",variant="brand",image=None):
         super().__init__(x,y,size,size,variant)
@@ -326,7 +321,6 @@ class WaAvatar(WaComponent):
         _drawCircle(self.x+self.w/2,self.y+self.h/2,self.w/2,fill=WaTheme.colors["dark"]["card2"],border=WaTheme.colors["dark"]["border"])
         _drawLabel(self.initials,self.x+self.w/2,self.y+self.h/2+1,size=int(self.w*0.35),fill=WaTheme.variant_fill(self.variant),bold=True)
 
-# WaTag
 class WaTag(WaComponent):
     def __init__(self,label,x,y,variant="neutral",removable=True):
         super().__init__(x,y,len(label)*8+28,22,variant)
@@ -342,14 +336,13 @@ class WaTag(WaComponent):
             self.removed=True; return True
         return False
 
-# WaSwitch
 class WaSwitch(WaComponent):
     def __init__(self,x,y,checked=False,label="",variant="brand"):
         super().__init__(x,y,40,22,variant)
         self.checked=checked; self.label=label
     def draw(self):
         fill=WaTheme.variant_fill(self.variant) if self.checked else WaTheme.colors["dark"]["border"]
-        _drawRect(self.x,self.y,self.w,self.h,fill=fill,roundness=WaTheme.radius["pill"])
+        _drawRect(self.x,self.y,self.w,self.h,fill=fill,roundness=999)
         thumb_x=self.x+(self.w-18) if self.checked else self.x+2
         _drawCircle(thumb_x+9,self.y+11,8,fill="white",border=WaTheme.colors["dark"]["border"])
         if self.label:
@@ -359,7 +352,6 @@ class WaSwitch(WaComponent):
             self.checked=not self.checked; return True
         return False
 
-# WaSlider
 class WaSlider(WaComponent):
     def __init__(self,x,y,w=180,min=0,max=100,value=50,label="",variant="brand"):
         super().__init__(x,y,w,20,variant)
@@ -382,7 +374,6 @@ class WaSlider(WaComponent):
     def _updateFromX(self,mx):
         pct=max(0,min(1,(mx-self.x)/self.w)); self.value=self.min+pct*(self.max-self.min)
 
-# WaBreadcrumb
 class WaBreadcrumb(WaComponent):
     def __init__(self,x,y,items=None):
         super().__init__(x,y,300,20,"neutral")
@@ -398,7 +389,6 @@ class WaBreadcrumb(WaComponent):
                 _drawLabel("/",x,self.y+6,size=11,fill=WaTheme.colors["dark"]["border"],align="left-top")
                 x+=10
 
-# WaDivider
 class WaDivider(WaComponent):
     def __init__(self,x,y,w=240,vertical=False,label=""):
         super().__init__(x,y,w,1 if not vertical else 100)
