@@ -2,7 +2,7 @@ from scs import *
 import math, random
 
 # ============================================================
-# LYAPUNOV DRONE LAB — (v3)
+# LYAPUNOV DRONE LAB — PROPER LASALLE ENERGY SHAPING (v3)
 # Drone: V = 0.5*kp|e|^2 + 0.5|v|^2 + 0.5*kTh*theta_err^2 + 0.5*w^2
 #        Vdot = exact derivative, exponential = -kd|v|^2 -kOm*w^2 + cross <=0
 # Cart-pole: theta 0=DOWN, pi=UP, E=0.5*w^2 + (1-cos theta), E0=2
@@ -266,7 +266,7 @@ def drawSky(app):
         b = int(235 + (235-235)*t)
         if app.windOn:
             r = int(r*0.78); g = int(g*0.82); b = int(b*0.9)
-        drawRect(0, y, 700, 4, fill=rgb(r,g,b), border=None)
+        drawRect(0, y, 700, 4, fill=rgb(r,g,b), border=None, align='leftTop')
     drawCircle(620, 70, 38, fill=rgb(255, 235, 120) if not app.windOn else rgb(210,210,180), border=None, opacity=85)
     drawCircle(620, 70, 48, fill=None, border=rgb(255,240,150), borderWidth=2, opacity=30)
     for c in app.clouds:
@@ -280,10 +280,10 @@ def drawSky(app):
                  fill=rgb(255,255,255), opacity=int(op*100), lineWidth=2 if app.windOn else 1)
 
 def drawIcyGround(app):
-    drawRect(0, 565, 700, 135, fill=rgb(205, 225, 245), border=None)
+    drawRect(0, 565, 700, 135, fill=rgb(205, 225, 245), border=None, align='leftTop')
     for i in range(0, 700, 70):
         drawLine(i, 575+i%30, i+30, 580+(i*2)%20, fill=rgb(170,200,230), lineWidth=1, opacity=60)
-    drawRect(0, 565, 700, 8, fill=rgb(255,255,255), opacity=40, border=None)
+    drawRect(0, 565, 700, 8, fill=rgb(255,255,255), opacity=40, border=None, align='leftTop')
     drawLine(0, 565, 700, 565, fill=rgb(120,150,190), lineWidth=3)
     shX = app.droneX + app.theta*18
     dist = (565 - app.droneY)/500
@@ -357,8 +357,8 @@ def drawDrone(app):
         drawLine(x1, y1, x2, y2, fill=rgb(180,180,190), lineWidth=2, opacity=55)
 
 def drawBowlPanel(app):
-    drawRect(700, 0, 350, 700, fill=rgb(18,20,28), border=None)
-    drawRect(700, 0, 350, 700, fill=None, border=rgb(50,55,70), borderWidth=2)
+    drawRect(700, 0, 350, 700, fill=rgb(18,20,28), border=None, align='leftTop')
+    drawRect(700, 0, 350, 700, fill=None, border=rgb(50,55,70), borderWidth=2, align='leftTop')
     drawLabel("LYAPUNOV ENERGY BOWL", 875, 22, size=15, bold=True, fill=rgb(230,235,255))
     drawLabel("V = Vtrans+Vatt, positive-def • radially unbounded", 875, 40, size=10, fill=rgb(150,160,190))
     cx = 875
@@ -383,7 +383,7 @@ def drawBowlPanel(app):
     ballX = cx + max(-110, min(110, ex*0.55))
     ballY = cy + ((ex*0.55)**2)/120 + 6
     if abs(app.vx) < 6 and abs(app.vy) < 6 and math.hypot(ex, app.droneY-app.targetY) > 20 and app.mode in (1,3):
-        drawRect(ballX-28, ballY-2, 56, 6, fill=rgb(255,210,80), opacity=55, border=None)
+        drawRect(ballX, ballY, 56, 6, fill=rgb(255,210,80), opacity=55, border=None, align='center')
         drawLabel("LaSalle flat — not invariant, slides off", ballX, ballY-18, size=9, fill=rgb(255,220,120))
     for i, rn in enumerate(app.bowlTrail[-30:]):
         op = int(10 + i*2.2)
@@ -404,7 +404,7 @@ def drawBowlPanel(app):
         drawLabel(f"dV/dt ≤ -αV  (exponential)", cx, 390, size=10, fill=rgb(180,185,205))
     else:
         drawLabel("Global + LaSalle: largest invariant set = origin", cx, 390, size=10, fill=rgb(180,185,205))
-    drawRect(720, 410, 310, 62, fill=rgb(28,31,42), border=rgb(55,60,80), borderWidth=1)
+    drawRect(720, 410, 310, 62, fill=rgb(28,31,42), border=rgb(55,60,80), borderWidth=1, align='leftTop')
     drawLabel("Lyapunov decay over time", 875, 416, size=10, fill=rgb(150,160,190))
     if len(app.Vhistory)>2:
         maxV = max(app.Vhistory) if max(app.Vhistory)>1 else 1
@@ -427,29 +427,29 @@ def drawBowlPanel(app):
         isActive = app.mode==m
         bg = rgb(70,85,130) if isActive else rgb(38,42,58)
         bd = rgb(120,160,255) if isActive else rgb(55,60,80)
-        drawRect(720, y, 310, 26, fill=bg, border=bd, borderWidth=2 if isActive else 1)
+        drawRect(720, y, 310, 26, fill=bg, border=bd, borderWidth=2 if isActive else 1, align='leftTop')
         drawLabel(label, 875, y+13, size=12, bold=isActive, fill=rgb(235,240,255) if isActive else rgb(160,170,190))
     windStr = "WINDSTORM ON" if app.windOn else "wind off"
     windCol = rgb(120,200,255) if app.windOn else rgb(100,110,130)
-    drawRect(720, 630, 145, 26, fill=rgb(30,35,50), border=windCol, borderWidth=2)
+    drawRect(720, 630, 145, 26, fill=rgb(30,35,50), border=windCol, borderWidth=2, align='leftTop')
     drawLabel(f"W: {windStr}", 792, 643, size=11, bold=app.windOn, fill=windCol)
-    drawRect(875, 630, 70, 26, fill=rgb(30,35,50), border=rgb(80,85,100), borderWidth=1)
+    drawRect(875, 630, 70, 26, fill=rgb(30,35,50), border=rgb(80,85,100), borderWidth=1, align='leftTop')
     drawLabel("SPACE: pause", 910, 643, size=10, fill=rgb(160,170,190))
-    drawRect(955, 630, 75, 26, fill=rgb(30,35,50), border=rgb(80,85,100), borderWidth=1)
+    drawRect(955, 630, 75, 26, fill=rgb(30,35,50), border=rgb(80,85,100), borderWidth=1, align='leftTop')
     drawLabel("R: reset", 992, 643, size=10, fill=rgb(160,170,190))
-    drawRect(720, 665, 310, 30, fill=rgb(24,26,36), border=None)
+    drawRect(720, 665, 310, 30, fill=rgb(24,26,36), border=None, align='leftTop')
     drawLabel("V = ½kp|e|² + ½|v|² + ½kTh|θ-θd|² + ½ω² >0", 875, 675, size=9, fill=rgb(130,140,170))
     drawLabel("V→∞ as |x|→∞  (radially unbounded → global)", 875, 686, size=8, fill=rgb(100,180,255))
 
 def drawHeader(app):
-    drawRect(0, 0, 700, 38, fill=rgb(15,17,26), opacity=88, border=None)
+    drawRect(0, 0, 700, 38, fill=rgb(15,17,26), opacity=88, border=None, align='leftTop')
     kp, kd, kTh, kOm, g, alpha, desc = getGains(app.mode)
     drawLabel("LYAPUNOV DRONE LAB — quadrotor = broomstick on ice in wind", 210, 13, size=13, bold=True, fill=rgb(235,240,255), align='left')
     drawLabel(desc, 10, 28, size=11, fill=rgb(120,200,255), align='left')
     drawLabel(f"|e|={math.hypot(app.droneX-app.targetX, app.droneY-app.targetY):0.0f}  Vdot={app.Vdot:+0.1f}  θ={math.degrees(app.theta):+0.1f}°", 690, 20, size=10, fill=rgb(180,190,210), align='right')
 
 def drawInstructions(app):
-    drawRect(0, 600, 700, 100, fill=rgb(15,17,26), opacity=82, border=None)
+    drawRect(0, 600, 700, 100, fill=rgb(15,17,26), opacity=82, border=None, align='leftTop')
     lines = [
         "CLICK/DRAG to set TARGET anywhere — test GLOBAL stability (radially unbounded bowl).",
         "Keys: 1-4 modes | W windstorm | G gust | R reset | C cart-pole overlay | SPACE pause",
@@ -461,8 +461,8 @@ def drawInstructions(app):
 def drawCartOverlay(app):
     if not app.showCartOverlay:
         return
-    drawRect(12, 360, 250, 198, fill=rgb(20,22,32), border=rgb(70,75,95), borderWidth=1.5)
-    drawLabel("Cart-Pole Swing-Up", 137, 372, size=11, bold=True, fill=rgb(220,225,245))
+    drawRect(12, 360, 250, 198, fill=rgb(20,22,32), border=rgb(70,75,95), borderWidth=1.5, align='leftTop')
+    drawLabel("Cart-Pole Swing-Up — Proper Energy Shaping", 137, 372, size=11, bold=True, fill=rgb(220,225,245))
     drawLabel("θ=0 DOWN, π=UP | E=½ω²+(1-cosθ), E0=2", 137, 386, size=9, fill=rgb(150,160,190))
     drawLine(22, 500, 242, 500, fill=rgb(120,130,160), lineWidth=2)
     cartX = 137 + app.poleU*8
@@ -495,8 +495,8 @@ def redrawAll(app):
     drawInstructions(app)
     drawCartOverlay(app)
     if app.messageTimer>0:
-        drawRect(180, 42, 360, 22, fill=rgb(255,210,80), border=rgb(50,40,10), borderWidth=1)
+        drawRect(360, 53, 360, 22, fill=rgb(255,210,80), border=rgb(50,40,10), borderWidth=1, align='center')
         drawLabel("New target set — testing global asymptotic stability!", 360, 53, size=11, bold=True, fill=rgb(40,30,0))
     if app.paused:
-        drawRect(0,0,700,700, fill=rgb(0,0,0), opacity=35, border=None)
+        drawRect(0,0,700,700, fill=rgb(0,0,0), opacity=35, border=None, align='leftTop')
         drawLabel("PAUSED — press SPACE", 350, 350, size=28, bold=True, fill=rgb(255,255,255))
