@@ -232,7 +232,7 @@ def _install_controls(app):
     upd()
 
 def onAppStart(app):
-    app.width=1050; app.height=700; app.stepsPerSecond=30; app.background=BG
+    app.width=1050; app.height=515; app.stepsPerSecond=30; app.background=BG
     app.Ein=20000000.0; app.dE=1.8; app.theta_deg=35.0; app.phi_deg=20.0; app.T=300.0
     app.branch_idx=3; app.playing=True; app.auto_scan=False; app.show_instability=False
     app.time=0.0; app.amplitude=6.0; app.cur_KL=K_L; app.cur_KT=K_T
