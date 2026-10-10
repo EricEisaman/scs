@@ -866,7 +866,7 @@ def redrawAll(app):
     if app.show_help:
         hx=app.width-160
         hy=80
-        drawRect(app.width-310,hy+60,300,140,fill=rgb(0,0,0))
+        drawRect(hx,hy+60,300,140,fill=rgb(0,0,0),align='center')
         drawLabel("BGS CONTROLS",hx,hy-20,size=12,fill=rgb(255,255,255))
         drawLabel("WASD / Arrows move",hx,hy,size=10,fill=rgb(200,220,255))
         drawLabel("R reset P pause 1 add",hx,hy+16,size=10,fill=rgb(200,220,255))
