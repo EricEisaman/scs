@@ -36,6 +36,14 @@ def _inject(name, module_obj):
 # The real packages live in extensions/__init__.py + extensions/*.py
 # We attempt to import them; if import fails (e.g. in sandbox without path),
 # we create a placeholder that will be overwritten once the package loads.
+try:
+    from extensions.canvas_ui import *
+    # create module entry if package loader fails
+    import extensions.canvas_ui as _mod
+    sys.modules['extensions.canvas_ui'] = _mod
+except Exception as e:
+    # fallback — will be loaded via extensions/__init__.py
+    pass
 
 try:
     import extensions.fetch as _fetch_mod
