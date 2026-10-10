@@ -16,8 +16,10 @@ import types
 # ------------------------------------------------------------------
 if 'extensions' not in sys.modules:
     pkg = types.ModuleType('extensions')
-    pkg.__path__ = ['extensions']
     sys.modules['extensions'] = pkg
+else:
+    pkg = sys.modules['extensions']
+pkg.__path__ = getattr(pkg, '__path__', ['extensions'])
 
 # ------------------------------------------------------------------
 # Helper to inject a submodule
@@ -50,6 +52,12 @@ except Exception as _e:
     pass
 
 try:
+    import extensions.ui as _ui_mod
+    _inject('ui', _ui_mod)
+except Exception:
+    pass
+
+try:
     import extensions.file_loader as _fl_mod
     _inject('file_loader', _fl_mod)
 except Exception:
@@ -67,4 +75,4 @@ try:
 except Exception:
     pass
 
-__all__ = ['fetch', 'transformers', 'file_loader', 'pyodide', 'proc_audio']
+__all__ = ['fetch', 'transformers', 'ui', 'file_loader', 'pyodide', 'proc_audio']

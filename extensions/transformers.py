@@ -47,19 +47,22 @@ _JS_BOOTSTRAP = """
   window._scsTransformersSetup = true;
   window._scsTransformersCache = {};
   window._scsTransformersModule = null;
+  window._scsTransformersProgress = {status: 'idle', file: '', loaded: 0, total: 0, progress: 0};
 
   window._scsEnsureTransformers = async () => {
     if (window._scsTransformersModule) return window._scsTransformersModule;
     try {
+      console.info('[scs transformers] importing @huggingface/transformers@3.8.1');
       const mod = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1');
       mod.env.allowLocalModels = false;
       mod.env.allowRemoteModels = true;
       // WASM assets via CDN (mirrors fetch.py dual backend pattern)
       mod.env.backends.onnx.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1/dist/';
       window._scsTransformersModule = mod;
+      console.info('[scs transformers] JS module imported; remote models enabled');
       return mod;
     } catch(e) {
-      console.error('[scs transformers] load failed', e);
+      console.error('[scs transformers] JS module import failed', e);
       throw e;
     }
   };
@@ -75,12 +78,45 @@ _JS_BOOTSTRAP = """
     }
     const key = task + '::' + (modelId || 'default') + '::' + JSON.stringify(opts);
     if (window._scsTransformersCache[key]) {
+      console.info('[scs transformers] using cached pipeline', {task, modelId});
+      window._scsTransformersProgress = {status: 'cached', file: '', loaded: 0, total: 0, progress: 100};
       return window._scsTransformersCache[key];
     }
-    const mod = await window._scsEnsureTransformers();
-    const pipe = await mod.pipeline(task, modelId || undefined, opts);
-    window._scsTransformersCache[key] = pipe;
-    return pipe;
+    console.info('[scs transformers] pipeline requested', {task, modelId, dtype: opts.dtype});
+    window._scsTransformersProgress = {status: 'loading', file: '', loaded: 0, total: 0, progress: 0};
+    let lastProgressKey = '';
+    let lastProgressBucket = -1;
+    opts.progress_callback = (event) => {
+      const update = event || {};
+      const status = String(update.status || 'loading');
+      const file = String(update.file || update.name || '');
+      const progress = Number(update.progress) || 0;
+      window._scsTransformersProgress = {
+        status,
+        file,
+        loaded: Number(update.loaded) || 0,
+        total: Number(update.total) || 0,
+        progress
+      };
+      const bucket = Math.floor(progress / 25);
+      if (file !== lastProgressKey || bucket !== lastProgressBucket || status !== 'progress') {
+        console.info('[scs transformers] model progress', {status, file, progress});
+        lastProgressKey = file;
+        lastProgressBucket = bucket;
+      }
+    };
+    try {
+      const mod = await window._scsEnsureTransformers();
+      console.info('[scs transformers] calling Transformers.js pipeline; model fetch should begin', {task, modelId});
+      const pipe = await mod.pipeline(task, modelId || undefined, opts);
+      window._scsTransformersCache[key] = pipe;
+      console.info('[scs transformers] pipeline loaded', {task, modelId});
+      return pipe;
+    } catch(e) {
+      window._scsTransformersProgress.status = 'error';
+      console.error('[scs transformers] pipeline load failed', {task, modelId, error: e});
+      throw e;
+    }
   };
 
   // Handles file_loader-style encoding: supports (input), (input, labels), (input, options), (input, labels, options)
@@ -134,6 +170,8 @@ _JS_BOOTSTRAP = """
   window._scsListPipelines = () => {
     return JSON.stringify(Object.keys(window._scsTransformersCache));
   };
+
+  window._scsGetProgress = () => JSON.stringify(window._scsTransformersProgress);
 })();
 """
 
@@ -312,6 +350,13 @@ async def list_cached_pipelines():
     except:
         return []
 
+def get_download_progress():
+    _ensure_js()
+    try:
+        return json.loads(str(window._scsGetProgress()))
+    except Exception:
+        return {}
+
 async def configure_env(**kwargs):
     _ensure_js()
     mod = await window._scsEnsureTransformers()
@@ -326,6 +371,7 @@ __all__ = [
     'ensure_transformers',
     'clear_cache',
     'list_cached_pipelines',
+    'get_download_progress',
     'configure_env',
     'DEFAULT_MODELS',
     'ORIGINAL_TO_XENOVA',

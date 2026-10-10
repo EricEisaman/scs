@@ -32,8 +32,9 @@ Our extension uses same: JSON.stringify/parse bridge, Array.from for Float32Arra
 """
 
 from scs import *
-from browser import aio
-from extensions.transformers import pipeline, clear_cache, ORIGINAL_TO_XENOVA
+from browser import aio, document
+from extensions.transformers import pipeline, clear_cache, get_download_progress, ORIGINAL_TO_XENOVA
+from extensions.ui import Button, ImageInput, TextArea
 
 # ---------------------------------------------------------------------------
 # Exact 14 tasks from screenshot - same order, same display names, same MB
@@ -243,7 +244,7 @@ DEMO_IMAGES = [
 # ---------------------------------------------------------------------------
 def format_result(task_def, result):
     if result is None:
-        return ["No result yet. Press SPACE to run."]
+        return ["No result yet. Select a model and press Generate."]
     t = task_def['task']
     lines = []
     try:
@@ -338,28 +339,95 @@ def wrap_text(text, max_len=60):
         lines.append(cur)
     return lines
 
+def _input_field_key(task_def):
+    task = task_def['task']
+    if task == 'question-answering':
+        return 'question'
+    if task == 'automatic-speech-recognition':
+        return 'audio_url'
+    if task in ('image-to-text', 'image-classification', 'zero-shot-image-classification', 'object-detection'):
+        return 'image_url'
+    return 'example_input'
+
+def _sync_input_editor(app):
+    task_def = app.tasks[app.selectedIdx]
+    field = _input_field_key(task_def)
+    editor_value = task_def.get(field, '')
+    is_image = field == 'image_url'
+    if is_image and task_def.get('image_file_name'):
+        editor_value = task_def['image_file_name']
+    app.inputEditor.value = editor_value
+    if is_image:
+        app.imageInput.show()
+        app.imageInput.set_source(task_def.get(field, ''))
+    else:
+        app.imageInput.hide()
+    left_y = app.buttonStartY + 4 * (app.buttonH + app.buttonGap) + 6 + 52
+    left_w = (app.width - 56) // 2
+    if task_def['task'] == 'question-answering':
+        context_lines = len(wrap_text(task_def['context'], 60))
+        top = left_y + 67 + 14 * context_lines
+        height = 48
+        placeholder = 'Type a question'
+    elif task_def['task'] == 'zero-shot-classification':
+        top, height = left_y + 48, 100
+        placeholder = 'Enter text to classify'
+    elif task_def['task'] in ('image-to-text', 'image-classification', 'zero-shot-image-classification', 'object-detection'):
+        top, height = left_y + 48, 46
+        placeholder = 'Paste an image URL'
+    elif task_def['task'] == 'automatic-speech-recognition':
+        top, height = left_y + 48, 46
+        placeholder = 'Paste an audio URL'
+    else:
+        top, height = left_y + 48, 350
+        placeholder = 'Type or paste input text'
+    app.inputEditor.placeholder = placeholder
+    app.inputEditor.set_bounds(30, top + 15, left_w - 24, height)
+
+def _store_input_editor(app, event=None):
+    task_def = app.tasks[app.selectedIdx]
+    field = _input_field_key(task_def)
+    task_def[field] = app.inputEditor.value
+    if field == 'image_url':
+        task_def.pop('image_file_name', None)
+        app.imageInput.set_source(task_def[field])
+
+def _store_selected_image(app, source, file_name):
+    task_def = app.tasks[app.selectedIdx]
+    task_def['image_url'] = source
+    task_def['image_file_name'] = file_name
+    app.inputEditor.value = file_name
+
 # ---------------------------------------------------------------------------
 # Controller
 # ---------------------------------------------------------------------------
 async def load_and_run(app):
     task_def = TASKS[app.selectedIdx]
     pipe_key = f"{task_def['task']}::{task_def['model']}"
+    print(f"[transformers demo] controller entered: task={task_def['task']} model={task_def['model']}")
 
     if pipe_key not in app.pipeCache:
         app.loading = True
+        app.loadingStage = 'model'
+        app.loadingPercent = 0
         app.loadingMsg = f"Loading {task_def['label']}..."
-        app.loadingDetail = f"{task_def['display']} - downloading..."
+        app.loadingDetail = f"Preparing {task_def['model']}"
         try:
+            print(f"[transformers demo] calling pipeline(): task={task_def['task']} model={task_def['model']} dtype=q8")
             pipe = await pipeline(task_def['task'], task_def['model'], dtype='q8')
             app.pipeCache[pipe_key] = pipe
+            print(f"[transformers demo] pipeline ready: {pipe_key}")
         except Exception as e:
+            print(f"[transformers demo] model load failed: {type(e).__name__}: {e}")
             app.resultError = f"Load failed: {e}"
             app.loading = False
+            app.loadingStage = 'idle'
             return
         app.loading = False
 
     pipe = app.pipeCache[pipe_key]
     app.loading = True
+    app.loadingStage = 'inference'
     app.loadingMsg = f"Running {task_def['label']}..."
     app.loadingDetail = "Inference via ONNX Runtime WASM"
     app.result = None
@@ -369,12 +437,9 @@ async def load_and_run(app):
             res = await pipe({'question': task_def['question'], 'context': task_def['context']})
         elif task_def['task'] in ('zero-shot-classification','zero-shot-image-classification'):
             inp = task_def['example_input'] if task_def['task']=='zero-shot-classification' else task_def.get('image_url', DEMO_IMAGES[app.imageIdx])
-            if task_def['task']=='zero-shot-image-classification':
-                inp = DEMO_IMAGES[app.imageIdx]
             res = await pipe(inp, candidate_labels=task_def['candidate_labels'])
         elif task_def['task'] in ('image-classification','object-detection','image-to-text'):
-            img = DEMO_IMAGES[app.imageIdx]
-            task_def['image_url'] = img
+            img = task_def.get('image_url') or DEMO_IMAGES[app.imageIdx]
             res = await pipe(img)
         elif task_def['task'] == 'automatic-speech-recognition':
             res = await pipe(task_def['audio_url'])
@@ -391,17 +456,44 @@ async def load_and_run(app):
             res = await pipe(task_def['example_input'])
         app.result = res
         app.resultLines = format_result(task_def, res)
+        app.generatePending = False
+        print(f"[transformers demo] inference complete: task={task_def['task']}")
     except Exception as e:
+        print(f"[transformers demo] inference failed: {type(e).__name__}: {e}")
         app.resultError = str(e)[:400]
         app.resultLines = [f"Error: {e}"]
     finally:
         app.loading = False
+        app.loadingStage = 'idle'
+
+def start_generate(app):
+    if app.loading:
+        print("[transformers demo] Generate ignored: another run is already active")
+        return
+    task_def = TASKS[app.selectedIdx]
+    pipe_key = f"{task_def['task']}::{task_def['model']}"
+    print(f"[transformers demo] Generate requested: task={task_def['task']} model={task_def['model']}")
+    app.loading = True
+    app.loadingStage = 'inference' if pipe_key in app.pipeCache else 'model'
+    app.loadingPercent = 0
+    app.generatePending = True
+    app.loadingMsg = f"Loading {task_def['label']}..." if app.loadingStage == 'model' else f"Running {task_def['label']}..."
+    app.loadingDetail = f"Preparing {task_def['model']}" if app.loadingStage == 'model' else "Starting inference..."
+    app.resultError = None
+    try:
+        aio.run(load_and_run(app))
+        print("[transformers demo] aio.run accepted controller coroutine")
+    except Exception as e:
+        print(f"[transformers demo] aio.run failed: {type(e).__name__}: {e}")
+        app.loading = False
+        app.loadingStage = 'idle'
+        app.resultError = f"Could not start generation: {e}"
 
 # ---------------------------------------------------------------------------
 # SCS App
 # ---------------------------------------------------------------------------
 def onAppStart(app):
-    app.width = 1120
+    app.width = 1240
     app.height = 780
     app.background = gradient(rgb(15, 17, 21), rgb(26, 29, 36), start='top')
     app.stepsPerSecond = 30
@@ -411,9 +503,12 @@ def onAppStart(app):
     app.pipeCache = {}
     app.loading = False
     app.loadingMsg = "Ready"
-    app.loadingDetail = "Press SPACE to run first model"
+    app.loadingDetail = "Select a model, then press Generate"
+    app.loadingStage = 'idle'
+    app.loadingPercent = 0
     app.result = None
-    app.resultLines = ["Press SPACE to run model", "First run downloads from HF Hub (sizes in list)", "Cached afterwards via WASM"]
+    app.generatePending = False
+    app.resultLines = ["Select a model, then press Generate", "First run downloads from HF Hub", "Model is cached for later runs"]
     app.resultError = None
     app.imageIdx = 0
     app.showHelp = False
@@ -424,12 +519,40 @@ def onAppStart(app):
     app.buttonsPerRow = 4
     app.buttonStartX = 18
     app.buttonStartY = 56
+    app.generateButtonW = 130
+    app.generateButtonH = 34
+    app.generateButtonX = app.width - 18 - app.generateButtonW
+    app.generateButtonY = 5
+    app.generatePending = False
+
+    container = document['canvas-container']
+    container.style.position = 'relative'
+    app.inputEditor = TextArea(container, 'transformers-demo-input', aria_label='Model input')
+    app.inputEditor.bind('input', lambda event: _store_input_editor(app, event))
+    left_y = app.buttonStartY + 4 * (app.buttonH + app.buttonGap) + 6 + 52
+    left_w = (app.width - 56) // 2
+    app.imageInput = ImageInput(
+        container,
+        'transformers-demo-image-input',
+        on_change=lambda source, file_name: _store_selected_image(app, source, file_name),
+    )
+    app.imageInput.set_bounds(30, left_y + 121, left_w - 24, 180)
+    _sync_input_editor(app)
+
+    app.generateControl = Button(container, 'transformers-demo-generate', 'Generate', aria_label='Generate with selected model')
+    app.generateControl.set_bounds(app.generateButtonX, app.generateButtonY, app.generateButtonW, app.generateButtonH)
+    app.generateControl.bind('click', lambda event: start_generate(app))
 
 def onKeyPress(app, key):
-    if key == ' ' or key == 'Enter':
-        aio.run(load_and_run(app))
+    try:
+        if document.activeElement.id == app.inputEditor.element.id:
+            return
+    except Exception:
+        pass
+    if key.lower() == 'enter':
+        start_generate(app)
     elif key.lower() == 'r':
-        aio.run(load_and_run(app))
+        start_generate(app)
     elif key.lower() == 'c':
         async def clear():
             await clear_cache()
@@ -440,26 +563,37 @@ def onKeyPress(app, key):
         app.showHelp = not app.showHelp
     elif key == 'Right' or key == 'd':
         app.selectedIdx = (app.selectedIdx + 1) % len(app.tasks)
+        _sync_input_editor(app)
         app.result = None
-        app.resultLines = [f"Selected: {app.tasks[app.selectedIdx]['display']}", "Press SPACE"]
+        app.generatePending = False
+        app.resultLines = [f"Selected: {app.tasks[app.selectedIdx]['display']}", "Press Generate"]
     elif key == 'Left' or key == 'a':
         app.selectedIdx = (app.selectedIdx - 1) % len(app.tasks)
+        _sync_input_editor(app)
         app.result = None
-        app.resultLines = [f"Selected: {app.tasks[app.selectedIdx]['display']}", "Press SPACE"]
+        app.generatePending = False
+        app.resultLines = [f"Selected: {app.tasks[app.selectedIdx]['display']}", "Press Generate"]
     elif key in '123456789':
         idx = int(key)-1
         if idx < len(app.tasks):
             app.selectedIdx = idx
+            _sync_input_editor(app)
             app.result = None
-            app.resultLines = [f"Selected: {app.tasks[app.selectedIdx]['display']}", "Press SPACE"]
+            app.generatePending = False
+            app.resultLines = [f"Selected: {app.tasks[app.selectedIdx]['display']}", "Press Generate"]
     elif key == '0':
         idx = 9
         app.selectedIdx = idx
+        _sync_input_editor(app)
+        app.result = None
+        app.generatePending = False
+        app.resultLines = [f"Selected: {app.tasks[idx]['display']}", "Press Generate"]
     elif key.lower() == 'i':
         app.imageIdx = (app.imageIdx + 1) % len(DEMO_IMAGES)
         for td in app.tasks:
             if 'image_url' in td:
                 td['image_url'] = DEMO_IMAGES[app.imageIdx]
+        _sync_input_editor(app)
 
 def onMousePress(app, mx, my):
     for i, task_def in enumerate(app.tasks):
@@ -469,28 +603,41 @@ def onMousePress(app, mx, my):
         by = app.buttonStartY + row * (app.buttonH + app.buttonGap)
         if bx <= mx <= bx + app.buttonW and by <= my <= by + app.buttonH:
             app.selectedIdx = i
+            _sync_input_editor(app)
             app.result = None
-            app.resultLines = [f"Selected: {task_def['display']}", "Press SPACE to run"]
+            app.generatePending = False
+            app.resultLines = [f"Selected: {task_def['display']}", "Press Generate"]
             return
-    if 18 <= mx <= 138 and 710 <= my <= 745:
-        aio.run(load_and_run(app))
-        return
     if app.tasks[app.selectedIdx]['task'] in ('image-classification','object-detection','image-to-text','zero-shot-image-classification'):
         if 30 <= mx <= 540 and 300 <= my <= 600:
             app.imageIdx = (app.imageIdx + 1) % len(DEMO_IMAGES)
             for td in app.tasks:
                 if 'image_url' in td:
                     td['image_url'] = DEMO_IMAGES[app.imageIdx]
+            _sync_input_editor(app)
 
 def onStep(app):
-    pass
+    if app.loading and app.loadingStage == 'model':
+        progress = get_download_progress()
+        loaded = float(progress.get('loaded', 0) or 0)
+        total = float(progress.get('total', 0) or 0)
+        percent = float(progress.get('progress', 0) or 0)
+        if percent == 0 and total > 0:
+            percent = loaded / total * 100
+        app.loadingPercent = max(0, min(100, percent))
+        filename = str(progress.get('file') or progress.get('name') or app.tasks[app.selectedIdx]['model'])
+        filename = filename.rsplit('/', 1)[-1]
+        if total > 0:
+            app.loadingDetail = f"{filename}  {loaded / 1048576:.1f} / {total / 1048576:.1f} MB"
+        else:
+            app.loadingDetail = filename
 
 def redrawAll(app):
     drawRect(0, 0, app.width, 44, fill=rgb(21, 23, 30))
     drawLabel("SCS x Transformers.js - 14 Models Exact from Screenshot - ONNX WASM in Browser",
-              app.width//2, 15, fill=rgb(220, 220, 230), size=15, bold=True)
-    drawLabel("SPACE=Run | Click task (14) | LEFT/RIGHT | C=Clear | I=Cycle images | H=Help",
-              app.width//2, 31, fill=rgb(150, 150, 165), size=11)
+              18, 15, fill=rgb(220, 220, 230), size=15, bold=True, align='left')
+    drawLabel("Click Generate to run | Select task (14) | LEFT/RIGHT | C=Clear | I=Cycle images | H=Help",
+              18, 31, fill=rgb(150, 150, 165), size=11, align='left')
 
     for i, td in enumerate(app.tasks):
         row = i // app.buttonsPerRow
@@ -522,7 +669,7 @@ def redrawAll(app):
 
     drawRect(rightX, leftY, leftW, panelH, fill=rgb(28, 30, 40), border=rgb(60,65,80), borderWidth=1, roundness=10)
     drawLabel("OUTPUT", rightX+12, leftY+14, fill=rgb(130,130,150), size=11, align='left', bold=True)
-    drawLabel(f"Cache {len(app.pipeCache)}/14", rightX+leftW-12, leftY+14, fill=rgb(100,100,120), size=10, align='right')
+    drawLabel(f"Cache {len(app.pipeCache)}/14", rightX+88, leftY+14, fill=rgb(100,100,120), size=10, align='left')
 
     tx = leftX + 12
     ty = leftY + 32
@@ -538,13 +685,10 @@ def redrawAll(app):
         ty += 8
         drawLabel(f"Q: {sel['question']}", tx, ty, fill=rgb(160,220,255), size=12, align='left', bold=True)
     elif sel['task'] in ('image-classification','object-detection','image-to-text','zero-shot-image-classification'):
-        drawLabel(f"Image: {DEMO_IMAGES[app.imageIdx].split('/')[-1]} (click to cycle)", tx, ty, fill=rgb(150,150,170), size=10, align='left')
-        ty += 14
-        imgBoxY = ty
-        imgBoxH = 240
-        drawRect(tx, imgBoxY, maxW, imgBoxH, fill=rgb(20,20,25), border=rgb(80,80,100), borderWidth=1, roundness=6)
-        drawLabel(f"{DEMO_IMAGES[app.imageIdx]}", tx+maxW//2, imgBoxY+imgBoxH//2-8, fill=rgb(100,100,120), size=9, align='center')
-        drawLabel("Preview box - SCS Image() would load URL via file_loader", tx+maxW//2, imgBoxY+imgBoxH//2+10, fill=rgb(80,80,90), size=8, align='center')
+        image_url = sel.get('image_url') or DEMO_IMAGES[app.imageIdx]
+        drawLabel(f"Image URL (editable): {image_url.split('/')[-1]}", tx, ty, fill=rgb(150,150,170), size=10, align='left')
+        imgBoxY = leftY + 121
+        imgBoxH = 180
         ty = imgBoxY + imgBoxH + 12
         if 'candidate_labels' in sel:
             drawLabel("Candidate labels:", tx, ty, fill=rgb(180,180,200), size=11, align='left', bold=True)
@@ -554,19 +698,15 @@ def redrawAll(app):
                 ty += 13
     elif sel['task'] == 'zero-shot-classification':
         drawLabel("Text:", tx, ty, fill=rgb(180,180,200), size=11, align='left', bold=True)
-        ty += 14
-        for line in wrap_text(sel['example_input'], 60):
-            drawLabel(line, tx, ty, fill=rgb(220,220,230), size=11, align='left')
-            ty += 14
-        ty += 6
+        ty = leftY + 48 + 123
         drawLabel("Labels:", tx, ty, fill=rgb(180,180,200), size=11, align='left', bold=True)
         ty += 14
         for lbl in sel['candidate_labels']:
             drawLabel(f" - {lbl}", tx, ty, fill=rgb(200,200,220), size=11, align='left')
             ty += 13
     elif sel['task'] == 'automatic-speech-recognition':
-        drawLabel(f"Audio: {sel['audio_url']}", tx, ty, fill=rgb(150,200,255), size=10, align='left')
-        ty += 18
+        drawLabel("Audio URL (editable):", tx, ty, fill=rgb(150,200,255), size=10, align='left')
+        ty = leftY + 123
         drawLabel("JFK - 'Ask not what your country can do for you'", tx, ty, fill=rgb(200,200,210), size=11, align='left')
         ty += 14
         drawLabel("Whisper tiny.en 41 MB", tx, ty, fill=rgb(130,130,150), size=10, align='left')
@@ -583,8 +723,17 @@ def redrawAll(app):
     if app.loading:
         drawLabel(app.loadingMsg, otx+ leftW//2 -12, oty+100, fill=rgb(255,220,100), size=15, bold=True, align='center')
         drawLabel(app.loadingDetail, otx+ leftW//2 -12, oty+122, fill=rgb(180,180,190), size=11, align='center')
-        for i in range(3):
-            drawCircle(otx + leftW//2 -20 + i*20, oty+150, 6, fill=rgb(100+i*30, 180, 255))
+        if app.loadingStage == 'model':
+            progressX = otx + 18
+            progressY = oty + 148
+            progressW = leftW - 60
+            drawRect(progressX, progressY, progressW, 12, fill=rgb(45,48,60), roundness=5)
+            if app.loadingPercent > 0:
+                drawRect(progressX, progressY, progressW * app.loadingPercent / 100, 12, fill=rgb(0,184,148), roundness=5)
+            drawLabel(f"{app.loadingPercent:.0f}%", progressX+progressW//2, progressY+28, fill=rgb(200,220,220), size=10)
+        else:
+            for i in range(3):
+                drawCircle(otx + leftW//2 -20 + i*20, oty+150, 6, fill=rgb(100+i*30, 180, 255))
     else:
         if app.resultError:
             drawLabel("ERROR:", otx, oty, fill=rgb(255,100,100), size=12, bold=True, align='left')
@@ -601,9 +750,12 @@ def redrawAll(app):
                     drawLabel(line, otx, oty, fill=rgb(220,220,230), size=11, align='left')
                     oty += 15
 
-    btnX, btnY, btnW, btnH = 18, 710, 130, 34
-    drawRect(btnX, btnY, btnW, btnH, fill=rgb(88,101,242) if not app.loading else rgb(60,60,80), roundness=8, border=rgb(255,255,255), borderWidth=1)
-    drawLabel("RUN (SPACE)" if not app.loading else "Loading...", btnX+btnW//2, btnY+btnH//2, fill='white', size=12, bold=True)
+    button_color = 'rgb(130,150,176)' if app.generatePending else 'rgb(44,130,242)'
+    button_text = "Generating..." if app.loading else "Generate"
+    if app.generateControl.color != button_color:
+        app.generateControl.color = button_color
+    if app.generateControl.text != button_text:
+        app.generateControl.text = button_text
 
     drawRect(0, app.height-22, app.width, 22, fill=rgb(21,23,30))
     drawLabel(f"Task {app.selectedIdx+1}/14: {sel['display']} | Cache {len(app.pipeCache)} | Img {app.imageIdx+1}/{len(DEMO_IMAGES)}",
@@ -631,9 +783,11 @@ def redrawAll(app):
             "",
             "Encoding: JSON bridge, Array.from TypedArrays, tensor truncation",
             "Like file_loader (canvas+getImageData) and fetch (JSON handling)",
-            "SPACE run, C clear, I cycle images, H close",
+            "Generate runs selected model; C clear, I cycle images, H close",
         ]
         hy = app.height//2 -130
         for line in helpLines:
             drawLabel(line, app.width//2, hy, fill=rgb(200,200,210), size=10, align='center')
             hy += 15
+
+runApp(width=1240, height=780)
