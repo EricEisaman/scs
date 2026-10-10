@@ -232,7 +232,7 @@ def _install_controls(app):
     upd()
 
 def onAppStart(app):
-    app.width=1050; app.height=620; app.stepsPerSecond=30; app.background=BG
+    app.width=1050; app.height=575; app.stepsPerSecond=30; app.background=BG
     app.Ein=20000000.0; app.dE=1.8; app.theta_deg=35.0; app.phi_deg=20.0; app.T=300.0
     app.branch_idx=3; app.playing=True; app.auto_scan=False; app.show_instability=False
     app.time=0.0; app.amplitude=6.0; app.cur_KL=K_L; app.cur_KT=K_T
@@ -428,24 +428,24 @@ def redrawAll(app):
     drawRect(0,0,app.width,app.height, fill=BG)
     drawLabel('IXS - Phonon Interaction', 20, 22, size=18, fill=INK, bold=True, align='left')
     drawLabel(f"E_in {app.Ein/1e6:.1f}keV dE {app.dE:.1f}meV hw 1-100meV Si3N4 12nm", 20, 38, size=10, fill=MUTED, align='left')
-    _draw_geometry(app, 20, 50, 310, 80)
-    drawRect(345,50,685,80, fill=rgb(18,28,32), border=rgb(42,58,63), borderWidth=1)
+    _draw_geometry(app, 20, 50, 310, 78)
+    drawRect(345,50,685,78, fill=rgb(18,28,32), border=rgb(42,58,63), borderWidth=1)
     drawLabel('THREE ENERGIES IN ONE IXS EVENT:', 355, 58, size=9, fill=GOLD, bold=True, align='left')
     hw=abs(app.branches[app.branch_idx]['w_meV']) if app.branches else 0
     drawLabel(f"1) E_in = {app.Ein:.0f} meV = {app.Ein/1e6:.1f} keV lam={HC/app.Ein:.3f}A", 355, 70, size=9, fill=INK, align='left')
     drawLabel(f"2) hw = {hw:.1f} meV lost E_out={app.Ein-hw:.0f} meV", 355, 82, size=9, fill=MINT, align='left')
     drawLabel(f"3) dE = {app.dE:.1f} meV resolution 1 in {app.Ein/app.dE:.0f}M ex 23,724,000->23,723,900", 355, 94, size=9, fill=CYAN, align='left')
-    _draw_lattice(app,20,140,500,370)
-    _draw_brillouin(app,535,140,235,185)
-    _draw_dispersion(app,785,140,245,185)
-    _draw_ixs(app,535,335,495,185)
-    drawRect(20,530,1010,32, fill=rgb(18,26,30), border=rgb(42,58,63), borderWidth=1)
-    drawLabel('THIN FILM: 3 layers c-axis out-of-plane - substrate below, vacuum above', 28, 536, size=8, fill=MUTED, align='left')
-    drawRect(28,548,994,6, fill=rgb(30,40,45), border=rgb(60,70,75), borderWidth=1)
-    drawRect(28,548,994*0.7,6, fill=BLUE)
-    drawLabel('Si3N4 12nm', 28, 558, size=7, fill=BLUE, align='left')
-    drawLabel('w2<0 -> imaginary phonon -> instability', 400, 558, size=7, fill=RED if app.show_instability else MUTED, align='left')
-    # breathing room: 620-562=58px bottom margin
+    _draw_lattice(app,20,138,500,360)
+    _draw_brillouin(app,535,138,235,178)
+    _draw_dispersion(app,785,138,245,178)
+    _draw_ixs(app,535,326,495,178)
+    drawRect(20,508,1010,32, fill=rgb(18,26,30), border=rgb(42,58,63), borderWidth=1)
+    drawLabel('THIN FILM: 3 layers c-axis out-of-plane - substrate below, vacuum above', 28, 514, size=8, fill=MUTED, align='left')
+    drawRect(28,526,994,6, fill=rgb(30,40,45), border=rgb(60,70,75), borderWidth=1)
+    drawRect(28,526,994*0.7,6, fill=BLUE)
+    drawLabel('Si3N4 12nm', 28, 536, size=7, fill=BLUE, align='left')
+    drawLabel('w2<0 -> imaginary phonon -> instability', 400, 536, size=7, fill=RED if app.show_instability else MUTED, align='left')
+    # 575-542=33px bottom breathing room - clean outline visible
     # references only in bottom footer (HTML below canvas)
     try:
         info=document.getElementById('ixs-info')
@@ -453,6 +453,7 @@ def redrawAll(app):
             br=app.branches[app.branch_idx]; qn=math.hypot(app.qx,app.qy)
             info.innerHTML=f"D(q) diag: " + ", ".join([f"{b['label']}={b['w_meV']:.1f}meV" for b in app.branches]) + f" | q=({app.qx:.2f},{app.qy:.2f}) |q|={qn:.2f} k={_k_from_E(app.Ein):.2f} | e=[{br['e1']:.2f},{br['e2']:.2f}]"
     except: pass
+
 
 
 def onKeyPress(app,key):
