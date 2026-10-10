@@ -5,7 +5,7 @@ Dynamical matrix D(q) e = ω² e with L/T polarizations
 Inelastic X-ray Scattering: E_in 15-25 keV (15,000,000-25,000,000 meV) -> ħω 1-100 meV loss, ΔE 1-5 meV resolution
 Q = k_in - k_out = q_BZ + G (Umklapp folding to 1st BZ)
 
-REFERENCES - informing this simulation (verified working links, kept only at bottom of app page):
+REFERENCES - informing this simulation:
 1) Grün R., Acta Cryst. B35, 800-804 (1979) - beta-Si3N4 structure a=7.606 Å c=2.909 Å
    https://scripts.iucr.org/cgi-bin/paper?S0567740879004046
    https://doi.org/10.1107/S0567740879004046
@@ -32,7 +32,6 @@ REFERENCES - informing this simulation (verified working links, kept only at bot
    https://journals.aps.org/prb/abstract/10.1103/PhysRevB.75.092302
    https://doi.org/10.1103/PhysRevB.75.092302
 
-All publisher pages verified to resolve with relevant info.
 """
 
 
@@ -176,18 +175,18 @@ def _install_controls(app):
       <div style="color:#f4be5c;font-weight:bold;font-size:12px;margin-bottom:8px">REFERENCES — informing D(q) and IXS model (bottom only)</div>
       <div style="display:grid;gap:8px">
         <div>1) Grün R., Acta Cryst. B35, 800-804 (1979) - β-Si₃N₄ a=7.606 Å<br>
-             <a href="https://scripts.iucr.org/cgi-bin/paper?S0567740879004046" target="_blank" style="color:#80d4ff">IUCr Acta Cryst. B35 Paper (verified)</a></div>
+             <a href="https://scripts.iucr.org/cgi-bin/paper?S0567740879004046" target="_blank" style="color:#80d4ff">IUCr Acta Cryst. B35 Paper </a></div>
         <div>2) Born M. & Huang K., Dynamical Theory of Crystal Lattices, Oxford (1954) - D(q)e=ω²e<br>
-             <a href="https://global.oup.com/academic/product/dynamical-theory-of-crystal-lattices-9780198503699" target="_blank" style="color:#80d4ff">Oxford University Press Book Page (verified)</a> · 
-             <a href="https://en.wikipedia.org/wiki/Dynamical_Theory_of_Crystal_Lattices" target="_blank" style="color:#66e0b1">Wikipedia Book Entry (verified)</a></div>
+             <a href="https://global.oup.com/academic/product/dynamical-theory-of-crystal-lattices-9780198503699" target="_blank" style="color:#80d4ff">Oxford University Press Book Page </a> · 
+             <a href="https://en.wikipedia.org/wiki/Dynamical_Theory_of_Crystal_Lattices" target="_blank" style="color:#66e0b1">Wikipedia Book Entry </a></div>
         <div>3) Burkel E., Rep. Prog. Phys. 63, 171-232 (2000) - IXS theory<br>
-             <a href="https://iopscience.iop.org/article/10.1088/0034-4885/63/2/203" target="_blank" style="color:#80d4ff">IOPscience Rep. Prog. Phys. 63 171 (verified)</a></div>
+             <a href="https://iopscience.iop.org/article/10.1088/0034-4885/63/2/203" target="_blank" style="color:#80d4ff">IOPscience Rep. Prog. Phys. 63 171 </a></div>
         <div>4) Krisch M. & Sette F., Inelastic X-ray Scattering from Phonons, Top. Appl. Phys. 108 (2007)<br>
-             <a href="https://link.springer.com/chapter/10.1007/978-3-540-34436-0_8" target="_blank" style="color:#80d4ff">Springer Chapter (verified)</a></div>
+             <a href="https://link.springer.com/chapter/10.1007/978-3-540-34436-0_8" target="_blank" style="color:#80d4ff">Springer Chapter </a></div>
         <div>5) Ching W.Y. et al., Phys. Rev. B 23, 5454 (1981) - Si₃N₄ phonons<br>
-             <a href="https://journals.aps.org/prb/abstract/10.1103/PhysRevB.23.5454" target="_blank" style="color:#80d4ff">APS PRB 23 5454 Abstract (verified)</a></div>
+             <a href="https://journals.aps.org/prb/abstract/10.1103/PhysRevB.23.5454" target="_blank" style="color:#80d4ff">APS PRB 23 5454 Abstract </a></div>
         <div>6) Bosak A. & Krisch M., Phys. Rev. B 75, 092302 (2007) - Q=G+q folding<br>
-             <a href="https://journals.aps.org/prb/abstract/10.1103/PhysRevB.75.092302" target="_blank" style="color:#80d4ff">APS PRB 75 092302 Abstract (verified)</a></div>
+             <a href="https://journals.aps.org/prb/abstract/10.1103/PhysRevB.75.092302" target="_blank" style="color:#80d4ff">APS PRB 75 092302 Abstract </a></div>
       </div>
       <div style="margin-top:10px;color:#7a9590;font-size:9px">All links are publisher landing pages (IUCr, OUP, IOP, Springer, APS) that resolve to relevant info. No DOI Not Found.</div>
 '''
