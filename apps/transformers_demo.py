@@ -32,7 +32,7 @@ Our extension uses same: JSON.stringify/parse bridge, Array.from for Float32Arra
 """
 
 from scs import *
-from browser import aio, document
+from browser import aio, document, window
 from extensions.transformers import pipeline, clear_cache, get_download_progress, ORIGINAL_TO_XENOVA
 from extensions.ui import Button, ImageInput, TextArea
 
@@ -349,6 +349,21 @@ def _input_field_key(task_def):
         return 'image_url'
     return 'example_input'
 
+def _viewport_canvas_width():
+    try:
+        viewport_width = int(window.innerWidth)
+    except Exception:
+        viewport_width = 1132
+    return max(320, min(1100, viewport_width - 32))
+
+def _task_grid_rows(app):
+    return (len(app.tasks) + app.buttonsPerRow - 1) // app.buttonsPerRow
+
+def _layout_dom_controls(app):
+    app.generateButtonX = app.width - 18 - app.generateButtonW
+    app.generateControl.set_bounds(app.generateButtonX, app.generateButtonY, app.generateButtonW, app.generateButtonH)
+    _sync_input_editor(app)
+
 def _sync_input_editor(app):
     task_def = app.tasks[app.selectedIdx]
     field = _input_field_key(task_def)
@@ -362,8 +377,9 @@ def _sync_input_editor(app):
         app.imageInput.set_source(task_def.get(field, ''))
     else:
         app.imageInput.hide()
-    left_y = app.buttonStartY + 4 * (app.buttonH + app.buttonGap) + 6 + 52
+    left_y = app.buttonStartY + _task_grid_rows(app) * (app.buttonH + app.buttonGap) + 6 + 52
     left_w = (app.width - 56) // 2
+    app.imageInput.set_bounds(30, left_y + 151, left_w - 24, 180)
     if task_def['task'] == 'question-answering':
         context_lines = len(wrap_text(task_def['context'], 60))
         top = left_y + 67 + 14 * context_lines
@@ -382,7 +398,7 @@ def _sync_input_editor(app):
         top, height = left_y + 48, 350
         placeholder = 'Type or paste input text'
     app.inputEditor.placeholder = placeholder
-    app.inputEditor.set_bounds(30, top + 15, left_w - 24, height)
+    app.inputEditor.set_bounds(30, top + 45, left_w - 24, height)
 
 def _store_input_editor(app, event=None):
     task_def = app.tasks[app.selectedIdx]
@@ -493,7 +509,7 @@ def start_generate(app):
 # SCS App
 # ---------------------------------------------------------------------------
 def onAppStart(app):
-    app.width = 1240
+    app.width = _viewport_canvas_width()
     app.height = 780
     app.background = gradient(rgb(15, 17, 21), rgb(26, 29, 36), start='top')
     app.stepsPerSecond = 30
@@ -519,6 +535,7 @@ def onAppStart(app):
     app.buttonsPerRow = 4
     app.buttonStartX = 18
     app.buttonStartY = 56
+    app.buttonsPerRow = max(1, min(4, (app.width - 31) // (app.buttonW + app.buttonGap)))
     app.generateButtonW = 130
     app.generateButtonH = 34
     app.generateButtonX = app.width - 18 - app.generateButtonW
@@ -529,19 +546,25 @@ def onAppStart(app):
     container.style.position = 'relative'
     app.inputEditor = TextArea(container, 'transformers-demo-input', aria_label='Model input')
     app.inputEditor.bind('input', lambda event: _store_input_editor(app, event))
-    left_y = app.buttonStartY + 4 * (app.buttonH + app.buttonGap) + 6 + 52
-    left_w = (app.width - 56) // 2
     app.imageInput = ImageInput(
         container,
         'transformers-demo-image-input',
         on_change=lambda source, file_name: _store_selected_image(app, source, file_name),
     )
-    app.imageInput.set_bounds(30, left_y + 121, left_w - 24, 180)
     _sync_input_editor(app)
 
     app.generateControl = Button(container, 'transformers-demo-generate', 'Generate', aria_label='Generate with selected model')
-    app.generateControl.set_bounds(app.generateButtonX, app.generateButtonY, app.generateButtonW, app.generateButtonH)
+    _layout_dom_controls(app)
     app.generateControl.bind('click', lambda event: start_generate(app))
+
+    def resize_to_viewport(event):
+        width = _viewport_canvas_width()
+        if width == app.width:
+            return
+        app.width = width
+        app.buttonsPerRow = max(1, min(4, (app.width - 31) // (app.buttonW + app.buttonGap)))
+        _layout_dom_controls(app)
+    window.bind('resize', resize_to_viewport)
 
 def onKeyPress(app, key):
     try:
@@ -653,7 +676,7 @@ def redrawAll(app):
             drawLabel(td['label'], bx+app.buttonW//2, by+app.buttonH//2, fill=rgb(210,210,220), size=9, bold=False)
 
     sel = app.tasks[app.selectedIdx]
-    infoY = app.buttonStartY + 4* (app.buttonH + app.buttonGap) + 6
+    infoY = app.buttonStartY + _task_grid_rows(app) * (app.buttonH + app.buttonGap) + 6
     drawRect(18, infoY, app.width-36, 38, fill=rgb(35, 38, 50), roundness=8, border=rgb(60,65,80), borderWidth=1)
     drawLabel(f"{sel['icon']}  {sel['display']}  |  {sel['description']}  |  Xenova: {sel['model']}",
               26, infoY+19, fill=rgb(200,200,210), size=11, align='left')
@@ -683,11 +706,10 @@ def redrawAll(app):
             ty += 14
             if ty > leftY+panelH-30: break
         ty += 8
-        drawLabel(f"Q: {sel['question']}", tx, ty, fill=rgb(160,220,255), size=12, align='left', bold=True)
+        drawLabel("Question (editable):", tx, ty, fill=rgb(160,220,255), size=12, align='left', bold=True)
     elif sel['task'] in ('image-classification','object-detection','image-to-text','zero-shot-image-classification'):
         image_url = sel.get('image_url') or DEMO_IMAGES[app.imageIdx]
-        drawLabel(f"Image URL (editable): {image_url.split('/')[-1]}", tx, ty, fill=rgb(150,150,170), size=10, align='left')
-        imgBoxY = leftY + 121
+        imgBoxY = leftY + 151
         imgBoxH = 180
         ty = imgBoxY + imgBoxH + 12
         if 'candidate_labels' in sel:
@@ -697,26 +719,19 @@ def redrawAll(app):
                 drawLabel(f" - {lbl}", tx, ty, fill=rgb(200,200,220), size=11, align='left')
                 ty += 13
     elif sel['task'] == 'zero-shot-classification':
-        drawLabel("Text:", tx, ty, fill=rgb(180,180,200), size=11, align='left', bold=True)
-        ty = leftY + 48 + 123
+        ty = leftY + 48 + 153
         drawLabel("Labels:", tx, ty, fill=rgb(180,180,200), size=11, align='left', bold=True)
         ty += 14
         for lbl in sel['candidate_labels']:
             drawLabel(f" - {lbl}", tx, ty, fill=rgb(200,200,220), size=11, align='left')
             ty += 13
     elif sel['task'] == 'automatic-speech-recognition':
-        drawLabel("Audio URL (editable):", tx, ty, fill=rgb(150,200,255), size=10, align='left')
-        ty = leftY + 123
+        ty = leftY + 201
         drawLabel("JFK - 'Ask not what your country can do for you'", tx, ty, fill=rgb(200,200,210), size=11, align='left')
         ty += 14
         drawLabel("Whisper tiny.en 41 MB", tx, ty, fill=rgb(130,130,150), size=10, align='left')
     else:
-        drawLabel("Text:", tx, ty, fill=rgb(180,180,200), size=11, align='left', bold=True)
-        ty += 14
-        for line in wrap_text(sel['example_input'], 60):
-            if ty > leftY + panelH - 20: break
-            drawLabel(line, tx, ty, fill=rgb(220,220,230), size=11, align='left')
-            ty += 14
+        pass
 
     otx = rightX + 12
     oty = leftY + 32
@@ -790,4 +805,4 @@ def redrawAll(app):
             drawLabel(line, app.width//2, hy, fill=rgb(200,200,210), size=10, align='center')
             hy += 15
 
-runApp(width=1240, height=780)
+runApp(width=1100, height=780)
