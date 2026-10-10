@@ -675,14 +675,14 @@ class Group:
             if hasattr(s, 'centerY'): s.centerY += dy
 
 # ======================================================================
-# DRAW FUNCTIONS - EXACT CMU LOGIC
+# DRAW FUNCTIONS - CMU API Compliant
 # ======================================================================
 def drawRect(x, y, width, height, fill='black', border=None, borderWidth=2, opacity=100, rotateAngle=0, dashes=False, align='left-top', visible=True, roundness=0):
     _ensure_canvas()
     if not visible: return
-    left, top = _resolve_bbox(float(x), float(y), float(width), float(height), align)
+    left, top = _resolve_bbox(float(x), float(y), float(width), float(height), _normalize_align(align))
     ctx = _ctx
-    ctx.save()
+    ctx.save() 
     try:
         ctx.globalAlpha = opacity / 100
         if rotateAngle != 0:
