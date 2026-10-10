@@ -172,7 +172,7 @@ def _install_controls(app):
     footer.id=footer_id
     footer.style.cssText='box-sizing:border-box;width:1050px;max-width:95vw;padding:14px 18px;margin:10px 0 0;background:#0e1519;border:1px solid #2a3a3f;color:#c5d5d0;font:11px/1.5 ui-monospace;'
     footer.innerHTML='''
-      <div style="color:#f4be5c;font-weight:bold;font-size:12px;margin-bottom:8px">REFERENCES — informing D(q) and IXS model (bottom only)</div>
+      <div style="color:#f4be5c;font-weight:bold;font-size:12px;margin-bottom:8px">REFERENCES — informing D(q) and IXS model </div>
       <div style="display:grid;gap:8px">
         <div>1) Grün R., Acta Cryst. B35, 800-804 (1979) - β-Si₃N₄ a=7.606 Å<br>
              <a href="https://scripts.iucr.org/cgi-bin/paper?S0567740879004046" target="_blank" style="color:#80d4ff">IUCr Acta Cryst. B35 Paper </a></div>
