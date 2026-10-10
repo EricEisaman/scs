@@ -186,10 +186,14 @@ class WaDialog(WaComponent):
 
 class WaBadge(WaComponent):
     def __init__(self,text,x,y,variant="neutral"):
-        super().__init__(x,y,len(text)*7+16,22,variant)
+        # wider chip to fit SOLO ZEN etc
+        w = max(56, len(text)*9 + 22)
+        super().__init__(x,y,w,22,variant)
         self.text=text
     def draw(self):
-        _drawRect(self.x,self.y,self.w,self.h,fill=WaTheme.dark_soft(self.variant),border=WaTheme.variant_fill(self.variant),borderWidth=1,roundness=7)
+        # dynamic width — recalc on text change
+        self.w = max(56, len(self.text)*9 + 22)
+        _drawRect(self.x,self.y,self.w,self.h,fill=WaTheme.dark_soft(self.variant),border=WaTheme.variant_fill(self.variant),borderWidth=1,roundness=9)
         _drawLabel(self.text,self.x+self.w/2,self.y+self.h/2+1,size=10,fill=WaTheme.variant_fill(self.variant),bold=True)
 
 class WaCallout(WaComponent):
