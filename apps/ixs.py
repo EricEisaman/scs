@@ -65,6 +65,27 @@ def _dynamical_matrix(qx,qy,kL=K_L,kT=K_T):
     return branches
 
 def _k_from_E(E_meV): return 2*math.pi*E_meV/HC
+
+# reciprocal lattice for folding Q = q_BZ + G
+import math as _math
+B1 = (2*_math.pi/A_LATT, -2*_math.pi/(math.sqrt(3)*A_LATT))
+B2 = (0.0, 4*_math.pi/(math.sqrt(3)*A_LATT))
+
+def _fold_to_first_bz(qx,qy):
+    # brute force search n,m in [-3,3] for minimal |q - nB1 - mB2|
+    best = (qx,qy,0,0, math.hypot(qx,qy))
+    best_n=0; best_m=0; best_len=best[4]
+    best_qx=qx; best_qy=qy
+    for n in range(-3,4):
+        for m in range(-3,4):
+            qbx = qx - n*B1[0] - m*B2[0]
+            qby = qy - n*B1[1] - m*B2[1]
+            l = math.hypot(qbx,qby)
+            if l < best_len:
+                best_len=l; best_qx=qbx; best_qy=qby; best_n=n; best_m=m
+    Gx = qx - best_qx; Gy = qy - best_qy
+    return best_qx, best_qy, Gx, Gy, best_n, best_m
+
 def _bose(w,T):
     if w<=0.1: return 1.0
     kT=0.08617*T
@@ -99,7 +120,18 @@ def _install_controls(app):
     html+='<label>Branch<select id="sBr" style="background:#0f1417;color:#e5eee8;border:1px solid #43524d;padding:5px"><option value="0">0 LA acoustic</option><option value="1">1 TA acoustic</option><option value="2">2 LO optical</option><option value="3" selected>3 TO optical</option></select></label>'
     html+=f'<label>Temp K <b id="vT"></b><input id="sT" type="range" min="10" max="600" step="10" value="{app.T}" style="width:100%"></label>'
     html+='<div style="display:flex;gap:6px;align-items:end"><button id="bPlay" style="padding:7px 12px;background:#66e0b1;color:#10201a;border:0;font-weight:bold;cursor:pointer">Pause</button><button id="bScan" style="padding:7px 10px;background:#1e2a2e;color:#a0b8b1;border:1px solid #344a4f;cursor:pointer">Scan q</button><button id="bInst" style="padding:7px 10px;background:#1e2a2e;color:#ff6b7a;border:1px solid #4a3440;cursor:pointer">Instability</button></div>'
+
     html+='<div id="ixs-info" style="grid-column:1/-1;color:#7a9590;font-size:10px;border-top:1px solid #223035;padding-top:6px"></div>'
+    html+='<div style="grid-column:1/-1;color:#8aa39e;font-size:9px;line-height:1.4;border-top:1px solid #1f2f35;padding-top:6px">'
+    html+='<b style="color:#f4be5c">REFERENCES with links:</b><br>'
+    html+='1) Grun R., Acta Cryst. B35 800 (1979) beta-Si3N4 a=7.606A <a href="https://doi.org/10.1107/S0567740879004046" target="_blank" style="color:#80d4ff">doi:10.1107/S0567740879004046</a><br>'
+    html+='2) Born M. & Huang K., Dynamical Theory of Crystal Lattices (1954) <a href="https://doi.org/10.1093/oso/9780198503699.001.0001" target="_blank" style="color:#80d4ff">Oxford OUP</a><br>'
+    html+='3) Burkel E., Rep. Prog. Phys. 63, 171-232 (2000) IXS theory <a href="https://doi.org/10.1088/0034-4885/63/2/203" target="_blank" style="color:#80d4ff">doi:10.1088/0034-4885/63/2/203</a><br>'
+    html+='4) Krisch M. & Sette F., Inelastic X-ray Scattering from Phonons, Top. Appl. Phys. 108 (2007) <a href="https://doi.org/10.1007/978-3-540-34436-0_8" target="_blank" style="color:#80d4ff">Springer link</a><br>'
+    html+='5) Ching et al., Phys. Rev. B 23, 5454 (1981) beta/alpha-Si3N4 electronic structure & phonons <a href="https://doi.org/10.1103/PhysRevB.23.5454" target="_blank" style="color:#80d4ff">doi:10.1103/PhysRevB.23.5454</a><br>'
+    html+='6) Bosak A. & Krisch M., Phys. Rev. B 75, 092302 (2007) multibeam IXS, Q=G+q <a href="https://doi.org/10.1103/PhysRevB.75.092302" target="_blank" style="color:#80d4ff">doi:10.1103/PhysRevB.75.092302</a><br>'
+    html+='</div>'
+
     panel.innerHTML=html
     document.getElementById('canvas-container').parentNode.insertBefore(panel, document.getElementById('canvas-container'))
     def upd():
@@ -111,7 +143,10 @@ def _install_controls(app):
         document['vPh'].textContent=f"{app.phi_deg:.0f}°"; document['vT'].textContent=f"{int(app.T)}K"
         k=_k_from_E(app.Ein); qmag=2*k*math.sin(math.radians(app.theta_deg)/2)
         ph=math.radians(app.phi_deg); app.qx=qmag*math.cos(ph); app.qy=qmag*math.sin(ph)
-        app.branches=_dynamical_matrix(app.qx,app.qy,kL=app.cur_KL,kT=app.cur_KT)
+        qbx,qby,Gx,Gy,n,m = _fold_to_first_bz(app.qx,app.qy)
+        app.q_bz_x=qbx; app.q_bz_y=qby; app.Gx=Gx; app.Gy=Gy
+        # phonon frequency depends on reduced q (first BZ)
+        app.branches=_dynamical_matrix(qbx,qby,kL=app.cur_KL,kT=app.cur_KT)
     for sid in ['sEin','sdE','sTh','sPh','sT','sBr']:
         document[sid].bind('input', lambda e: upd())
     def tPlay(e):
@@ -142,7 +177,9 @@ def onAppStart(app):
     app.lattice=_gen_lattice(6,4)
     k=_k_from_E(app.Ein); qmag=2*k*math.sin(math.radians(app.theta_deg)/2)
     ph=math.radians(app.phi_deg); app.qx=qmag*math.cos(ph); app.qy=qmag*math.sin(ph)
-    app.branches=_dynamical_matrix(app.qx,app.qy,kL=app.cur_KL,kT=app.cur_KT)
+    qbx,qby,Gx,Gy,n,m = _fold_to_first_bz(app.qx,app.qy)
+    app.q_bz_x=qbx; app.q_bz_y=qby; app.Gx=Gx; app.Gy=Gy
+    app.branches=_dynamical_matrix(qbx,qby,kL=app.cur_KL,kT=app.cur_KT)
     Gamma=(0,0); M=(math.pi/A_LATT, math.pi/(math.sqrt(3)*A_LATT)); Kpt=(4*math.pi/(3*A_LATT),0)
     def lerp(a,b,t): return (a[0]*(1-t)+b[0]*t, a[1]*(1-t)+b[1]*t)
     app.path_pts=[]
@@ -161,7 +198,10 @@ def onStep(app):
         app.phi_deg=(app.phi_deg+0.7)%360; app.theta_deg=30+15*math.sin(app.time*0.25)
         k=_k_from_E(app.Ein); qmag=2*k*math.sin(math.radians(app.theta_deg)/2)
         ph=math.radians(app.phi_deg); app.qx=qmag*math.cos(ph); app.qy=qmag*math.sin(ph)
-        app.branches=_dynamical_matrix(app.qx,app.qy,kL=app.cur_KL,kT=app.cur_KT)
+        qbx,qby,Gx,Gy,n,m = _fold_to_first_bz(app.qx,app.qy)
+        app.q_bz_x=qbx; app.q_bz_y=qby; app.Gx=Gx; app.Gy=Gy
+        # phonon frequency depends on reduced q (first BZ)
+        app.branches=_dynamical_matrix(qbx,qby,kL=app.cur_KL,kT=app.cur_KT)
         try:
             document['sPh'].value=str(app.phi_deg); document['sTh'].value=str(app.theta_deg)
             document['vPh'].textContent=f"{app.phi_deg:.0f}°"; document['vTh'].textContent=f"{app.theta_deg:.0f}°"
@@ -174,7 +214,9 @@ def _draw_lattice(app,x0,y0,w,h):
     drawLabel('REAL SPACE - Hexagonal Si3N4 phonon (clipped)', x0+8, y0+12, size=10, fill=MUTED, align='left')
     cx=x0+w*0.5; cy=y0+h*0.55; scale=13.0
     br=app.branches[app.branch_idx] if app.branch_idx < len(app.branches) else app.branches[0]
-    qx,qy=app.qx,app.qy; qn=math.hypot(qx,qy)+1e-9; qhx=qx/qn; qhy=qy/qn
+    # use reduced q for visualization - same physical displacement, visible wavelength
+    qx,qy=app.q_bz_x,app.q_bz_y; qn_full=math.hypot(app.qx,app.qy); qn=math.hypot(qx,qy)+1e-9; qhx=qx/(qn) if qn>1e-9 else 1.0; qhy=qy/(qn) if qn>1e-9 else 0.0
+    # fallback if q_bz near zero, use full q direction for polarization
     px,py=(qhx,qhy) if br['pol']=='L' else (-qhy,qhx)
     omega_anim=max(0.6, min(5.0, abs(br['w_meV'])*0.12))
     for (x,y,typ) in app.lattice:
@@ -199,21 +241,30 @@ def _draw_lattice(app,x0,y0,w,h):
         if typ==0: drawCircle(Xd,Yd,6, fill=BLUE, border=rgb(180,210,255), borderWidth=1)
         else: drawCircle(Xd,Yd,4.5, fill=GOLD, border=rgb(255,230,160), borderWidth=1)
     col=MINT if br['w_meV']>=0 else RED
-    drawLabel(f"q={qn:.2f} A-1  w={br['w_meV']:.1f} meV {br['label']} {'UNSTABLE' if br['w_meV']<0 else ''}", x0+8, y0+h-10, size=10, fill=col, align='left')
+    drawLabel(f"q_BZ={qn:.2f} |Q|={qn_full:.2f} A-1 w={br['w_meV']:.1f} meV {br['label']} {'UNSTABLE' if br['w_meV']<0 else ''} G=({app.Gx:.1f},{app.Gy:.1f})", x0+8, y0+h-10, size=9, fill=col, align='left')
 
 def _draw_brillouin(app,x0,y0,w,h):
     drawRect(x0,y0,w,h, fill=rgb(13,20,24), border=rgb(42,58,63), borderWidth=1)
-    drawLabel('BRILLOUIN ZONE - static (q marker moves)', x0+8, y0+12, size=9, fill=MUTED, align='left')
+    drawLabel('BRILLOUIN ZONE - folded to 1st BZ', x0+8, y0+12, size=9, fill=MUTED, align='left')
     cx=x0+w*0.5; cy=y0+h*0.55; R=min(w,h)*0.34
     hex_pts=[]
     for i in range(6):
         ang=math.radians(30+i*60); hex_pts.append((cx+R*math.cos(ang), cy+R*math.sin(ang)))
     for i in range(6):
         x1,y1=hex_pts[i]; x2,y2=hex_pts[(i+1)%6]; drawLine(x1,y1,x2,y2, fill=rgb(70,90,95), lineWidth=2)
-    drawCircle(cx,cy,3, fill=INK); drawLabel('G', cx+6, cy-8, size=10, fill=INK, align='left')
-    q_scale=R/1.2; qx_s=cx+app.qx*q_scale; qy_s=cy-app.qy*q_scale
+    drawCircle(cx,cy,3, fill=INK); drawLabel('Γ', cx+6, cy-8, size=10, fill=INK, align='left')
+    # use folded q_BZ - always inside
+    q_scale=R/1.2  # 1.2 A-1 -> edge
+    qx_s=cx+app.q_bz_x*q_scale; qy_s=cy-app.q_bz_y*q_scale
+    # clip to hexagon radius: if outside, project to edge
+    dx=qx_s-cx; dy=qy_s-cy; dist=math.hypot(dx,dy)
+    if dist > R*0.92:
+        # clamp to edge
+        ang=math.atan2(dy,dx); qx_s=cx+math.cos(ang)*R*0.88; qy_s=cy+math.sin(ang)*R*0.88
     drawLine(cx,cy,qx_s,qy_s, fill=CYAN, lineWidth=2); drawCircle(qx_s,qy_s,5, fill=CYAN, border=INK, borderWidth=1)
-    drawLabel('q', qx_s+7, qy_s-7, size=10, fill=CYAN, align='left')
+    drawLabel(f"q_BZ {math.hypot(app.q_bz_x,app.q_bz_y):.2f}", qx_s+7, qy_s-7, size=9, fill=CYAN, align='left')
+    drawLabel(f"G=({app.Gx:.1f},{app.Gy:.1f})", x0+8, y0+h-10, size=8, fill=rgb(100,115,120), align='left')
+
 
 def _draw_dispersion(app,x0,y0,w,h):
     drawRect(x0,y0,w,h, fill=rgb(13,20,24), border=rgb(42,58,63), borderWidth=1)
@@ -238,7 +289,7 @@ def _draw_dispersion(app,x0,y0,w,h):
         x=ax+frac*aw; drawLine(x,ay,x,ay+ah, fill=rgb(50,65,70), lineWidth=1, dashes=[3,3]); drawLabel(label,x,ay+ah+10,size=9,fill=MUTED,align='center')
     best_i=0; best_d=1e9
     for i,q in enumerate(app.path_pts):
-        d=(q[0]-app.qx)**2+(q[1]-app.qy)**2
+        d=(q[0]-app.q_bz_x)**2+(q[1]-app.q_bz_y)**2
         if d<best_d: best_d=d; best_i=i
     xq=ax+(best_i/(n-1))*aw; drawLine(xq,ay,xq,ay+ah, fill=CYAN, lineWidth=1)
     br=app.branches[app.branch_idx]; yq=ay+ah-(br['w_meV']-w_min)/(w_max-w_min)*ah
@@ -293,18 +344,41 @@ def _draw_ixs(app,x0,y0,w,h):
 
 def _draw_geometry(app,x0,y0,w,h):
     drawRect(x0,y0,w,h, fill=rgb(13,20,24), border=rgb(42,58,63), borderWidth=1)
-    drawLabel('GEOMETRY k_in - k_out = Q', x0+6, y0+10, size=8, fill=MUTED, align='left')
-    cx=x0+w*0.5; cy=y0+h*0.5+4; k_len=w*0.36
+    drawLabel('GEOMETRY k_in - k_out = Q (clipped)', x0+6, y0+10, size=8, fill=MUTED, align='left')
+    cx=x0+w*0.5; cy=y0+h*0.5+4; k_len=min(w*0.32, h*0.9)
     ang_in=math.radians(app.phi_deg-app.theta_deg/2); ang_out=math.radians(app.phi_deg+app.theta_deg/2)
-    x_in=cx-k_len*math.cos(ang_in)*0.5; y_in=cy-k_len*math.sin(ang_in)*0.5
-    x_tip=cx+k_len*math.cos(ang_in)*0.5; y_tip=cy+k_len*math.sin(ang_in)*0.5
+    x_in=cx-k_len*math.cos(ang_in)*0.45; y_in=cy-k_len*math.sin(ang_in)*0.45
+    x_tip=cx+k_len*math.cos(ang_in)*0.45; y_tip=cy+k_len*math.sin(ang_in)*0.45
     drawLine(x_in,y_in,x_tip,y_tip, fill=BLUE, lineWidth=2); drawCircle(x_tip,y_tip,3, fill=BLUE)
-    k_out_len=k_len*(1-abs(app.branches[app.branch_idx]['w_meV'])/app.Ein*3)
-    x_out_base=cx-k_out_len*math.cos(ang_out)*0.5; y_out_base=cy-k_out_len*math.sin(ang_out)*0.5
-    x_out=cx+k_out_len*math.cos(ang_out)*0.5; y_out=cy+k_out_len*math.sin(ang_out)*0.5
+    drawLabel('k_in', x_in-4, y_in-8, size=8, fill=BLUE, align='right')
+    k_out_len=k_len*(0.98)
+    x_out_base=cx-k_out_len*math.cos(ang_out)*0.45; y_out_base=cy-k_out_len*math.sin(ang_out)*0.45
+    x_out=cx+k_out_len*math.cos(ang_out)*0.45; y_out=cy+k_out_len*math.sin(ang_out)*0.45
     drawLine(x_out_base,y_out_base,x_out,y_out, fill=GOLD, lineWidth=2); drawCircle(x_out,y_out,3, fill=GOLD)
+    drawLabel('k_out', x_out+4, y_out-8, size=8, fill=GOLD, align='left')
+    # Q vector between tips - always inside
     drawLine(x_tip,y_tip,x_out,y_out, fill=CYAN, lineWidth=1, dashes=[4,4])
-    drawLabel(f"|k|={_k_from_E(app.Ein):.1f} A-1 |Q|={math.hypot(app.qx,app.qy):.2f}", x0+6, y0+h-6, size=8, fill=rgb(100,115,120), align='left')
+    drawLabel(f"|k|={_k_from_E(app.Ein):.1f} |Q|={math.hypot(app.qx,app.qy):.2f}->BZ {math.hypot(app.q_bz_x,app.q_bz_y):.2f}", x0+6, y0+h-6, size=7, fill=rgb(100,115,120), align='left')
+
+
+
+def _draw_references(app,x0,y0,w,h):
+    drawRect(x0,y0,w,h, fill=rgb(16,22,26), border=rgb(42,58,63), borderWidth=1)
+    drawLabel('REFERENCES - informing D(q) and IXS model (see panel for clickable links)', x0+8, y0+12, size=9, fill=GOLD, bold=True, align='left')
+    refs=[
+
+        "1) Grun 1979 Acta Cryst B35 800 doi:10.1107/S0567740879004046 beta-Si3N4 a=7.606A",
+        "2) Born & Huang 1954 Dynamical Theory of Crystal Lattices doi:10.1093/oso/9780198503699.001.0001 D(q)e=w2e",
+        "3) Burkel Rep Prog Phys 63 171 (2000) doi:10.1088/0034-4885/63/2/203 IXS 15-25keV meV res",
+        "4) Krisch & Sette Top Appl Phys 108 (2007) doi:10.1007/978-3-540-34436-0_8 |Q·e|^2 cross-section",
+        "5) Ching et al PRB 23 5454 (1981) doi:10.1103/PhysRevB.23.5454 Si3N4 phonons K_L~80 K_T~32 N/m",
+        "6) Bosak & Krisch PRB 75 092302 (2007) doi:10.1103/PhysRevB.75.092302 Q=G+q folding"
+    ]
+    y=y0+24
+    for r in refs:
+        drawLabel(r, x0+8, y, size=7, fill=rgb(130,145,150), align='left')
+        y+=12
+
 
 def redrawAll(app):
     drawRect(0,0,app.width,app.height, fill=BG)
@@ -321,11 +395,13 @@ def redrawAll(app):
     _draw_brillouin(app,535,130,235,155)
     _draw_dispersion(app,785,130,245,155)
     _draw_ixs(app,535,295,495,165)
-    drawRect(20,470,1010,38, fill=rgb(18,26,30), border=rgb(42,58,63), borderWidth=1)
-    drawLabel('THIN FILM: 3 layers c-axis out-of-plane', 28, 478, size=9, fill=MUTED, align='left')
-    drawRect(28,490,994,6, fill=rgb(30,40,45), border=rgb(60,70,75), borderWidth=1)
-    drawRect(28,490,994*0.7,6, fill=BLUE)
-    drawLabel('Si3N4 12nm - instability when w2<0', 400, 498, size=8, fill=RED if app.show_instability else MUTED, align='left')
+    drawRect(20,470,1010,28, fill=rgb(18,26,30), border=rgb(42,58,63), borderWidth=1)
+    drawLabel('THIN FILM: 3 layers c-axis out-of-plane - substrate below, vacuum above', 28, 476, size=8, fill=MUTED, align='left')
+    drawRect(28,488,994,4, fill=rgb(30,40,45), border=rgb(60,70,75), borderWidth=1)
+    drawRect(28,488,994*0.7,4, fill=BLUE)
+    drawLabel('Si3N4 12nm', 28, 496, size=7, fill=BLUE, align='left')
+    drawLabel('w2<0 -> imaginary phonon -> instability', 400, 496, size=7, fill=RED if app.show_instability else MUTED, align='left')
+    _draw_references(app,20,505,1010,90)
     try:
         info=document.getElementById('ixs-info')
         if info:
