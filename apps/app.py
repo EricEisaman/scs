@@ -1,1399 +1,502 @@
 from scs import *
-from math import sin, cos, atan2, sqrt, pi
+import math, random
 
+# ============================================================
+# LYAPUNOV DRONE LAB — (v3)
+# Drone: V = 0.5*kp|e|^2 + 0.5|v|^2 + 0.5*kTh*theta_err^2 + 0.5*w^2
+#        Vdot = exact derivative, exponential = -kd|v|^2 -kOm*w^2 + cross <=0
+# Cart-pole: theta 0=DOWN, pi=UP, E=0.5*w^2 + (1-cos theta), E0=2
+#            u = -k*(E-E0)*w*cos(theta), V=0.5*(E-E0)^2, Vdot=-k*(E-E0)^2*w^2*cos^2 <=0
+# ============================================================
 
-# ==============================================================
-# THE EXACT METHOD OF AEROFOIL DESIGN
-# JOUKOWSKI CONFORMAL-MAPPING WIND TUNNEL
-#
-# CMU CS Academy CPCS Mode
-# Canvas: 1050 x 700
-#
-# VISUAL CONVENTION
-# --------------------------------------------------------------
-# The wind remains horizontal, moving left to right.
-# The aerofoil and mapped flow geometry visibly rotate.
-# The rotation angle is the displayed angle of attack alpha.
-#
-# CONTROLS
-# --------------------------------------------------------------
-# Drag gold handle : Move generating circle / change camber
-# W / S            : Increase / decrease circulation
-# A / D            : Rotate aerofoil down / up
-# Q / E            : Make generating circle smaller / larger
-# 1                : Symmetric preset
-# 2                : Cambered preset
-# 3                : High-lift preset
-# SPACE            : Pause / resume tracer particles
-# R                : Reset
-# H                : Help
-# ==============================================================
-
-
-# --------------------------------------------------------------
-# Utility functions
-# --------------------------------------------------------------
-
-def clamp(value, low, high):
-    if value < low:
-        return low
-    elif value > high:
-        return high
-    return value
-
-
-def distanceBetween(x1, y1, x2, y2):
-    return sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-
-
-def sourceToScreen(app, x, y):
-    return (
-        app.sourceCenterX + x * app.sourceScale,
-        app.sourceCenterY - y * app.sourceScale
-    )
-
-
-def mappedToScreen(app, x, y):
-    return (
-        app.mappedCenterX + x * app.mappedScale,
-        app.mappedCenterY - y * app.mappedScale
-    )
-
-
-def screenToSource(app, screenX, screenY):
-    return (
-        (screenX - app.sourceCenterX) / app.sourceScale,
-        (app.sourceCenterY - screenY) / app.sourceScale
-    )
-
-
-def rotatePoint(x, y, pivotX, pivotY, angleRadians):
-    dx = x - pivotX
-    dy = y - pivotY
-
-    rotatedX = pivotX + dx * cos(angleRadians) - dy * sin(angleRadians)
-    rotatedY = pivotY + dx * sin(angleRadians) + dy * cos(angleRadians)
-
-    return (rotatedX, rotatedY)
-
-
-def joukowskiMap(x, y):
-    # w = z + 1/z
-    denominator = x * x + y * y
-
-    if denominator < 0.0001:
-        denominator = 0.0001
-
-    return (
-        x + x / denominator,
-        y - y / denominator
-    )
-
-
-# --------------------------------------------------------------
-# Fast cached source and mapped geometry
-# --------------------------------------------------------------
-
-def getBaseStreamlinePoint(app, level, theta):
-    radius = app.circleRadius
-
-    radialOffset = 0.22 + abs(level) * 0.46
-    noseBend = 0.46 * (1 - cos(theta))
-    sideBend = 0.16 * sin(theta) * sin(theta)
-
-    radialDistance = radius + radialOffset + noseBend + sideBend
-
-    x = app.circleX + radialDistance * cos(theta)
-    y = app.circleY + radialDistance * sin(theta)
-
-    # A qualitative circulation asymmetry.
-    circulationShift = app.circulation * 0.13 * sin(theta)
-
-    if level > 0:
-        y += circulationShift
+def getGains(mode):
+    if mode == 0:
+        return 0.6, 0.0, 0.8, 0.0, 350, 0.0, "ISL: Stable (dV = 0) — orbits forever"
+    elif mode == 1:
+        return 0.9, 0.7, 3.5, 1.0, 380, 0.0, "Asymptotic: dV < 0 — eventually stops"
+    elif mode == 2:
+        return 1.6, 1.9, 14.0, 4.8, 420, 1.15, "Exponential: dV ≤ -αV — fast guaranteed"
     else:
-        y += circulationShift * 0.72
-
-    return (x, y)
-
-
-def buildOneStreamline(app, level):
-    points = []
-
-    if level > 0:
-        startTheta = pi + 0.98
-        endTheta = -0.98
-    else:
-        startTheta = pi - 0.98
-        endTheta = 0.98
-
-    startX = -3.45
-    startY = level * 0.69 + app.circleY * 0.10
-    points.append((startX, startY))
-
-    steps = 50
-
-    for step in range(steps + 1):
-        fraction = step / steps
-        theta = startTheta + (endTheta - startTheta) * fraction
-
-        x, y = getBaseStreamlinePoint(app, level, theta)
-        points.append((x, y))
-
-    endX = 3.45
-    endY = level * 0.69 + app.circleY * 0.10
-    endY += app.circulation * 0.10
-    points.append((endX, endY))
-
-    return points
-
-
-def rebuildCachedGeometry(app):
-    # This runs only after an input change, never every onStep.
-
-    app.sourceStreamlines = []
-    app.mappedStreamlines = []
-
-    levels = [
-        -2.15, -1.72, -1.36, -1.04, -0.78, -0.54, -0.33,
-         0.33,  0.54,  0.78,  1.04,  1.36,  1.72,  2.15
-    ]
-
-    for level in levels:
-        sourceLine = buildOneStreamline(app, level)
-        mappedLine = []
-
-        for x, y in sourceLine:
-            mappedX, mappedY = joukowskiMap(x, y)
-            mappedLine.append((mappedX, mappedY))
-
-        app.sourceStreamlines.append(sourceLine)
-        app.mappedStreamlines.append(mappedLine)
-
-    app.mappedAirfoilPoints = []
-
-    pointCount = 180
-
-    for index in range(pointCount + 1):
-        theta = 2 * pi * index / pointCount
-
-        sourceX = app.circleX + app.circleRadius * cos(theta)
-        sourceY = app.circleY + app.circleRadius * sin(theta)
-
-        mappedX, mappedY = joukowskiMap(sourceX, sourceY)
-        app.mappedAirfoilPoints.append((mappedX, mappedY))
-
-    # Cache leading and trailing edge coordinates in mapped world space.
-    app.leadingEdge = app.mappedAirfoilPoints[0]
-    app.trailingEdge = app.mappedAirfoilPoints[0]
-
-    for point in app.mappedAirfoilPoints:
-        if point[0] < app.leadingEdge[0]:
-            app.leadingEdge = point
-
-        if point[0] > app.trailingEdge[0]:
-            app.trailingEdge = point
-
-    # Rotation pivot: a point partway from leading to trailing edge.
-    # Approximately a quarter-chord pivot works well visually.
-    app.aerofoilPivotX = (
-        app.leadingEdge[0] +
-        0.28 * (app.trailingEdge[0] - app.leadingEdge[0])
-    )
-
-    app.aerofoilPivotY = (
-        app.leadingEdge[1] +
-        0.28 * (app.trailingEdge[1] - app.leadingEdge[1])
-    )
-
-
-# --------------------------------------------------------------
-# Aerofoil display rotation
-# --------------------------------------------------------------
-
-def getRotatedMappedPoint(app, x, y):
-    # In math coordinates, positive alpha should make the nose rise.
-    # Screen y is inverted later by mappedToScreen, so use -alpha.
-    angleRadians = -app.angleOfAttack * pi / 180
-
-    return rotatePoint(
-        x,
-        y,
-        app.aerofoilPivotX,
-        app.aerofoilPivotY,
-        angleRadians
-    )
-
-
-def getRotatedMappedScreenPoint(app, x, y):
-    rotatedX, rotatedY = getRotatedMappedPoint(app, x, y)
-    return mappedToScreen(app, rotatedX, rotatedY)
-
-
-# --------------------------------------------------------------
-# Statistics
-# --------------------------------------------------------------
-
-def getDesignStats(app):
-    camber = app.circleY * 32
-    thickness = max(1.5, (app.circleRadius - 0.87) * 58)
-
-    liftIndex = (
-        app.circulation * 0.62 +
-        app.angleOfAttack * 0.065 +
-        camber * 0.085
-    )
-
-    if liftIndex >= 1.85:
-        rating = 'ELITE LIFT'
-        ratingColor = 'springGreen'
-    elif liftIndex >= 1.25:
-        rating = 'MISSION READY'
-        ratingColor = 'gold'
-    elif liftIndex >= 0.45:
-        rating = 'LIFTING'
-        ratingColor = 'lightGreen'
-    elif liftIndex >= -0.20:
-        rating = 'NEAR NEUTRAL'
-        ratingColor = 'lightSteelBlue'
-    else:
-        rating = 'DOWNFORCE'
-        ratingColor = 'tomato'
-
-    return (camber, thickness, liftIndex, rating, ratingColor)
-
-
-def getKuttaStatus(app):
-    targetX = 1.0 - app.circleRadius
-    targetY = 0
-
-    error = distanceBetween(
-        app.circleX,
-        app.circleY,
-        targetX,
-        targetY
-    )
-
-    if error < 0.12:
-        return ('TRAILING EDGE ALIGNED', 'springGreen')
-    elif error < 0.30:
-        return ('NEAR EDGE SETUP', 'gold')
-    else:
-        return ('EXPERIMENTAL PROFILE', 'tomato')
-
-
-# --------------------------------------------------------------
-# Setup
-# --------------------------------------------------------------
-
-def resetApp(app):
-    app.circleX = -0.10
-    app.circleY = 0.13
-    app.circleRadius = 1.10
-
-    app.circulation = 0.55
-    app.angleOfAttack = 0
-
-    app.running = True
-    app.showHelp = True
-    app.draggingHandle = False
-
-    app.particleOffset = 0
-
-    app.message = 'Mission: rotate the aerofoil and study its mapped flow.'
-    app.messageTimer = 180
-
-    rebuildCachedGeometry(app)
-
+        return 1.4, 1.3, 9.0, 3.2, 400, 0.85, "Global + LaSalle: ∀ start, escapes flats"
 
 def onAppStart(app):
     app.width = 1050
     app.height = 700
-    app.stepsPerSecond = 30
-
-    app.sourceCenterX = 265
-    app.sourceCenterY = 365
-    app.sourceScale = 97
-
-    app.mappedCenterX = 786
-    app.mappedCenterY = 365
-    app.mappedScale = 130
-
-    resetApp(app)
-
-
-# --------------------------------------------------------------
-# Drawing helpers
-# --------------------------------------------------------------
-
-def drawPanel(x, y, width, height, fillColor, borderColor):
-    drawRect(
-        x, y, width, height,
-        fill=fillColor,
-        border=borderColor,
-        borderWidth=2
-    )
-
-
-def drawArrow(x1, y1, x2, y2, color, opacity, lineWidth=2):
-    drawLine(
-        x1, y1, x2, y2,
-        fill=color,
-        lineWidth=lineWidth,
-        opacity=opacity
-    )
-
-    angle = atan2(y2 - y1, x2 - x1)
-    arrowSize = 7
-
-    drawLine(
-        x2, y2,
-        x2 - arrowSize * cos(angle - 0.55),
-        y2 - arrowSize * sin(angle - 0.55),
-        fill=color,
-        lineWidth=lineWidth,
-        opacity=opacity
-    )
-
-    drawLine(
-        x2, y2,
-        x2 - arrowSize * cos(angle + 0.55),
-        y2 - arrowSize * sin(angle + 0.55),
-        fill=color,
-        lineWidth=lineWidth,
-        opacity=opacity
-    )
-
-
-def drawGrid(centerX, centerY, scale, width, height, color):
-    for value in range(-3, 4):
-        x = centerX + value * scale
-        y = centerY - value * scale
-
-        drawLine(
-            x, centerY - height / 2,
-            x, centerY + height / 2,
-            fill=color,
-            opacity=14
-        )
-
-        drawLine(
-            centerX - width / 2, y,
-            centerX + width / 2, y,
-            fill=color,
-            opacity=14
-        )
-
-    drawLine(
-        centerX - width / 2, centerY,
-        centerX + width / 2, centerY,
-        fill='white',
-        opacity=27
-    )
-
-    drawLine(
-        centerX, centerY - height / 2,
-        centerX, centerY + height / 2,
-        fill='white',
-        opacity=27
-    )
-
-
-def drawGlow(x, y, radius, color):
-    drawCircle(x, y, radius + 12, fill=color, opacity=6)
-    drawCircle(x, y, radius + 7, fill=color, opacity=10)
-    drawCircle(x, y, radius + 3, fill=color, opacity=16)
-
-
-def drawButton(x, y, width, height, text, fillColor):
-    drawRect(
-        x, y, width, height,
-        fill=fillColor,
-        border='white',
-        borderWidth=1,
-        opacity=95
-    )
-
-    drawLabel(
-        text,
-        x + width / 2,
-        y + height / 2,
-        fill='white',
-        bold=True,
-        size=10
-    )
-
-
-def drawProgressBar(x, y, width, height, ratio, fillColor):
-    drawRect(
-        x, y, width, height,
-        fill='black',
-        border='lightSteelBlue',
-        borderWidth=1
-    )
-
-    fillWidth = clamp(ratio, 0, 1) * width
-
-    if fillWidth > 0.5:
-        drawRect(
-            x, y, fillWidth, height,
-            fill=fillColor
-        )
-
-
-# --------------------------------------------------------------
-# Header and controls
-# --------------------------------------------------------------
-
-def drawHeader(app):
-    drawRect(0, 0, app.width, app.height, fill='black')
-
-    drawRect(0, 0, app.width, 87, fill='midnightBlue')
-    drawRect(0, 87, app.width, 5, fill='slateBlue')
-    drawRect(0, 92, app.width, 3, fill='gold', opacity=75)
-
-    drawLabel(
-        'THE EXACT METHOD OF AEROFOIL DESIGN',
-        525, 26,
-        fill='white',
-        bold=True,
-        size=23
-    )
-
-    drawLabel(
-        'Joukowski Conformal-Mapping Wind Tunnel',
-        525, 50,
-        fill='lightSteelBlue',
-        size=14
-    )
-
-    drawLabel(
-        'Hold the wind fixed. Rotate the aerofoil. Transform the flow.',
-        525, 71,
-        fill='gold',
-        bold=True,
-        size=12
-    )
-
-    drawLabel(
-        'w = z + 1/z',
-        937, 47,
-        fill='aqua',
-        bold=True,
-        size=15
-    )
-
-
-def drawControls(app):
-    drawButton(24, 99, 55, 24, 'W +Γ', 'darkGreen')
-    drawButton(84, 99, 55, 24, 'S -Γ', 'darkRed')
-
-    drawButton(147, 99, 55, 24, 'A -α', 'darkSlateBlue')
-    drawButton(207, 99, 55, 24, 'D +α', 'darkSlateBlue')
-
-    drawButton(270, 99, 58, 24, 'Q thin', 'darkSlateGray')
-    drawButton(333, 99, 62, 24, 'E thick', 'darkSlateGray')
-
-    if app.running:
-        flowText = 'PAUSE'
-        flowColor = 'darkOrange'
-    else:
-        flowText = 'PLAY'
-        flowColor = 'darkGreen'
-
-    drawButton(404, 99, 68, 24, flowText, flowColor)
-
-    drawButton(644, 99, 67, 24, '1 SYMM', 'darkSlateBlue')
-    drawButton(717, 99, 70, 24, '2 CAMBER', 'darkSlateBlue')
-    drawButton(793, 99, 65, 24, '3 LIFT', 'darkGreen')
-
-    drawButton(880, 99, 62, 24, 'RESET', 'darkRed')
-    drawButton(948, 99, 74, 24, 'HELP H', 'darkSlateBlue')
-
-
-# --------------------------------------------------------------
-# Source plane
-# --------------------------------------------------------------
-
-def drawSourceWindVectors():
-    # Wind stays horizontal in both panes in this visual convention.
-    for y in range(230, 514, 48):
-        drawArrow(44, y, 85, y, 'aqua', 65)
-
-
-def drawSourcePlane(app):
-    drawPanel(22, 132, 470, 458, 'midnightBlue', 'slateBlue')
-
-    drawLabel(
-        '1. SOURCE PLANE: SOLVE THE CIRCLE',
-        257, 158,
-        fill='white',
-        bold=True,
-        size=15
-    )
-
-    drawLabel(
-        'Circle flow is the mathematical starting point',
-        257, 178,
-        fill='lightSteelBlue',
-        size=11
-    )
-
-    drawGrid(
-        app.sourceCenterX,
-        app.sourceCenterY,
-        app.sourceScale,
-        430,
-        348,
-        'lightCyan'
-    )
-
-    drawSourceWindVectors()
-
-    for streamline in app.sourceStreamlines:
-        previous = None
-
-        for x, y in streamline:
-            screenX, screenY = sourceToScreen(app, x, y)
-
-            if previous != None:
-                drawLine(
-                    previous[0], previous[1],
-                    screenX, screenY,
-                    fill='aqua',
-                    lineWidth=1.5,
-                    opacity=67
-                )
-
-            previous = (screenX, screenY)
-
-    circleX, circleY = sourceToScreen(
-        app,
-        app.circleX,
-        app.circleY
-    )
-
-    circleRadius = app.circleRadius * app.sourceScale
-
-    drawGlow(circleX, circleY, circleRadius, 'dodgerBlue')
-
-    drawCircle(
-        circleX, circleY, circleRadius,
-        fill='dodgerBlue',
-        opacity=63,
-        border='white',
-        borderWidth=2
-    )
-
-    drawGlow(circleX, circleY, 10, 'gold')
-
-    drawCircle(
-        circleX, circleY, 10,
-        fill='gold',
-        border='white',
-        borderWidth=1
-    )
-
-    drawLine(
-        circleX - 13, circleY,
-        circleX + 13, circleY,
-        fill='white',
-        opacity=70
-    )
-
-    drawLine(
-        circleX, circleY - 13,
-        circleX, circleY + 13,
-        fill='white',
-        opacity=70
-    )
-
-    drawLabel(
-        'DRAG',
-        circleX,
-        circleY - 22,
-        fill='gold',
-        bold=True,
-        size=10
-    )
-
-    drawLabel(
-        'z-plane',
-        65, 564,
-        fill='lightCyan',
-        bold=True,
-        size=12
-    )
-
-    drawLabel(
-        'fixed generating geometry',
-        257, 564,
-        fill='lightCyan',
-        size=11
-    )
-
-
-# --------------------------------------------------------------
-# Mapped aerofoil plane
-# --------------------------------------------------------------
-
-def getFlowColor(index, total):
-    middle = total / 2
-    relativeDistance = abs(index - middle) / middle
-
-    if relativeDistance < 0.22:
-        return 'tomato'
-    elif relativeDistance < 0.48:
-        return 'gold'
-    return 'springGreen'
-
-
-def drawMappedStreamlines(app):
-    lineCount = len(app.mappedStreamlines)
-
-    for index in range(lineCount):
-        streamline = app.mappedStreamlines[index]
-        color = getFlowColor(index, lineCount)
-        previous = None
-
-        for x, y in streamline:
-            screenX, screenY = getRotatedMappedScreenPoint(app, x, y)
-
-            if previous != None:
-                currentInside = (
-                    514 <= screenX <= 1012 and
-                    197 <= screenY <= 545
-                )
-
-                previousInside = (
-                    514 <= previous[0] <= 1012 and
-                    197 <= previous[1] <= 545
-                )
-
-                if currentInside and previousInside:
-                    drawLine(
-                        previous[0], previous[1],
-                        screenX, screenY,
-                        fill=color,
-                        lineWidth=1.5,
-                        opacity=68
-                    )
-
-            previous = (screenX, screenY)
-
-
-def drawMappedAirfoil(app):
-    screenPoints = []
-
-    for x, y in app.mappedAirfoilPoints:
-        screenX, screenY = getRotatedMappedScreenPoint(app, x, y)
-        screenPoints.append((screenX, screenY))
-
-    # Golden atmospheric glow.
-    for index in range(len(screenPoints) - 1):
-        x1, y1 = screenPoints[index]
-        x2, y2 = screenPoints[index + 1]
-
-        drawLine(
-            x1, y1, x2, y2,
-            fill='gold',
-            lineWidth=8,
-            opacity=13
-        )
-
-    # White aerofoil boundary.
-    for index in range(len(screenPoints) - 1):
-        x1, y1 = screenPoints[index]
-        x2, y2 = screenPoints[index + 1]
-
-        drawLine(
-            x1, y1, x2, y2,
-            fill='white',
-            lineWidth=2
-        )
-
-    leadingX, leadingY = getRotatedMappedScreenPoint(
-        app,
-        app.leadingEdge[0],
-        app.leadingEdge[1]
-    )
-
-    trailingX, trailingY = getRotatedMappedScreenPoint(
-        app,
-        app.trailingEdge[0],
-        app.trailingEdge[1]
-    )
-
-    pivotX, pivotY = getRotatedMappedScreenPoint(
-        app,
-        app.aerofoilPivotX,
-        app.aerofoilPivotY
-    )
-
-    drawGlow(pivotX, pivotY, 4, 'gold')
-
-    drawCircle(
-        pivotX, pivotY, 4,
-        fill='gold',
-        border='white',
-        borderWidth=1
-    )
-
-    drawLabel(
-        'PIVOT',
-        pivotX,
-        pivotY + 16,
-        fill='gold',
-        bold=True,
-        size=8
-    )
-
-    drawCircle(leadingX, leadingY, 4, fill='orange')
-    drawCircle(trailingX, trailingY, 4, fill='tomato')
-
-    drawLabel(
-        'LE',
-        leadingX + 16,
-        leadingY + 15,
-        fill='orange',
-        bold=True,
-        size=10
-    )
-
-    drawLabel(
-        'TE',
-        trailingX - 16,
-        trailingY - 17,
-        fill='tomato',
-        bold=True,
-        size=10
-    )
-
-
-def drawFlowParticles(app):
-    if not app.running:
-        return
-
-    particleLines = [1, 3, 5, 8, 10, 12]
-
-    for lineIndex in particleLines:
-        if lineIndex < len(app.mappedStreamlines):
-            streamline = app.mappedStreamlines[lineIndex]
-
-            if len(streamline) > 4:
-                pointIndex = int(
-                    (app.particleOffset + lineIndex * 11)
-                    % len(streamline)
-                )
-
-                x, y = streamline[pointIndex]
-
-                screenX, screenY = getRotatedMappedScreenPoint(
-                    app,
-                    x,
-                    y
-                )
-
-                if (
-                    514 <= screenX <= 1012 and
-                    197 <= screenY <= 545
-                ):
-                    drawCircle(
-                        screenX, screenY, 7,
-                        fill='springGreen',
-                        opacity=13
-                    )
-
-                    drawCircle(
-                        screenX, screenY, 3,
-                        fill='white',
-                        border='springGreen',
-                        borderWidth=1
-                    )
-
-
-def drawMappedWindVectors():
-    # The wind is fixed and horizontal.
-    for y in range(230, 514, 49):
-        drawArrow(963, y, 1001, y, 'springGreen', 62)
-
-
-def drawAngleIndicator(app):
-    pivotX, pivotY = getRotatedMappedScreenPoint(
-        app,
-        app.aerofoilPivotX,
-        app.aerofoilPivotY
-    )
-
-    # The dashed baseline represents alpha = 0.
-    drawLine(
-        pivotX - 48, pivotY,
-        pivotX + 48, pivotY,
-        fill='lightSteelBlue',
-        lineWidth=1,
-        opacity=60,
-        dashes=True
-    )
-
-    # Direction of rotated aerofoil chord.
-    angle = -app.angleOfAttack * pi / 180
-
-    tipX = pivotX + 58 * cos(angle)
-    tipY = pivotY + 58 * sin(angle)
-
-    drawArrow(
-        pivotX,
-        pivotY,
-        tipX,
-        tipY,
-        'gold',
-        100,
-        3
-    )
-
-    drawLabel(
-        'α = ' + str(app.angleOfAttack) + '°',
-        pivotX + 38,
-        pivotY - 26,
-        fill='gold',
-        bold=True,
-        size=11
-    )
-
-
-def drawMappedPlane(app):
-    drawPanel(558, 132, 470, 458, 'darkSlateGray', 'seaGreen')
-
-    drawLabel(
-        '2. MAPPED PLANE: ROTATE THE AEROFOIL',
-        793, 158,
-        fill='white',
-        bold=True,
-        size=15
-    )
-
-    drawLabel(
-        'Wind stays horizontal; A/D rotates wing and transformed flow',
-        793, 178,
-        fill='paleGreen',
-        size=10
-    )
-
-    drawGrid(
-        app.mappedCenterX,
-        app.mappedCenterY,
-        app.mappedScale,
-        430,
-        348,
-        'paleGreen'
-    )
-
-    drawMappedWindVectors()
-    drawMappedStreamlines(app)
-    drawMappedAirfoil(app)
-    drawAngleIndicator(app)
-    drawFlowParticles(app)
-
-    drawLabel(
-        'w-plane',
-        602, 564,
-        fill='paleGreen',
-        bold=True,
-        size=12
-    )
-
-    drawLabel(
-        'rotated aerofoil + transformed ideal flow',
-        793, 564,
-        fill='paleGreen',
-        size=11
-    )
-
-
-# --------------------------------------------------------------
-# Dashboard
-# --------------------------------------------------------------
-
-def drawDashboard(app):
-    drawPanel(22, 601, 1006, 84, 'midnightBlue', 'slateBlue')
-
-    camber, thickness, liftIndex, rating, ratingColor = getDesignStats(app)
-    kuttaText, kuttaColor = getKuttaStatus(app)
-
-    drawLabel(
-        'DESIGN TELEMETRY',
-        100, 621,
-        fill='gold',
-        bold=True,
-        size=13
-    )
-
-    drawLabel(
-        'Camber',
-        230, 620,
-        fill='lightSteelBlue',
-        size=10
-    )
-
-    drawLabel(
-        str(round(camber, 1)) + '%',
-        230, 646,
-        fill='white',
-        bold=True,
-        size=17
-    )
-
-    drawLabel(
-        'Thickness',
-        355, 620,
-        fill='lightSteelBlue',
-        size=10
-    )
-
-    drawLabel(
-        str(round(thickness, 1)) + '%',
-        355, 646,
-        fill='white',
-        bold=True,
-        size=17
-    )
-
-    drawLabel(
-        'Aerofoil angle α',
-        483, 620,
-        fill='lightSteelBlue',
-        size=10
-    )
-
-    drawLabel(
-        str(app.angleOfAttack) + '°',
-        483, 646,
-        fill='gold',
-        bold=True,
-        size=17
-    )
-
-    drawLabel(
-        'Circulation Γ',
-        590, 620,
-        fill='lightSteelBlue',
-        size=10
-    )
-
-    drawLabel(
-        str(round(app.circulation, 2)),
-        590, 646,
-        fill='white',
-        bold=True,
-        size=17
-    )
-
-    drawLabel(
-        'Ideal lift index',
-        710, 620,
-        fill='lightSteelBlue',
-        size=10
-    )
-
-    drawLabel(
-        str(round(liftIndex, 2)),
-        710, 646,
-        fill=ratingColor,
-        bold=True,
-        size=17
-    )
-
-    drawLabel(
-        rating,
-        819, 620,
-        fill=ratingColor,
-        bold=True,
-        size=11
-    )
-
-    drawLabel(
-        kuttaText,
-        908, 620,
-        fill=kuttaColor,
-        bold=True,
-        size=9
-    )
-
-    drawLabel(
-        'TARGET 1.25',
-        819, 643,
-        fill='lightSteelBlue',
-        size=9
-    )
-
-    drawProgressBar(
-        875, 638,
-        128, 13,
-        liftIndex / 1.25,
-        ratingColor
-    )
-
-    drawLabel(
-        'Wind fixed → wing rotates about quarter-chord pivot',
-        257, 671,
-        fill='gold',
-        size=10
-    )
-
-    drawLabel(
-        'Model: 2D, inviscid, ideal potential flow',
-        740, 671,
-        fill='lightSteelBlue',
-        size=10
-    )
-
-
-# --------------------------------------------------------------
-# Messages and help
-# --------------------------------------------------------------
-
-def drawMessage(app):
-    if app.messageTimer > 0:
-        drawRect(
-            288, 133, 474, 29,
-            fill='darkSlateBlue',
-            border='gold',
-            borderWidth=1,
-            opacity=95
-        )
-
-        drawLabel(
-            app.message,
-            525, 147,
-            fill='gold',
-            bold=True,
-            size=11
-        )
-
-
-def drawHelpOverlay(app):
-    if not app.showHelp:
-        return
-
-    drawRect(
-        0, 0, app.width, app.height,
-        fill='black',
-        opacity=72
-    )
-
-    drawPanel(
-        212, 132, 626, 437,
-        'midnightBlue',
-        'gold'
-    )
-
-    drawLabel(
-        'AEROFOIL DESIGN MISSION',
-        525, 168,
-        fill='gold',
-        bold=True,
-        size=21
-    )
-
-    drawLabel(
-        'Turn a solved circle-flow problem into a rotating wing.',
-        525, 198,
-        fill='white',
-        bold=True,
-        size=13
-    )
-
-    instructions = [
-        'The left panel starts with a solvable ideal-flow problem:',
-        'flow around a generating circle in the z-plane.',
-        '',
-        'The Joukowski map w = z + 1/z transforms that circle',
-        'and its flow curves into a wing-like aerofoil in the w-plane.',
-        '',
-        'Drag the gold circle handle to alter mapped camber.',
-        'Use Q/E to alter thickness-like geometry.',
-        'Use W/S to alter circulation and flow asymmetry.',
-        '',
-        'Use A/D to rotate the aerofoil about its quarter-chord pivot.',
-        'The incoming wind remains horizontal, like a wind tunnel.',
-        '',
-        'Try preset 3, then press D repeatedly to visibly pitch the wing.'
+    app.stepsPerSecond = 60
+    app.droneX = 350
+    app.droneY = 300
+    app.vx = 0
+    app.vy = 0
+    app.theta = 0.08
+    app.omega = 0
+    app.targetX = 350
+    app.targetY = 260
+    app.prevThetaDes = 0
+    app.thetaDes = 0
+    app.thetaDesDot = 0
+    app.mode = 2
+    app.trail = []
+    app.bowlTrail = []
+    app.time = 0
+    app.propAngle = 0
+    app.windOn = False
+    app.windX = 0
+    app.windY = 0
+    app.gust = 0
+    app.gustTimer = 0
+    app.windParticles = []
+    for _ in range(55):
+        app.windParticles.append({
+            'x': random.randint(-100, 800),
+            'y': random.randint(20, 520),
+            'vx': random.uniform(2, 6),
+            'len': random.uniform(8, 26),
+            'a': random.uniform(0.15, 0.55)
+        })
+    app.clouds = [
+        {'x': 120, 'y': 80, 's': 1.0, 'vx': 0.2},
+        {'x': 400, 'y': 55, 's': 1.3, 'vx': 0.15},
+        {'x': 600, 'y': 90, 's': 0.9, 'vx': 0.25},
     ]
+    app.V = 0
+    app.Vdot = 0
+    app.Vprev = 0
+    app.Vhistory = []
+    app.showCartOverlay = True
+    app.paused = False
+    app.messageTimer = 0
+    # Cart-pole proper: theta 0 = DOWN, pi = UP
+    app.poleAngle = 0.05
+    app.poleOmega = 0
+    app.poleE = 0
+    app.poleV = 0
+    app.poleVdot = 0
+    app.poleK = 1.2
+    app.poleU = 0
 
-    y = 229
+def resetDrone(app):
+    app.droneX = 350 + random.uniform(-140, 140)
+    app.droneY = 300 + random.uniform(-90, 90)
+    app.vx = random.uniform(-20, 20)
+    app.vy = random.uniform(-20, 20)
+    app.theta = random.uniform(-0.25, 0.25)
+    app.omega = random.uniform(-0.4, 0.4)
+    app.trail = []
+    app.Vhistory = []
+    app.bowlTrail = []
+    app.gust = 0
+    app.prevThetaDes = 0
+    app.thetaDes = 0
+    app.poleAngle = 0.05
+    app.poleOmega = 0
 
-    for line in instructions:
-        drawLabel(
-            line,
-            525, y,
-            fill='lightCyan',
-            size=12
-        )
+def onMousePress(app, mx, my):
+    if mx < 700:
+        app.targetX = max(50, min(650, mx))
+        app.targetY = max(50, min(520, my))
+        app.messageTimer = 90
+    if 720 <= mx <= 1030:
+        if 495 <= my <= 520:
+            app.mode = 0
+        elif 525 <= my <= 550:
+            app.mode = 1
+        elif 555 <= my <= 580:
+            app.mode = 2
+        elif 585 <= my <= 610:
+            app.mode = 3
 
-        y += 20
-
-    drawLabel(
-        'CLICK ANYWHERE OR PRESS H TO START',
-        525, 538,
-        fill='springGreen',
-        bold=True,
-        size=13
-    )
-
-
-# --------------------------------------------------------------
-# Main view
-# --------------------------------------------------------------
-
-def redrawAll(app):
-    drawHeader(app)
-    drawControls(app)
-    drawSourcePlane(app)
-    drawMappedPlane(app)
-    drawDashboard(app)
-    drawMessage(app)
-    drawHelpOverlay(app)
-
-
-# --------------------------------------------------------------
-# Controller helpers
-# --------------------------------------------------------------
-
-def setMessage(app, text):
-    app.message = text
-    app.messageTimer = 100
-
-
-def changeCirculation(app, amount):
-    app.circulation = clamp(
-        app.circulation + amount,
-        -2.5,
-        2.5
-    )
-
-    if amount > 0:
-        setMessage(
-            app,
-            'Circulation increased: transformed flow becomes more asymmetric.'
-        )
-    else:
-        setMessage(
-            app,
-            'Circulation decreased.'
-        )
-
-    rebuildCachedGeometry(app)
-
-
-def changeAngle(app, amount):
-    app.angleOfAttack = clamp(
-        app.angleOfAttack + amount,
-        -18,
-        18
-    )
-
-    setMessage(
-        app,
-        'Aerofoil pitched to ' +
-        str(app.angleOfAttack) +
-        '°. Wind remains horizontal.'
-    )
-
-
-def changeRadius(app, amount):
-    app.circleRadius = clamp(
-        app.circleRadius + amount,
-        0.94,
-        1.30
-    )
-
-    if amount > 0:
-        setMessage(
-            app,
-            'Generating circle enlarged: mapped profile becomes thicker.'
-        )
-    else:
-        setMessage(
-            app,
-            'Generating circle reduced: mapped profile becomes thinner.'
-        )
-
-    rebuildCachedGeometry(app)
-
-
-def toggleFlow(app):
-    app.running = not app.running
-
-    if app.running:
-        setMessage(app, 'Tracer particles resumed.')
-    else:
-        setMessage(app, 'Tracer particles paused.')
-
-
-def applyPreset(app, preset):
-    if preset == 1:
-        app.circleX = -0.10
-        app.circleY = 0.00
-        app.circleRadius = 1.10
-        app.circulation = 0.00
-        app.angleOfAttack = 0
-
-        setMessage(
-            app,
-            'Preset 1: symmetric aerofoil, neutral angle, no circulation.'
-        )
-
-    elif preset == 2:
-        app.circleX = -0.10
-        app.circleY = 0.17
-        app.circleRadius = 1.10
-        app.circulation = 0.60
-        app.angleOfAttack = 3
-
-        setMessage(
-            app,
-            'Preset 2: cambered aerofoil at moderate positive angle.'
-        )
-
-    elif preset == 3:
-        app.circleX = -0.12
-        app.circleY = 0.24
-        app.circleRadius = 1.14
-        app.circulation = 1.20
-        app.angleOfAttack = 7
-
-        setMessage(
-            app,
-            'Preset 3: high-lift aerofoil. Press A/D to pitch the wing.'
-        )
-
-    rebuildCachedGeometry(app)
-
-
-# --------------------------------------------------------------
-# Events
-# --------------------------------------------------------------
-
-def onStep(app):
-    # Geometry is cached. Animation only advances particle locations.
-    if app.running:
-        app.particleOffset += 0.45
-
-    if app.messageTimer > 0:
-        app.messageTimer -= 1
-
-
-def onMousePress(app, mouseX, mouseY):
-    if app.showHelp:
-        app.showHelp = False
-        return
-
-    if 24 <= mouseX <= 79 and 99 <= mouseY <= 123:
-        changeCirculation(app, 0.20)
-
-    elif 84 <= mouseX <= 139 and 99 <= mouseY <= 123:
-        changeCirculation(app, -0.20)
-
-    elif 147 <= mouseX <= 202 and 99 <= mouseY <= 123:
-        changeAngle(app, -1)
-
-    elif 207 <= mouseX <= 262 and 99 <= mouseY <= 123:
-        changeAngle(app, 1)
-
-    elif 270 <= mouseX <= 328 and 99 <= mouseY <= 123:
-        changeRadius(app, -0.04)
-
-    elif 333 <= mouseX <= 395 and 99 <= mouseY <= 123:
-        changeRadius(app, 0.04)
-
-    elif 404 <= mouseX <= 472 and 99 <= mouseY <= 123:
-        toggleFlow(app)
-
-    elif 644 <= mouseX <= 711 and 99 <= mouseY <= 123:
-        applyPreset(app, 1)
-
-    elif 717 <= mouseX <= 787 and 99 <= mouseY <= 123:
-        applyPreset(app, 2)
-
-    elif 793 <= mouseX <= 858 and 99 <= mouseY <= 123:
-        applyPreset(app, 3)
-
-    elif 880 <= mouseX <= 942 and 99 <= mouseY <= 123:
-        resetApp(app)
-
-    elif 948 <= mouseX <= 1022 and 99 <= mouseY <= 123:
-        app.showHelp = True
-
-    else:
-        handleX, handleY = sourceToScreen(
-            app,
-            app.circleX,
-            app.circleY
-        )
-
-        if distanceBetween(mouseX, mouseY, handleX, handleY) <= 18:
-            app.draggingHandle = True
-
-            setMessage(
-                app,
-                'Handle engaged: drag to reshape the mapped aerofoil.'
-            )
-
-
-def onMouseDrag(app, mouseX, mouseY):
-    if app.draggingHandle:
-        sourceX, sourceY = screenToSource(app, mouseX, mouseY)
-
-        app.circleX = clamp(sourceX, -0.38, 0.28)
-        app.circleY = clamp(sourceY, -0.43, 0.43)
-
-        rebuildCachedGeometry(app)
-
-
-def onMouseRelease(app, mouseX, mouseY):
-    app.draggingHandle = False
-
+def onMouseDrag(app, mx, my):
+    if mx < 700:
+        app.targetX = max(50, min(650, mx))
+        app.targetY = max(50, min(520, my))
 
 def onKeyPress(app, key):
-    if key == 'h':
-        app.showHelp = not app.showHelp
-
-    elif key == 'r':
-        resetApp(app)
-
-    elif key == 'space':
-        toggleFlow(app)
-
-    elif key == 'w':
-        changeCirculation(app, 0.20)
-
-    elif key == 's':
-        changeCirculation(app, -0.20)
-
-    elif key == 'a':
-        changeAngle(app, -1)
-
-    elif key == 'd':
-        changeAngle(app, 1)
-
-    elif key == 'q':
-        changeRadius(app, -0.04)
-
-    elif key == 'e':
-        changeRadius(app, 0.04)
-
-    elif key == '1':
-        applyPreset(app, 1)
-
+    if key == '1':
+        app.mode = 0
     elif key == '2':
-        applyPreset(app, 2)
-
+        app.mode = 1
     elif key == '3':
-        applyPreset(app, 3)
+        app.mode = 2
+    elif key == '4':
+        app.mode = 3
+    elif key.lower() == 'w':
+        app.windOn = not app.windOn
+    elif key.lower() == 'r':
+        resetDrone(app)
+    elif key == 'space':
+        app.paused = not app.paused
+    elif key.lower() == 'c':
+        app.showCartOverlay = not app.showCartOverlay
+    elif key.lower() == 'g':
+        app.gust = random.uniform(-220, 220)
+        app.gustTimer = 25
 
+def onStep(app):
+    dt = 1/60
+    app.time += dt
+    app.propAngle += 18 + abs(app.vx)*0.15
+    for c in app.clouds:
+        c['x'] += c['vx']
+        if c['x'] > 780:
+            c['x'] = -80
+    speedMult = 3.5 if app.windOn else 1.0
+    for p in app.windParticles:
+        p['x'] += p['vx']*speedMult + (app.gust*0.02 if app.windOn else 0)
+        p['y'] += math.sin(app.time*0.6 + p['x']*0.01)*0.15
+        if p['x'] > 760:
+            p['x'] = -40
+            p['y'] = random.randint(20, 520)
+    if app.messageTimer > 0:
+        app.messageTimer -= 1
+    if app.paused:
+        return
+    if app.gustTimer > 0:
+        app.gustTimer -= 1
+        app.gust *= 0.94
+    else:
+        app.gust *= 0.90
+        if abs(app.gust) < 1:
+            app.gust = 0
+        if app.windOn and random.random() < 0.03:
+            app.gust = random.uniform(-180, 180)
+            app.gustTimer = random.randint(10, 30)
 
-def main():
-    runApp(width=1050, height=700)
+    kp, kd, kTh, kOm, g, alpha, _ = getGains(app.mode)
+    ex = app.droneX - app.targetX
+    ey = app.droneY - app.targetY
 
+    ax_des = -kp*ex - kd*app.vx
+    ay_des = -kp*ey - kd*app.vy
+    thetaDes = ax_des / g
+    thetaDes = max(-0.65, min(0.65, thetaDes))
+    thetaDesDotRaw = (thetaDes - app.prevThetaDes) / dt
+    app.thetaDesDot = app.thetaDesDot*0.7 + thetaDesDotRaw*0.3
+    app.prevThetaDes = thetaDes
+    app.thetaDes = thetaDes
 
-main()
+    theta_err = app.theta - thetaDes
+    torque = -kTh*theta_err - kOm*app.omega
+
+    windFX = app.windX + app.gust
+    if app.windOn:
+        windFX += math.sin(app.time*1.7)*40 + random.uniform(-15, 15)
+        app.windX = math.sin(app.time*0.9)*35
+    else:
+        app.windX *= 0.92
+    windFY = math.sin(app.time*1.3)*8 if app.windOn else 0
+
+    if app.mode == 0:
+        ax = -kp*ex*0.35 + windFX*0.05
+        ay = -kp*ey*0.35 + windFY*0.05
+        omegaDot = -kTh*0.4*theta_err
+    else:
+        ax = g * math.sin(app.theta) + windFX*0.12
+        ay = ay_des + windFY*0.12
+        omegaDot = torque
+
+    app.vx += ax*dt
+    app.vy += ay*dt
+    app.droneX += app.vx*dt
+    app.droneY += app.vy*dt
+    app.omega += omegaDot*dt
+    app.theta += app.omega*dt
+
+    if app.droneX < 40:
+        app.droneX = 40
+        app.vx *= -0.5
+    if app.droneX > 660:
+        app.droneX = 660
+        app.vx *= -0.5
+    if app.droneY < 40:
+        app.droneY = 40
+        app.vy *= -0.5
+    if app.droneY > 560:
+        app.droneY = 560
+        app.vy *= -0.35
+
+    Vtrans = 0.5*kp*(ex*ex + ey*ey) + 0.5*(app.vx*app.vx + app.vy*app.vy)
+    Vatt = 0.5*kTh*(theta_err*theta_err) + 0.5*app.omega*app.omega
+    V = Vtrans + Vatt
+    app.Vprev = app.V
+    app.V = V
+
+    if app.mode == 0:
+        app.Vdot = (V - app.Vprev)/dt if app.Vprev!=0 else 0
+        if abs(app.Vdot) < 0.8:
+            app.Vdot = 0.0
+    else:
+        Vdot_trans = kp*ex*app.vx + kp*ey*app.vy + app.vx*ax + app.vy*ay
+        Vdot_att = kTh*theta_err*(app.omega - app.thetaDesDot) + app.omega*omegaDot
+        app.Vdot = Vdot_trans + Vdot_att
+
+    app.Vhistory.append(V)
+    if len(app.Vhistory) > 160:
+        app.Vhistory.pop(0)
+    app.trail.append((app.droneX, app.droneY))
+    if len(app.trail) > 90:
+        app.trail.pop(0)
+    rNorm = math.sqrt(ex*ex + ey*ey)/180.0
+    rNorm = max(0, min(1.5, rNorm))
+    app.bowlTrail.append(rNorm)
+    if len(app.bowlTrail) > 70:
+        app.bowlTrail.pop(0)
+
+    # --- PROPER Cart-pole energy shaping + LaSalle ---
+    E0 = 2.0
+    th = app.poleAngle
+    w = app.poleOmega
+    E = 0.5*w*w + (1 - math.cos(th))
+    app.poleE = E
+    Etilde = E - E0
+    Vp = 0.5*Etilde*Etilde
+    app.poleV = Vp
+    u = -app.poleK * Etilde * w * math.cos(th)
+    app.poleU = u
+    th_ddot = -math.sin(th) + u*math.cos(th)
+    app.poleOmega += th_ddot*dt
+    app.poleAngle += app.poleOmega*dt
+    Vpdot = -app.poleK * Etilde*Etilde * w*w * (math.cos(th)**2)
+    app.poleVdot = Vpdot
+
+def drawSky(app):
+    for y in range(0, 580, 4):
+        t = y/580
+        r = int(135 + (200-135)*t)
+        g = int(206 + (220-206)*t)
+        b = int(235 + (235-235)*t)
+        if app.windOn:
+            r = int(r*0.78); g = int(g*0.82); b = int(b*0.9)
+        drawRect(0, y, 700, 4, fill=rgb(r,g,b), border=None)
+    drawCircle(620, 70, 38, fill=rgb(255, 235, 120) if not app.windOn else rgb(210,210,180), border=None, opacity=85)
+    drawCircle(620, 70, 48, fill=None, border=rgb(255,240,150), borderWidth=2, opacity=30)
+    for c in app.clouds:
+        x = c['x']; y = c['y']; s = c['s']
+        col = rgb(255,255,255) if not app.windOn else rgb(210,210,210)
+        for dx, dy, rx, ry in [(0,0,30,14),(20,6,22,12),(-18,7,20,11)]:
+            drawOval(x+dx*s, y+dy*s, rx*s*2, ry*s*2, fill=col, opacity=85, border=None)
+    for p in app.windParticles:
+        op = p['a']*(0.9 if app.windOn else 0.22)
+        drawLine(p['x'], p['y'], p['x']-p['len'], p['y']-1,
+                 fill=rgb(255,255,255), opacity=int(op*100), lineWidth=2 if app.windOn else 1)
+
+def drawIcyGround(app):
+    drawRect(0, 565, 700, 135, fill=rgb(205, 225, 245), border=None)
+    for i in range(0, 700, 70):
+        drawLine(i, 575+i%30, i+30, 580+(i*2)%20, fill=rgb(170,200,230), lineWidth=1, opacity=60)
+    drawRect(0, 565, 700, 8, fill=rgb(255,255,255), opacity=40, border=None)
+    drawLine(0, 565, 700, 565, fill=rgb(120,150,190), lineWidth=3)
+    shX = app.droneX + app.theta*18
+    dist = (565 - app.droneY)/500
+    shW = 60 + dist*20
+    shH = 10 + dist*4
+    opacity = max(8, int(28 - dist*15))
+    drawOval(shX, 575, shW, shH, fill=rgb(60,80,120), opacity=opacity, border=None)
+
+def drawTarget(app):
+    x = app.targetX; y = app.targetY
+    pulse = 12 + math.sin(app.time*3.5)*3
+    drawCircle(x, y, pulse+10, fill=None, border=rgb(255,80,80), borderWidth=2, opacity=35)
+    drawCircle(x, y, 6, fill=rgb(255,80,80), border=None)
+    drawLine(x-18, y, x-7, y, fill=rgb(255,80,80), lineWidth=2)
+    drawLine(x+7, y, x+18, y, fill=rgb(255,80,80), lineWidth=2)
+    drawLine(x, y-18, x, y-7, fill=rgb(255,80,80), lineWidth=2)
+    drawLine(x, y+7, x, y+18, fill=rgb(255,80,80), lineWidth=2)
+    drawLabel("TARGET (global)", x, y-26, size=11, bold=True, fill=rgb(180,30,30))
+
+def drawDrone(app):
+    for i,(tx,ty) in enumerate(app.trail):
+        op = int(18 + i*0.9)
+        r = 2 + i*0.03
+        drawCircle(tx, ty, r, fill=rgb(80,120,255), opacity=op, border=None)
+    x = app.droneX; y = app.droneY; th = app.theta
+    def rot(lx, ly):
+        c = math.cos(th); s = math.sin(th)
+        return x + lx*c - ly*s, y + lx*s + ly*c
+    for side in (-1,1):
+        flameLen = 6 + abs(app.vy)*0.08 + abs(app.vx)*0.05
+        if app.mode==0:
+            flameLen *= 0.3
+        fx1, fy1 = rot(side*22-3, 10)
+        fx2, fy2 = rot(side*22+3, 10)
+        fx3, fy3 = rot(side*22, 10+flameLen)
+        drawPolygon(fx1,fy1,fx2,fy2,fx3,fy3, fill=rgb(120,200,255), opacity=70, border=None)
+        drawPolygon(fx1,fy1,fx2,fy2,fx3,fy3, fill=rgb(255,230,120), opacity=45, border=None)
+    leftArmX1, leftArmY1 = rot(-18, 0)
+    leftArmX2, leftArmY2 = rot(-32, 0)
+    rightArmX1, rightArmY1 = rot(18, 0)
+    rightArmX2, rightArmY2 = rot(32, 0)
+    drawLine(leftArmX1, leftArmY1, leftArmX2, leftArmY2, fill=rgb(40,40,50), lineWidth=4)
+    drawLine(rightArmX1, rightArmY1, rightArmX2, rightArmY2, fill=rgb(40,40,50), lineWidth=4)
+    bx1, by1 = rot(-26, -6)
+    bx2, by2 = rot(26, -6)
+    bx3, by3 = rot(26, 8)
+    bx4, by4 = rot(-26, 8)
+    drawPolygon(bx1,by1,bx2,by2,bx3,by3,bx4,by4, fill=rgb(25,25,30), border=rgb(60,60,70), borderWidth=2)
+    if app.Vdot > 2:
+        ledCol = rgb(255,60,60)
+    elif abs(app.Vdot) < 0.6:
+        ledCol = rgb(255,210,60)
+    else:
+        ledCol = rgb(60,255,120)
+    drawCircle(x, y, 5, fill=ledCol, border=rgb(255,255,255), borderWidth=1)
+    drawCircle(x, y, 9, fill=ledCol, opacity=18, border=None)
+    for side in (-1,1):
+        px, py = rot(side*32, 0)
+        drawOval(px, py, 36, 8, fill=rgb(80,80,90), opacity=35, border=None)
+        a = math.radians(app.propAngle*(1 if side>0 else -1.1))
+        x1 = px + math.cos(a)*16
+        y1 = py + math.sin(a)*3
+        x2 = px - math.cos(a)*16
+        y2 = py - math.sin(a)*3
+        drawLine(x1, y1, x2, y2, fill=rgb(220,220,230), lineWidth=3, opacity=80)
+        a2 = a + math.pi/2
+        x1 = px + math.cos(a2)*16
+        y1 = py + math.sin(a2)*3
+        x2 = px - math.cos(a2)*16
+        y2 = py - math.sin(a2)*3
+        drawLine(x1, y1, x2, y2, fill=rgb(180,180,190), lineWidth=2, opacity=55)
+
+def drawBowlPanel(app):
+    drawRect(700, 0, 350, 700, fill=rgb(18,20,28), border=None)
+    drawRect(700, 0, 350, 700, fill=None, border=rgb(50,55,70), borderWidth=2)
+    drawLabel("LYAPUNOV ENERGY BOWL", 875, 22, size=15, bold=True, fill=rgb(230,235,255))
+    drawLabel("V = Vtrans+Vatt, positive-def • radially unbounded", 875, 40, size=10, fill=rgb(150,160,190))
+    cx = 875
+    cy = 210
+    for i in range(6):
+        t = i/5
+        r = 120 * (1 - t*0.15)
+        h = 110 * (t**2)
+        shade = int(35 + t*55)
+        drawOval(cx, cy+h, r*2, r*0.55, fill=rgb(shade, shade+8, shade+18), border=rgb(70,75,95), borderWidth=1, opacity=85)
+    pts = []
+    for ix in range(-120, 121, 6):
+        y = cy + (ix*ix)/120 + 6
+        pts.append((cx+ix, y))
+    poly = []
+    for p in pts:
+        poly.extend(p)
+    poly.extend([cx+120, cy+125, cx-120, cy+125])
+    drawPolygon(*poly, fill=rgb(45,52,72), border=None, opacity=90)
+    drawLabel("V → ∞ as |x| → ∞", cx, cy+138, size=10, bold=True, fill=rgb(120,200,255))
+    ex = app.droneX - app.targetX
+    ballX = cx + max(-110, min(110, ex*0.55))
+    ballY = cy + ((ex*0.55)**2)/120 + 6
+    if abs(app.vx) < 6 and abs(app.vy) < 6 and math.hypot(ex, app.droneY-app.targetY) > 20 and app.mode in (1,3):
+        drawRect(ballX-28, ballY-2, 56, 6, fill=rgb(255,210,80), opacity=55, border=None)
+        drawLabel("LaSalle flat — not invariant, slides off", ballX, ballY-18, size=9, fill=rgb(255,220,120))
+    for i, rn in enumerate(app.bowlTrail[-30:]):
+        op = int(10 + i*2.2)
+        bx = cx + (1 if i%2==0 else -1)*abs(rn)*100
+        by = cy + (rn*100)**2/120 + 6
+        drawCircle(bx, by, 2, fill=rgb(120,200,255), opacity=op, border=None)
+    glowCol = rgb(60,255,130) if app.Vdot < -0.5 else rgb(255,220,80) if abs(app.Vdot)<0.6 else rgb(255,80,80)
+    drawCircle(ballX, ballY, 11, fill=glowCol, opacity=22, border=None)
+    drawCircle(ballX, ballY, 7, fill=rgb(240,245,255), border=rgb(30,30,40), borderWidth=1.5)
+    drawLabel(f"V = {app.V:0.1f}  (energy)", cx, 352, size=13, bold=True, fill=rgb(230,235,255))
+    vdotCol = rgb(80,255,130) if app.Vdot < -0.5 else rgb(255,230,90) if abs(app.Vdot)<0.6 else rgb(255,90,90)
+    drawLabel(f"dV/dt = {app.Vdot:+0.2f}", cx, 372, size=12, bold=True, fill=vdotCol)
+    if app.mode==0:
+        drawLabel("dV/dt ≈ 0 → orbits (ISL)", cx, 390, size=10, fill=rgb(180,185,205))
+    elif app.mode==1:
+        drawLabel("dV/dt ≤ 0 → decays (asymptotic)", cx, 390, size=10, fill=rgb(180,185,205))
+    elif app.mode==2:
+        drawLabel(f"dV/dt ≤ -αV  (exponential)", cx, 390, size=10, fill=rgb(180,185,205))
+    else:
+        drawLabel("Global + LaSalle: largest invariant set = origin", cx, 390, size=10, fill=rgb(180,185,205))
+    drawRect(720, 410, 310, 62, fill=rgb(28,31,42), border=rgb(55,60,80), borderWidth=1)
+    drawLabel("Lyapunov decay over time", 875, 416, size=10, fill=rgb(150,160,190))
+    if len(app.Vhistory)>2:
+        maxV = max(app.Vhistory) if max(app.Vhistory)>1 else 1
+        for i in range(1, len(app.Vhistory)):
+            x1 = 725 + (i-1)/159*300
+            x2 = 725 + i/159*300
+            y1 = 465 - (app.Vhistory[i-1]/maxV)*48
+            y2 = 465 - (app.Vhistory[i]/maxV)*48
+            col = rgb(80,220,255) if app.mode!=0 else rgb(255,210,80)
+            drawLine(x1, y1, x2, y2, fill=col, lineWidth=2)
+    drawLabel("STABILITY PROOF MODE — press 1-4", 875, 485, size=11, bold=True, fill=rgb(200,210,240))
+    modes = [
+        (0, "1: ISL (frictionless)"),
+        (1, "2: Asymptotic (friction)"),
+        (2, "3: Exponential (fast)"),
+        (3, "4: Global + LaSalle"),
+    ]
+    for idx,(m, label) in enumerate(modes):
+        y = 505 + idx*30
+        isActive = app.mode==m
+        bg = rgb(70,85,130) if isActive else rgb(38,42,58)
+        bd = rgb(120,160,255) if isActive else rgb(55,60,80)
+        drawRect(720, y, 310, 26, fill=bg, border=bd, borderWidth=2 if isActive else 1)
+        drawLabel(label, 875, y+13, size=12, bold=isActive, fill=rgb(235,240,255) if isActive else rgb(160,170,190))
+    windStr = "WINDSTORM ON" if app.windOn else "wind off"
+    windCol = rgb(120,200,255) if app.windOn else rgb(100,110,130)
+    drawRect(720, 630, 145, 26, fill=rgb(30,35,50), border=windCol, borderWidth=2)
+    drawLabel(f"W: {windStr}", 792, 643, size=11, bold=app.windOn, fill=windCol)
+    drawRect(875, 630, 70, 26, fill=rgb(30,35,50), border=rgb(80,85,100), borderWidth=1)
+    drawLabel("SPACE: pause", 910, 643, size=10, fill=rgb(160,170,190))
+    drawRect(955, 630, 75, 26, fill=rgb(30,35,50), border=rgb(80,85,100), borderWidth=1)
+    drawLabel("R: reset", 992, 643, size=10, fill=rgb(160,170,190))
+    drawRect(720, 665, 310, 30, fill=rgb(24,26,36), border=None)
+    drawLabel("V = ½kp|e|² + ½|v|² + ½kTh|θ-θd|² + ½ω² >0", 875, 675, size=9, fill=rgb(130,140,170))
+    drawLabel("V→∞ as |x|→∞  (radially unbounded → global)", 875, 686, size=8, fill=rgb(100,180,255))
+
+def drawHeader(app):
+    drawRect(0, 0, 700, 38, fill=rgb(15,17,26), opacity=88, border=None)
+    kp, kd, kTh, kOm, g, alpha, desc = getGains(app.mode)
+    drawLabel("LYAPUNOV DRONE LAB — quadrotor = broomstick on ice in wind", 210, 13, size=13, bold=True, fill=rgb(235,240,255), align='left')
+    drawLabel(desc, 10, 28, size=11, fill=rgb(120,200,255), align='left')
+    drawLabel(f"|e|={math.hypot(app.droneX-app.targetX, app.droneY-app.targetY):0.0f}  Vdot={app.Vdot:+0.1f}  θ={math.degrees(app.theta):+0.1f}°", 690, 20, size=10, fill=rgb(180,190,210), align='right')
+
+def drawInstructions(app):
+    drawRect(0, 600, 700, 100, fill=rgb(15,17,26), opacity=82, border=None)
+    lines = [
+        "CLICK/DRAG to set TARGET anywhere — test GLOBAL stability (radially unbounded bowl).",
+        "Keys: 1-4 modes | W windstorm | G gust | R reset | C cart-pole overlay | SPACE pause",
+        "Bussin Sigma Scholars — V fuel gauge, dV/dt friction. LaSalle escapes flats."
+    ]
+    for i,txt in enumerate(lines):
+        drawLabel(txt, 12, 614+i*16, size=11, fill=rgb(210,215,235), align='left', bold=(i==0))
+
+def drawCartOverlay(app):
+    if not app.showCartOverlay:
+        return
+    drawRect(12, 360, 250, 198, fill=rgb(20,22,32), border=rgb(70,75,95), borderWidth=1.5)
+    drawLabel("Cart-Pole Swing-Up ", 137, 372, size=11, bold=True, fill=rgb(220,225,245))
+    drawLabel("θ=0 DOWN, π=UP | E=½ω²+(1-cosθ), E0=2", 137, 386, size=9, fill=rgb(150,160,190))
+    drawLine(22, 500, 242, 500, fill=rgb(120,130,160), lineWidth=2)
+    cartX = 137 + app.poleU*8
+    cartX = max(30, min(220, cartX))
+    drawRect(cartX-18, 486, 36, 14, fill=rgb(200,200,210), border=rgb(50,50,60), borderWidth=1)
+    px = cartX
+    py = 486
+    ang = app.poleAngle
+    poleLen = 62
+    ex = px + math.sin(ang)*poleLen
+    ey = py + math.cos(ang)*poleLen
+    drawLine(px, py, ex, ey, fill=rgb(255,90,90), lineWidth=4)
+    drawCircle(ex, ey, 7, fill=rgb(255,180,60), border=None)
+    drawLabel(f"E={app.poleE:0.2f} E0=2.0  Ẽ={app.poleE-2.0:+0.2f}", 137, 522, size=10, fill=rgb(170,180,200))
+    drawLabel(f"V=½Ẽ²={app.poleV:0.3f}  Vdot={app.poleVdot:+0.3f} ≤0", 137, 537, size=10, bold=True, fill=rgb(120,255,130) if app.poleVdot<=-0.001 else rgb(255,220,80))
+    drawLabel(f"Vdot=-k·Ẽ²·ω²·cos²θ ≤0", 137, 551, size=9, fill=rgb(120,200,255))
+    if abs(app.poleOmega) < 0.15 and abs(math.cos(app.poleAngle)) < 0.15:
+        drawLabel("Flat: ω≈0 or cos≈0 → Vdot=0", 137, 565, size=8, fill=rgb(255,210,80))
+        drawLabel("Not invariant → gravity slides off", 137, 577, size=8, fill=rgb(255,220,120))
+    else:
+        drawLabel("LaSalle: only invariant in Vdot=0 is Ẽ=0 → UP", 137, 571, size=8, fill=rgb(150,200,255))
+
+def redrawAll(app):
+    drawSky(app)
+    drawIcyGround(app)
+    drawTarget(app)
+    drawDrone(app)
+    drawBowlPanel(app)
+    drawHeader(app)
+    drawInstructions(app)
+    drawCartOverlay(app)
+    if app.messageTimer>0:
+        drawRect(180, 42, 360, 22, fill=rgb(255,210,80), border=rgb(50,40,10), borderWidth=1)
+        drawLabel("New target set — testing global asymptotic stability!", 360, 53, size=11, bold=True, fill=rgb(40,30,0))
+    if app.paused:
+        drawRect(0,0,700,700, fill=rgb(0,0,0), opacity=35, border=None)
+        drawLabel("PAUSED — press SPACE", 350, 350, size=28, bold=True, fill=rgb(255,255,255))
