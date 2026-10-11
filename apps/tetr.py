@@ -192,6 +192,13 @@ def set_spectating(is_spec):
 
 # Only extensions path — avoids 404
 from extensions.canvas_ui import WaBreadcrumb, WaTabGroup, WaInput, WaAvatar, WaButton, WaBadge, WaDialog
+try:
+    from extensions.chat_slayer import ChatSlayerClient
+    HAS_CHAT = True
+except Exception as _chat_import_error:
+    ChatSlayerClient = None
+    HAS_CHAT = False
+    print(f"ChatSlayer import failed: {_chat_import_error}")
 
 # Global signals - V24 FIX from platformer_bgs: use Python global dict, not window dict (Brython window dict bug)
 _bgs_signals_py = {}
@@ -961,6 +968,10 @@ def onStep(app):
             sig=get_signal("character-state-update")
             if sig and isinstance(sig, dict):
                 for u in sig.get("updates",[]):
+                    metadata=u.get("metadata")
+                    if isinstance(metadata,dict):
+                        u=dict(u)
+                        u.update(metadata)
                     cid=u.get("clientId")
                     if not cid or cid==app.client_id:
                         continue
@@ -1117,8 +1128,8 @@ def onStep(app):
                 "velocity":[float(app.tetr.board.attack),float(app.tetr.board.combo)],
                 "animationState":"topped" if app.tetr.game_over else "playing",
                 "score":int(app.tetr.stats["score"]),
-                "lines":int(app.tetr.stats["lines"]),
                 "timestamp":now,
+                "metadata":{
                 "username":str(app.username)[:16],
                 "isAnonymous":bool(app.is_anonymous),
                 "tetrBoard":flat,
@@ -1143,6 +1154,7 @@ def onStep(app):
                 "tetrPieces":int(app.tetr.stats["pieces"]),
                 "tetrTime":int(elapsed),
                 "tetrGarbageIncoming":len(app.mp_wrapper.match["garbage"]["incoming"]),
+                },
             }],"timestamp":now}
             send_bgs_patch(app,"/api/multiplayer/character-state",payload)
             if app.tetr.board.attack>0: app.tetr.board.attack=0
@@ -1800,196 +1812,28 @@ def draw_multiplayer_vs(app):
 
 def onMousePress(app,mx,my):
     if app.game_state=="title":
-        # TETR.IO welcome screen handling
         cx = app.width//2
-        card_w = 460
-        card_x = cx - card_w//2
-        card_y = 88
-        def gen_random_name():
-            adj = random.choice(app.random_names) if hasattr(app,'random_names') else "GUEST"
-            num = random.randint(100,9999)
-            return f"{adj}_{num}"
-
-        def is_registered(name):
-            if not name:
-                return False
-            return name.strip().upper() in app.registered_users
-
-        if app.welcome_state=="enter":
-            # Input field
-            input_w = 300
-            input_x = cx - input_w//2
-            input_y = card_y+118
-            # Click on input -> focus
-            if input_x <= mx <= input_x+input_w and input_y <= my <= input_y+38:
-                app.inputName.focused=True
-                play_sfx("ui.click")
-                return True
+        input_x = cx-160
+        input_y1, input_y2 = 176, 238
+        if input_x <= mx <= input_x+320 and input_y1 <= my <= input_y1+38:
+            app.welcome_focus="user"
+            return True
+        if input_x <= mx <= input_x+320 and input_y2 <= my <= input_y2+38:
+            app.welcome_focus="pass"
+            return True
+        button_y = 300
+        if cx-160 <= mx <= cx-10 and button_y <= my <= button_y+40:
+            aio.run(_authenticate_chat(app))
+            return True
+        if cx+10 <= mx <= cx+160 and button_y <= my <= button_y+40:
+            aio.run(_authenticate_chat(app))
+            return True
+        if cx-160 <= mx <= cx+160 and 398 <= my <= 442:
+            if _chat_authenticated():
+                _enter_authenticated_game(app)
             else:
-                app.inputName.focused=False
-            # JOIN button
-            btn_w = 300
-            btn_x = cx - btn_w//2
-            btn_y = input_y+56
-            if btn_x <= mx <= btn_x+btn_w and btn_y <= my <= btn_y+36:
-                play_sfx("ui.click")
-                name = app.welcome_username.strip()
-                if not name:
-                    # Blank -> random
-                    rnd = gen_random_name()
-                    app.username = rnd
-                    app.is_anonymous = True
-                    app.welcome_error=""
-                    app.game_state="menu"
-                    app.tabGroup.active=2
-                    app.tetr=TetrGame(mode="zen")
-                    app.game_state="playing"
-                    app.badgeOPP.text="SOLO ZEN"
-                    app.inputName.focused=False
-                    stop_bgm(); play_bgm("bgm.zen", floor=0)
-                    print(f"Random name {rnd}")
-                else:
-                    if len(name) < 2:
-                        app.welcome_error="Name too short"
-                    elif len(name) > 16:
-                        app.welcome_error="Name too long (max 16)"
-                    elif is_registered(name):
-                        app.welcome_state="taken"
-                        app.welcome_error=""
-                        app.welcome_password=""
-                        print(f"Name taken {name}")
-                    else:
-                        app.welcome_state="available"
-                        app.welcome_error=""
-                        print(f"Name available {name}")
-                return True
-            return False
-
-        elif app.welcome_state=="available":
-            btn_w = 300
-            btn_x = cx - btn_w//2
-            y1 = card_y+150
-            y2 = y1+62
-            # STAY ANONYMOUS
-            if btn_x <= mx <= btn_x+btn_w and y1 <= my <= y1+38:
-                play_sfx("ui.click")
-                app.username = app.welcome_username.strip()
-                app.is_anonymous = True
-                app.inputName.value = app.username
-                app.inputName.text = app.username
-                # Go to main menu
-                app.game_state="menu"
-                app.tabGroup.active=2
-                app.tetr=TetrGame(mode="zen")
-                app.game_state="playing"
-                app.badgeOPP.text="SOLO ZEN"
-                app.inputName.focused=False
-                stop_bgm(); play_bgm("bgm.zen", floor=0)
-                print(f"Stay anonymous as {app.username}")
-                return True
-            # REGISTER
-            if btn_x <= mx <= btn_x+btn_w and y2 <= my <= y2+38:
-                play_sfx("ui.click")
-                # Simulate registration — add to registered, not anonymous
-                name = app.welcome_username.strip()
-                app.registered_users.add(name.upper())
-                try:
-                    ls = window.localStorage
-                    if ls:
-                        lst = list(app.registered_users)
-                        ls.setItem("tetrio_registered", json.dumps(lst))
-                except:
-                    pass
-                app.username = name
-                app.is_anonymous = False
-                app.inputName.value = name
-                app.inputName.text = name
-                app.game_state="menu"
-                app.tabGroup.active=2
-                app.tetr=TetrGame(mode="zen")
-                app.game_state="playing"
-                app.badgeOPP.text="SOLO ZEN"
-                app.inputName.focused=False
-                stop_bgm(); play_bgm("bgm.zen", floor=0)
-                print(f"Registered {name}")
-                return True
-            # BACK
-            back_y = card_y+420-32
-            if cx-30 <= mx <= cx+30 and back_y-10 <= my <= back_y+10:
-                app.welcome_state="enter"
-                app.welcome_error=""
-                play_sfx("ui.back")
-                return True
-            return False
-
-        elif app.welcome_state=="taken":
-            input_w = 300
-            input_x = cx - input_w//2
-            input_y = card_y+154
-            btn_w = 300
-            btn_x = cx - btn_w//2
-            btn_y = input_y+56
-            # Password field focus
-            if input_x <= mx <= input_x+input_w and input_y <= my <= input_y+38:
-                # focus password — for simplicity use same inputName focused
-                app.inputName.focused=True
-                play_sfx("ui.click")
-                return True
-            # LOGIN
-            if btn_x <= mx <= btn_x+btn_w and btn_y <= my <= btn_y+36:
-                play_sfx("ui.click")
-                # Simulate login — any password works if name registered, unless we stored one
-                # For demo, accept any non-empty password
-                if not app.welcome_password:
-                    app.welcome_error="Enter password"
-                else:
-                    app.username = app.welcome_username.strip()
-                    app.is_anonymous = False
-                    app.inputName.value = app.username
-                    app.inputName.text = app.username
-                    app.game_state="menu"
-                    app.tabGroup.active=2
-                    app.tetr=TetrGame(mode="zen")
-                    app.game_state="playing"
-                    app.badgeOPP.text="SOLO ZEN"
-                    app.inputName.focused=False
-                    stop_bgm(); play_bgm("bgm.zen", floor=0)
-                    print(f"Logged in as {app.username}")
-                return True
-            # BACK
-            back_y = card_y+420-32
-            if cx-30 <= mx <= cx+30 and back_y-10 <= my <= back_y+10:
-                app.welcome_state="enter"
-                app.welcome_error=""
-                app.welcome_password=""
-                play_sfx("ui.back")
-                return True
-            app.inputName.focused=False
-            return False
-
-        # Old titleItems fallback (should not happen with new welcome)
-        for item in app.titleItems:
-            x=120; y=item["y"]; w=880; h=58
-            if x<=mx<=x+w and y<=my<=y+h:
-                if item["id"]=="multiplayer":
-                    app.game_state="menu"; app.tabGroup.active=0; start_search(app); app.game_state="searching"
-                elif item["id"]=="solo":
-                    # MIN FIX: clear single opponent lock - SOLO must not have bot
-                    try:
-                        app.mp_wrapper.match["players"]["opponent"]=None
-                        app.mp_wrapper.cancelSearch()
-                        app.single_opponent_id=None
-                        app.mp_wrapper.search_timer=0
-                    except: pass
-                    app.game_state="menu"; app.tabGroup.active=2; app.tetr=TetrGame(mode="zen"); app.game_state="playing"; app.badgeOPP.text="SOLO ZEN"; app.inputName.focused=False
-                    stop_bgm(); play_bgm("bgm.zen", floor=0)
-                elif item["id"]=="config":
-                    go_config(app)
-                elif item["id"]=="tetra":
-                    app.game_state="menu"; app.tabGroup.active=0; start_search(app); app.game_state="searching"
-                else:
-                    go_config(app)
-                return True
+                app.welcome_error="Register or log in first"
+            return True
         return False
     if app.dialogGameOver.open:
         for b in app.dialogGameOver.buttons:
@@ -2071,78 +1915,32 @@ def _code_from_key(k):
     return kl
 
 def onKeyPress(app,key):
-    # Welcome screen typing
     if app.game_state=="title":
         k=_norm_key(key)
-        code = _code_from_key(key)
-        # Handle backspace, enter, typing for username/password
-        if app.welcome_state=="enter":
-            if k=="backspace":
-                app.welcome_username = app.welcome_username[:-1]
-                app.inputName.value = app.welcome_username
-                play_sfx("tetr.move", volume=0.15)
-                return
-            elif k=="enter" or k==" " and False:
-                # Simulate JOIN click
-                def gen_random_name():
-                    adj = _r.choice(app.random_names) if hasattr(app,'random_names') else "GUEST"
-                    num = _r.randint(100,9999)
-                    return f"{adj}_{num}"
-                def is_registered(name):
-                    return name.strip().upper() in app.registered_users if name else False
-                name = app.welcome_username.strip()
-                if not name:
-                    rnd = gen_random_name()
-                    app.username = rnd
-                    app.is_anonymous = True
-                    app.game_state="menu"; app.tabGroup.active=2; app.tetr=TetrGame(mode="zen"); app.game_state="playing"; app.badgeOPP.text="SOLO ZEN"; app.inputName.focused=False
-                    stop_bgm(); play_bgm("bgm.zen", floor=0)
-                else:
-                    if is_registered(name):
-                        app.welcome_state="taken"; app.welcome_password=""
-                    else:
-                        app.welcome_state="available"
-                play_sfx("ui.click")
-                return
-            elif len(k)==1 and k.isprintable() and len(app.welcome_username)<16:
-                # Only allow alphanumeric and _ and -
-                if k in "abcdefghijklmnopqrstuvwxyz0123456789_-" or (k.isalnum()):
-                    app.welcome_username += key if len(key)==1 else k
-                    # Keep original case for display — use key as typed
-                    if len(key)==1 and key.isalnum():
-                        # Replace last char with actual key to preserve case
-                        app.welcome_username = app.welcome_username[:-1] + key
-                    app.inputName.value = app.welcome_username
-                    play_sfx("tetr.move", volume=0.1, pitch=1.1)
-                return
-            elif k=="escape":
-                app.welcome_username=""
-                app.welcome_error=""
-                return
-        elif app.welcome_state=="taken":
-            # typing password
-            if k=="backspace":
+        focus = getattr(app, "welcome_focus", "user")
+        if k == "enter":
+            if _chat_authenticated():
+                _enter_authenticated_game(app)
+            else:
+                aio.run(_authenticate_chat(app))
+            return
+        if k == "escape":
+            app.welcome_focus = "user"
+            app.welcome_error = ""
+            return
+        if k == "backspace":
+            if focus == "pass":
                 app.welcome_password = app.welcome_password[:-1]
-                play_sfx("tetr.move", volume=0.15)
-                return
-            elif k=="enter":
-                # Try login
-                if app.welcome_password:
-                    app.username = app.welcome_username.strip()
-                    app.is_anonymous=False
-                    app.inputName.value=app.username
-                    app.game_state="menu"; app.tabGroup.active=2; app.tetr=TetrGame(mode="zen"); app.game_state="playing"; app.badgeOPP.text="SOLO ZEN"; app.inputName.focused=False
-                    stop_bgm(); play_bgm("bgm.zen", floor=0)
-                    play_sfx("ui.click")
-                return
-            elif len(k)==1 and k.isprintable() and len(app.welcome_password)<24:
-                app.welcome_password += key if len(key)==1 else k
-                play_sfx("tetr.move", volume=0.1)
-                return
-            elif k=="escape":
-                app.welcome_state="enter"; app.welcome_password=""; app.welcome_error=""
-                play_sfx("ui.back")
-                return
+            else:
+                app.welcome_username = app.welcome_username[:-1]
+            return
+        if len(k) == 1 and k.isprintable():
+            if focus == "pass" and len(app.welcome_password) < 128:
+                app.welcome_password += key if len(key) == 1 else k
+            elif focus != "pass" and len(app.welcome_username) < 32:
+                if k.isalnum() or k in "_-":
+                    app.welcome_username += key if len(key) == 1 else k
+            return
 
     k=_norm_key(key)
     code = _code_from_key(key)
@@ -2285,6 +2083,65 @@ def draw_garbage_meter(app):
             drawRoundedRect(ox+1, oy+BOARD_H_VISIBLE*CELL - h, 10, h, 4, rgb(220,80,80))
     except: pass
 
+def _chat_authenticated():
+    try:
+        token = window._chatSlayer.token
+        return bool(token) and str(token) not in ("null", "undefined")
+    except:
+        return False
+
+async def _authenticate_chat(app):
+    if getattr(app, "_chat_auth_busy", False):
+        return
+    if not HAS_CHAT:
+        app.welcome_error = "Chat authentication unavailable"
+        return
+    username = app.welcome_username.strip()
+    if not username:
+        app.welcome_error = "Enter a username"
+        return
+    app._chat_auth_busy = True
+    app.welcome_error = "Connecting..."
+    try:
+        client = ChatSlayerClient(
+            base_url="https://scs-207.onrender.com/chat-api",
+            client_id="web-demo",
+            username=username,
+            password=app.welcome_password,
+        )
+        app.chat_client = client
+        await client.register_or_login(username, app.welcome_password)
+        if client.connected:
+            app.username = username
+            app.is_anonymous = False
+            app.welcome_error = ""
+            print(f"ChatSlayer authenticated as {username}")
+        else:
+            response = getattr(window._chatSlayer, "lastResp", None)
+            details = getattr(response, "data", None) if response else None
+            error = ""
+            try:
+                error = details.get("error") or details.get("errcode") or details.get("message") or ""
+            except:
+                pass
+            app.welcome_error = client.login_error or error or "Authentication failed"
+    except Exception as error:
+        app.welcome_error = f"Authentication failed: {error}"
+        print(f"ChatSlayer auth failed: {error}")
+    finally:
+        app._chat_auth_busy = False
+
+def _enter_authenticated_game(app):
+    app.username = app.welcome_username.strip() or app.username or "Player"
+    app.is_anonymous = False
+    app.tabGroup.active = 2
+    app.tetr = TetrGame(mode="zen")
+    app.game_state = "playing"
+    app.badgeOPP.text = "SOLO ZEN"
+    app.inputName.focused = False
+    stop_bgm()
+    play_bgm("bgm.zen", floor=0)
+
 # ===== TITLE per demo =====
 def drawTitleScreen(app):
     drawRect(0,0,app.width,app.height,fill=rgb(18,19,23))
@@ -2311,6 +2168,8 @@ def drawTitleScreen(app):
     drawLabel("REGISTER",bx1+btn_w//2,btn_y+20,size=12,fill="white",bold=True)
     drawRoundedRect(bx2,btn_y,btn_w,40,8,rgb(90,100,220),border=rgb(120,130,250),borderWidth=1.2)
     drawLabel("LOGIN",bx2+btn_w//2,btn_y+20,size=12,fill="white",bold=True)
+    if app.welcome_error:
+        drawLabel(app.welcome_error,cx,btn_y+54,size=9,fill=rgb(255,140,140),bold=True)
     # verification status
     try:
         lr = getattr(window,'_chatSlayer',None)
@@ -2332,20 +2191,11 @@ def onKeyHold(app,keys):
     normed=set(_norm_key(k) for k in keys)
     if app.game_state!="playing": return
     if "left" in normed or "a" in normed:
-        if app.tetr.das_left==0: 
+        if app.tetr.das_left==0:
             if app.tetr.try_move(-1,0): play_sfx("tetr.move", pitch=0.96, volume=0.4)
             app.tetr.das_left=1
     if "right" in normed or "d" in normed:
-        if app.tetr.das_right==0: 
+        if app.tetr.das_right==0:
             if app.tetr.try_move(1,0): play_sfx("tetr.move", pitch=1.04, volume=0.4)
             app.tetr.das_right=1
     if "down" in normed or "s" in normed: app.tetr.soft_drop=True
-
-def do_hold(app):
-    if not app.tetr.board.can_hold: 
-        play_sfx("tetr.lock", pitch=0.7, volume=0.3)
-        return
-    play_sfx("tetr.hold")
-    if app.tetr.hold_piece is None: app.tetr.hold_piece=app.tetr.current.kind; app.tetr.spawn()
-    else: cur=app.tetr.current.kind; app.tetr.current=Piece(app.tetr.hold_piece); app.tetr.hold_piece=cur
-    app.tetr.board.can_hold=False

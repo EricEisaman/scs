@@ -27,6 +27,9 @@ class CharacterProtocolTests(unittest.TestCase):
         payload = character_payload("peer")
         self.assertEqual(CharacterState.from_payload(payload).to_dict(), payload)
 
+        game_payload = dict(payload, metadata={"tetrBoard": [0, 1], "username": "peer"})
+        self.assertEqual(CharacterState.from_payload(game_payload).to_dict(), game_payload)
+
         with self.assertRaises(ValueError):
             CharacterState.from_payload(dict(payload, rotation=[0, 0, 0]))
         with self.assertRaises(ValueError):
@@ -36,6 +39,21 @@ class CharacterProtocolTests(unittest.TestCase):
 
 
 class MultiplayerRegistryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_character_metadata_survives_registry_broadcast(self):
+        registry = MultiplayerRegistry()
+        joined = await registry.join(JoinRequest("tetr_1v1", "Player"))
+        queue, _ = await registry.subscribe_sse(joined.client_id)
+        metadata = {"tetrBoard": [0, 1], "username": "Player"}
+
+        await registry.handle_character_state(
+            joined.client_id,
+            [dict(character_payload(joined.client_id), metadata=metadata)],
+        )
+
+        signal, update = await queue.get()
+        self.assertEqual(signal, "character-state-update")
+        self.assertEqual(update["updates"][0]["metadata"], metadata)
+
     async def test_character_updates_reject_extra_fields_before_broadcast(self):
         registry = MultiplayerRegistry()
         joined = await registry.join(JoinRequest("level-a", "Player"))

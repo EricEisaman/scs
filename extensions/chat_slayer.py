@@ -114,7 +114,7 @@ class ChatSlayerClient:
             window._chatSlayer.username = user
             window._chatSlayer.connected = True
             window._chatSlayer.lastResp = {"status":200,"data":dL,"stage":"login_verified"}
-            self.access_token = dL["access_token"]; self.connected=True
+            self.access_token = dL["access_token"]; self.user_id = dL["user_id"]; self.connected=True
         else:
             window._chatSlayer.lastResp = {"status":resL.status,"data":dL,"stage":"login_failed"}
             window._chatSlayer.connected = False
