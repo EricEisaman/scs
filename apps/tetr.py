@@ -10,35 +10,49 @@ from scs import *
 from browser import window, aio
 import math, random, json as py_json, time
 
-# ===== Audio — uses proc_audio core (do NOT modify core) =====
-# Core 1662-line version provides sfx singleton with .play(), .resume(), .set_volume(), .mute()
-# It does NOT have play_bgm/stop_bgm/set_floor — we implement those via sfx.play with category music
+# ===== Audio — TETR.IO kinetic soundscape (proper sound) =====
+# Uses proc_audio.py 1662-line core + proc_audio_tetrio.py extension
+# Implements: B2B escalating, thunder attacks, garbage pressure cues, clutch, surge, mode-varying BGM, Watchful Eye, Zenith floor adaptive
 try:
-    from extensions.proc_audio import sfx as _sfx
+    from extensions.proc_audio_tetrio import tetrio_sfx as _sfx, tetrio_bgm as _bgm_engine, TETR_PRESETS
     HAS_AUDIO = True
+    HAS_TETRIO_AUDIO = True
     sfx = _sfx
+    tetrio_bgm = _bgm_engine
+    print(f"TETR.IO audio loaded: {len(TETR_PRESETS)} presets")
+except Exception as e:
+    print(f"tetrio audio import failed: {e}, trying base")
     try:
-        from extensions.proc_audio import AudioEngine as _AudioEngine
+        from extensions.proc_audio import sfx as _sfx
+        HAS_AUDIO = True
+        HAS_TETRIO_AUDIO = False
+        sfx = _sfx
+        tetrio_bgm = None
+    except:
+        try:
+            from proc_audio import sfx as _sfx
+            HAS_AUDIO = True
+            HAS_TETRIO_AUDIO = False
+            sfx = _sfx
+            tetrio_bgm = None
+        except Exception as e2:
+            print(f"proc_audio import failed: {e2}")
+            HAS_AUDIO = False
+            HAS_TETRIO_AUDIO = False
+            sfx = None
+            tetrio_bgm = None
+
+try:
+    from extensions.proc_audio import AudioEngine as _AudioEngine
+    audio = _AudioEngine(quality="high")
+except:
+    try:
+        from proc_audio import AudioEngine as _AudioEngine
         audio = _AudioEngine(quality="high")
     except:
         audio = None
-except:
-    try:
-        from proc_audio import sfx as _sfx
-        HAS_AUDIO = True
-        sfx = _sfx
-        try:
-            from proc_audio import AudioEngine as _AudioEngine
-            audio = _AudioEngine(quality="high")
-        except:
-            audio = None
-    except Exception as e:
-        print(f"proc_audio import failed: {e}")
-        HAS_AUDIO = False
-        sfx = None
-        audio = None
 
-# Fallback direct WebAudio for when presets missing (TETR.IO presets not in base manifest)
+# Fallback direct WebAudio (only for emergency)
 _fallback_ctx = None
 def _ensure_fallback_ctx():
     global _fallback_ctx
@@ -57,7 +71,7 @@ def _ensure_fallback_ctx():
     except:
         return None
 
-def _fallback_beep(freq=440, dur=0.2, vol=0.3, wave="sine"):
+def _fallback_beep(freq=440, dur=0.10, vol=0.25, wave="sine"):
     try:
         ctx = _ensure_fallback_ctx()
         if not ctx:
@@ -79,145 +93,111 @@ def _fallback_beep(freq=440, dur=0.2, vol=0.3, wave="sine"):
         o.start(ctx.currentTime + 0.01)
         o.stop(ctx.currentTime + dur + 0.05)
     except Exception as e:
-        print(f"fallback beep failed {e}")
+        pass
 
-
+# Proper TETR.IO kinetic SFX — escalating B2B, thunder, garbage pressure, clutch, surge
 def play_sfx(name, **kw):
-    # Try proc_audio sfx.play first
-    if HAS_AUDIO and sfx:
-        try:
-            sfx.resume()
-            # Map TETR.IO names to available presets or fallback
-            # Base manifest has: character.jump, weapon.laser_01, ui.coin_pickup, ui.hover, etc.
-            # We map tetr.* to closest
-            mapped = name
-            # Map tetr presets to base presets for sound
+    if not HAS_AUDIO or not sfx:
+        return
+    try:
+        sfx.resume()
+        # Ensure seed for determinism
+        if "seed" not in kw:
+            kw["seed"] = random.randint(0, 999999)
+        # Floor adaptive pitch for Zenith Tower — SFX pitch matches floor key
+        floor = kw.get("floor", getattr(sfx, "_floor", 0))
+        # Map generic names to tetr presets if using base
+        if not HAS_TETRIO_AUDIO:
             tetr_map = {
                 "tetr.move": "ui.hover",
                 "tetr.rotate": "character.jump",
                 "tetr.hold": "ui.coin_pickup",
                 "tetr.softdrop": "ui.hover",
-                "tetr.harddrop": "weapon.laser_01",
+                "tetr.harddrop": "character.footstep_grass",
                 "tetr.lock": "character.footstep_grass",
                 "tetr.clear1": "ui.coin_pickup",
                 "tetr.clear2": "ui.coin_pickup",
                 "tetr.clear3": "ui.coin_pickup",
-                "tetr.clear4": "weapon.explosion_small",
-                "tetr.tspin": "weapon.plasma_bolt",
-                "tetr.tspin_mini": "weapon.plasma_bolt",
-                "tetr.perfect_clear": "scifi.portal_open",
+                "tetr.clear4": "weapon.laser_01",
+                "tetr.tspin": "weapon.laser_01",
+                "tetr.tspin_mini": "weapon.laser_01",
+                "tetr.perfect_clear": "ui.coin_pickup",
                 "tetr.combo1": "ui.coin_pickup",
                 "tetr.b2b1": "weapon.laser_01",
-                "tetr.garbage_incoming": "nature.wind_light",
-                "tetr.clutch": "scifi.portal_open",
-                "tetr.topout": "weapon.explosion_large",
-                "ui.click": "ui.hover",
-                "ui.back": "ui.hover",
-                "ui.hover": "ui.hover",
+                "tetr.garbage_incoming": "ui.hover",
+                "tetr.clutch": "ui.coin_pickup",
+                "tetr.topout": "character.jump",
             }
-            # For combo/b2b with numbers, strip number
-            base_name = name
-            if "combo" in name:
-                base_name = "tetr.combo1"
-            if "b2b" in name:
-                base_name = "tetr.b2b1"
-            if "surge" in name:
-                base_name = "tetr.b2b1"
-            if "garbage" in name:
-                base_name = "tetr.garbage_incoming"
-            if "clutch" in name:
-                base_name = "tetr.clutch"
-            if "levelup" in name:
-                base_name = "ui.coin_pickup"
-            
-            mapped = tetr_map.get(base_name, tetr_map.get(name, "ui.hover"))
-            
-            pitch = kw.get("pitch", 1.0)
-            vol = kw.get("volume", kw.get("gain", 0.5))
-            seed = kw.get("seed", random.randint(0, 999999))
-            # Use brightness to convey volume/pitch
-            sfx.play(mapped, pitch=float(pitch), brightness=float(min(1.0, vol+0.3)), seed=int(seed))
+            base = name
+            if "combo" in name: base = "tetr.combo1"
+            if "b2b" in name: base = "tetr.b2b1"
+            if "surge" in name: base = "tetr.b2b1"
+            if "garbage" in name: base = "tetr.garbage_incoming"
+            if "clutch" in name: base = "tetr.clutch"
+            mapped = tetr_map.get(base, tetr_map.get(name, "ui.hover"))
+            sfx.play(mapped, pitch=kw.get("pitch",1.0), brightness=kw.get("volume",0.35), seed=kw["seed"])
             return
-        except Exception as e:
-            print(f"sfx.play failed {name}: {e}")
-    # Fallback beep
-    try:
-        # Determine freq from name
-        freq_map = {
-            "move": 220,
-            "rotate": 320,
-            "hold": 500,
-            "harddrop": 80,
-            "clear1": 261,
-            "clear4": 523,
-            "tspin": 440,
-            "combo": 400,
-            "b2b": 300,
-            "garbage": 65,
-            "clutch": 600,
-            "topout": 120,
-            "lock": 110,
-        }
-        f = 440
-        for k,v in freq_map.items():
-            if k in name:
-                f = v
-                break
-        pitch = kw.get("pitch", 1.0)
-        vol = kw.get("volume", 0.3)
-        _fallback_beep(freq=float(f*float(pitch)), dur=0.25, vol=float(min(0.5, vol)), wave="sine" if "clear" not in name else "triangle")
-    except:
-        pass
+        # TETR.IO proper: use tetrio_sfx which handles B2B escalating, thunder, garbage, clutch, surge
+        # Pass through pitch/volume/seed/floor/lines
+        sfx.play(name, **kw)
+    except Exception as e:
+        print(f"play_sfx failed {name}: {e}")
 
 def play_bgm(name, **kw):
-    # BGM via sfx with music category, or fallback
-    if HAS_AUDIO and sfx:
-        try:
-            sfx.resume()
-            # Map BGM names
-            bgm_map = {
-                "bgm.menu_watchful_eye": "nature.wind_light",
-                "bgm.battle_tetra_league": "vehicle.engine_idle",
-                "bgm.zen": "nature.wind_light",
-                "bgm.40lines": "vehicle.engine_idle",
-                "bgm.blitz": "vehicle.engine_idle",
-                "bgm.victory": "ui.coin_pickup",
-                "bgm.defeat": "weapon.explosion_large",
-            }
-            mapped = bgm_map.get(name, "nature.wind_light")
-            # For zen, pitch by floor
-            floor = kw.get("floor", 0)
-            pitch = 1.0 + (floor % 12) * 0.05
-            sfx.play(mapped, pitch=float(pitch), brightness=0.6, seed=kw.get("seed", 123), category="music")
-            return
-        except Exception as e:
-            print(f"bgm play failed {name}: {e}")
-    # Fallback: simple loop tone via WebAudio
+    # Mode-varying BGM per spec
+    # TETRA LEAGUE: menu_watchful_eye fades instruments, adds drums spectating
+    # Battle/victory/defeat distinct
+    # Quick Play Zenith: floor adaptive, transitions support ascent, skip bars on fast climb
+    if not HAS_AUDIO or not sfx:
+        return
     try:
-        _fallback_beep(freq=110, dur=1.0, vol=0.15, wave="triangle")
+        sfx.resume()
+        floor = kw.get("floor", 0)
+        spectating = kw.get("spectating", False)
+        if HAS_TETRIO_AUDIO and tetrio_bgm:
+            # Use proper TETR.IO BGM engine
+            tetrio_bgm.play(name, floor=floor, spectating=spectating)
+        else:
+            # Base fallback: silent (avoid 5s noise)
+            try:
+                sfx.mute("music", mute=False)
+                sfx.set_volume("music", -24)
+            except:
+                pass
+    except Exception as e:
+        print(f"play_bgm failed {name}: {e}")
+
+def stop_bgm():
+    if not HAS_AUDIO or not sfx:
+        return
+    try:
+        if HAS_TETRIO_AUDIO and tetrio_bgm:
+            tetrio_bgm.stop()
+        else:
+            sfx.mute("music", mute=True)
     except:
         pass
 
-def stop_bgm():
-    if HAS_AUDIO and sfx:
-        try:
-            sfx.mute("music", mute=True)
-            # unmute after short delay to allow next BGM
-            def _unmute():
-                try:
-                    sfx.mute("music", mute=False)
-                except:
-                    pass
-            try:
-                window.setTimeout(lambda: _unmute(), 100)
-            except:
-                pass
-        except:
-            pass
-
 def set_floor(floor):
-    # No-op for base engine, but we can adjust music bus pitch via next play_bgm
-    pass
+    if not HAS_AUDIO or not sfx:
+        return
+    try:
+        if HAS_TETRIO_AUDIO:
+            sfx.set_floor(floor)
+        if tetrio_bgm:
+            tetrio_bgm.update_floor(floor)
+    except:
+        pass
+
+def set_spectating(is_spec):
+    try:
+        if HAS_TETRIO_AUDIO and hasattr(sfx, 'set_spectating'):
+            sfx.set_spectating(is_spec)
+        if tetrio_bgm:
+            tetrio_bgm.set_spectating(is_spec)
+    except:
+        pass
+
 
 try:
     from extensions.canvas_ui import WaBreadcrumb, WaTabGroup, WaInput, WaAvatar, WaButton, WaBadge, WaDialog
@@ -235,9 +215,20 @@ def _bgs_on_datastar_patch(evt):
     try:
         raw = evt.data
         if isinstance(raw, str) and raw.startswith("signals "): raw = raw[8:]
-        try: import json as _jj; parsed=_jj.loads(raw)
-        except: parsed=window.JSON.parse(raw)
-        import json as _jj2; parsed=_jj2.loads(window.JSON.stringify(parsed))
+        try:
+            parsed=py_json.loads(raw)
+        except:
+            try:
+                parsed=window.JSON.parse(raw)
+            except:
+                parsed={}
+        # Stringify roundtrip via py_json, not re-importing json
+        try:
+            # If parsed is JS object, stringify via window.JSON then loads via py_json
+            json_str = window.JSON.stringify(parsed) if hasattr(window,'JSON') else py_json.dumps(parsed)
+            parsed = py_json.loads(json_str) if isinstance(json_str, str) else parsed
+        except:
+            pass
         if isinstance(parsed, dict):
             for k,v in parsed.items(): _bgs_signals_py[k]=v
             try:
@@ -510,28 +501,46 @@ class TetrGame:
 def handle_piece_lock(app, attack, cleared, is_tspin, is_pc, is_opener, difficult):
     inc=app.mp_wrapper.match["garbage"]["incoming"]
     had_incoming = len(inc) > 0
-    play_sfx("tetr.lock", pitch=0.95+app.tetr.board.combo*0.02)
+    floor = app.tetr.stats["lines"] // 5 if app.tetr.mode in ("zen","40lines","blitz") else app.tetr.stats["lines"] // 8
+    # Lock with subtle pitch variation from combo for momentum
+    play_sfx("tetr.lock", pitch=0.95+app.tetr.board.combo*0.02, floor=floor)
     if cleared:
-        if had_incoming and cleared>=2: play_sfx("tetr.clutch", volume=0.9)
-        if is_pc: play_sfx("tetr.perfect_clear", volume=1.0)
+        # Clutch — own effect when clearing under pressure
+        if had_incoming and cleared>=2: 
+            play_sfx("tetr.clutch", volume=0.9, floor=floor)
+        if is_pc: 
+            play_sfx("tetr.perfect_clear", volume=1.0, floor=floor)
         elif is_tspin:
-            if cleared==1: play_sfx("tetr.tspin_mini" if app.tetr.board.combo<0 else "tetr.tspin", pitch=1.0+app.tetr.board.b2b_streak*0.03)
-            else: play_sfx("tetr.tspin", pitch=1.0+app.tetr.board.b2b_streak*0.03, volume=0.95)
+            # T-Spin punctuates achievement, pitch escalates with B2B for momentum
+            b2b_pitch = 1.0+app.tetr.board.b2b_streak*0.045
+            if cleared==1: 
+                play_sfx("tetr.tspin_mini" if app.tetr.board.combo<0 else "tetr.tspin", pitch=b2b_pitch, volume=0.95, floor=floor)
+            else: 
+                play_sfx("tetr.tspin", pitch=b2b_pitch, volume=0.98, floor=floor)
         else:
-            if cleared==1: play_sfx("tetr.clear1", pitch=1.0+app.tetr.board.b2b_streak*0.02)
-            elif cleared==2: play_sfx("tetr.clear2", pitch=1.0+app.tetr.board.b2b_streak*0.02)
-            elif cleared==3: play_sfx("tetr.clear3", pitch=1.0+app.tetr.board.b2b_streak*0.03)
-            elif cleared>=4: play_sfx("tetr.clear4", volume=1.1)
+            # Clears — increasingly consequential, musical, forceful
+            b2b_pitch = 1.0+app.tetr.board.b2b_streak*0.035
+            if cleared==1: 
+                play_sfx("tetr.clear1", pitch=b2b_pitch, floor=floor)
+            elif cleared==2: 
+                play_sfx("tetr.clear2", pitch=b2b_pitch*1.02, floor=floor)
+            elif cleared==3: 
+                play_sfx("tetr.clear3", pitch=b2b_pitch*1.04, floor=floor)
+            elif cleared>=4: 
+                # Thunder impact for powerful attacks
+                play_sfx("tetr.clear4", volume=1.1, pitch=b2b_pitch, floor=floor)
         if app.tetr.board.combo>=1:
             combo_n = app.tetr.board.combo+1
-            play_sfx(f"tetr.combo{combo_n}", volume=0.6+min(combo_n*0.04,0.4), pitch=1.0+combo_n*0.03)
+            # Combo escalates — sustained success sounds increasingly consequential
+            play_sfx(f"tetr.combo{combo_n}", volume=0.6+min(combo_n*0.04,0.4), pitch=1.0+combo_n*0.04, floor=floor)
         if difficult and app.tetr.board.b2b_streak>=1:
             b2b_n = app.tetr.board.b2b_streak
-            play_sfx(f"tetr.b2b{b2b_n}", volume=0.65+min(b2b_n*0.05,0.35), pitch=1.0+b2b_n*0.025)
+            # Back-to-back chains receive escalating audio cues
+            play_sfx(f"tetr.b2b{b2b_n}", volume=0.65+min(b2b_n*0.05,0.35), pitch=1.0+b2b_n*0.03, floor=floor)
         if app.tetr.board.b2b_streak>=4:
-            play_sfx(f"tetr.surge{app.tetr.board.surge_charged}", volume=0.7)
+            # Surge changing with streak — audible conversation of building pressure
+            play_sfx(f"tetr.surge{app.tetr.board.surge_charged}", volume=0.7, floor=floor)
         if app.tetr.mode in ("zen","40lines","blitz"):
-            floor = app.tetr.stats["lines"] // 5
             set_floor(floor)
     remaining=attack
     if app.tetr.mode in ("zen","40lines","blitz"):
@@ -559,12 +568,12 @@ def handle_piece_lock(app, attack, cleared, is_tspin, is_pc, is_opener, difficul
     if inc and cleared==0 and random.random()<0.12:
         g=inc.pop(0)
         topped=app.tetr.board.add_garbage(g["lines"],g["hole"],0.15)
-        play_sfx("tetr.garbage_rise", volume=0.7, pitch=0.9+g["lines"]*0.1)
+        play_sfx("tetr.garbage_incoming", volume=0.6+g["lines"]*0.08, pitch=0.9+g["lines"]*0.06, floor=floor, lines=g["lines"])  # pressure cue
         if topped and not app.tetr.board.zen: 
             play_sfx("tetr.topout")
             app.tetr.game_over=True
     if attack>0 and app.single_opponent_id:
-        play_sfx("tetr.garbage_incoming", volume=0.5+min(attack*0.12,0.5), pitch=1.0+attack*0.04)
+        play_sfx("tetr.garbage_incoming", volume=0.5+min(attack*0.12,0.5), pitch=1.0+attack*0.04, floor=floor, lines=attack)  # audible pressure
 
 # ===== KEYBINDS =====
 DEFAULT_BINDS_GUIDELINE = {
@@ -703,13 +712,22 @@ def onAppStart(app):
                 cid=res.get("client_id") if isinstance(res,dict) else None
                 if not cid:
                     try:
-                        import json as _j
-                        d=_j.loads(window.JSON.stringify(res)) if hasattr(window,'JSON') else {}
+                        json_str = window.JSON.stringify(res) if hasattr(window,'JSON') else "{}"
+                        d=py_json.loads(json_str) if isinstance(json_str, str) else {}
                         cid=d.get("client_id")
-                    except: cid=getattr(res,"client_id",None)
+                    except: 
+                        cid=getattr(res,"client_id",None)
                 app.client_id=cid
-            except Exception as e: print(f"Join failed {e}")
-        aio.run(join_mp())
+                print(f"Joined BGS as {cid}")
+            except Exception as e: 
+                print(f"Join failed {e}")
+                # Don't crash — continue as solo
+                app.client_id = f"local_{int(time.time()*1000)}"
+        try:
+            aio.run(join_mp())
+        except Exception as e:
+            print(f"aio.run join failed {e}")
+            app.client_id = f"local_{int(time.time()*1000)}"
 
     app.dialogGameOver=WaDialog("Match Finished","You topped out.",w=380,h=160,variant="danger")
     app.dialogGameOver.buttons=[WaButton("RETRY (R)",0,0,w=110,h=36,variant="brand",onClick=lambda: reset_game(app)), WaButton("MENU",0,0,w=80,h=36,variant="neutral",appearance="outlined",onClick=lambda: go_title(app))]
@@ -893,40 +911,76 @@ def redrawAll(app):
     app.breadcrumb.draw()
     app.tabGroup.draw()
 
-    # Determine mode from tab — this is source of truth, not tetr.mode alone
     active_tab = app.tabGroup.tabs[app.tabGroup.active] if hasattr(app.tabGroup,'tabs') and app.tabGroup.active < len(app.tabGroup.tabs) else ""
     is_solo_tab = any(k in active_tab for k in ("ZEN","40 LINES","BLITZ"))
     is_mp_tab = not is_solo_tab
-
-    # Also consider actual mode for safety
     is_mp_mode = app.tetr.mode not in ("zen","40lines","blitz")
-    is_mp = is_mp_tab and is_mp_mode or (is_mp_tab and app.game_state in ("menu","searching"))
+    is_mp = is_mp_tab and (is_mp_mode or app.game_state in ("menu","searching","playing","gameover"))
 
     if is_mp:
-        # Multiplayer VS layout — true split screen like tetrio.webp
-        # Do NOT draw old top-left HUD that overlaps HOLD (avatar, input, OPP badge, TR/APM/PPS)
-        # Only draw BACK and action buttons below boards
+        # MP UI — restore connection info but layout without overlap
+        # Top bar: YOU and OPP avatars + TR/APM/PPS moved up, not overlapping HOLD
+        # HOLD is at y=68, so place HUD at y=32-56 with small size
+        # Draw compact MP HUD
+        try:
+            # Compact top HUD
+            drawRoundedRect(20, 64, 220, 36, 8, rgb(30,32,48), border=rgb(60,65,90), borderWidth=1)
+            app.avatarLocal.x = 28; app.avatarLocal.y = 66
+            app.avatarLocal.w = 28; app.avatarLocal.h = 28
+            app.avatarLocal.draw()
+            app.inputName.x = 62; app.inputName.y = 66
+            app.inputName.w = 90; app.inputName.h = 22
+            app.inputName.draw()
+            app.badgeTR.x = 160; app.badgeTR.y = 68
+            app.badgeTR.draw()
+        except:
+            pass
+        try:
+            drawRoundedRect(260, 64, 220, 36, 8, rgb(30,32,48), border=rgb(60,65,90), borderWidth=1)
+            app.avatarOpp.x = 268; app.avatarOpp.y = 66
+            app.avatarOpp.w = 28; app.avatarOpp.h = 28
+            app.avatarOpp.draw()
+            app.badgeOPP.x = 304; app.badgeOPP.y = 68
+            app.badgeOPP.draw()
+            # Connection indicator
+            col = rgb(100,255,100) if app.datastar_connected else rgb(255,180,80) if app.client_id else rgb(255,80,80)
+            drawCircle(450, 82, 5, fill=col)
+            status = "BGS CONNECTED" if app.datastar_connected else f"ID:{str(app.client_id)[:6]}" if app.client_id else "OFFLINE - BOT ONLY"
+            drawLabel(status, 470, 82, size=8, fill=rgb(180,180,200), bold=True, align="left-top")
+        except:
+            pass
+
         app.btnBack.draw()
+        # Buttons centered below boards with NO overlap
+        bh = BOARD_H_VISIBLE*CELL_MP
+        base_y = app.board_y + bh + 16
         if app.game_state=="searching":
-            # Center the cancel/bot buttons under VS SCORE, not over HOLD
-            app.btnCancel.x = app.width/2 - 110
-            app.btnCancel.y = app.board_y + (BOARD_H_VISIBLE*CELL_MP) + 50
-            app.btnBot.x = app.width/2 + 10
-            app.btnBot.y = app.board_y + (BOARD_H_VISIBLE*CELL_MP) + 50
+            app.btnCancel.x = app.width/2 - 220
+            app.btnCancel.y = base_y
+            app.btnCancel.w = 200
+            app.btnBot.x = app.width/2 + 20
+            app.btnBot.y = base_y
+            app.btnBot.w = 200
             app.btnCancel.draw()
             app.btnBot.draw()
         elif app.game_state in ("menu","title"):
             app.btnFind.x = app.width/2 - 100
-            app.btnFind.y = app.board_y + (BOARD_H_VISIBLE*CELL_MP) + 50
+            app.btnFind.y = base_y
             app.btnFind.draw()
         else:
-            # playing — RESET under board
             app.btnReset.x = app.width/2 - 100
-            app.btnReset.y = app.board_y + (BOARD_H_VISIBLE*CELL_MP) + 50
+            app.btnReset.y = base_y
             app.btnReset.draw()
+            # Show APM/PPS in vs layout
+            try:
+                app.badgeAPM.x = app.width/2 - 80; app.badgeAPM.y = base_y + 40
+                app.badgePPS.x = app.width/2 + 20; app.badgePPS.y = base_y + 40
+                app.badgeAPM.draw(); app.badgePPS.draw()
+            except:
+                pass
         draw_multiplayer_vs(app)
     else:
-        # SOLO layout — center board like original TETR.IO
+        # SOLO — original centered layout
         app.avatarLocal.draw()
         app.inputName.draw()
         app.avatarOpp.draw()
@@ -941,7 +995,6 @@ def redrawAll(app):
         app.badgeTR.draw()
         app.badgeAPM.draw()
         app.badgePPS.draw()
-
         if app.game_state in ("playing","searching","gameover","menu"):
             draw_tetrio_frame(app)
             draw_board_tetrio(app,app.tetr.board,app.board_x,app.board_y,CELL,app.tetr.current,app.tetr.ghost_y,True)
@@ -957,7 +1010,7 @@ def redrawAll(app):
         app.dialogGameOver.buttons[0].x=cx-110; app.dialogGameOver.buttons[0].y=cy+30
         app.dialogGameOver.buttons[1].x=cx+10; app.dialogGameOver.buttons[1].y=cy+30
         for b in app.dialogGameOver.buttons: b.draw()
-    drawLabel(f"BGS | {app.room_id} | {app.tetr.mode.upper()} | {'🔊' if HAS_AUDIO else '🔇'}",app.width/2,app.height-10,size=8,fill=rgb(90,90,95))
+    drawLabel(f"BGS | {app.room_id} | {app.tetr.mode.upper()} | {'🔊' if HAS_AUDIO else '🔇'} | {app.client_id or 'no-id'}",app.width/2,app.height-10,size=8,fill=rgb(90,90,95))
     drawCircle(app.width-16,12,4,fill=rgb(100,255,100) if app.datastar_connected else rgb(255,180,80))
 
 # ===== TITLE =====
