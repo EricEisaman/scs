@@ -352,11 +352,14 @@ except Exception as e:
 def send_bgs_patch(app,path,payload):
     try:
         url=app.mp_client.base_url+path
-        headers={"Content-Type":"application/json","X-Client-ID":str(app.client_id)}
+        sid = getattr(app.mp_client, "session_id", "") or ""
+        headers={"Content-Type":"application/json","X-Client-ID":str(app.client_id),"X-Session-ID":str(sid)}
         body=py_json.dumps(payload,separators=(",",":"))
-        script=f"fetch({py_json.dumps(url)},{{method:'PATCH',headers:{py_json.dumps(headers)},body:{py_json.dumps(body)}}}).catch(function(e){{}})"
+        script=f"fetch({py_json.dumps(url)},{{method:'PATCH',headers:{py_json.dumps(headers)},body:{py_json.dumps(body)},mode:'cors',keepalive:true}}).catch(function(e){{console.log('[BGS] patch fail',e)}})"
         window.eval(script); return True
-    except: return False
+    except Exception as e:
+        print(f"[BGS] send patch fail {e}")
+        return False
 
 def drawRoundedRect(x, y, width, height, radius, fill, border=None, borderWidth=1, opacity=100):
     r = max(0, min(radius, width/2, height/2))
@@ -819,7 +822,8 @@ def onAppStart(app):
                 base_url="http://localhost:10000"
         except:
             pass
-        app.mp_client=MultiplayerClient(base_url=base_url,environment_name="tetr_1v1",character_name="TetrPlayer")
+        char_name = getattr(app, "username", "TetrPlayer") or "TetrPlayer"
+        app.mp_client=MultiplayerClient(base_url=base_url,environment_name="tetr_1v1",character_name=char_name)
         def on_char_state(updates):
             for u in updates:
                 cid=u.get("clientId")
@@ -830,6 +834,10 @@ def onAppStart(app):
 
         async def join_mp():
             try:
+                try:
+                    app.mp_client.character_name = getattr(app, "username", "TetrPlayer") or "TetrPlayer"
+                except:
+                    pass
                 res=await app.mp_client.join()
                 cid=res.get("client_id") if isinstance(res,dict) else None
                 if not cid:
@@ -1140,11 +1148,9 @@ def redrawAll(app):
     is_mp = is_mp_tab and (is_mp_mode or app.game_state in ("menu","searching","playing","gameover"))
 
     if is_mp:
-        # MP — true split-screen, no overlapping HUD
-        # Connection indicator top-right, not behind HOLD
+        # Connection indicator
         try:
             col = rgb(100,255,100) if app.datastar_connected else rgb(255,180,80) if app.client_id else rgb(255,80,80)
-            # Top bar connection — to the right of tabs, not overlapping board
             drawRoundedRect(540, 32, 160, 22, 6, rgb(30,32,48), border=rgb(60,65,90), borderWidth=1)
             drawCircle(552, 43, 4, fill=col)
             status = "BGS" if app.datastar_connected else f"{str(app.client_id)[:8]}" if app.client_id else "OFFLINE"
@@ -1153,10 +1159,48 @@ def redrawAll(app):
         except:
             pass
 
-        app.btnBack.draw()
         bh = BOARD_H_VISIBLE*CELL_MP
-        base_y = 110 + bh + 16  # boards now at y=110
-        if app.game_state=="searching":
+        base_y = 110 + bh + 16
+
+        if app.game_state=="menu":
+            # SECOND SCREEN — MODE PICKER — MUST HAVE: welcome -> mode -> game/config
+            # Show mode selection like TETR.IO main menu
+            try:
+                # Title
+                drawLabel("SELECT MODE", app.width/2, 90, size=20, fill=rgb(240,240,255), bold=True)
+                # Mode buttons based on tabs
+                modes = ["TETRA LEAGUE", "QUICK PLAY", "ZEN", "40 LINES", "BLITZ"]
+                btn_w = 220
+                btn_h = 44
+                start_y = 130
+                gap = 12
+                for i, mode_name in enumerate(modes):
+                    y = start_y + i*(btn_h+gap)
+                    x = app.width/2 - btn_w/2
+                    is_active = app.tabGroup.tabs[app.tabGroup.active]==mode_name if hasattr(app.tabGroup,'tabs') and app.tabGroup.active < len(app.tabGroup.tabs) else False
+                    bg = rgb(50,62,90) if is_active else rgb(32,38,58)
+                    border = rgb(80,95,130) if is_active else rgb(50,60,85)
+                    drawRoundedRect(x, y, btn_w, btn_h, 8, bg, border=border, borderWidth=1.2)
+                    drawLabel(mode_name, x+btn_w/2, y+btn_h/2, size=13, fill=rgb(200,220,255) if is_active else rgb(160,180,210), bold=True)
+                # CONFIG and BACK at bottom
+                app.btnConfig.x = app.width/2 - 220
+                app.btnConfig.y = base_y
+                app.btnConfig.w = 200
+                app.btnConfig.draw()
+                app.btnBack.x = app.width/2 + 20
+                app.btnBack.y = base_y
+                app.btnBack.w = 200
+                app.btnBack.draw()
+                # PLAY button
+                app.btnFind.x = app.width/2 - 100
+                app.btnFind.y = base_y - 60
+                app.btnFind.w = 200
+                app.btnFind.draw()
+                # Info
+                drawLabel(f"Logged in as {app.username} {'(ANON)' if app.is_anonymous else ''}", app.width/2, base_y+50, size=10, fill=rgb(140,150,170))
+            except Exception as e:
+                print(f"mode screen fail {e}")
+        elif app.game_state=="searching":
             app.btnCancel.x = app.width/2 - 220
             app.btnCancel.y = base_y
             app.btnCancel.w = 200
@@ -1165,28 +1209,14 @@ def redrawAll(app):
             app.btnBot.w = 200
             app.btnCancel.draw()
             app.btnBot.draw()
-        elif app.game_state in ("menu","title"):
-            app.btnFind.x = app.width/2 - 100
-            app.btnFind.y = base_y
-            app.btnFind.draw()
-        elif app.game_state=="menu":
-            # MODE PICKER SECOND SCREEN — MUST HAVE: tabs for mode + FIND + CONFIG
-            app.btnFind.x = app.width/2 - 220
-            app.btnFind.y = base_y
-            app.btnFind.w = 200
-            app.btnFind.draw()
-            app.btnConfig.x = app.width/2 + 20
-            app.btnConfig.y = base_y
-            app.btnConfig.w = 200
-            app.btnConfig.draw()
-            app.btnBack.x = app.width/2 - 100
-            app.btnBack.y = base_y + 48
-            app.btnBack.draw()
+            draw_multiplayer_vs(app)
         else:
+            # PLAYING or GAMEOVER — show VS boards (tetrio.webp)
+            app.btnBack.draw()
             app.btnReset.x = app.width/2 - 100
             app.btnReset.y = base_y
             app.btnReset.draw()
-        draw_multiplayer_vs(app)
+            draw_multiplayer_vs(app)
     else:
         # SOLO — original centered layout
         app.avatarLocal.draw()
@@ -1746,7 +1776,7 @@ def draw_multiplayer_vs(app):
             apm=int(app.tetr.stats["attack"]/max(1,elapsed)*60)
             drawLabel(f"{apm}/M", sx+32, sy+3, size=9, fill=rgb(130,130,150), align="left-top"); sy+=22
             drawLabel("TIME", sx, sy, size=8, fill=rgb(160,160,180), align="left-top"); sy+=10
-            drawLabel(f"{int(elapsed//60)}:{elapsed%60:02d}", sx, sy, size=16, fill=rgb(230,230,245), bold=True, align="left-top")
+            drawLabel(f"{int(elapsed//60)}:{int(elapsed%60):02d}", sx, sy, size=16, fill=rgb(230,230,245), bold=True, align="left-top")
         except Exception as e:
             print(f"P1 stats fail {e}")
 
@@ -2015,14 +2045,103 @@ def onMousePress(app,mx,my):
                     go_config(app)
                 return True
         return False
+    if app.game_state=="config":
+        # Config screen handling - matches config.png
+        # Tabs
+        tab_y=56; tab_w= (app.width-24)//3
+        tabs=["GUIDELINE","WASD","CUSTOM"]
+        for i,t in enumerate(tabs):
+            x=12+i*(tab_w+4)
+            if x <= mx <= x+tab_w and tab_y <= my <= tab_y+28:
+                app.configTab=t
+                play_sfx("ui.click")
+                return True
+        # Back button
+        if 12 <= mx <= 172 and app.height-52 <= my <= app.height-20:
+            # Go back to mode screen (second screen), not title, to preserve flow
+            app.game_state="menu"
+            app.config_selected=None
+            play_sfx("ui.back")
+            return True
+        # Slots
+        y0=100
+        visible=14
+        start=app.config_scroll
+        # choose binds
+        if app.configTab=="GUIDELINE": binds=app.keybinds_guideline
+        elif app.configTab=="CUSTOM": binds=app.keybinds_custom
+        else: binds=app.keybinds
+        for idx in range(visible):
+            real_idx=start+idx
+            if real_idx>=len(ACTION_LABELS): break
+            action,label=ACTION_LABELS[real_idx]
+            y=y0+idx*36
+            slot_w=90
+            for s in range(3):
+                sx=app.width-300+s*(slot_w+6)
+                if sx <= mx <= sx+slot_w and y+4 <= my <= y+30:
+                    app.config_selected=(action,s)
+                    play_sfx("ui.click")
+                    return True
+        return False
     if app.dialogGameOver.open:
         for b in app.dialogGameOver.buttons:
             if b.contains(mx,my) and b.handlePress(mx,my): 
                 play_sfx("ui.click")
                 return True
+    # MODE SCREEN — handle big mode buttons (second screen)
+    if app.game_state=="menu":
+        modes = ["TETRA LEAGUE", "QUICK PLAY", "ZEN", "40 LINES", "BLITZ"]
+        btn_w = 220
+        btn_h = 44
+        start_y = 130
+        gap = 12
+        for i, mode_name in enumerate(modes):
+            y = start_y + i*(btn_h+gap)
+            x = app.width/2 - btn_w/2
+            if x <= mx <= x+btn_w and y <= my <= y+btn_h:
+                # Set active tab to this mode
+                try:
+                    idx = app.tabGroup.tabs.index(mode_name)
+                    app.tabGroup.active = idx
+                except:
+                    # Find by contains
+                    for j,t in enumerate(app.tabGroup.tabs):
+                        if mode_name.split()[0] in t or t.split()[0] in mode_name:
+                            app.tabGroup.active = j
+                            break
+                play_sfx("ui.click")
+                # Update preview tetr
+                if "40" in mode_name:
+                    app.tetr=TetrGame(mode="40lines")
+                elif "BLITZ" in mode_name:
+                    app.tetr=TetrGame(mode="blitz")
+                elif "ZEN" in mode_name:
+                    app.tetr=TetrGame(mode="zen")
+                elif "QUICK" in mode_name:
+                    app.tetr=TetrGame(mode="quick_play")
+                else:
+                    app.tetr=TetrGame(mode="tetra_league")
+                return True
     if app.tabGroup.handlePress(mx,my): 
         play_sfx("ui.click")
-        start_search(app); return True
+        # In menu (mode picker), tab click only changes mode, doesn't auto-start
+        if app.game_state=="menu":
+            # Update tetr mode preview but don't start yet
+            tab = app.tabGroup.tabs[app.tabGroup.active] if hasattr(app.tabGroup,'tabs') and app.tabGroup.active < len(app.tabGroup.tabs) else ""
+            if "40" in tab:
+                app.tetr=TetrGame(mode="40lines")
+            elif "BLITZ" in tab:
+                app.tetr=TetrGame(mode="blitz")
+            elif "ZEN" in tab:
+                app.tetr=TetrGame(mode="zen")
+            elif "QUICK" in tab:
+                app.tetr=TetrGame(mode="quick_play")
+            else:
+                app.tetr=TetrGame(mode="tetra_league")
+            return True
+        else:
+            start_search(app); return True
     if app.tetr.mode in ("zen","40lines","blitz") or app.tabGroup.tabs[app.tabGroup.active] in ("ZEN","40 LINES","BLITZ"):
         if app.btnReset.contains(mx,my) and app.btnReset.handlePress(mx,my): 
             play_sfx("ui.click")
@@ -2112,8 +2231,8 @@ def onKeyPress(app,key):
             elif k=="enter" or k==" " and False:
                 # Simulate JOIN click
                 def gen_random_name():
-                    adj = _r.choice(app.random_names) if hasattr(app,'random_names') else "GUEST"
-                    num = _r.randint(100,9999)
+                    adj = random.choice(app.random_names) if hasattr(app,'random_names') else "GUEST"
+                    num = random.randint(100,9999)
                     return f"{adj}_{num}"
                 def is_registered(name):
                     return name.strip().upper() in app.registered_users if name else False
@@ -2191,7 +2310,11 @@ def onKeyPress(app,key):
             play_sfx("ui.click")
             return
         if k=="escape":
-            go_title(app)
+            # Back to mode screen (second screen) per flow welcome->mode->config
+            app.game_state="menu"
+            app.config_selected=None
+            play_sfx("ui.back")
+            return
         return
 
     if hasattr(app,'inputName') and app.inputName.focused:
