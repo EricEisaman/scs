@@ -11,47 +11,213 @@ from browser import window, aio
 import math, random, json as py_json, time
 
 # ===== Audio — uses proc_audio core (do NOT modify core) =====
+# Core 1662-line version provides sfx singleton with .play(), .resume(), .set_volume(), .mute()
+# It does NOT have play_bgm/stop_bgm/set_floor — we implement those via sfx.play with category music
 try:
-    from extensions.proc_audio import sfx as _sfx, audio as _audio
+    from extensions.proc_audio import sfx as _sfx
     HAS_AUDIO = True
     sfx = _sfx
-    audio = _audio
+    try:
+        from extensions.proc_audio import AudioEngine as _AudioEngine
+        audio = _AudioEngine(quality="high")
+    except:
+        audio = None
 except:
     try:
-        from proc_audio import sfx as _sfx, audio as _audio
+        from proc_audio import sfx as _sfx
         HAS_AUDIO = True
         sfx = _sfx
-        audio = _audio
-    except:
+        try:
+            from proc_audio import AudioEngine as _AudioEngine
+            audio = _AudioEngine(quality="high")
+        except:
+            audio = None
+    except Exception as e:
+        print(f"proc_audio import failed: {e}")
         HAS_AUDIO = False
         sfx = None
         audio = None
 
-def play_sfx(name, **kw):
-    if not HAS_AUDIO or not sfx: return
+# Fallback direct WebAudio for when presets missing (TETR.IO presets not in base manifest)
+_fallback_ctx = None
+def _ensure_fallback_ctx():
+    global _fallback_ctx
+    if _fallback_ctx:
+        return _fallback_ctx
     try:
-        sfx.resume()
-        if "pitch" not in kw: kw["pitch"] = 1.0
-        if "seed" not in kw: kw["seed"] = random.randint(0, 999999)
-        sfx.play(name, **kw)
-    except: pass
+        AC = getattr(window, "AudioContext", None) or getattr(window, "webkitAudioContext", None)
+        if not AC:
+            return None
+        try:
+            ctx = AC.new()
+        except:
+            ctx = window.AudioContext.new()
+        _fallback_ctx = ctx
+        return ctx
+    except:
+        return None
+
+def _fallback_beep(freq=440, dur=0.2, vol=0.3, wave="sine"):
+    try:
+        ctx = _ensure_fallback_ctx()
+        if not ctx:
+            return
+        if ctx.state == "suspended":
+            try:
+                ctx.resume()
+            except:
+                pass
+        o = ctx.createOscillator()
+        g = ctx.createGain()
+        o.type = wave
+        o.frequency.value = float(freq)
+        g.gain.value = float(vol)
+        g.gain.setValueAtTime(float(vol), ctx.currentTime)
+        g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur)
+        o.connect(g)
+        g.connect(ctx.destination)
+        o.start(ctx.currentTime + 0.01)
+        o.stop(ctx.currentTime + dur + 0.05)
+    except Exception as e:
+        print(f"fallback beep failed {e}")
+
+
+def play_sfx(name, **kw):
+    # Try proc_audio sfx.play first
+    if HAS_AUDIO and sfx:
+        try:
+            sfx.resume()
+            # Map TETR.IO names to available presets or fallback
+            # Base manifest has: character.jump, weapon.laser_01, ui.coin_pickup, ui.hover, etc.
+            # We map tetr.* to closest
+            mapped = name
+            # Map tetr presets to base presets for sound
+            tetr_map = {
+                "tetr.move": "ui.hover",
+                "tetr.rotate": "character.jump",
+                "tetr.hold": "ui.coin_pickup",
+                "tetr.softdrop": "ui.hover",
+                "tetr.harddrop": "weapon.laser_01",
+                "tetr.lock": "character.footstep_grass",
+                "tetr.clear1": "ui.coin_pickup",
+                "tetr.clear2": "ui.coin_pickup",
+                "tetr.clear3": "ui.coin_pickup",
+                "tetr.clear4": "weapon.explosion_small",
+                "tetr.tspin": "weapon.plasma_bolt",
+                "tetr.tspin_mini": "weapon.plasma_bolt",
+                "tetr.perfect_clear": "scifi.portal_open",
+                "tetr.combo1": "ui.coin_pickup",
+                "tetr.b2b1": "weapon.laser_01",
+                "tetr.garbage_incoming": "nature.wind_light",
+                "tetr.clutch": "scifi.portal_open",
+                "tetr.topout": "weapon.explosion_large",
+                "ui.click": "ui.hover",
+                "ui.back": "ui.hover",
+                "ui.hover": "ui.hover",
+            }
+            # For combo/b2b with numbers, strip number
+            base_name = name
+            if "combo" in name:
+                base_name = "tetr.combo1"
+            if "b2b" in name:
+                base_name = "tetr.b2b1"
+            if "surge" in name:
+                base_name = "tetr.b2b1"
+            if "garbage" in name:
+                base_name = "tetr.garbage_incoming"
+            if "clutch" in name:
+                base_name = "tetr.clutch"
+            if "levelup" in name:
+                base_name = "ui.coin_pickup"
+            
+            mapped = tetr_map.get(base_name, tetr_map.get(name, "ui.hover"))
+            
+            pitch = kw.get("pitch", 1.0)
+            vol = kw.get("volume", kw.get("gain", 0.5))
+            seed = kw.get("seed", random.randint(0, 999999))
+            # Use brightness to convey volume/pitch
+            sfx.play(mapped, pitch=float(pitch), brightness=float(min(1.0, vol+0.3)), seed=int(seed))
+            return
+        except Exception as e:
+            print(f"sfx.play failed {name}: {e}")
+    # Fallback beep
+    try:
+        # Determine freq from name
+        freq_map = {
+            "move": 220,
+            "rotate": 320,
+            "hold": 500,
+            "harddrop": 80,
+            "clear1": 261,
+            "clear4": 523,
+            "tspin": 440,
+            "combo": 400,
+            "b2b": 300,
+            "garbage": 65,
+            "clutch": 600,
+            "topout": 120,
+            "lock": 110,
+        }
+        f = 440
+        for k,v in freq_map.items():
+            if k in name:
+                f = v
+                break
+        pitch = kw.get("pitch", 1.0)
+        vol = kw.get("volume", 0.3)
+        _fallback_beep(freq=float(f*float(pitch)), dur=0.25, vol=float(min(0.5, vol)), wave="sine" if "clear" not in name else "triangle")
+    except:
+        pass
 
 def play_bgm(name, **kw):
-    if not HAS_AUDIO or not sfx: return
+    # BGM via sfx with music category, or fallback
+    if HAS_AUDIO and sfx:
+        try:
+            sfx.resume()
+            # Map BGM names
+            bgm_map = {
+                "bgm.menu_watchful_eye": "nature.wind_light",
+                "bgm.battle_tetra_league": "vehicle.engine_idle",
+                "bgm.zen": "nature.wind_light",
+                "bgm.40lines": "vehicle.engine_idle",
+                "bgm.blitz": "vehicle.engine_idle",
+                "bgm.victory": "ui.coin_pickup",
+                "bgm.defeat": "weapon.explosion_large",
+            }
+            mapped = bgm_map.get(name, "nature.wind_light")
+            # For zen, pitch by floor
+            floor = kw.get("floor", 0)
+            pitch = 1.0 + (floor % 12) * 0.05
+            sfx.play(mapped, pitch=float(pitch), brightness=0.6, seed=kw.get("seed", 123), category="music")
+            return
+        except Exception as e:
+            print(f"bgm play failed {name}: {e}")
+    # Fallback: simple loop tone via WebAudio
     try:
-        sfx.resume()
-        sfx.play_bgm(name, **kw)
-    except: pass
+        _fallback_beep(freq=110, dur=1.0, vol=0.15, wave="triangle")
+    except:
+        pass
 
 def stop_bgm():
-    if not HAS_AUDIO or not sfx: return
-    try: sfx.stop_bgm()
-    except: pass
+    if HAS_AUDIO and sfx:
+        try:
+            sfx.mute("music", mute=True)
+            # unmute after short delay to allow next BGM
+            def _unmute():
+                try:
+                    sfx.mute("music", mute=False)
+                except:
+                    pass
+            try:
+                window.setTimeout(lambda: _unmute(), 100)
+            except:
+                pass
+        except:
+            pass
 
 def set_floor(floor):
-    if not HAS_AUDIO or not sfx: return
-    try: sfx.set_floor(floor)
-    except: pass
+    # No-op for base engine, but we can adjust music bus pitch via next play_bgm
+    pass
 
 try:
     from extensions.canvas_ui import WaBreadcrumb, WaTabGroup, WaInput, WaAvatar, WaButton, WaBadge, WaDialog
@@ -726,35 +892,64 @@ def redrawAll(app):
     drawRect(0,0,app.width,app.height,fill=rgb(18,19,23))
     app.breadcrumb.draw()
     app.tabGroup.draw()
-    app.avatarLocal.draw()
-    app.inputName.draw()
-    app.avatarOpp.draw()
-    app.badgeOPP.draw()
-    if app.tetr.mode in ("zen","40lines","blitz") or app.tabGroup.tabs[app.tabGroup.active] in ("ZEN","40 LINES","BLITZ"):
-        if app.game_state=="playing": app.btnReset.draw()
-        elif app.game_state=="searching": app.btnCancel.draw()
-        else: app.btnReset.draw()
-    else:
+
+    # Determine mode from tab — this is source of truth, not tetr.mode alone
+    active_tab = app.tabGroup.tabs[app.tabGroup.active] if hasattr(app.tabGroup,'tabs') and app.tabGroup.active < len(app.tabGroup.tabs) else ""
+    is_solo_tab = any(k in active_tab for k in ("ZEN","40 LINES","BLITZ"))
+    is_mp_tab = not is_solo_tab
+
+    # Also consider actual mode for safety
+    is_mp_mode = app.tetr.mode not in ("zen","40lines","blitz")
+    is_mp = is_mp_tab and is_mp_mode or (is_mp_tab and app.game_state in ("menu","searching"))
+
+    if is_mp:
+        # Multiplayer VS layout — true split screen like tetrio.webp
+        # Do NOT draw old top-left HUD that overlaps HOLD (avatar, input, OPP badge, TR/APM/PPS)
+        # Only draw BACK and action buttons below boards
+        app.btnBack.draw()
         if app.game_state=="searching":
+            # Center the cancel/bot buttons under VS SCORE, not over HOLD
+            app.btnCancel.x = app.width/2 - 110
+            app.btnCancel.y = app.board_y + (BOARD_H_VISIBLE*CELL_MP) + 50
+            app.btnBot.x = app.width/2 + 10
+            app.btnBot.y = app.board_y + (BOARD_H_VISIBLE*CELL_MP) + 50
             app.btnCancel.draw()
             app.btnBot.draw()
-        else: app.btnFind.draw()
-    app.btnBack.draw()
-    app.badgeTR.draw()
-    app.badgeAPM.draw()
-    app.badgePPS.draw()
-
-    is_mp = app.tetr.mode not in ("zen","40lines","blitz") and "ZEN" not in app.tabGroup.tabs[app.tabGroup.active] and "40 LINES" not in app.tabGroup.tabs[app.tabGroup.active] and "BLITZ" not in app.tabGroup.tabs[app.tabGroup.active]
-    if is_mp and app.game_state in ("playing","searching","gameover","menu"):
+        elif app.game_state in ("menu","title"):
+            app.btnFind.x = app.width/2 - 100
+            app.btnFind.y = app.board_y + (BOARD_H_VISIBLE*CELL_MP) + 50
+            app.btnFind.draw()
+        else:
+            # playing — RESET under board
+            app.btnReset.x = app.width/2 - 100
+            app.btnReset.y = app.board_y + (BOARD_H_VISIBLE*CELL_MP) + 50
+            app.btnReset.draw()
         draw_multiplayer_vs(app)
-    elif app.game_state in ("playing","searching","gameover","menu"):
-        draw_tetrio_frame(app)
-        draw_board_tetrio(app,app.tetr.board,app.board_x,app.board_y,CELL,app.tetr.current,app.tetr.ghost_y,True)
-        draw_hold_tetrio(app)
-        draw_next_tetrio(app)
-        draw_opponent_tetrio(app)
-        draw_stats_tetrio(app)
-        draw_garbage_meter(app)
+    else:
+        # SOLO layout — center board like original TETR.IO
+        app.avatarLocal.draw()
+        app.inputName.draw()
+        app.avatarOpp.draw()
+        app.badgeOPP.draw()
+        if app.game_state=="playing": 
+            app.btnReset.draw()
+        elif app.game_state=="searching": 
+            app.btnCancel.draw()
+        else: 
+            app.btnReset.draw()
+        app.btnBack.draw()
+        app.badgeTR.draw()
+        app.badgeAPM.draw()
+        app.badgePPS.draw()
+
+        if app.game_state in ("playing","searching","gameover","menu"):
+            draw_tetrio_frame(app)
+            draw_board_tetrio(app,app.tetr.board,app.board_x,app.board_y,CELL,app.tetr.current,app.tetr.ghost_y,True)
+            draw_hold_tetrio(app)
+            draw_next_tetrio(app)
+            draw_opponent_tetrio(app)
+            draw_stats_tetrio(app)
+            draw_garbage_meter(app)
 
     app.dialogGameOver.draw(app.width,app.height)
     if app.dialogGameOver.open:
