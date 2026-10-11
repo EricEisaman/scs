@@ -2115,11 +2115,10 @@ def onMousePress(app,mx,my):
                 app.game_state="menu"
                 app.tabGroup.active=2
                 app.tetr=TetrGame(mode="zen")
-                app.game_state="playing"
                 app.badgeOPP.text="SOLO ZEN"
                 app.inputName.focused=False
-                stop_bgm(); play_bgm("bgm.zen", floor=0)
-                print(f"Registered {name}")
+                stop_bgm(); play_bgm("bgm.menu_watchful_eye", spectating=False)
+                print(f"Registered {name} -> menu")
                 return True
             # BACK
             back_y = card_y+420-32
@@ -2444,26 +2443,29 @@ def onKeyPress(app,key):
                         app.welcome_state="available"
                 play_sfx("ui.click")
                 return
-            elif len(k)==1 and k.isprintable() and len(app.welcome_username)<16:
-                # Allow lowercase, CAPS, numbers, _ and -  — preserve case
-                # k is lowercased, key is original case
-                allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
-                if key in allowed or k in allowed.lower() or k.isalnum() or key in "_-":
-                    # Preserve original case from key
-                    char_to_add = key if len(key)==1 and key in allowed else (key if len(key)==1 else k)
-                    # Ensure we keep case: if key is single char and is alnum or _-, use key as typed
-                    if len(key)==1:
-                        char_to_add = key
-                    else:
-                        char_to_add = k
-                    app.welcome_username += char_to_add
-                    # Keep original case for display — use key as typed
-                    if len(key)==1 and key.isalnum():
-                        # Replace last char with actual key to preserve case
-                        # Preserve case for A-Z a-z 0-9 _-
-                        add_char = key if len(key)==1 and key in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" else key
-                        app.welcome_username = app.welcome_username[:-1] + add_char
+            elif len(key)==1 and len(app.welcome_username)<16:
+                # Preserve CAPS and lowercase — key is original case from browser (Shift+A = "A")
+                # Allowed: a-zA-Z0-9_- (max 16)
+                allowed_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+                if key in allowed_chars:
+                    app.welcome_username += key  # preserve exact case
                     app.inputName.value = app.welcome_username
+                    app.inputName.text = app.welcome_username
+                    play_sfx("tetr.move", volume=0.1, pitch=1.1)
+                    print(f"Added char '{key}' -> username now '{app.welcome_username}'")
+                return
+            elif len(k)==1 and k.isprintable() and len(app.welcome_username)<16:
+                # Fallback for k if key not single char (e.g., from _norm_key)
+                allowed_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+                # Try to use original key if it has case, else use k but preserve if it was originally capital
+                char_to_use = key if len(key)==1 and key in allowed_chars else k
+                if char_to_use in allowed_chars or char_to_use.lower() in allowed_chars.lower():
+                    # If k is lower but key was upper, use upper
+                    if len(key)==1 and key.upper() == k.upper() and key in allowed_chars:
+                        char_to_use = key
+                    app.welcome_username += char_to_use
+                    app.inputName.value = app.welcome_username
+                    app.inputName.text = app.welcome_username
                     play_sfx("tetr.move", volume=0.1, pitch=1.1)
                 return
             elif k=="escape":
@@ -2528,8 +2530,14 @@ def onKeyPress(app,key):
     if app.game_state=="title":
         if k in ("enter"," "):
             play_sfx("ui.click")
-            app.game_state="menu"; app.tabGroup.active=2; app.tetr=TetrGame(mode="zen"); app.game_state="playing"; app.inputName.focused=False
-            stop_bgm(); play_bgm("bgm.zen", floor=0)
+            # Should go to MODE CHOOSER (menu), not directly to game
+            app.game_state="menu"
+            app.tabGroup.active=2
+            app.tetr=TetrGame(mode="zen")
+            app.badgeOPP.text="SOLO ZEN"
+            app.inputName.focused=False
+            stop_bgm(); play_bgm("bgm.menu_watchful_eye", spectating=False)
+            print("Title ENTER -> menu (mode chooser)")
         return
 
     # ===== Chat Slayer — OPEN CHAT is SLASH per config.png — general purpose =====
