@@ -207,18 +207,29 @@ ds_ext = None
 USE_EXTENSION_SIGNAL_STORE = False
 
 def _bgs_on_datastar_patch(evt):
-    # Proven from platformer_bgs — handles "signals " prefix and JSON via window.JSON
+    # V25 FIX: No inner imports — Brython $B.$import bug reading '2'/'3' when import inside function
+    # Uses py_json (global import json as py_json) and window.JSON
     try:
         raw = evt.data
         if isinstance(raw, str) and raw.startswith("signals "):
             raw = raw[8:]
+        parsed = None
+        # Try py_json first
         try:
-            import json as _jj
-            parsed = _jj.loads(raw)
+            parsed = py_json.loads(raw)
         except:
-            parsed = window.JSON.parse(raw)
-            import json as _jj2
-            parsed = _jj2.loads(window.JSON.stringify(parsed))
+            try:
+                # raw may be JS object already parsed by EventSource? Try window.JSON path
+                js_obj = window.JSON.parse(raw) if isinstance(raw, str) else raw
+                # Stringify via window.JSON then parse via py_json for Python dict
+                json_str = window.JSON.stringify(js_obj)
+                parsed = py_json.loads(json_str)
+            except:
+                # Last resort: if raw is already dict-like from Brython, use as is
+                try:
+                    parsed = raw if isinstance(raw, dict) else {}
+                except:
+                    parsed = {}
         if isinstance(parsed, dict):
             for kk, vv in parsed.items():
                 _bgs_signals_py[kk] = vv
@@ -227,6 +238,7 @@ def _bgs_on_datastar_patch(evt):
                 except:
                     pass
     except Exception as ex:
+        # print(f"[BGS] patch parse fail {ex}")
         pass
 
 def get_signal(n,d=None):
@@ -268,8 +280,6 @@ def is_datastar_connected():
 
 # ---------- FIXED IMPORT WITH INLINE FALLBACK V4 — from platformer_bgs proven working ----------
 try:
-    import extensions.multiplayer as mp_ext
-    import extensions.datastar as ds_ext
     if not hasattr(mp_ext,'MultiplayerClient'):
         raise AttributeError("cached mp_ext has no MultiplayerClient")
     MultiplayerClient = mp_ext.MultiplayerClient
@@ -395,11 +405,17 @@ KICKS_180_JLSTZ={
     (3,1):[(0,0),(-1,0),(-1,2),(-1,1),(0,2),(0,1)],  # WEST->EAST: NO KICK, OFF-THE-WALL, TALL JUMP, CONSTRICTED JUMP, TALL ZIPPER, CONSTRICTED ZIPPER
 }
 KICKS_180_I={
-    (0,2):[(0,1)],  # N->S: (0,-1) DOWN = up1
-    (2,0):[(0,-1)], # S->N: (0,1) DOWN = down1
-    (1,3):[(1,0)],  # E->W: (1,0) DOWN = right
-    (3,1):[(-1,0)], # W->E: (-1,0) DOWN = left
-}  # O never rotates but keep for completeness
+    (0,2):[(0,0),(0,1)],  # N->S: try no kick first, then OFF-THE-FLOOR up1
+    (2,0):[(0,0),(0,-1)], # S->N: no kick, OFF-THE-CEILING down1
+    (1,3):[(0,0),(1,0)],  # E->W: no kick, OFF-THE-WALL right
+    (3,1):[(0,0),(-1,0)], # W->E: no kick, OFF-THE-WALL left
+}
+KICKS_180_O={
+    (0,2):[(0,0)],
+    (2,0):[(0,0)],
+    (1,3):[(0,0)],
+    (3,1):[(0,0)],
+}
 BASE_ATTACK={(1,False,False,False):0,(2,False,False,False):1,(3,False,False,False):2,(4,False,False,False):4,(0,True,False,False):0,(1,True,False,False):2,(2,True,False,False):4,(3,True,False,False):6,(1,True,True,False):0,(2,True,True,False):1,(0,False,False,True):10}
 def calc_attack(base,combo,mode="DOWN"):
     if combo<=0: return base
@@ -736,13 +752,11 @@ def onAppStart(app):
     app.random_names=["GUEST","ANON","TETRON","BLOCKER","STACKER","SPINNER","CLUTCH","ZENITH","BLITZ","COMBO","B2B","T-SPIN","PERFECT","TETRA","LEAGUE","QUICK","SWEeper","LINES","ATTACK","GARBAGE"]
     # Load registered from localStorage if available
     try:
-        import json as _js
         ls = window.localStorage
         if ls:
             reg = ls.getItem("tetrio_registered")
             if reg:
-                import json
-                extra = json.loads(reg)
+                extra = py_json.loads(reg)
                 if isinstance(extra, list):
                     for n in extra:
                         app.registered_users.add(n.upper())
@@ -1684,10 +1698,9 @@ def onMousePress(app,mx,my):
         card_w = 460
         card_x = cx - card_w//2
         card_y = 88
-        import random as _r
         def gen_random_name():
-            adj = _r.choice(app.random_names) if hasattr(app,'random_names') else "GUEST"
-            num = _r.randint(100,9999)
+            adj = random.choice(app.random_names) if hasattr(app,'random_names') else "GUEST"
+            num = random.randint(100,9999)
             return f"{adj}_{num}"
 
         def is_registered(name):
@@ -1776,7 +1789,6 @@ def onMousePress(app,mx,my):
                 try:
                     ls = window.localStorage
                     if ls:
-                        import json
                         lst = list(app.registered_users)
                         ls.setItem("tetrio_registered", json.dumps(lst))
                 except:
@@ -1958,7 +1970,6 @@ def onKeyPress(app,key):
                 return
             elif k=="enter" or k==" " and False:
                 # Simulate JOIN click
-                import random as _r
                 def gen_random_name():
                     adj = _r.choice(app.random_names) if hasattr(app,'random_names') else "GUEST"
                     num = _r.randint(100,9999)
