@@ -189,14 +189,14 @@ def set_spectating(is_spec):
     except:
         pass
 
-
 # Only extensions path — avoids 404
 from extensions.canvas_ui import WaBreadcrumb, WaTabGroup, WaInput, WaAvatar, WaButton, WaBadge, WaDialog
 try:
-    from extensions.chat_slayer import ChatSlayerClient
+    from extensions.chat_slayer import ChatSlayerClient, get_chat_client
     HAS_CHAT = True
 except Exception as _chat_import_error:
     ChatSlayerClient = None
+    get_chat_client = None
     HAS_CHAT = False
     print(f"ChatSlayer import failed: {_chat_import_error}")
 
@@ -757,7 +757,6 @@ def onAppStart(app):
     app.background=rgb(18,19,23)
     import random, time
     try:
-        # FIX: use v2 key so you don't get stuck with old shared web-demo id
         cid = window.localStorage.getItem("tetr_client_id_v2")
         if not cid:
             cid = f"tetr_{int(time.time()*1000)}_{random.randint(1000,9999)}"
@@ -766,22 +765,20 @@ def onAppStart(app):
     except:
         app.chat_client_id = f"tetr_{int(time.time()*1000)}_{random.randint(1000,9999)}"
 
-    app.chat_status = "Chat: idle"
+    app.chat_status = "Waking chat server..."
     app.chat_client = None
 
-    # --- WAKE FIX: correct indent, defined outside aio.run ---
     async def init_chat():
-        if not HAS_CHAT:
+        if not HAS_CHAT or get_chat_client is None:
             return
         def set_status(msg):
             app.chat_status = msg
-            print(f"[CHAT] {msg}")
-            # mirror to title screen
             try:
                 if "Waking" in msg or "Rate limited" in msg or "retry" in msg.lower():
                     app.welcome_error = msg
             except:
                 pass
+            print(f"[CHAT] {msg}")
 
         client = get_chat_client(
             base_url="https://scs-207.onrender.com/chat-api",
@@ -791,6 +788,7 @@ def onAppStart(app):
         ok = await client.wait_for_wake()
         if ok:
             app.chat_client = client
+            app.welcome_error = ""  # clear wake message on success
         else:
             app.chat_status = "Chat offline - playing solo"
 
