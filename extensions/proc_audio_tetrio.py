@@ -15,13 +15,14 @@ from browser import window
 import random
 import math
 
+# Fix import order to avoid 404s in SCS/Brython — extensions path first
 try:
-    from .proc_audio import Patch, AudioEngine, sfx as base_sfx, SeededRandom, Bus, db_to_linear
+    from extensions.proc_audio import Patch, AudioEngine, sfx as base_sfx, SeededRandom, Bus, db_to_linear
 except:
     try:
         from proc_audio import Patch, AudioEngine, sfx as base_sfx, SeededRandom, Bus, db_to_linear
     except:
-        from extensions.proc_audio import Patch, AudioEngine, sfx as base_sfx, SeededRandom, Bus, db_to_linear
+        from .proc_audio import Patch, AudioEngine, sfx as base_sfx, SeededRandom, Bus, db_to_linear
 
 # ---------- TETR.IO SFX Presets — kinetic, musical, consequential ----------
 
