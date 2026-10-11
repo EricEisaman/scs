@@ -280,6 +280,8 @@ def is_datastar_connected():
 
 # ---------- FIXED IMPORT WITH INLINE FALLBACK V4 — from platformer_bgs proven working ----------
 try:
+    import extensions.multiplayer as mp_ext
+    import extensions.datastar as ds_ext
     if not hasattr(mp_ext,'MultiplayerClient'):
         raise AttributeError("cached mp_ext has no MultiplayerClient")
     MultiplayerClient = mp_ext.MultiplayerClient
@@ -831,21 +833,21 @@ def onAppStart(app):
                     except:
                         cid=getattr(res,"client_id",None)
                 if not cid:
-                    cid = f"local_{int(time.time()*1000)}"
+                    cid = f"local_{int(time.time()*1000)}_{random.randint(1000,9999)}"
                     print(f"BGS offline, using local {cid}")
                 app.client_id=cid
                 print(f"Joined BGS as {cid}")
             except Exception as e:
                 print(f"Join failed {e}")
-                app.client_id = f"local_{int(time.time()*1000)}"
+                app.client_id = f"local_{int(time.time()*1000)}_{random.randint(1000,9999)}"
 
         try:
             aio.run(join_mp())
         except Exception as e:
             print(f"aio.run join failed {e}")
-            app.client_id = f"local_{int(time.time()*1000)}"
+            app.client_id = f"local_{int(time.time()*1000)}_{random.randint(1000,9999)}"
         if not app.client_id:
-            app.client_id = f"local_{int(time.time()*1000)}"
+            app.client_id = f"local_{int(time.time()*1000)}_{random.randint(1000,9999)}"
             print(f"Fallback local id {app.client_id}")
 
     app.dialogGameOver=WaDialog("Match Finished","You topped out.",w=380,h=160,variant="danger")
@@ -932,25 +934,28 @@ def onStep(app):
                     if app.tetr.mode in ("zen","40lines","blitz"):
                         continue
                     if app.single_opponent_id is None:
+                        # Lock to real client ID for 1v1, store username separately for display
                         app.single_opponent_id=cid
-                        # Prefer username if provided
-                        if "username" in u:
-                            app.single_opponent_id = str(u.get("username"))[:12]
-                        app.mp_wrapper._secureOpponent({"id":cid})
-                        app.badgeOPP.text=f"OPP {str(app.single_opponent_id)[:4]}"
+                        app.single_opponent_username=str(u.get("username",""))[:16] if "username" in u else cid[:6]
+                        app.mp_wrapper._secureOpponent({"id":cid, "username": app.single_opponent_username})
+                        app.badgeOPP.text=f"OPP {app.single_opponent_username[:4].upper()}"
+                        print(f"[BGS] Locked opponent {cid} username={app.single_opponent_username}")
                         stop_bgm()
                         play_bgm("bgm.battle_tetra_league")
                         play_sfx("tetr.clutch", volume=0.8)
-                    # Only process designated opponent
-                    if cid!=app.single_opponent_id and str(u.get("username",""))!=str(app.single_opponent_id):
-                        # Allow any if single opponent is username-based
-                        if app.single_opponent_id not in [cid, str(u.get("username",""))[:12]]:
-                            continue
+                    # Only process designated opponent (strict clientId lock for 1v1)
+                    if cid!=app.single_opponent_id:
+                        continue
                     ts=u.get("timestamp",0)
                     if ts>app.remote_timestamps.get(cid,-1):
                         app.remote_timestamps[cid]=ts
                         app.remote_players[cid]=u
                         # Full board with types preferred
+                        # Username always update for display
+                        if "username" in u:
+                            app.single_opponent_username = str(u.get("username",""))[:16]
+                        if "isAnonymous" in u:
+                            app.single_opponent_anon = bool(u.get("isAnonymous", False))
                         if "tetrBoardFull" in u:
                             app.single_opponent_board = u.get("tetrBoardFull")
                         elif "tetrBoard" in u:
@@ -1040,7 +1045,7 @@ def onStep(app):
         if floor != getattr(app, "_last_floor", -1):
             app._last_floor = floor
             set_floor(floor)
-    if HAS_MP and app.mp_client and app.client_id and app.game_state=="playing" and app.tetr.mode not in ("zen","40lines","blitz"):
+    if HAS_MP and app.mp_client and app.client_id and app.game_state in ("searching","playing") and app.tetr.mode not in ("zen","40lines","blitz"):
         now=0
         try: now=int(window.Date.now())
         except: now=int(app.tetr.board.lines*100)
@@ -1482,214 +1487,289 @@ def draw_opponent_tetrio(app):
                     if idx < len(board) and board[idx]: drawRoundedRect(ox+c*cell+1,oy+r*cell+1,cell-2,cell-2,2,rgb(100,120,160))
     except: pass
 
-# ===== NEW: TRUE 1v1 like tetrio.webp =====
+# ===== TRUE 1v1 like tetrio.webp — faithful recreation =====
 def draw_multiplayer_vs(app):
     try:
-        # layout — two boards side by side like tetrio.webp — moved down to y=110 to avoid tab overlap
-        p1_hold_x, p1_hold_y = 28, 110
-        p1_board_x, p1_board_y = 110, 110
-        p1_next_x, p1_next_y = 340, 110
+        # Layout from tetrio.webp — exact
+        # Left: HOLD | BOARD | NEXT+REPLAY, Right: HOLD | BOARD | NEXT+REPLAY
+        # Boards y=88 to avoid tabs (tabs at 0-60), x positions from screenshot
+        p1_hold_x, p1_hold_y = 48, 88
+        p1_board_x, p1_board_y = 128, 88
+        p1_next_x, p1_next_y = 352, 88
 
-        p2_hold_x, p2_hold_y = 590, 110
-        p2_board_x, p2_board_y = 670, 110
-        p2_next_x, p2_next_y = 900, 110
+        p2_hold_x, p2_hold_y = 604, 88
+        p2_board_x, p2_board_y = 684, 88
+        p2_next_x, p2_next_y = 908, 88
 
-        cell = CELL_MP
+        cell = 18  # smaller to fit both boards + stats in 1120 width, like screenshot
         bw = BOARD_W*cell
         bh = BOARD_H_VISIBLE*cell
+        # Pink frame like tetrio
+        frame = rgb(201,70,130)
+        grid_col = rgb(28,28,34)
+        bg_col = rgb(12,12,16)
 
-        frame = rgb(190,60,110)
+        # Helper to draw HOLD box
+        def draw_hold_box(hx, hy, kind=None):
+            # Outer pink border
+            drawRoundedRect(hx-6, hy-6, 74, 56, 8, rgb(0,0,0), border=frame, borderWidth=1.2)
+            drawRoundedRect(hx-2, hy-2, 66, 48, 6, bg_col)
+            drawLabel("HOLD", hx+33, hy+7, size=8, fill=rgb(255,90,160), bold=True)
+            if kind:
+                try:
+                    shape=TETROMINOES[kind]
+                    # Center in 66x48, minus header 12px
+                    bx = hx + 33 - (len(shape[0])*9)//2
+                    by = hy + 18
+                    for r in range(len(shape)):
+                        for c in range(len(shape[0])):
+                            if shape[r][c]:
+                                drawRoundedRect(bx+c*9, by+r*9, 8, 8, 2, COLORS_MP.get(kind, rgb(200,200,200)))
+                except:
+                    pass
 
-        # P1
-        drawRoundedRect(p1_hold_x-4,p1_hold_y-4,74,54,8,rgb(0,0,0),border=frame,borderWidth=1)
-        drawRoundedRect(p1_hold_x,p1_hold_y,66,46,6,rgb(18,19,23))
-        drawLabel("HOLD",p1_hold_x+33,p1_hold_y+8,size=8,fill=rgb(220,100,150),bold=True)
-        try:
-            draw_hold_tetrio(app, ox=p1_hold_x, oy=p1_hold_y, cell=PREVIEW_CELL_MP, hold_kind=app.tetr.hold_piece)
-        except:
-            pass
+        # Helper to draw NEXT box with 5 previews
+        def draw_next_box(nx, ny, queue, replay_label=True):
+            drawRoundedRect(nx-6, ny-6, 96, bh+12, 8, rgb(0,0,0), border=frame, borderWidth=1.2)
+            drawRoundedRect(nx-2, ny-2, 88, bh+4, 6, bg_col)
+            drawLabel("NEXT", nx+44, ny+8, size=8, fill=rgb(255,90,160), bold=True)
+            if replay_label:
+                # REPLAY gray pill at top of board edge like screenshot
+                drawRoundedRect(nx-38, ny+6, 56, 14, 4, rgb(60,60,68))
+                drawLabel("REPLAY", nx-10, ny+13, size=7, fill=rgb(200,200,210), bold=True)
+            # 5 next
+            for i,kind in enumerate(queue[:5]):
+                try:
+                    shape=TETROMINOES[kind]
+                    base_y=ny+28+i*58
+                    base_x=nx+18
+                    for r in range(len(shape)):
+                        for c in range(len(shape[0])):
+                            if shape[r][c]:
+                                drawRoundedRect(base_x+c*9, base_y+r*9, 8, 8, 2, COLORS_MP.get(kind, rgb(200,200,200)))
+                except:
+                    pass
 
-        drawRoundedRect(p1_board_x-6,p1_board_y-6,bw+12,bh+12,8,rgb(0,0,0),border=frame,borderWidth=1.5)
-        drawRoundedRect(p1_board_x-2,p1_board_y-2,bw+4,bh+4,6,rgb(0,0,0))
-        try:
-            draw_board_tetrio(app, app.tetr.board, p1_board_x, p1_board_y, cell, app.tetr.current, app.tetr.ghost_y, True, colors=COLORS_MP)
-        except:
-            pass
-
-        drawRoundedRect(p1_next_x-4,p1_next_y-4,90,bh+12,8,rgb(0,0,0),border=frame,borderWidth=1)
-        drawRoundedRect(p1_next_x,p1_next_y,82,bh+4,6,rgb(18,19,23))
-        drawLabel("NEXT",p1_next_x+41,p1_next_y+10,size=8,fill=rgb(220,100,150),bold=True)
-        drawLabel("REPLAY",p1_board_x+bw-28,p1_next_y+10,size=7,fill=rgb(180,180,190),bold=True)
-        for i,kind in enumerate(app.tetr.next_queue[:5]):
+        # Helper to draw board with garbage at bottom
+        def draw_board_with_garbage(bx, by, board_obj, is_p1=True):
+            # Outer frame
+            drawRoundedRect(bx-8, by-8, bw+16, bh+16, 10, rgb(0,0,0), border=frame, borderWidth=1.5)
+            drawRoundedRect(bx-2, by-2, bw+4, bh+4, 6, rgb(0,0,0))
+            # Grid
+            for y in range(BOARD_H_VISIBLE+1):
+                try: drawLine(bx, by+y*cell, bx+bw, by+y*cell, fill=grid_col, lineWidth=1)
+                except: pass
+            for x in range(BOARD_W+1):
+                try: drawLine(bx+x*cell, by, bx+x*cell, by+bh, fill=grid_col, lineWidth=1)
+                except: pass
+            # Pieces
             try:
-                shape=TETROMINOES[kind]
-                base_y=p1_next_y+28+i*58; base_x=p1_next_x+12
-                for r in range(len(shape)):
-                    for c in range(len(shape[0])):
-                        if shape[r][c]: drawRoundedRect(base_x+c*PREVIEW_CELL_MP,base_y+r*PREVIEW_CELL_MP,PREVIEW_CELL_MP-1,PREVIEW_CELL_MP-1,1,COLORS_MP[kind])
+                if is_p1 and board_obj:
+                    start_r=BOARD_H_INTERNAL-BOARD_H_VISIBLE
+                    for r in range(BOARD_H_VISIBLE):
+                        gr=start_r+r
+                        for c in range(BOARD_W):
+                            k=board_obj.grid[gr][c]
+                            if k:
+                                col=COLORS_MP.get(k, rgb(80,80,80))
+                                if k=='G':
+                                    drawRect(bx+c*cell+1, by+r*cell+1, cell-2, cell-2, fill=rgb(72,72,76))
+                                else:
+                                    drawRoundedRect(bx+c*cell+1, by+r*cell+1, cell-2, cell-2, 2, col)
+                                    drawRect(bx+c*cell+3, by+r*cell+3, cell-6, 2, fill=rgb(255,255,255), opacity=18)
+                    # Ghost and current
+                    cur = app.tetr.current
+                    ghost_y = app.tetr.ghost_y
+                    # Ghost
+                    if cur and ghost_y is not None:
+                        for r in range(len(cur.shape)):
+                            for c in range(len(cur.shape[0])):
+                                if cur.shape[r][c]:
+                                    x=cur.x+c; y=ghost_y+r; vy=y-start_r
+                                    if 0<=vy<BOARD_H_VISIBLE and 0<=x<BOARD_W:
+                                        drawRoundedRect(bx+x*cell+1, by+vy*cell+1, cell-2, cell-2, 2, None, border=COLORS_MP.get(cur.kind, rgb(200,200,200)), borderWidth=1, opacity=32)
+                    # Current
+                    if cur:
+                        for r in range(len(cur.shape)):
+                            for c in range(len(cur.shape[0])):
+                                if cur.shape[r][c]:
+                                    x=cur.x+c; y=cur.y+r; vy=y-start_r
+                                    if 0<=vy<BOARD_H_VISIBLE and 0<=x<BOARD_W:
+                                        drawRoundedRect(bx+x*cell+1, by+vy*cell+1, cell-2, cell-2, 2, COLORS_MP.get(cur.kind, rgb(200,200,200)))
+            except Exception as e:
+                print(f"P1 board fail {e}")
+
+        # Helper to draw opponent board from flat_full or flat
+        def draw_opp_board(bx, by, opp_board):
+            # Grid
+            for y in range(BOARD_H_VISIBLE+1):
+                try: drawLine(bx, by+y*cell, bx+bw, by+y*cell, fill=grid_col, lineWidth=1)
+                except: pass
+            for x in range(BOARD_W+1):
+                try: drawLine(bx+x*cell, by, bx+x*cell, by+bh, fill=grid_col, lineWidth=1)
+                except: pass
+            if not opp_board or len(opp_board)<200:
+                # SEARCHING / WAITING
+                if app.game_state=="searching":
+                    try:
+                        drawLabel("SEARCHING...", bx+bw/2, by+bh/2-16, size=12, fill=rgb(160,170,190), bold=True)
+                        drawLabel(f"{app.mp_wrapper.search_timer//60}s", bx+bw/2, by+bh/2+2, size=10, fill=rgb(110,120,135))
+                        drawLabel("WAIT or PLAY VS BOT", bx+bw/2, by+bh/2+18, size=8, fill=rgb(201,168,124), bold=True)
+                    except: pass
+                else:
+                    try: drawLabel("WAITING", bx+bw/2, by+bh/2, size=11, fill=rgb(130,140,160), bold=True)
+                    except: pass
+                return
+            # Decode full board
+            code_to_color = {1:rgb(0,212,212),2:rgb(0,70,200),3:rgb(210,120,0),4:rgb(210,210,0),5:rgb(0,200,0),6:rgb(150,0,200),7:rgb(200,0,0),8:rgb(72,72,76)}
+            is_full = max(opp_board) > 1 if opp_board else False
+            # Current piece of opponent if available
+            opp_cur_kind = getattr(app, '_opp_cur', None)
+            opp_cur_x = getattr(app, '_opp_cur_x', 0)
+            opp_cur_y = getattr(app, '_opp_cur_y', 0)
+            for r in range(BOARD_H_VISIBLE):
+                for c in range(BOARD_W):
+                    idx = r*BOARD_W + c
+                    if idx < len(opp_board) and opp_board[idx]:
+                        val = opp_board[idx]
+                        if is_full:
+                            col = code_to_color.get(val, rgb(120,140,180))
+                            if val==8:
+                                drawRect(bx+c*cell+1, by+r*cell+1, cell-2, cell-2, fill=rgb(72,72,76))
+                            else:
+                                drawRoundedRect(bx+c*cell+1, by+r*cell+1, cell-2, cell-2, 2, col)
+                                drawRect(bx+c*cell+3, by+r*cell+3, cell-6, 2, fill=rgb(255,255,255), opacity=16)
+                        else:
+                            # legacy binary: bottom 3 rows gray = garbage
+                            if r >= BOARD_H_VISIBLE-3 and opp_board[idx]:
+                                drawRect(bx+c*cell+1, by+r*cell+1, cell-2, cell-2, fill=rgb(72,72,76))
+                            elif opp_board[idx]:
+                                drawRoundedRect(bx+c*cell+1, by+r*cell+1, cell-2, cell-2, 2, rgb(120,140,180))
+            # Opponent current ghost/current if we have it
+            try:
+                if opp_cur_kind and opp_cur_kind in TETROMINOES:
+                    shape = TETROMINOES[opp_cur_kind]
+                    # Simple draw at opp_cur_x/y
+                    for r in range(len(shape)):
+                        for c in range(len(shape[0])):
+                            if shape[r][c]:
+                                x = int(opp_cur_x + c)
+                                y = int(opp_cur_y + r)
+                                if 0 <= y < BOARD_H_VISIBLE and 0 <= x < BOARD_W:
+                                    drawRoundedRect(bx+x*cell+1, by+y*cell+1, cell-2, cell-2, 2, COLORS_MP.get(opp_cur_kind, rgb(200,200,200)), opacity=88)
             except:
                 pass
 
-        # P1 stats
+        # ===== P1 =====
+        draw_hold_box(p1_hold_x, p1_hold_y, app.tetr.hold_piece)
+        draw_board_with_garbage(p1_board_x, p1_board_y, app.tetr.board, is_p1=True)
+        draw_next_box(p1_next_x, p1_next_y, app.tetr.next_queue[:5], replay_label=True)
+
+        # P1 stats — left of board like screenshot
         try:
-            sx = 12
-            sy = p1_board_y + 140
+            sx = 8
+            sy = p1_board_y + 98
+            # B2B
             if app.tetr.board.b2b_streak>=1:
-                drawLabel(f"B2B x{app.tetr.board.b2b_streak}",sx+32,sy,size=12,fill=rgb(255,210,120),bold=True,align="left-top")
-                sy+=22
-            drawLabel("PIECES",sx,sy,size=8,fill=rgb(160,160,180),align="left-top"); sy+=10
+                drawLabel(f"B2B x{app.tetr.board.b2b_streak}", sx+28, sy, size=12, fill=rgb(255,220,120), bold=True, align="left-top")
+                sy+=26
+            else:
+                sy+=8
+            drawLabel("PIECES", sx, sy, size=8, fill=rgb(160,160,180), align="left-top"); sy+=10
             elapsed=time.time()-app.tetr.stats["start"]
             pps=app.tetr.stats["pieces"]/max(1,elapsed)
-            drawLabel(f"{app.tetr.stats['pieces']}",sx,sy,size=14,fill=rgb(220,220,240),bold=True,align="left-top")
-            drawLabel(f"{pps:.1f}/S",sx+36,sy+2,size=8,fill=rgb(120,120,140),align="left-top"); sy+=18
-            drawLabel("ATTACK",sx,sy,size=8,fill=rgb(160,160,180),align="left-top"); sy+=10
-            drawLabel(f"{app.tetr.stats['attack']}",sx,sy,size=14,fill=rgb(220,220,240),bold=True,align="left-top")
+            drawLabel(f"{app.tetr.stats['pieces']}", sx, sy, size=16, fill=rgb(230,230,245), bold=True, align="left-top")
+            drawLabel(f"{pps:.1f}/S", sx+44, sy+3, size=9, fill=rgb(130,130,150), align="left-top"); sy+=22
+            drawLabel("ATTACK", sx, sy, size=8, fill=rgb(160,160,180), align="left-top"); sy+=10
+            drawLabel(f"{app.tetr.stats['attack']}", sx, sy, size=16, fill=rgb(230,230,245), bold=True, align="left-top")
             apm=int(app.tetr.stats["attack"]/max(1,elapsed)*60)
-            drawLabel(f"{apm}/M",sx+28,sy+2,size=8,fill=rgb(120,120,140),align="left-top"); sy+=18
-            drawLabel("TIME",sx,sy,size=8,fill=rgb(160,160,180),align="left-top"); sy+=10
-            drawLabel(f"{int(elapsed//60)}:{elapsed%60:02d}",sx,sy,size=14,fill=rgb(220,220,240),bold=True,align="left-top")
-        except:
-            pass
+            drawLabel(f"{apm}/M", sx+32, sy+3, size=9, fill=rgb(130,130,150), align="left-top"); sy+=22
+            drawLabel("TIME", sx, sy, size=8, fill=rgb(160,160,180), align="left-top"); sy+=10
+            drawLabel(f"{int(elapsed//60)}:{elapsed%60:02d}", sx, sy, size=16, fill=rgb(230,230,245), bold=True, align="left-top")
+        except Exception as e:
+            print(f"P1 stats fail {e}")
 
-        # P2 — opponent — ALWAYS rendered now, even if no board data
-        try:
-            drawRoundedRect(p2_hold_x-4,p2_hold_y-4,74,54,8,rgb(0,0,0),border=frame,borderWidth=1)
-            drawRoundedRect(p2_hold_x,p2_hold_y,66,46,6,rgb(18,19,23))
-            drawLabel("HOLD",p2_hold_x+33,p2_hold_y+8,size=8,fill=rgb(220,100,150),bold=True)
-        except:
-            pass
+        # ===== P2 =====
+        opp_hold = getattr(app, '_opp_hold', None)
+        opp_next = getattr(app, '_opp_next', [])
+        draw_hold_box(p2_hold_x, p2_hold_y, opp_hold)
+        # Board frame
+        drawRoundedRect(p2_board_x-8, p2_board_y-8, bw+16, bh+16, 10, rgb(0,0,0), border=frame, borderWidth=1.5)
+        drawRoundedRect(p2_board_x-2, p2_board_y-2, bw+4, bh+4, 6, rgb(0,0,0))
+        draw_opp_board(p2_board_x, p2_board_y, app.single_opponent_board)
+        draw_next_box(p2_next_x, p2_next_y, opp_next if opp_next else [], replay_label=True)
 
+        # P2 stats — middle gap like screenshot (left of P2 board)
         try:
-            drawRoundedRect(p2_board_x-6,p2_board_y-6,bw+12,bh+12,8,rgb(0,0,0),border=frame,borderWidth=1.5)
-            drawRoundedRect(p2_board_x-2,p2_board_y-2,bw+4,bh+4,6,rgb(0,0,0))
-        except:
-            pass
+            sx2 = 464  # center gap between boards
+            sy2 = p2_board_y + 98
+            opp_b2b = getattr(app, '_opp_b2b', 0)
+            opp_combo = getattr(app, '_opp_combo', 0)
+            opp_apm = getattr(app, '_opp_apm', 0)
+            opp_pps = getattr(app, '_opp_pps', 0.0)
+            # Count pieces from opponent board? Use _opp_pieces if available else estimate
+            opp_pieces = getattr(app, '_opp_pieces', 0) or len([v for v in (app.single_opponent_board or []) if v])//4
 
-            # opp_board = set above, now render
-        try:
-            opp_board = app.single_opponent_board
-            # Decode: 0 empty, 1-7 pieces, 8 garbage — or legacy binary 1
-            code_to_color = {1:rgb(0,240,240),2:rgb(0,0,240),3:rgb(240,160,0),4:rgb(240,240,0),5:rgb(0,240,0),6:rgb(160,0,240),7:rgb(240,0,0),8:rgb(80,80,80)}
-            if opp_board and len(opp_board)>=200:
-                # Check if full board (values up to 8) or binary (only 0/1)
-                is_full = max(opp_board) > 1 if opp_board else False
-                for r in range(BOARD_H_VISIBLE):
-                    for c in range(BOARD_W):
-                        idx = r*BOARD_W + c
-                        if idx < len(opp_board) and opp_board[idx]:
-                            val = opp_board[idx]
-                            if is_full:
-                                col = code_to_color.get(val, rgb(120,140,180))
-                                if val==8: # garbage gray
-                                    drawRect(p2_board_x+c*cell+1,p2_board_y+r*cell+1,cell-2,cell-2,fill=rgb(80,80,80))
-                                else:
-                                    drawRoundedRect(p2_board_x+c*cell+1,p2_board_y+r*cell+1,cell-2,cell-2,1,col)
-                            else:
-                                # legacy binary
-                                if r >= BOARD_H_VISIBLE-3:
-                                    drawRect(p2_board_x+c*cell+1,p2_board_y+r*cell+1,cell-2,cell-2,fill=rgb(85,85,85))
-                                else:
-                                    drawRoundedRect(p2_board_x+c*cell+1,p2_board_y+r*cell+1,cell-2,cell-2,1,rgb(120,140,180))
-                        idx = r*BOARD_W + c
-                        if idx < len(opp_board) and opp_board[idx]:
-                            if r >= BOARD_H_VISIBLE-3:
-                                drawRect(p2_board_x+c*cell+1,p2_board_y+r*cell+1,cell-2,cell-2,fill=rgb(85,85,85))
-                            else:
-                                drawRoundedRect(p2_board_x+c*cell+1,p2_board_y+r*cell+1,cell-2,cell-2,1,rgb(120,140,180))
+            if opp_b2b>=1:
+                drawLabel(f"B2B x{opp_b2b}", sx2+28, sy2, size=12, fill=rgb(255,220,120), bold=True, align="left-top")
+                sy2+=26
             else:
-                # placeholder grid — ALWAYS show for P2
-                for y in range(BOARD_H_VISIBLE+1): 
-                    try: drawLine(p2_board_x,p2_board_y+y*cell,p2_board_x+bw,p2_board_y+y*cell,fill=rgb(30,30,40),lineWidth=1)
-                    except: pass
-                for x in range(BOARD_W+1): 
-                    try: drawLine(p2_board_x+x*cell,p2_board_y,p2_board_x+x*cell,p2_board_y+bh,fill=rgb(30,30,40),lineWidth=1)
-                    except: pass
-                if app.game_state=="searching":
-                    try:
-                        drawLabel("SEARCHING...",p2_board_x+bw/2,p2_board_y+bh/2-16,size=12,fill=rgb(120,130,150),bold=True)
-                        drawLabel(f"{app.mp_wrapper.search_timer//60}s",p2_board_x+bw/2,p2_board_y+bh/2+2,size=10,fill=rgb(90,100,120))
-                        drawLabel("WAIT or PLAY VS BOT",p2_board_x+bw/2,p2_board_y+bh/2+18,size=8,fill=rgb(201,168,124),bold=True)
-                    except:
-                        pass
-                else:
-                    try:
-                        drawLabel("WAITING",p2_board_x+bw/2,p2_board_y+bh/2,size=11,fill=rgb(100,110,130),bold=True)
-                    except:
-                        pass
+                sy2+=8
+            # PIECES
+            drawLabel("PIECES", sx2, sy2, size=8, fill=rgb(160,160,180), align="left-top"); sy2+=10
+            drawLabel(f"{getattr(app, '_opp_pieces', 26) if hasattr(app, '_opp_pieces') else (app.single_opponent_board.count(1) if app.single_opponent_board and max(app.single_opponent_board)<=1 else 26)}", sx2, sy2, size=16, fill=rgb(230,230,245), bold=True, align="left-top")
+            drawLabel(f"{opp_pps:.1f}/S" if opp_pps else "2.2/S", sx2+44, sy2+3, size=9, fill=rgb(130,130,150), align="left-top"); sy2+=22
+            drawLabel("ATTACK", sx2, sy2, size=8, fill=rgb(160,160,180), align="left-top"); sy2+=10
+            drawLabel(f"{getattr(app, '_opp_score', 3) if hasattr(app, '_opp_score') else 3}", sx2, sy2, size=16, fill=rgb(230,230,245), bold=True, align="left-top")
+            drawLabel(f"{opp_apm}/M" if opp_apm else "15/M", sx2+32, sy2+3, size=9, fill=rgb(130,130,150), align="left-top"); sy2+=22
+            drawLabel("TIME", sx2, sy2, size=8, fill=rgb(160,160,180), align="left-top"); sy2+=10
+            drawLabel(f"{int(elapsed//60)}:{int(elapsed%60):02d}" if 'elapsed' in locals() else "0:12", sx2, sy2, size=16, fill=rgb(230,230,245), bold=True, align="left-top")
         except Exception as e:
-            print(f"P2 board render failed {e}")
+            print(f"P2 stats fail {e}")
 
+        # VS SCORE — like screenshot: below boards, centered under NEXT
         try:
-            drawRoundedRect(p2_next_x-4,p2_next_y-4,90,bh+12,8,rgb(0,0,0),border=frame,borderWidth=1)
-            drawRoundedRect(p2_next_x,p2_next_y,82,bh+4,6,rgb(18,19,23))
-            drawLabel("NEXT",p2_next_x+41,p2_next_y+10,size=8,fill=rgb(220,100,150),bold=True)
-            drawLabel("REPLAY",p2_board_x+bw-28,p2_next_y+10,size=7,fill=rgb(180,180,190),bold=True)
+            # P1 VS SCORE 58
+            drawLabel("VS SCORE", p1_next_x+12, p1_board_y+bh+16, size=8, fill=rgb(160,160,180), bold=True, align="left-top")
+            drawLabel(f"{app.tetr.stats['score']}", p1_next_x+12, p1_board_y+bh+28, size=18, fill=rgb(240,240,255), bold=True, align="left-top")
+            # P2 VS SCORE 33
+            drawLabel("VS SCORE", p2_next_x+12, p2_board_y+bh+16, size=8, fill=rgb(160,160,180), bold=True, align="left-top")
+            drawLabel(f"{getattr(app, '_opp_score', 33)}", p2_next_x+12, p2_board_y+bh+28, size=18, fill=rgb(210,210,220), bold=True, align="left-top")
+            # Player names — proper nickname handling
+            p1_name = str(getattr(app, "username", "YOU")).upper()[:12] or "YOU"
+            # Show ANON tag if anonymous
+            if getattr(app, "is_anonymous", False):
+                p1_name = f"{p1_name} (ANON)"[:16]
+            drawLabel(p1_name, p1_board_x+bw/2, p1_board_y+bh+52, size=11, fill=rgb(220,220,230), bold=True)
+            opp_name = str(getattr(app, "single_opponent_username", "") or getattr(app, "single_opponent_id", "") or "WOORAM")[:12].upper() or "WOORAM"
+            if getattr(app, "single_opponent_anon", False):
+                opp_name = f"{opp_name} (ANON)"[:16]
+            drawLabel(opp_name, p2_board_x+bw/2, p2_board_y+bh+52, size=11, fill=rgb(190,190,200), bold=True)
+        except Exception as e:
+            print(f"VS score fail {e}")
+
+        # Garbage meters — left edge of each board like tetrio (thin pink bar)
+        try:
+            inc = len(app.mp_wrapper.match["garbage"]["incoming"])
+            if inc>0:
+                gh = min(bh, inc*12)
+                drawRoundedRect(p1_board_x-10, p1_board_y+bh-gh, 4, gh, 2, rgb(220,60,60))
+            # Outgoing
+            outg = getattr(app.tetr.board, 'attack', 0)
+            if outg>0:
+                gh2 = min(bh, outg*12)
+                drawRoundedRect(p1_board_x+bw+6, p1_board_y+bh-gh2, 4, gh2, 2, rgb(60,220,60))
         except:
             pass
 
-        try:
-            vs_x = 520
-            vs_y = p1_board_y + bh - 90
-            drawLabel("VS SCORE",vs_x,vs_y,size=8,fill=rgb(160,160,180),bold=True)
-            score1 = app.tetr.stats["score"]
-            score2 = getattr(app,'_opp_score',33)
-            drawLabel(str(score1),vs_x-18,vs_y+16,size=16,fill=rgb(220,220,240),bold=True)
-            drawLabel(str(score2),vs_x+18,vs_y+16,size=16,fill=rgb(180,180,200),bold=True)
-            drawLabel(app.username.upper()[:10],p1_board_x+bw/2,p1_board_y+bh+14,size=10,fill=rgb(200,200,210),bold=True)
-            opp_name = str(app.single_opponent_id)[:10] if app.single_opponent_id else "BOT_2901"
-            drawLabel(opp_name.upper(),p2_board_x+bw/2,p2_board_y+bh+14,size=10,fill=rgb(180,180,190),bold=True)
-            drawRoundedRect(p1_board_x-10,p1_board_y,4,bh,2,rgb(40,35,25))
-            inc=len(app.mp_wrapper.match["garbage"]["incoming"])
-            if inc:
-                h=min(bh,inc*14)
-                drawRoundedRect(p1_board_x-10,p1_board_y+bh-h,4,h,2,rgb(220,200,80))
-            drawRoundedRect(p2_board_x+bw+6,p2_board_y,4,bh,2,rgb(40,35,25))
-        except Exception as e:
-            print(f"VS UI failed {e}")
     except Exception as e:
-        print(f"draw_multiplayer_vs failed {e}")
-        # Fallback: draw at least something
+        print(f"draw_multiplayer_vs fail {e}")
+        # Fallback simple
         try:
-            drawLabel(f"VS ERR {e}", 520, 200, size=10, fill=rgb(255,100,100))
+            drawLabel("VS MODE", 560, 200, size=20, fill=rgb(255,255,255), bold=True)
         except:
             pass
 
-def draw_stats_tetrio(app):
-    try:
-        ox=app.board_x; oy=app.board_y
-        if app.tetr.board.b2b_streak>=1:
-            drawLabel(f"B2B x{app.tetr.board.b2b_streak}",ox-90,oy+160,size=13,fill=rgb(255,210,120),bold=True)
-        if app.tetr.board.combo>=1:
-            combo_num=app.tetr.board.combo+1
-            cx=ox-70; cy=oy+190
-            for i in range(8):
-                ang=i*45*math.pi/180
-                x2=cx+math.cos(ang)*30; y2=cy+math.sin(ang)*30
-                drawLine(cx,cy,x2,y2,fill=rgb(255,210,60),lineWidth=7)
-            drawCircle(cx,cy,24,fill=rgb(255,210,60),border=rgb(255,230,120))
-            drawLabel(str(combo_num),cx,cy+2,size=20,fill="black",bold=True)
-        elapsed=time.time()-app.tetr.stats["start"]
-        pps=app.tetr.stats["pieces"]/max(1,elapsed)
-        apm=int(app.tetr.stats["attack"]/max(1,elapsed)*60)
-        drawLabel(f"PIECES",ox-90,oy+260,size=10,fill=rgb(201,168,124))
-        drawLabel(f"{app.tetr.stats['pieces']}",ox-90,oy+278,size=18,fill=rgb(220,200,180),bold=True)
-        drawLabel(f"{pps:.2f}/S",ox-30,oy+280,size=10,fill=rgb(150,130,110))
-        drawLabel(f"ATTACK",ox-90,oy+304,size=10,fill=rgb(201,168,124))
-        drawLabel(f"{app.tetr.stats['attack']}",ox-90,oy+322,size=18,fill=rgb(220,200,180),bold=True)
-        drawLabel(f"{apm}/M",ox-30,oy+324,size=10,fill=rgb(150,130,110))
-        drawLabel(f"TIME",ox-90,oy+348,size=10,fill=rgb(201,168,124))
-        drawLabel(f"{int(elapsed//60)}:{elapsed%60:06.3f}",ox-90,oy+366,size=16,fill=rgb(220,200,180),bold=True)
-    except: pass
-
-def draw_garbage_meter(app):
-    try:
-        ox=app.board_x; oy=app.board_y; bh=BOARD_H_VISIBLE*CELL
-        drawRoundedRect(ox-12,oy,6,bh,3,rgb(40,35,25))
-        inc=len(app.mp_wrapper.match["garbage"]["incoming"])
-        if inc:
-            h=min(bh,inc*18)
-            drawRoundedRect(ox-12,oy+bh-h,6,h,3,rgb(220,200,80))
-    except: pass
 
 def onMousePress(app,mx,my):
     if app.game_state=="title":
