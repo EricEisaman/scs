@@ -953,7 +953,7 @@ def onStep(app):
                         app.single_opponent_id=cid
                         app.single_opponent_username=str(u.get("username",""))[:16] if "username" in u else cid[:6]
                         app.mp_wrapper._secureOpponent({"id":cid, "username": app.single_opponent_username})
-                        app.badgeOPP.text=f"OPP {app.single_opponent_username[:4].upper()}"
+                        app.badgeOPP.text=f"OPP {app.single_opponent_username[:4]}"
                         print(f"[BGS] Locked opponent {cid} username={app.single_opponent_username}")
                         stop_bgm()
                         play_bgm("bgm.battle_tetra_league")
@@ -1827,12 +1827,12 @@ def draw_multiplayer_vs(app):
             drawLabel("VS SCORE", p2_next_x+12, p2_board_y+bh+16, size=8, fill=rgb(160,160,180), bold=True, align="left-top")
             drawLabel(f"{getattr(app, '_opp_score', 33)}", p2_next_x+12, p2_board_y+bh+28, size=18, fill=rgb(210,210,220), bold=True, align="left-top")
             # Player names — proper nickname handling
-            p1_name = str(getattr(app, "username", "YOU")).upper()[:12] or "YOU"
+            p1_name = str(getattr(app, "username", "YOU"))[:12] or "YOU"
             # Show ANON tag if anonymous
             if getattr(app, "is_anonymous", False):
                 p1_name = f"{p1_name} (ANON)"[:16]
             drawLabel(p1_name, p1_board_x+bw/2, p1_board_y+bh+52, size=11, fill=rgb(220,220,230), bold=True)
-            opp_name = str(getattr(app, "single_opponent_username", "") or getattr(app, "single_opponent_id", "") or "WOORAM")[:12].upper() or "WOORAM"
+            opp_name = str(getattr(app, "single_opponent_username", "") or getattr(app, "single_opponent_id", "") or "WOORAM")[:12] or "WOORAM"
             if getattr(app, "single_opponent_anon", False):
                 opp_name = f"{opp_name} (ANON)"[:16]
             drawLabel(opp_name, p2_board_x+bw/2, p2_board_y+bh+52, size=11, fill=rgb(190,190,200), bold=True)
@@ -2251,13 +2251,24 @@ def onKeyPress(app,key):
                 play_sfx("ui.click")
                 return
             elif len(k)==1 and k.isprintable() and len(app.welcome_username)<16:
-                # Only allow alphanumeric and _ and -
-                if k in "abcdefghijklmnopqrstuvwxyz0123456789_-" or (k.isalnum()):
-                    app.welcome_username += key if len(key)==1 else k
+                # Allow lowercase, CAPS, numbers, _ and -  — preserve case
+                # k is lowercased, key is original case
+                allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+                if key in allowed or k in allowed.lower() or k.isalnum() or key in "_-":
+                    # Preserve original case from key
+                    char_to_add = key if len(key)==1 and key in allowed else (key if len(key)==1 else k)
+                    # Ensure we keep case: if key is single char and is alnum or _-, use key as typed
+                    if len(key)==1:
+                        char_to_add = key
+                    else:
+                        char_to_add = k
+                    app.welcome_username += char_to_add
                     # Keep original case for display — use key as typed
                     if len(key)==1 and key.isalnum():
                         # Replace last char with actual key to preserve case
-                        app.welcome_username = app.welcome_username[:-1] + key
+                        # Preserve case for A-Z a-z 0-9 _-
+                        add_char = key if len(key)==1 and key in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" else key
+                        app.welcome_username = app.welcome_username[:-1] + add_char
                     app.inputName.value = app.welcome_username
                     play_sfx("tetr.move", volume=0.1, pitch=1.1)
                 return
