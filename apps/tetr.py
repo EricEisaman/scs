@@ -43,6 +43,20 @@ except Exception as e3:
     print(f"AudioEngine load failed: {e3}")
     audio = None
 
+# ===== Chat Slayer — lightweight Matrix-compatible chat server (https://github.com/EricEisaman/chat-slayer) =====
+# Docs: CLIENT_GUIDE.md — X-Chat-Slayer-Client-Id header, /_matrix/client/... routes
+# Demo: Datastar SSE (GET /demo/stream) + actions (POST /demo/actions/*)
+try:
+    from extensions.chat_slayer import ChatSlayerClient, get_chat_client, init_chat
+    HAS_CHAT_SLAYER = True
+    print("Chat Slayer extension loaded")
+except Exception as e_chat:
+    print(f"Chat Slayer import failed: {e_chat}")
+    HAS_CHAT_SLAYER = False
+    ChatSlayerClient = None
+    get_chat_client = None
+    init_chat = None
+
 # Fallback direct WebAudio (only for emergency)
 _fallback_ctx = None
 def _ensure_fallback_ctx():
@@ -890,6 +904,27 @@ def onAppStart(app):
             play_bgm("bgm.menu_watchful_eye", spectating=False)
         except: pass
 
+    # ===== Chat Slayer — general purpose chat for all apps =====
+    # https://github.com/EricEisaman/chat-slayer — CLIENT_GUIDE.md
+    # X-Chat-Slayer-Client-Id header required, Matrix API routes
+    if HAS_CHAT_SLAYER:
+        try:
+            username = getattr(app, 'username', None) or f"Player{random.randint(1000,9999)}"
+            # Use same base as BGS for simplicity, or separate chat-slayer deploy
+            chat_base = "https://scs-207.onrender.com"
+            try:
+                if hasattr(window,'location') and 'localhost' in window.location.hostname:
+                    chat_base="http://localhost:8008"
+            except:
+                pass
+            client = init_chat(app, base_url=chat_base)
+            if client:
+                client.username = username
+                app.chat_client = client
+                print(f"[TETR.IO] Chat Slayer init for {username} at {chat_base}")
+        except Exception as e:
+            print(f"Chat Slayer init failed: {e}")
+
 def go_title(app):
     app.game_state="title"
     app.dialogGameOver.hide()
@@ -1143,6 +1178,28 @@ def onStep(app):
             send_bgs_patch(app,"/api/multiplayer/character-state",payload)
             if app.tetr.board.attack>0: app.tetr.board.attack=0
 
+    # ===== Chat Slayer — general purpose, update from JS =====
+    if HAS_CHAT_SLAYER:
+        try:
+            if hasattr(app, 'chat_client') and app.chat_client:
+                app.chat_client._update_from_js()
+                # Auto-join Lobby when token ready
+                if app.chat_client.access_token and not getattr(app.chat_client, '_joined', False):
+                    try:
+                        if not app.chat_client.room_id:
+                            app.chat_client.join_room("Lobby")
+                            app.chat_client._joined = True
+                            # Start SSE after join
+                            try:
+                                app.chat_client.start_sse()
+                            except:
+                                pass
+                    except:
+                        pass
+        except Exception as e:
+            # print(f"chat update fail {e}")
+            pass
+
 
 def redrawAll(app):
     if app.game_state=="title":
@@ -1151,15 +1208,73 @@ def redrawAll(app):
     if app.game_state=="config":
         drawConfigScreen(app)
         return
+    # SECOND SCREEN — MODE PICKING — faithful to start_screen.jpg
+    if app.game_state=="menu":
+        # Background dark with subtle gradient like start_screen.jpg
+        drawRect(0,0,app.width,app.height,fill=rgb(28,22,26))
+        # Top bar
+        drawRoundedRect(0,0,app.width,28,0,rgb(32,32,38),border=rgb(50,50,60),borderWidth=1)
+        drawLabel("HOME",20,14,size=12,fill=rgb(180,180,190),bold=True,align="left-top")
+        drawLabel("TETRISWIKI  ANONYMOUS",app.width-20,8,size=8,fill=rgb(200,80,80),bold=True,align="right-top")
+        # EXIT small
+        drawRoundedRect(12,34,48,20,4,rgb(40,40,45))
+        drawLabel("EXIT",36,44,size=8,fill=rgb(160,160,170),bold=True)
+        # Banner — DID YOU KNOW: TETR.IO IS DEVELOPED BY A SINGLE PERSON...
+        banner_x = 136
+        banner_y = 58
+        banner_w = app.width - 272
+        drawRoundedRect(banner_x,banner_y,banner_w,32,4,rgb(60,40,30),border=rgb(200,120,40),borderWidth=1)
+        drawLabel("DID YOU KNOW: TETR.IO IS DEVELOPED BY A SINGLE PERSON",app.width/2,banner_y+10,size=7,fill=rgb(220,200,180),bold=True)
+        drawLabel("PLEASE CONSIDER SUPPORTING THEM!",app.width/2,banner_y+20,size=7,fill=rgb(200,180,160))
+        # Star icon top of banner
+        drawLabel("★",app.width/2,banner_y-6,size=16,fill=rgb(255,200,80),bold=True)
+
+        try:
+            # 5 big buttons like start_screen.jpg — MP, 1P, 4CN, CFG, ABT
+            btn_defs = [
+                {"id":"multiplayer","icon":"MP","title":"MULTIPLAYER","desc":"PLAY ONLINE WITH FRIENDS AND FOES","bg":rgb(62,32,52),"border":rgb(90,50,70),"icon_col":rgb(255,90,140)},
+                {"id":"solo","icon":"1P","title":"SOLO","desc":"CHALLENGE YOURSELF AND TOP THE LEADERBOARDS","bg":rgb(40,38,68),"border":rgb(60,58,90),"icon_col":rgb(120,120,200)},
+                {"id":"tetra","icon":"4CN","title":"TETRA CHANNEL","desc":"LEADERBOARDS, REPLAYS AND MORE","bg":rgb(32,62,42),"border":rgb(50,90,60),"icon_col":rgb(90,220,120)},
+                {"id":"config","icon":"CFG","title":"CONFIG","desc":"TWEAK YOUR TETR.IO EXPERIENCE","bg":rgb(32,52,82),"border":rgb(50,80,120),"icon_col":rgb(80,180,255)},
+                {"id":"about","icon":"ABT","title":"ABOUT","desc":"ALL ABOUT TETR.IO","bg":rgb(60,60,62),"border":rgb(80,80,85),"icon_col":rgb(200,200,210)},
+            ]
+            start_y = 104
+            btn_h = 48
+            gap = 6
+            for i, bd in enumerate(btn_defs):
+                y = start_y + i*(btn_h+gap)
+                x = 136
+                w = app.width - 272
+                # Hover check
+                is_hover = getattr(app,"_hoverTitle",None)==bd["id"]
+                bg = bd["bg"]
+                if is_hover:
+                    bg = rgb(min(255,bg[0]+20),min(255,bg[1]+20),min(255,bg[2]+20)) if isinstance(bg,tuple) else bg
+                drawRoundedRect(x,y,w,btn_h,4,bg,border=bd["border"],borderWidth=1)
+                # Icon left
+                drawLabel(bd["icon"],x+24,y+btn_h/2,size=22,fill=bd["icon_col"],bold=True,align="left-top")
+                # Title and desc
+                drawLabel(bd["title"],x+96,y+14,size=14,fill=rgb(230,230,240),bold=True,align="left-top")
+                drawLabel(bd["desc"],x+96,y+30,size=8,fill=rgb(160,170,180),align="left-top")
+            # Bottom welcome
+            drawRoundedRect(0,app.height-22,app.width,22,0,rgb(32,32,38))
+            drawLabel("WELCOME TO TETR.IO!",12,app.height-11,size=9,fill=rgb(180,180,190),align="left-top")
+            drawLabel(f"{app.username} {'(ANON)' if app.is_anonymous else ''}",app.width-60,app.height-11,size=8,fill=rgb(140,150,170),align="right-top")
+        except Exception as e:
+            print(f"mode screen fail {e}")
+        return
+
     drawRect(0,0,app.width,app.height,fill=rgb(18,19,23))
     app.breadcrumb.draw()
-    app.tabGroup.draw()
+    # TabGroup ONLY on mode picker (menu), NOT on game play screen per feedback
+    # So don't draw tabGroup here for searching/playing — mode switching belongs to second screen
+    # app.tabGroup.draw()  # REMOVED for game play screen
 
     active_tab = app.tabGroup.tabs[app.tabGroup.active] if hasattr(app.tabGroup,'tabs') and app.tabGroup.active < len(app.tabGroup.tabs) else ""
     is_solo_tab = any(k in active_tab for k in ("ZEN","40 LINES","BLITZ"))
     is_mp_tab = not is_solo_tab
     is_mp_mode = app.tetr.mode not in ("zen","40lines","blitz")
-    is_mp = is_mp_tab and (is_mp_mode or app.game_state in ("menu","searching","playing","gameover"))
+    is_mp = is_mp_tab and (is_mp_mode or app.game_state in ("searching","playing","gameover"))
 
     if is_mp:
         # Connection indicator
@@ -1262,6 +1377,19 @@ def redrawAll(app):
         app.dialogGameOver.buttons[0].x=cx-110; app.dialogGameOver.buttons[0].y=cy+30
         app.dialogGameOver.buttons[1].x=cx+10; app.dialogGameOver.buttons[1].y=cy+30
         for b in app.dialogGameOver.buttons: b.draw()
+
+    # ===== Chat Slayer overlay — general purpose =====
+    if HAS_CHAT_SLAYER:
+        try:
+            if hasattr(app, 'chat_client') and app.chat_client:
+                app.chat_client.draw_chat_overlay(app)
+                # Chat indicator dot
+                is_chat_connected = getattr(app.chat_client, 'connected', False) or bool(getattr(app.chat_client, 'access_token', None))
+                drawCircle(app.width-32,12,4,fill=rgb(100,200,255) if is_chat_connected else rgb(80,80,90))
+        except Exception as e:
+            # print(f"chat draw fail {e}")
+            pass
+
     drawLabel(f"BGS | {app.room_id} | {app.tetr.mode.upper()} | {'🔊' if HAS_AUDIO else '🔇'} | {app.client_id or 'no-id'}",app.width/2,app.height-10,size=8,fill=rgb(90,90,95))
     drawCircle(app.width-16,12,4,fill=rgb(100,255,100) if app.datastar_connected else rgb(255,180,80))
 
@@ -1569,6 +1697,10 @@ def draw_stats_tetrio(app):
         elapsed=time.time()-app.tetr.stats["start"]
         pps=app.tetr.stats["pieces"]/max(1,elapsed)
         apm=int(app.tetr.stats["attack"]/max(1,elapsed)*60)
+        # KO'S like solo.png — for MP modes
+        if app.tetr.mode in ("quick_play","tetra_league"):
+            drawLabel(f"KO'S",ox-90,oy+220,size=10,fill=rgb(201,168,124))
+            drawLabel(f"{app.tetr.stats.get('ko',0)}",ox-90,oy+238,size=18,fill=rgb(220,200,180),bold=True)
         drawLabel(f"PIECES",ox-90,oy+260,size=10,fill=rgb(201,168,124))
         drawLabel(f"{app.tetr.stats['pieces']}",ox-90,oy+278,size=18,fill=rgb(220,200,180),bold=True)
         drawLabel(f"{pps:.2f}/S",ox-30,oy+280,size=10,fill=rgb(150,130,110))
@@ -2103,43 +2235,89 @@ def onMousePress(app,mx,my):
             if b.contains(mx,my) and b.handlePress(mx,my): 
                 play_sfx("ui.click")
                 return True
-    # MODE SCREEN — handle big mode buttons (second screen)
+    # MODE PICKING SCREEN — start_screen.jpg faithful — MP/SOLO/TETRA/CONFIG/ABOUT
     if app.game_state=="menu":
-        modes = ["TETRA LEAGUE", "QUICK PLAY", "ZEN", "40 LINES", "BLITZ"]
-        btn_w = 220
-        btn_h = 44
-        start_y = 130
-        gap = 12
-        for i, mode_name in enumerate(modes):
-            y = start_y + i*(btn_h+gap)
-            x = app.width/2 - btn_w/2
-            if x <= mx <= x+btn_w and y <= my <= y+btn_h:
-                # Set active tab to this mode
-                try:
-                    idx = app.tabGroup.tabs.index(mode_name)
-                    app.tabGroup.active = idx
-                except:
-                    # Find by contains
-                    for j,t in enumerate(app.tabGroup.tabs):
-                        if mode_name.split()[0] in t or t.split()[0] in mode_name:
-                            app.tabGroup.active = j
-                            break
-                play_sfx("ui.click")
-                # Update preview tetr
-                if "40" in mode_name:
-                    app.tetr=TetrGame(mode="40lines")
-                elif "BLITZ" in mode_name:
-                    app.tetr=TetrGame(mode="blitz")
-                elif "ZEN" in mode_name:
-                    app.tetr=TetrGame(mode="zen")
-                elif "QUICK" in mode_name:
-                    app.tetr=TetrGame(mode="quick_play")
-                else:
+        # Buttons matching start_screen.jpg: MP, 1P, 4CN, CFG, ABT
+        btn_defs = [
+            {"id":"multiplayer","y":104},
+            {"id":"solo","y":158},
+            {"id":"tetra","y":212},
+            {"id":"config","y":266},
+            {"id":"about","y":320},
+        ]
+        btn_x = 136
+        btn_w = 0  # will be app.width - 272
+        btn_w_calc = 0
+        try:
+            btn_w_calc = app.width - 272
+        except:
+            btn_w_calc = 800
+        btn_h = 48
+        for bd in btn_defs:
+            y = bd["y"]
+            x = btn_x
+            w = btn_w_calc
+            if x <= mx <= x+w and y <= my <= y+btn_h:
+                if bd["id"]=="multiplayer":
+                    # MP -> go to TETRA LEAGUE / QUICK PLAY — for now TETRA LEAGUE VS
+                    app.tabGroup.active=0
                     app.tetr=TetrGame(mode="tetra_league")
-                return True
+                    start_search(app)
+                    print(f"[UI] MP clicked -> TETRA LEAGUE searching")
+                    play_sfx("ui.click")
+                    return True
+                elif bd["id"]=="solo":
+                    # SOLO -> go to ZEN / 40 LINES / BLITZ — show solo.png style
+                    app.tabGroup.active=2
+                    app.tetr=TetrGame(mode="zen")
+                    app.game_state="playing"
+                    app.badgeOPP.text="SOLO ZEN"
+                    stop_bgm(); play_bgm("bgm.zen", floor=0)
+                    play_sfx("ui.click")
+                    print(f"[UI] SOLO clicked -> ZEN")
+                    return True
+                elif bd["id"]=="config":
+                    go_config(app)
+                    return True
+                elif bd["id"]=="tetra":
+                    # TETRA CHANNEL — leaderboards etc — for now go to solo 40 LINES as placeholder
+                    app.tabGroup.active=3
+                    app.tetr=TetrGame(mode="40lines")
+                    app.game_state="playing"
+                    app.badgeOPP.text="SOLO 40L"
+                    stop_bgm(); play_bgm("bgm.40lines", floor=0)
+                    play_sfx("ui.click")
+                    print(f"[UI] TETRA CHANNEL clicked -> 40 LINES")
+                    return True
+                elif bd["id"]=="about":
+                    go_config(app)
+                    return True
+        # Also handle old titleItems fallback for compatibility
+        for item in getattr(app, "titleItems", []):
+            x=120; y=item.get("y",0); w=880; h=58
+            if x<=mx<=x+w and y<=my<=y+h:
+                if item["id"]=="multiplayer":
+                    app.tabGroup.active=0
+                    app.tetr=TetrGame(mode="tetra_league")
+                    start_search(app)
+                    return True
+                elif item["id"]=="solo":
+                    app.tabGroup.active=2
+                    app.tetr=TetrGame(mode="zen")
+                    app.game_state="playing"
+                    app.badgeOPP.text="SOLO ZEN"
+                    return True
+                elif item["id"]=="config":
+                    go_config(app)
+                    return True
+        # Don't return yet, let tabGroup handling below maybe
     if app.tabGroup.handlePress(mx,my): 
-        play_sfx("ui.click")
-        # In menu (mode picker), tab click only changes mode, doesn't auto-start
+        # MODE SWITCHING NOT ON GAME PLAY SCREEN — per screenshot feedback
+        # Tabs are ONLY for mode picker (menu), not for searching/playing/gameover
+        if app.game_state in ("searching","playing","gameover"):
+            # Ignore tab click on game play screen — user must CANCEL/BACK to menu first
+            print(f"[UI] Tab click ignored in {app.game_state} — go to menu to switch mode")
+            return True  # swallow click, don't start new search
         if app.game_state=="menu":
             # Update tetr mode preview but don't start yet
             tab = app.tabGroup.tabs[app.tabGroup.active] if hasattr(app.tabGroup,'tabs') and app.tabGroup.active < len(app.tabGroup.tabs) else ""
@@ -2153,8 +2331,10 @@ def onMousePress(app,mx,my):
                 app.tetr=TetrGame(mode="quick_play")
             else:
                 app.tetr=TetrGame(mode="tetra_league")
+            play_sfx("ui.click")
             return True
         else:
+            play_sfx("ui.click")
             start_search(app); return True
     if app.tetr.mode in ("zen","40lines","blitz") or app.tabGroup.tabs[app.tabGroup.active] in ("ZEN","40 LINES","BLITZ"):
         if app.btnReset.contains(mx,my) and app.btnReset.handlePress(mx,my): 
@@ -2351,10 +2531,53 @@ def onKeyPress(app,key):
             app.game_state="menu"; app.tabGroup.active=2; app.tetr=TetrGame(mode="zen"); app.game_state="playing"; app.inputName.focused=False
             stop_bgm(); play_bgm("bgm.zen", floor=0)
         return
+
+    # ===== Chat Slayer — OPEN CHAT is SLASH per config.png — general purpose =====
+    if HAS_CHAT_SLAYER and hasattr(app, 'chat_client') and app.chat_client:
+        chat = app.chat_client
+        # If chat is open, handle chat input
+        if getattr(chat, '_chat_open', False):
+            if k=="escape":
+                chat.close_chat()
+                play_sfx("ui.back")
+                return
+            elif k=="enter":
+                # Send message
+                msg = getattr(chat, '_chat_input', '').strip()
+                if msg:
+                    chat.send(msg)
+                    play_sfx("ui.click")
+                chat._chat_input = ""
+                chat.close_chat()
+                return
+            elif k=="backspace":
+                chat._chat_input = chat._chat_input[:-1]
+                return
+            elif len(key)==1 and key.isprintable() and len(getattr(chat, '_chat_input',''))<200:
+                # Allow typing in chat
+                chat._chat_input += key
+                return
+            else:
+                # Swallow other keys when chat open
+                return
+
     if app.game_state!="playing":
         if k=="r": reset_game(app)
         if k=="escape": go_title(app)
+        # Allow opening chat even in menu/searching
+        if HAS_CHAT_SLAYER and hasattr(app, 'chat_client'):
+            if k=="/" or code=="SLASH" or is_bound("open_chat", code):
+                app.chat_client.open_chat()
+                play_sfx("ui.click")
+                return
         return
+
+    # Allow OPEN CHAT in playing too (SLASH)
+    if HAS_CHAT_SLAYER and hasattr(app, 'chat_client'):
+        if k=="/" or code=="SLASH" or is_bound("open_chat", code):
+            app.chat_client.open_chat()
+            play_sfx("ui.click")
+            return
 
     def is_bound(action_name, key_code):
         binds = app.keybinds.get(action_name, [])
