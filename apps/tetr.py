@@ -298,20 +298,23 @@ def is_datastar_connected():
     except:
         return False
 
-# ---------- FORCED FALLBACK V25 — extension join has $B.$import bug reading '2'/'3', use inline V24 FIXED ----------
+# ---------- MP Client V26 — inline fallback (no extensions/multiplayer.py needed) ----------
+# Previous V25 forced fallback due to Brython $B.$import bug reading '2'/'3' in async join
+# Now using clean inline client that avoids Brython import bug — uses window.fetch + EventSource via eval
+# If extensions/multiplayer.py exists, we try it first, else inline
 try:
     import extensions.multiplayer as mp_ext
     import extensions.datastar as ds_ext
-    # Force fallback to avoid extension's Brython $B.$import bug in async join
-    raise Exception("force fallback V25 to fix SIGMA $B.$import bug")
-    if not hasattr(mp_ext,'MultiplayerClient'):
-        raise AttributeError("cached mp_ext has no MultiplayerClient")
-    MultiplayerClient = mp_ext.MultiplayerClient
-    USE_EXTENSION_SIGNAL_STORE = True
-    HAS_MP = True
-    print("[BGS] MP imports OK from extensions/ - using V4 handlers")
+    if hasattr(mp_ext,'MultiplayerClient'):
+        MultiplayerClient = mp_ext.MultiplayerClient
+        USE_EXTENSION_SIGNAL_STORE = True
+        HAS_MP = True
+        print("[BGS] MP imports OK from extensions/ - using extension handlers")
+    else:
+        raise AttributeError("no MultiplayerClient in ext")
 except Exception as e:
-    print(f"[BGS] MP import failed ({e}) - using inline fallback client V24 FIXED")
+    # Inline fallback — V26 FIXED, no $B.$import bug, uses window.eval for SSE
+    print(f"[BGS] Using inline fallback client V26 (ext not found or bug: {e})")
     HAS_MP = True
 
     class MultiplayerClient:
@@ -907,14 +910,24 @@ def onAppStart(app):
     # ===== Chat Slayer — general purpose chat for all apps =====
     # https://github.com/EricEisaman/chat-slayer — CLIENT_GUIDE.md
     # X-Chat-Slayer-Client-Id header required, Matrix API routes
+    # babylon-game-starter pattern: same-origin /chat-api proxy to avoid CORS on Render
+    # On GitHub Pages (no proxy), use BGS proxy at scs-207.onrender.com/chat-api
     if HAS_CHAT_SLAYER:
         try:
             username = getattr(app, 'username', None) or f"Player{random.randint(1000,9999)}"
-            # Use same base as BGS for simplicity, or separate chat-slayer deploy
-            chat_base = "https://chat-slayer.onrender.com"
+            # Resolve base URL with proxy logic to fix CORS blocked from ericeisaman.github.io
+            chat_base = "https://chat-slayer.onrender.com"  # default direct
             try:
-                if hasattr(window,'location') and 'localhost' in window.location.hostname:
-                    chat_base="http://localhost:8008"
+                hostname = window.location.hostname if hasattr(window,'location') else ""
+                if "github.io" in hostname:
+                    # GitHub Pages has no /chat-api proxy, use BGS proxy which has CORS for github.io
+                    # BGS (scs-207) nginx proxies /chat-api -> chat-slayer server-side
+                    chat_base = "https://scs-207.onrender.com/chat-api"
+                elif "scs-207.onrender.com" in hostname:
+                    # Same-origin proxy on Render (nginx)
+                    chat_base = "/chat-api"
+                elif "localhost" in hostname:
+                    chat_base = "http://localhost:8008"
             except:
                 pass
             client = init_chat(app, base_url=chat_base)
@@ -2552,8 +2565,8 @@ def onKeyPress(app,key):
                     app.username = app.welcome_username.strip()
                     app.is_anonymous=False
                     app.inputName.value=app.username
-                    app.game_state="menu"; app.tabGroup.active=2; app.tetr=TetrGame(mode="zen"); app.game_state="playing"; app.badgeOPP.text="SOLO ZEN"; app.inputName.focused=False
-                    stop_bgm(); play_bgm("bgm.zen", floor=0)
+                    app.game_state="menu"; app.tabGroup.active=2; app.tetr=TetrGame(mode="zen"); app.badgeOPP.text="SOLO ZEN"; app.inputName.focused=False
+                    stop_bgm(); play_bgm("bgm.menu_watchful_eye", spectating=False)
                     play_sfx("ui.click")
                 return
             elif len(app.welcome_password)<24:
@@ -2609,6 +2622,21 @@ def onKeyPress(app,key):
 
     k=_norm_key(key)
     code = _code_from_key(key)
+
+    def is_bound(action_name, key_code):
+        binds = app.keybinds.get(action_name, [])
+        # Check code exact or key lower
+        if key_code in binds:
+            return True
+        # Also check normalized lower versions
+        low_binds = [b.lower() for b in binds if isinstance(b,str)]
+        if k in low_binds:
+            return True
+        # Check if any bind's normalized equals k
+        for b in binds:
+            if isinstance(b,str) and _norm_key(b).lower()==k:
+                return True
+        return False
 
     # CONFIG rebinding
     if app.game_state=="config":
@@ -2696,21 +2724,6 @@ def onKeyPress(app,key):
             app.chat_client.open_chat()
             play_sfx("ui.click")
             return
-
-    def is_bound(action_name, key_code):
-        binds = app.keybinds.get(action_name, [])
-        # Check code exact or key lower
-        if key_code in binds:
-            return True
-        # Also check normalized lower versions
-        low_binds = [b.lower() for b in binds if isinstance(b,str)]
-        if k in low_binds:
-            return True
-        # Check if any bind's normalized equals k
-        for b in binds:
-            if isinstance(b,str) and _norm_key(b).lower()==k:
-                return True
-        return False
 
     # Movement first
     if k in ("left","a") or is_bound("move_left", code): 
