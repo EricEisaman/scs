@@ -1784,7 +1784,7 @@ def draw_multiplayer_vs(app):
             apm=int(app.tetr.stats["attack"]/max(1,elapsed)*60)
             drawLabel(f"{apm}/M", sx+32, sy+3, size=9, fill=rgb(130,130,150), align="left-top"); sy+=22
             drawLabel("TIME", sx, sy, size=8, fill=rgb(160,160,180), align="left-top"); sy+=10
-            drawLabel(f"{int(elapsed//60)}:{elapsed%60:02d}", sx, sy, size=16, fill=rgb(230,230,245), bold=True, align="left-top")
+            drawLabel(f"{int(elapsed//60)}:{int(elapsed%60):02d}", sx, sy, size=16, fill=rgb(230,230,245), bold=True, align="left-top")
         except Exception as e:
             print(f"P1 stats fail {e}")
 
@@ -2183,6 +2183,7 @@ async def _authenticate_chat(app):
 
 def _enter_authenticated_game(app):
     app.username = app.welcome_username.strip() or app.username or "Player"
+    print(f"app.username : {app.username}")
     app.is_anonymous = False
     app.tabGroup.active = 2
     app.tetr = TetrGame(mode="zen")
