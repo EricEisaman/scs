@@ -432,8 +432,26 @@ def calc_attack(base,combo,mode="DOWN"):
     else: val=base*(1+0.25*combo)
     return math.floor(val) if mode=="DOWN" else math.floor(val)+(1 if random.random()<(val-math.floor(val)) else 0)
 def make_empty_match(local_id="local"):
-    # use real local id
-    return {"version":"tetr_mp_v1_single",... "players":{"local":{"id":local_id,"tr":12500.0,"name": local_id},"opponent":None},...}
+    return {
+        "version":"tetr_mp_v1_single",
+        "match_id": f"tetr_{int(time.time()*1000)}_{random.randint(1000,9999)}",
+        "environment":"tetr_1v1",
+        "max_players":2,
+        "opponent_lock":True,
+        "players":{"local":{"id":local_id,"tr":12500.0,"name":local_id},"opponent":None},
+        "queue":{"status":"idle"},
+        "rules":{
+            "garbage_target":"single_opponent_only",
+            "garbage_system":"change_on_attack",
+            "garbage_messiness":0.15,
+            "passthrough":False,
+            "b2b_system":"charging",
+            "combo_system":"multiplier",
+            "opener_phase":14,
+            "playfield":"10x40"
+        },
+        "garbage":{"incoming":[],"outgoing":[]}
+    }
 class SingleOpponentClient:
     def __init__(self,app):
         self.app = app
