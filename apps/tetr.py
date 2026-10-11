@@ -755,6 +755,51 @@ def update_breadcrumb(app, extra=None):
 def onAppStart(app):
     app.width=1120; app.height=700; app.stepsPerSecond=60
     app.background=rgb(18,19,23)
+    import random, time
+    try:
+        # FIX: use v2 key so you don't get stuck with old shared web-demo id
+        cid = window.localStorage.getItem("tetr_client_id_v2")
+        if not cid:
+            cid = f"tetr_{int(time.time()*1000)}_{random.randint(1000,9999)}"
+            window.localStorage.setItem("tetr_client_id_v2", cid)
+        app.chat_client_id = cid
+    except:
+        app.chat_client_id = f"tetr_{int(time.time()*1000)}_{random.randint(1000,9999)}"
+
+    app.chat_status = "Chat: idle"
+    app.chat_client = None
+
+    # --- WAKE FIX: correct indent, defined outside aio.run ---
+    async def init_chat():
+        if not HAS_CHAT:
+            return
+        def set_status(msg):
+            app.chat_status = msg
+            print(f"[CHAT] {msg}")
+            # mirror to title screen
+            try:
+                if "Waking" in msg or "Rate limited" in msg or "retry" in msg.lower():
+                    app.welcome_error = msg
+            except:
+                pass
+
+        client = get_chat_client(
+            base_url="https://scs-207.onrender.com/chat-api",
+            client_id=app.chat_client_id,
+            status_cb=set_status
+        )
+        ok = await client.wait_for_wake()
+        if ok:
+            app.chat_client = client
+        else:
+            app.chat_status = "Chat offline - playing solo"
+
+    try:
+        aio.run(init_chat())
+    except Exception as e:
+        print(f"chat init failed {e}")
+    # --- END FIX ---
+
     try:
         window.eval('''if(!window._tetrio_space_fix){window._tetrio_space_fix=true; window.addEventListener("keydown", function(e){ const isSpace=e.code==="Space"||e.key===" "||e.keyCode===32; if(isSpace){ const ae=document.activeElement; const isInput=ae && (ae.tagName==="INPUT"||ae.tagName==="TEXTAREA"||ae.isContentEditable); if(!isInput){ e.preventDefault(); } } }, {passive:false, capture:true});}''')
     except: pass
@@ -767,19 +812,19 @@ def onAppStart(app):
     app.remote_players={}; app.single_opponent_id=None; app.single_opponent_board=None
     app.last_send_ms=0; app.last_character_state=None; app.remote_timestamps={}
     # TETR.IO welcome screen state — enter username to join, blank = random
-    app.welcome_state="enter"  # enter | available | taken | login
-    app.welcome_username=""  # what user typed
-    app.welcome_password=""  # for registered login
+    app.welcome_state="enter" # enter | available | taken | login
+    app.welcome_username="" # what user typed
+    app.welcome_password="" # for registered login
     app.welcome_error=""
-    app.welcome_anon=True  # is anonymous?
-    app.is_anonymous=False  # final flag
-    app.registered_users={"OSK","ZET","TETR.IO","ADMIN","MOD","BOT"}  # simulated registered names
+    app.welcome_anon=True # is anonymous?
+    app.is_anonymous=False # final flag
+    app.registered_users={"OSK","ZET","TETR.IO","ADMIN","MOD","BOT"} # simulated registered names
     app.random_names=["GUEST","ANON","TETRON","BLOCKER","STACKER","SPINNER","CLUTCH","ZENITH","BLITZ","COMBO","B2B","T-SPIN","PERFECT","TETRA","LEAGUE","QUICK","SWEeper","LINES","ATTACK","GARBAGE"]
     app.welcome_state="enter"
     app.welcome_focus="user"
-    app.welcome_username=""; app.welcome_password=""; app.welcome_error=""
-    app.chat_client=None
-    window.eval("if(!window._chatSlayer) window._chatSlayer={token:null,userId:null,connected:false,lastResp:null,lastError:null,clientId:'web-demo'}")
+    # NOTE: don't re-clear welcome_username/password/error here, and DON'T set app.chat_client=None again
+    # that second app.chat_client=None you had was wiping the client we just created
+    window.eval("if(!window._chatSlayer) window._chatSlayer={token:null,userId:null,connected:false,lastResp:null,lastError:null,clientId:'web-demo',status:'idle'}")
     # Load registered from localStorage if available
     try:
         ls = window.localStorage
@@ -808,7 +853,7 @@ def onAppStart(app):
         {"id":"about","label":"ABOUT","sub":"ALL ABOUT TETR.IO","icon":"ABT","color":rgb(140,140,150),"dark":rgb(35,35,38),"y":420},
     ]
 
-    app.breadcrumb=WaBreadcrumb(20,8,["Home","Arcade","TETR.IO"])  # MIN FIX: dynamic, not hardcoded SOLO
+    app.breadcrumb=WaBreadcrumb(20,8,["Home","Arcade","TETR.IO"])
     app.tabGroup=WaTabGroup(20,28,w=520,tabs=["Tetra League","Quick Play","ZEN","40 LINES","BLITZ"])
     app.tabGroup.active=2
     app.avatarLocal=WaAvatar(20,68,size=36,initials="YOU",variant="brand")
@@ -830,7 +875,7 @@ def onAppStart(app):
     app.keybinds = {k:v[:] for k,v in DEFAULT_BINDS_WASD.items()}
     app.keybinds_guideline = {k:v[:] for k,v in DEFAULT_BINDS_GUIDELINE.items()}
     app.keybinds_custom = {k:v[:] for k,v in DEFAULT_BINDS_WASD.items()}
-    app.config_selected = None  # (action, slot)
+    app.config_selected = None
     app.config_scroll = 0
 
     if HAS_MP:
@@ -1274,13 +1319,22 @@ def drawTitleScreen(app):
     drawLabel("TETR.IO",cx,card_y+38,size=32,fill=rgb(240,240,255),bold=True)
     drawLabel("WELCOME BACK" if app.welcome_state!="enter" else "WELCOME",cx,card_y+68,size=12,fill=rgb(160,170,190),bold=True)
 
+    # --- WAKE FIX START: 4 lines, no logic removed ---
+    chat_msg = getattr(app, 'chat_status', '')
+    is_waking = bool(chat_msg and ("Waking" in chat_msg or "retry" in chat_msg.lower() or "Rate limited" in chat_msg))
+    wake_offset = 18 if is_waking else 0
+    if is_waking:
+        drawRoundedRect(cx-160, card_y+84, 320, 18, 6, rgb(60,50,20), border=rgb(200,170,80), borderWidth=1)
+        drawLabel(chat_msg, cx, card_y+93, size=8, fill=rgb(255,220,120), bold=True)
+    # --- WAKE FIX END ---
+
     # State: enter username
     if app.welcome_state=="enter":
-        drawLabel("enter a username to join, or leave it blank to get a random one.",cx,card_y+96,size=9,fill=rgb(140,150,170),align="center")
+        drawLabel("enter a username to join, or leave it blank to get a random one.",cx,card_y+96+wake_offset,size=9,fill=rgb(140,150,170),align="center")
         # Input field
         input_w = 300
         input_x = cx - input_w//2
-        input_y = card_y+118
+        input_y = card_y+118+wake_offset
         is_focused = getattr(app.inputName,'focused',False) or app.welcome_state=="enter"
         bg = rgb(22,26,38) if not is_focused else rgb(28,34,52)
         border = rgb(90,110,160) if is_focused else rgb(60,70,95)
@@ -1304,11 +1358,13 @@ def drawTitleScreen(app):
         btn_x = cx - btn_w//2
         btn_y = input_y+56
         drawRoundedRect(btn_x+1,btn_y+2,btn_w,36,8,rgb(0,0,0),opacity=18)
-        drawRoundedRect(btn_x,btn_y,btn_w,36,8,rgb(90,100,220),border=rgb(120,130,250),borderWidth=1)
-        drawLabel("JOIN",cx,btn_y+18,size=14,fill="white",bold=True)
+        # dim when waking
+        btn_fill = rgb(60,65,130) if is_waking else rgb(90,100,220)
+        drawRoundedRect(btn_x,btn_y,btn_w,36,8,btn_fill,border=rgb(120,130,250),borderWidth=1)
+        drawLabel("PLEASE WAIT..." if is_waking else "JOIN",cx,btn_y+18,size=14,fill="white",bold=True)
 
         # Error
-        if app.welcome_error:
+        if app.welcome_error and not is_waking:
             drawLabel(app.welcome_error,cx,btn_y+54,size=9,fill=rgb(255,120,120),bold=True)
 
         # Info bottom
@@ -1317,13 +1373,13 @@ def drawTitleScreen(app):
 
     elif app.welcome_state=="available":
         # Nickname available — choose STAY ANONYMOUS or REGISTER
-        drawLabel(f'"{app.welcome_username}" is available!',cx,card_y+96,size=12,fill=rgb(120,220,130),bold=True)
-        drawLabel("You can play anonymously with this name, or register to claim it.",cx,card_y+118,size=8,fill=rgb(140,150,170))
+        drawLabel(f'"{app.welcome_username}" is available!',cx,card_y+96+wake_offset,size=12,fill=rgb(120,220,130),bold=True)
+        drawLabel("You can play anonymously with this name, or register to claim it.",cx,card_y+118+wake_offset,size=8,fill=rgb(140,150,170))
         # Buttons
         btn_w = 300
         btn_x = cx - btn_w//2
         # Stay anonymous
-        y1 = card_y+150
+        y1 = card_y+150+wake_offset
         drawRoundedRect(btn_x+1,y1+2,btn_w,38,8,rgb(0,0,0),opacity=18)
         drawRoundedRect(btn_x,y1,btn_w,38,8,rgb(45,55,80),border=rgb(80,95,130),borderWidth=1)
         drawLabel("STAY ANONYMOUS",cx,y1+19,size=12,fill=rgb(200,210,230),bold=True)
@@ -1339,13 +1395,13 @@ def drawTitleScreen(app):
 
     elif app.welcome_state=="taken":
         # Nickname belongs to registered account — ask password
-        drawLabel(f'"{app.welcome_username}" is taken!',cx,card_y+96,size=12,fill=rgb(255,120,120),bold=True)
-        drawLabel("This nickname belongs to a registered account.",cx,card_y+118,size=8,fill=rgb(140,150,170))
-        drawLabel("Enter password to log in, or go back and choose another name.",cx,card_y+132,size=8,fill=rgb(140,150,170))
+        drawLabel(f'"{app.welcome_username}" is taken!',cx,card_y+96+wake_offset,size=12,fill=rgb(255,120,120),bold=True)
+        drawLabel("This nickname belongs to a registered account.",cx,card_y+118+wake_offset,size=8,fill=rgb(140,150,170))
+        drawLabel("Enter password to log in, or go back and choose another name.",cx,card_y+132+wake_offset,size=8,fill=rgb(140,150,170))
         # Password field
         input_w = 300
         input_x = cx - input_w//2
-        input_y = card_y+154
+        input_y = card_y+154+wake_offset
         is_focused = True
         bg = rgb(28,34,52)
         border = rgb(90,110,160)
@@ -1362,7 +1418,7 @@ def drawTitleScreen(app):
         drawRoundedRect(btn_x+1,btn_y+2,btn_w,36,8,rgb(0,0,0),opacity=18)
         drawRoundedRect(btn_x,btn_y,btn_w,36,8,rgb(90,100,220),border=rgb(120,130,250),borderWidth=1)
         drawLabel("LOG IN",cx,btn_y+18,size=14,fill="white",bold=True)
-        if app.welcome_error:
+        if app.welcome_error and not is_waking:
             drawLabel(app.welcome_error,cx,btn_y+54,size=9,fill=rgb(255,120,120),bold=True)
         drawLabel("BACK",cx,card_y+card_h-32,size=10,fill=rgb(120,130,150),bold=True)
 
