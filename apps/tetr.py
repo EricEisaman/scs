@@ -872,10 +872,11 @@ def onAppStart(app):
         else:
             app.chat_status = "Chat offline - playing solo"
 
-    try:
-        aio.run(init_chat())
-    except Exception as e:
-        print(f"chat init failed {e}")
+    # Don't wake chat on load like babylon does - wake on first chat open
+    app.chat_client = None
+    app.chat_status = "Chat offline - click to wake"
+    app.welcome_error = ""
+    # init_chat will be called from open_chat binding
     # --- END FIX ---
 
     try:
@@ -963,11 +964,14 @@ def onAppStart(app):
                 base_url="http://localhost:10000"
         except:
             pass
-        app.mp_client=MultiplayerClient(base_url=base_url,environment_name="tetr_1v1",character_name="TetrPlayer")
+        # tetr_zen is always enabled on scs-207, use it for matchmaking test
+        app.room_id = "tetr_1v1"
+        app.mp_client = MultiplayerClient(base_url=base_url, environment_name="tetr_zen", character_name=app.username)
         #on character state start
         def on_char_state(updates):
             if not hasattr(app, 'remote_players'):
                 app.remote_players = {}
+                print("no remote_players")
             for u in updates:
                 cid = u.get("clientId") or u.get("client_id")
                 if not cid or cid == getattr(app, 'client_id', None):
@@ -1437,6 +1441,7 @@ def onStep(app):
                 },
             }],"timestamp":now}
             send_bgs_patch(app,"/api/multiplayer/character-state",payload)
+            print("sent patch ...")
             if app.tetr.board.attack>0: app.tetr.board.attack=0
 
 
@@ -2148,7 +2153,22 @@ def onKeyPress(app,key):
         return
 
     if hasattr(app,'inputName') and app.inputName.focused:
-        if k=="escape": app.inputName.focused=False
+    if k=="escape": app.inputName.focused=False
+    return
+
+    # ===== CHAT OPENER - wake on demand like babylon-game-starter =====
+    if is_bound("open_chat", code) or k in ("/", "t", "slash"):
+        try:
+            # first time: boot chat server, don't spam health on load
+            if not getattr(app, 'chat_client', None):
+                print("[CHAT] waking on demand (T pressed)")
+                aio.run(init_chat())
+            app.chat_open = True
+            app.inputName.focused = False
+            if hasattr(app, 'chat_input'):
+                app.chat_input.focused = True
+        except Exception as e:
+            print(f"chat open fail {e}")
         return
 
     if app.game_state!="playing":
