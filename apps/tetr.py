@@ -911,7 +911,7 @@ def onAppStart(app):
         try:
             username = getattr(app, 'username', None) or f"Player{random.randint(1000,9999)}"
             # Use same base as BGS for simplicity, or separate chat-slayer deploy
-            chat_base = "https://scs-207.onrender.com"
+            chat_base = "https://chat-slayer.onrender.com"
             try:
                 if hasattr(window,'location') and 'localhost' in window.location.hostname:
                     chat_base="http://localhost:8008"
@@ -1060,7 +1060,21 @@ def onStep(app):
             app.game_state="playing"; app.tetr=TetrGame(mode=app.tetr.mode); app.inputName.focused=False
             stop_bgm()
             play_bgm("bgm.battle_tetra_league")
-        # NO auto-bot — user must choose PLAY VS BOT or keep waiting
+            print(f"[BGS] Opponent found {app.single_opponent_id} -> playing")
+        else:
+            # Auto-bot after 8 sec if no opponent (480 steps at 60fps) — improves UX when no one online
+            if app.mp_wrapper.search_timer > 480:
+                print(f"[BGS] No opponent after {app.mp_wrapper.search_timer} ticks, auto bot")
+                # Only auto if still searching and user hasn't cancelled
+                if app.game_state=="searching":
+                    play_vs_bot(app)
+        # Update badge with search time and BGS status
+        try:
+            secs = app.mp_wrapper.search_timer // 60
+            bgs_status = "BGS OK" if app.datastar_connected else "BGS OFF"
+            app.badgeOPP.text = f"SEARCHING {secs}s {bgs_status}"
+        except:
+            pass
     if app.game_state!="playing": return
     if app.tetr.game_over: 
         app.game_state="gameover"; app.dialogGameOver.show()
@@ -2443,31 +2457,85 @@ def onKeyPress(app,key):
                         app.welcome_state="available"
                 play_sfx("ui.click")
                 return
-            elif len(key)==1 and len(app.welcome_username)<16:
-                # Preserve CAPS and lowercase — key is original case from browser (Shift+A = "A")
-                # Allowed: a-zA-Z0-9_- (max 16)
+            elif len(app.welcome_username)<16:
+                # Robust caps handling — try to get original case from browser event
+                # SCS may lowercase key, so we check shiftKey via window.event
+                original_key = key  # may be lowercased by framework
+                try:
+                    # Try to get real key with case from window.event
+                    evt = getattr(window, 'event', None)
+                    if evt:
+                        real_key = getattr(evt, 'key', None)
+                        if real_key and len(str(real_key))==1:
+                            original_key = str(real_key)
+                except:
+                    pass
+                # Also try window._lastKeyEvent if available
+                try:
+                    last_evt = window.eval("window._lastKeyEvent ? window._lastKeyEvent.key : null")
+                    if last_evt and len(str(last_evt))==1:
+                        # If last event is same as current and has uppercase, use it
+                        if str(last_evt).lower() == str(key).lower():
+                            original_key = str(last_evt)
+                except:
+                    pass
+
                 allowed_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
-                if key in allowed_chars:
-                    app.welcome_username += key  # preserve exact case
+                # If original_key is allowed (with case), use it
+                if len(original_key)==1 and original_key in allowed_chars:
+                    app.welcome_username += original_key
                     app.inputName.value = app.welcome_username
                     app.inputName.text = app.welcome_username
                     play_sfx("tetr.move", volume=0.1, pitch=1.1)
-                    print(f"Added char '{key}' -> username now '{app.welcome_username}'")
-                return
-            elif len(k)==1 and k.isprintable() and len(app.welcome_username)<16:
-                # Fallback for k if key not single char (e.g., from _norm_key)
-                allowed_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
-                # Try to use original key if it has case, else use k but preserve if it was originally capital
-                char_to_use = key if len(key)==1 and key in allowed_chars else k
-                if char_to_use in allowed_chars or char_to_use.lower() in allowed_chars.lower():
-                    # If k is lower but key was upper, use upper
-                    if len(key)==1 and key.upper() == k.upper() and key in allowed_chars:
-                        char_to_use = key
-                    app.welcome_username += char_to_use
+                    print(f"Added char '{original_key}' (from '{key}' caps fix) -> username now '{app.welcome_username}'")
+                    return
+                # Fallback: if key is lower but shift was pressed, uppercase it
+                try:
+                    shift_pressed = False
+                    try:
+                        evt = getattr(window, 'event', None)
+                        if evt:
+                            shift_pressed = bool(getattr(evt, 'shiftKey', False))
+                    except:
+                        pass
+                    if not shift_pressed:
+                        try:
+                            shift_pressed = bool(window.eval("window.event ? window.event.shiftKey : false"))
+                        except:
+                            pass
+                    if shift_pressed and len(k)==1 and k.isalpha():
+                        up_char = k.upper()
+                        if up_char in allowed_chars:
+                            app.welcome_username += up_char
+                            app.inputName.value = app.welcome_username
+                            app.inputName.text = app.welcome_username
+                            play_sfx("tetr.move", volume=0.1, pitch=1.1)
+                            print(f"Added char '{up_char}' via shift -> username now '{app.welcome_username}'")
+                            return
+                except:
+                    pass
+                # Last fallback: use k if allowed (lowercase)
+                if len(k)==1 and k in allowed_chars.lower():
+                    app.welcome_username += k
                     app.inputName.value = app.welcome_username
                     app.inputName.text = app.welcome_username
                     play_sfx("tetr.move", volume=0.1, pitch=1.1)
-                return
+                    return
+                # Also allow numbers and _-
+                if len(k)==1 and (k.isalnum() or k in "_-") and len(app.welcome_username)<16:
+                    if k in "abcdefghijklmnopqrstuvwxyz0123456789_-":
+                        app.welcome_username += k
+                        app.inputName.value = app.welcome_username
+                        app.inputName.text = app.welcome_username
+                        play_sfx("tetr.move", volume=0.1, pitch=1.1)
+                    return
+                # If still not handled and key is printable single char allowed, use key as is
+                if len(key)==1 and key in allowed_chars:
+                    app.welcome_username += key
+                    app.inputName.value = app.welcome_username
+                    app.inputName.text = app.welcome_username
+                    play_sfx("tetr.move", volume=0.1, pitch=1.1)
+                    return
             elif k=="escape":
                 app.welcome_username=""
                 app.welcome_error=""
@@ -2488,10 +2556,52 @@ def onKeyPress(app,key):
                     stop_bgm(); play_bgm("bgm.zen", floor=0)
                     play_sfx("ui.click")
                 return
-            elif len(k)==1 and k.isprintable() and len(app.welcome_password)<24:
-                app.welcome_password += key if len(key)==1 else k
-                play_sfx("tetr.move", volume=0.1)
-                return
+            elif len(app.welcome_password)<24:
+                # Password caps fix — same as username, preserve case
+                original_key = key
+                try:
+                    evt = getattr(window, 'event', None)
+                    if evt:
+                        real_key = getattr(evt, 'key', None)
+                        if real_key and len(str(real_key))==1:
+                            original_key = str(real_key)
+                except:
+                    pass
+                try:
+                    last_evt = window.eval("window._lastKeyEvent ? window._lastKeyEvent.key : null")
+                    if last_evt and len(str(last_evt))==1 and str(last_evt).lower() == str(key).lower():
+                        original_key = str(last_evt)
+                except:
+                    pass
+                # Allow any printable char for password (including caps)
+                if len(original_key)==1 and original_key.isprintable():
+                    app.welcome_password += original_key
+                    play_sfx("tetr.move", volume=0.1)
+                    return
+                elif len(k)==1 and k.isprintable():
+                    # Fallback check shift for caps
+                    try:
+                        shift_pressed = False
+                        try:
+                            evt = getattr(window, 'event', None)
+                            if evt:
+                                shift_pressed = bool(getattr(evt, 'shiftKey', False))
+                        except:
+                            pass
+                        if not shift_pressed:
+                            try:
+                                shift_pressed = bool(window.eval("window.event ? window.event.shiftKey : false"))
+                            except:
+                                pass
+                        if shift_pressed and k.isalpha():
+                            app.welcome_password += k.upper()
+                            play_sfx("tetr.move", volume=0.1)
+                            return
+                    except:
+                        pass
+                    app.welcome_password += k
+                    play_sfx("tetr.move", volume=0.1)
+                    return
             elif k=="escape":
                 app.welcome_state="enter"; app.welcome_password=""; app.welcome_error=""
                 play_sfx("ui.back")

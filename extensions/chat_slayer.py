@@ -58,7 +58,7 @@ import time
 import random
 
 # Default config — can be overridden per client
-DEFAULT_BASE_URL = "https://scs-207.onrender.com"
+DEFAULT_BASE_URL = "https://chat-slayer.onrender.com"
 DEFAULT_CLIENT_ID = "tetrio-chat"
 DEFAULT_ROOM = "Lobby"
 
