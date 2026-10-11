@@ -27,6 +27,7 @@ import uuid
 import time
 
 from .api.health import router as health_router
+from .api.chat_proxy import router as chat_proxy_router
 from .settings import settings
 from .multiplayer.protocol import (
     JoinRequest, JoinResponse, 
@@ -547,7 +548,7 @@ app.add_middleware(
 )
 
 app.include_router(health_router)
-
+app.include_router(chat_proxy_router)
 # ---------- BGS Routes ----------
 
 bgs_router = APIRouter(prefix="/api/multiplayer")
