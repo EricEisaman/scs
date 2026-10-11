@@ -164,6 +164,22 @@ class ChatSlayerClient:
         self._set_status("Chat offline - playing solo")
         return False
 
+    async def _fetch_with_backoff(self, url, opts, retries=5, wake_mode=False, quiet=False):
+        for attempt in range(retries):
+            try:
+                res = await window.fetch(url, opts)
+                txt = await res.clone().text() if hasattr(res, 'clone') else ""
+                # don't spam console for expected auth steps
+                is_expected = res.status in (401, 403) and ("/login" in url or "session" in txt or "M_USER_IN_USE" in txt)
+                if not res.ok and not quiet and not is_expected:
+                    # only then log
+                    window.console.error(f"fetch {res.status} {url}")
+                return res
+            except Exception as e:
+                if attempt == retries-1:
+                    raise e
+                await asyncio.sleep(0.5 * (attempt+1))
+
     async def register_or_login(self, username=None, password=None):
         if username:
             self.display_name = username  # Mark - preserve case
@@ -181,19 +197,21 @@ class ChatSlayerClient:
         bodyL = {"type":"m.login.password","identifier":{"type":"m.id.user","user":user_lower},"password":pwd}
         optsL = {"method":"POST","headers":headers,"body":py_json.dumps(bodyL)}
         try:
-            resL = await self._fetch_with_backoff(base+"/_matrix/client/r0/login", optsL, retries=2, wake_mode=True)
-            tL = await resL.text(); dL = py_json.loads(tL) if tL else {}
+            resL = await self._fetch_with_backoff(base+"/_matrix/client/r0/login", optsL, retries=2, wake_mode=True, quiet=True)
+            tL = await resL.text()
+            try: dL = py_json.loads(tL)
+            except: dL = {}
             if resL.status == 200 and dL.get("access_token"):
                 window._chatSlayer.token = dL["access_token"]
                 window._chatSlayer.userId = dL["user_id"]
-                window._chatSlayer.username = display  # Mark
+                window._chatSlayer.username = display
                 window._chatSlayer.displayName = display
                 window._chatSlayer.connected = True
                 self.access_token = dL["access_token"]; self.user_id = dL["user_id"]; self.connected=True
                 self._set_status(f"Connected as {display}")
                 return dL
-        except: pass
-
+        except:
+            pass
         # 2. NEW USER - register + UIAA 401 is expected
         self._set_status(f"Registering {display}...")
         opts1 = {"method":"POST","headers":headers,"body":py_json.dumps({"username":user_lower,"password":pwd})}
