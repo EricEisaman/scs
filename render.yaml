@@ -15,3 +15,10 @@ services:
         value: "https://ericeisaman.github.io,https://scs-207.onrender.com,http://localhost:8000,https://scs-2qah.onrender.com"
       - key: SESSION_SECRET
         generateValue: true
+      - key: CHAT_UPSTREAM_URL
+        value: https://chat-slayer.onrender.com
+      - key: CHAT_PROXY_PREFIX
+        value: /chat-api
+      - key: CHAT_CLIENT_ID
+        value: web-demo
+
