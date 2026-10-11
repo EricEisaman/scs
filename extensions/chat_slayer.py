@@ -1,24 +1,26 @@
 """
 extensions/chat_slayer.py — per CLIENT_GUIDE.md + demo/ — NO EVAL
 https://github.com/EricEisaman/chat-slayer/tree/main/demo
-- X-Chat-Slayer-Client-Id on EVERY request
+- X-Chat-Slayer-Client-Id on EVERY request = web-demo (must be in ALLOWED_CLIENTS)
+- Unique browser ID stored separately as deviceId, NOT as clientId
 - Register: POST no auth -> 401 {session} -> POST dummy auth -> 200 verification
 - Login: POST /_matrix/client/r0/login m.login.password -> 200
+- REST via scs-207 proxy on github.io to avoid CORS preflight, SSE direct to chat-slayer
 - 429 backoff with Retry-After + 502/503 wake handling
 - Username+password first screen
 - Uses window.fetch directly, window.Object.new() for state — no window.eval
-- FIX: unique clientId per browser + wake UI + exponential backoff for free tier
 """
 from browser import window, aio
 import json as py_json
 import time, random
 
-DEFAULT_BASE_URL = "https://scs-207.onrender.com/chat-api"
-DEFAULT_CLIENT_ID = "web-demo"
+DEFAULT_PROXY_BASE = "https://scs-207.onrender.com/chat-api"
+DEFAULT_DIRECT_BASE = "https://chat-slayer.onrender.com"
+DEFAULT_CLIENT_ID = "web-demo"  # MUST be in ALLOWED_CLIENTS
 
-def _get_unique_client_id():
+def _get_unique_device_id():
     try:
-        k = "tetr_client_id_v2"
+        k = "tetr_device_id_v2"
         v = window.localStorage.getItem(k)
         if v:
             return v
@@ -39,25 +41,48 @@ def _ensure_js_state():
             o = window.Object.new()
             o.token = None; o.userId = None; o.deviceId = None
             o.roomId = None; o.messages = []; o.connected = False
-            o.username = None; o.clientId = _get_unique_client_id()
+            o.username = None; o.clientId = DEFAULT_CLIENT_ID
+            o.deviceId = _get_unique_device_id()
             o.lastResp = None; o.lastError = None
             o.status = "idle"
             window._chatSlayer = o
         except:
-            window._chatSlayer = {"token":None,"userId":None,"connected":False,"status":"idle","clientId":_get_unique_client_id()}
+            window._chatSlayer = {"token":None,"userId":None,"connected":False,"status":"idle","clientId":DEFAULT_CLIENT_ID,"deviceId":_get_unique_device_id()}
 
 _ensure_js_state()
 
+def _is_github_io():
+    try:
+        return "github.io" in window.location.hostname
+    except:
+        return False
+
+def _get_rest_base(base_url=None):
+    """REST (register/login) via scs-207 proxy on github.io to avoid CORS preflight failures"""
+    raw = (base_url or DEFAULT_PROXY_BASE).rstrip("/")
+    if "scs-207.onrender.com" in raw and "/chat-api" not in raw:
+        raw += "/chat-api"
+    if _is_github_io():
+        return DEFAULT_PROXY_BASE
+    # same-origin on Render
+    try:
+        if "scs-207" in window.location.hostname or "localhost" in window.location.hostname:
+            return "/chat-api"
+    except:
+        pass
+    return raw
+
+def _get_stream_base():
+    """SSE stream always direct on github.io - edge proxy breaks chunked SSE with ERR_HTTP2_PROTOCOL_ERROR"""
+    return DEFAULT_DIRECT_BASE
+
 class ChatSlayerClient:
     def __init__(self, base_url=None, client_id=None, username=None, password=None, status_cb=None):
-        raw = (base_url or DEFAULT_BASE_URL).rstrip("/")
-        if "scs-207.onrender.com" in raw and "/chat-api" not in raw:
-            raw += "/chat-api"
-        self.base_url = raw
-        # FIX: don't share web-demo bucket
-        if not client_id or client_id == DEFAULT_CLIENT_ID:
-            client_id = _get_unique_client_id()
-        self.client_id = client_id
+        # Always use web-demo for gate, unique ID is deviceId
+        self.base_url = _get_rest_base(base_url)
+        self.stream_base = _get_stream_base()
+        self.client_id = DEFAULT_CLIENT_ID  # FIX: must be in ALLOWED_CLIENTS
+        self.device_id = _get_unique_device_id()
         self.username = username or f"Guest{random.randint(1000,9999)}"
         self.password = password or ""
         self.access_token = None
@@ -79,7 +104,6 @@ class ChatSlayerClient:
         try:
             ra = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
             if ra:
-                # can be seconds or http-date, we only handle seconds
                 return int(str(ra).split()[0])
         except:
             pass
@@ -90,17 +114,14 @@ class ChatSlayerClient:
         for attempt in range(retries + 1):
             try:
                 resp = await window.fetch(url, opts)
-                # success or non-retryable
                 if resp.status not in (429, 502, 503, 504):
                     return resp
-                # retryable: 429 = rate limit, 502/503 = Render waking
                 ra = self._parse_retry_after(resp)
                 if ra is not None:
                     wait = float(ra)
                 else:
-                    # wake takes longer than rate limit
                     wait = (5 + attempt*2) if wake_mode or resp.status!= 429 else (base * (2 ** attempt))
-                wait = min(wait, 20) + random.uniform(0, 1.5) # jitter
+                wait = min(wait, 20) + random.uniform(0, 1.5)
                 if wake_mode or resp.status in (502,503,504):
                     self._set_status(f"Waking chat server... retry in {int(wait)}s ({attempt+1}/{retries+1})")
                 else:
@@ -108,24 +129,19 @@ class ChatSlayerClient:
                 await aio.sleep(wait)
                 continue
             except Exception as e:
-                # network error while waking
                 wait = min(base * (2 ** attempt) + random.uniform(0,1), 20)
                 self._set_status(f"Waking chat server... {e} - retry in {int(wait)}s ({attempt+1}/{retries+1})")
                 await aio.sleep(wait)
-        # last try, let caller handle
         return await window.fetch(url, opts)
 
     async def wait_for_wake(self, max_attempts=12):
-        """Call this BEFORE register/login. Shows UI and respects free-tier cold start."""
         self._set_status("Waking chat server (free tier, ~40s)...")
         headers = {"X-Chat-Slayer-Client-Id": self.client_id}
         for i in range(max_attempts):
             try:
-                # chat-slayer has /health on some deploys, base / returns 200 on others
                 for path in ["/health", "/", "/_matrix/client/versions"]:
                     url = f"{self.base_url}{path}"
                     resp = await window.fetch(url, {"method":"GET","headers":headers})
-                    # 200, 401 (needs auth but alive), 404 (route missing but server alive) all mean awake
                     if resp.status in (200, 401, 404):
                         self._set_status("Chat server awake")
                         return True
@@ -147,14 +163,12 @@ class ChatSlayerClient:
         if password: self.password = password
         if len(self.password) < 8:
             self.login_error = "Password min 8 chars"; return
-        # FIX: wait first
         await self.wait_for_wake()
 
         base, cid, user, pwd = self.base_url, self.client_id, self.username, self.password
         headers = {"Content-Type":"application/json","X-Chat-Slayer-Client-Id":cid}
         self._set_status(f"Registering {user}...")
 
-        # STEP 1: no auth -> 401 with session
         opts1 = {"method":"POST","headers":headers,"body":py_json.dumps({"username":user,"password":pwd})}
         res1 = await self._fetch_with_backoff(base+"/_matrix/client/r0/register?kind=user", opts1, retries=5, wake_mode=True)
         t1 = await res1.text()
@@ -171,7 +185,7 @@ class ChatSlayerClient:
             if res2.status == 200 and d2.get("access_token"):
                 window._chatSlayer.token = d2["access_token"]
                 window._chatSlayer.userId = d2["user_id"]
-                window._chatSlayer.deviceId = d2.get("device_id")
+                window._chatSlayer.deviceId = d2.get("device_id") or self.device_id
                 window._chatSlayer.username = user
                 window._chatSlayer.connected = True
                 window._chatSlayer.lastResp = {"status":200,"data":d2,"stage":"register_verified"}
@@ -189,7 +203,6 @@ class ChatSlayerClient:
             self._set_status(f"Connected as {user}")
             return d1
 
-        # LOGIN fallback
         self._set_status(f"Logging in {user}...")
         bodyL = {"type":"m.login.password","identifier":{"type":"m.id.user","user":user},"password":pwd}
         optsL = {"method":"POST","headers":headers,"body":py_json.dumps(bodyL)}
@@ -208,7 +221,11 @@ class ChatSlayerClient:
         else:
             window._chatSlayer.lastResp = {"status":resL.status,"data":dL,"stage":"login_failed"}
             window._chatSlayer.connected = False
-            self._set_status(f"Login failed: {dL.get('error','unknown')}")
+            self._set_status(f"Login failed: {dL.get('error','unknown')} - {dL.get('errcode','')}")
+
+    def get_stream_url(self):
+        # Direct for SSE on github.io
+        return f"{self.stream_base}/demo/stream"
 
 _global=None
 def get_chat_client(base_url=None, client_id=None, username=None, password=None, status_cb=None):
@@ -219,5 +236,4 @@ def get_chat_client(base_url=None, client_id=None, username=None, password=None,
         if username: _global.username = username
         if password: _global.password = password
         if status_cb: _global._status_cb = status_cb
-        if client_id: _global.client_id = client_id
     return _global

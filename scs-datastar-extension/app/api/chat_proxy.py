@@ -17,7 +17,7 @@ DO NOT CREATE:
   app/chat_proxy_1.py — WRONG
 
 CORRECT USAGE IN main.py (2 lines only):
-  from.api.chat_proxy import router as chat_proxy_router
+  from .api.chat_proxy import router as chat_proxy_router
   app.include_router(chat_proxy_router)
 
 Implements:
@@ -58,7 +58,8 @@ FORWARD_HEADER_NAMES = [
     "origin",
 ]
 
-HOP_BY_HOP = {"content-encoding", "transfer-encoding", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "upgrade"}
+HOP_BY_HOP = {"content-encoding", "transfer-encoding", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "upgrade", "content-length"}
+
 
 @router.api_route("/chat-api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
 async def chat_api_proxy(path: str, request: Request):
