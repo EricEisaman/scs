@@ -9,6 +9,7 @@ https://github.com/EricEisaman/chat-slayer/tree/main/demo
 - 429 backoff with Retry-After + 502/503 wake handling
 - Username+password first screen
 - Uses window.fetch directly, window.Object.new() for state — no window.eval
+- FIX: preserve display capitalization (Mark) while using lowercase for Matrix (mark)
 """
 from browser import window, aio
 import json as py_json
@@ -36,18 +37,20 @@ def _ensure_js_state():
         if _._is_none: raise AttributeError
         if not hasattr(_, "status"):
             _.status = "idle"
+        if not hasattr(_, "displayName"):
+            _.displayName = None
     except:
         try:
             o = window.Object.new()
             o.token = None; o.userId = None; o.deviceId = None
             o.roomId = None; o.messages = []; o.connected = False
-            o.username = None; o.clientId = DEFAULT_CLIENT_ID
+            o.username = None; o.displayName = None; o.clientId = DEFAULT_CLIENT_ID
             o.deviceId = _get_unique_device_id()
             o.lastResp = None; o.lastError = None
             o.status = "idle"
             window._chatSlayer = o
         except:
-            window._chatSlayer = {"token":None,"userId":None,"connected":False,"status":"idle","clientId":DEFAULT_CLIENT_ID,"deviceId":_get_unique_device_id()}
+            window._chatSlayer = {"token":None,"userId":None,"connected":False,"status":"idle","clientId":DEFAULT_CLIENT_ID,"deviceId":_get_unique_device_id(),"displayName":None}
 
 _ensure_js_state()
 
@@ -83,7 +86,10 @@ class ChatSlayerClient:
         self.stream_base = _get_stream_base()
         self.client_id = DEFAULT_CLIENT_ID  # FIX: must be in ALLOWED_CLIENTS
         self.device_id = _get_unique_device_id()
-        self.username = username or f"Guest{random.randint(1000,9999)}"
+        # FIX: keep display case (Mark) and lowercase for Matrix (mark)
+        raw = username or f"Guest{random.randint(1000,9999)}"
+        self.display_name = raw  # Mark - for UI
+        self.username = raw.lower()  # mark - for Matrix API
         self.password = password or ""
         self.access_token = None
         self.user_id = None
@@ -159,24 +165,26 @@ class ChatSlayerClient:
         return False
 
     async def register_or_login(self, username=None, password=None):
-        if username: self.username = username
+        if username:
+            self.display_name = username  # Mark - preserve case for display
+            self.username = username.lower()  # mark - for Matrix
         if password: self.password = password
         if len(self.password) < 8:
             self.login_error = "Password min 8 chars"; return
         await self.wait_for_wake()
 
-        base, cid, user, pwd = self.base_url, self.client_id, self.username, self.password
+        base, cid, user_lower, display, pwd = self.base_url, self.client_id, self.username, self.display_name, self.password
         headers = {"Content-Type":"application/json","X-Chat-Slayer-Client-Id":cid}
-        self._set_status(f"Registering {user}...")
+        self._set_status(f"Registering {display}...")
 
-        opts1 = {"method":"POST","headers":headers,"body":py_json.dumps({"username":user,"password":pwd})}
+        opts1 = {"method":"POST","headers":headers,"body":py_json.dumps({"username":user_lower,"password":pwd})}
         res1 = await self._fetch_with_backoff(base+"/_matrix/client/r0/register?kind=user", opts1, retries=5, wake_mode=True)
         t1 = await res1.text()
         try: d1 = py_json.loads(t1)
         except: d1 = {}
 
         if res1.status == 401 and d1.get("session"):
-            body2 = {"username":user,"password":pwd,"auth":{"type":"m.login.dummy","session":d1["session"]}}
+            body2 = {"username":user_lower,"password":pwd,"auth":{"type":"m.login.dummy","session":d1["session"]}}
             opts2 = {"method":"POST","headers":headers,"body":py_json.dumps(body2)}
             res2 = await self._fetch_with_backoff(base+"/_matrix/client/r0/register?kind=user", opts2, retries=5, wake_mode=True)
             t2 = await res2.text()
@@ -186,25 +194,27 @@ class ChatSlayerClient:
                 window._chatSlayer.token = d2["access_token"]
                 window._chatSlayer.userId = d2["user_id"]
                 window._chatSlayer.deviceId = d2.get("device_id") or self.device_id
-                window._chatSlayer.username = user
+                window._chatSlayer.username = display  # Mark - display case
+                window._chatSlayer.displayName = display  # Mark - display case
                 window._chatSlayer.connected = True
                 window._chatSlayer.lastResp = {"status":200,"data":d2,"stage":"register_verified"}
                 self.access_token = d2["access_token"]; self.user_id = d2["user_id"]; self.connected=True
-                self._set_status(f"Connected as {user}")
+                self._set_status(f"Connected as {display}")
                 return d2
 
         if res1.status == 200 and d1.get("access_token"):
             window._chatSlayer.token = d1["access_token"]
             window._chatSlayer.userId = d1["user_id"]
-            window._chatSlayer.username = user
+            window._chatSlayer.username = display  # Mark
+            window._chatSlayer.displayName = display  # Mark
             window._chatSlayer.connected = True
             window._chatSlayer.lastResp = {"status":200,"data":d1,"stage":"register_verified"}
             self.access_token = d1["access_token"]; self.connected=True
-            self._set_status(f"Connected as {user}")
+            self._set_status(f"Connected as {display}")
             return d1
 
-        self._set_status(f"Logging in {user}...")
-        bodyL = {"type":"m.login.password","identifier":{"type":"m.id.user","user":user},"password":pwd}
+        self._set_status(f"Logging in {display}...")
+        bodyL = {"type":"m.login.password","identifier":{"type":"m.id.user","user":user_lower},"password":pwd}
         optsL = {"method":"POST","headers":headers,"body":py_json.dumps(bodyL)}
         resL = await self._fetch_with_backoff(base+"/_matrix/client/r0/login", optsL, retries=5, wake_mode=True)
         tL = await resL.text()
@@ -213,11 +223,12 @@ class ChatSlayerClient:
         if resL.status == 200 and dL.get("access_token"):
             window._chatSlayer.token = dL["access_token"]
             window._chatSlayer.userId = dL["user_id"]
-            window._chatSlayer.username = user
+            window._chatSlayer.username = display  # Mark
+            window._chatSlayer.displayName = display  # Mark
             window._chatSlayer.connected = True
             window._chatSlayer.lastResp = {"status":200,"data":dL,"stage":"login_verified"}
             self.access_token = dL["access_token"]; self.user_id = dL["user_id"]; self.connected=True
-            self._set_status(f"Connected as {user}")
+            self._set_status(f"Connected as {display}")
         else:
             window._chatSlayer.lastResp = {"status":resL.status,"data":dL,"stage":"login_failed"}
             window._chatSlayer.connected = False
@@ -233,7 +244,9 @@ def get_chat_client(base_url=None, client_id=None, username=None, password=None,
     if _global is None:
         _global = ChatSlayerClient(base_url, client_id, username, password, status_cb=status_cb)
     else:
-        if username: _global.username = username
+        if username:
+            _global.display_name = username
+            _global.username = username.lower()
         if password: _global.password = password
         if status_cb: _global._status_cb = status_cb
     return _global

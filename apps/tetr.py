@@ -1835,7 +1835,7 @@ def draw_multiplayer_vs(app):
             drawLabel("VS SCORE", p2_next_x+12, p2_board_y+bh+16, size=8, fill=rgb(160,160,180), bold=True, align="left-top")
             drawLabel(f"{getattr(app, '_opp_score', 33)}", p2_next_x+12, p2_board_y+bh+28, size=18, fill=rgb(210,210,220), bold=True, align="left-top")
             # Player names
-            drawLabel(str(app.username).upper()[:12], p1_board_x+bw/2, p1_board_y+bh+52, size=11, fill=rgb(220,220,230), bold=True)
+            drawLabel(str(app.username)[:12], p1_board_x+bw/2, p1_board_y+bh+52, size=11, fill=rgb(220,220,230), bold=True)
             opp_name = str(app.single_opponent_id)[:12] if app.single_opponent_id else "WOORAM"
             drawLabel(opp_name.upper(), p2_board_x+bw/2, p2_board_y+bh+52, size=11, fill=rgb(190,190,200), bold=True)
         except Exception as e:
@@ -1951,11 +1951,24 @@ def key_code_to_display(code):
     # code like "ARROWLEFT" -> display
     return code
 
-def _norm_key(k):
+def _norm_key(k, preserve_case=False):
     if not k: return ""
-    kl=str(k).lower()
-    mapping={"arrowleft":"left","arrowright":"right","arrowup":"up","arrowdown":"down"," ":"space","spacebar":"space"}
-    return mapping.get(kl,kl)
+    raw = str(k)
+    kl = raw if preserve_case else raw.lower()
+    # only lower the mapping keys when not preserving
+    if preserve_case:
+        mapping={"ArrowLeft":"left","ArrowRight":"right","ArrowUp":"up","ArrowDown":"down"," ":"space","Spacebar":"space"}
+        # check raw, not lower
+        return mapping.get(raw, raw)
+    else:
+        mapping={"arrowleft":"left","arrowright":"right","arrowup":"up","arrowdown":"down"," ":"space","spacebar":"space"}
+        return mapping.get(kl,kl)
+
+def _norm_key_game(k):
+    return _norm_key(k, preserve_case=False)
+
+def _norm_key_text(k):
+    return _norm_key(k, preserve_case=True)
 
 def _code_from_key(k):
     # browser key -> code format like config.png ARROWLEFT etc
@@ -1969,18 +1982,20 @@ def _code_from_key(k):
     return kl
 
 def onKeyPress(app,key):
+    focus = getattr(app, "welcome_focus", "user")
+
+    # ===== TITLE - preserve Mark case =====
     if app.game_state=="title":
-        k=_norm_key(key)
-        focus = getattr(app, "welcome_focus", "user")
+        k_raw = key # "M" preserve
+        k = _norm_key_game(key) # "m" for checks
+
         if k == "enter":
             if _chat_authenticated():
                 _enter_authenticated_game(app)
+                app.inputName.value = app.username
+                app.inputName.placeholder = app.username
             else:
                 aio.run(_authenticate_chat(app))
-            return
-        if k == "escape":
-            app.welcome_focus = "user"
-            app.welcome_error = ""
             return
         if k == "backspace":
             if focus == "pass":
@@ -1988,18 +2003,25 @@ def onKeyPress(app,key):
             else:
                 app.welcome_username = app.welcome_username[:-1]
             return
-        if len(k) == 1 and k.isprintable():
-            if focus == "pass" and len(app.welcome_password) < 128:
-                app.welcome_password += key if len(key) == 1 else k
-            elif focus != "pass" and len(app.welcome_username) < 32:
-                if k.isalnum() or k in "_-":
-                    app.welcome_username += key if len(key) == 1 else k
+        if k == "escape":
+            app.welcome_focus = "user"
+            app.welcome_error = ""
             return
+        # typing - k_raw keeps case
+        if len(k_raw) == 1 and k_raw.isprintable():
+            if focus == "pass" and len(app.welcome_password) < 128:
+                app.welcome_password += k_raw
+                return
+            elif focus!= "pass" and len(app.welcome_username) < 32:
+                if k_raw.isalnum() or k_raw in "_-":
+                    app.welcome_username += k_raw # Mark not mark
+                    return
+        return
 
-    k=_norm_key(key)
+    # ===== CONFIG =====
+    k = _norm_key_game(key)
     code = _code_from_key(key)
 
-    # CONFIG rebinding
     if app.game_state=="config":
         if app.config_selected:
             action,slot = app.config_selected
@@ -2022,83 +2044,59 @@ def onKeyPress(app,key):
     if hasattr(app,'inputName') and app.inputName.focused:
         if k=="escape": app.inputName.focused=False
         return
-    if app.game_state=="title":
-        if k in ("enter"," "):
-            play_sfx("ui.click")
-            app.game_state="menu"; app.tabGroup.active=2; app.tetr=TetrGame(mode="zen"); app.game_state="playing"; app.inputName.focused=False
-            stop_bgm(); play_bgm("bgm.zen", floor=0)
-        return
+
     if app.game_state!="playing":
         if k=="r": reset_game(app)
         if k=="escape": go_title(app)
         return
 
+    # ===== GAMEPLAY - lowercased correct =====
     def is_bound(action_name, key_code):
         binds = app.keybinds.get(action_name, [])
-        # Check code exact or key lower
-        if key_code in binds:
-            return True
-        # Also check normalized lower versions
+        if key_code in binds: return True
         low_binds = [b.lower() for b in binds if isinstance(b,str)]
-        if k in low_binds:
-            return True
-        # Check if any bind's normalized equals k
+        if k in low_binds: return True
         for b in binds:
-            if isinstance(b,str) and _norm_key(b).lower()==k:
+            if isinstance(b,str) and _norm_key_game(b).lower()==k:
                 return True
         return False
 
-    # Movement first
-    if k in ("left","a") or is_bound("move_left", code): 
+    if k in ("left","a") or is_bound("move_left", code):
         if app.tetr.try_move(-1,0): play_sfx("tetr.move", pitch=0.98, floor=app.tetr.stats["lines"]//5)
         return
-    if k in ("right","d") or is_bound("move_right", code): 
+    if k in ("right","d") or is_bound("move_right", code):
         if app.tetr.try_move(1,0): play_sfx("tetr.move", pitch=1.02, floor=app.tetr.stats["lines"]//5)
         return
-    if k in ("down","s") or is_bound("soft_drop", code): 
+    if k in ("down","s") or is_bound("soft_drop", code):
         app.tetr.soft_drop=True
         play_sfx("tetr.softdrop", volume=0.2, floor=app.tetr.stats["lines"]//5)
         return
-
-    # Rotation — FIXED: up and w now work for rotation, not just hard_drop
-    # TETR.IO: x= cw, z= ccw, c= 180/hold, up= cw (many players), w= cw (WASD)
-    # We prioritize rotation binds over hard_drop for up/w if they are bound to rotate
     if k=="z" or is_bound("rotate_ccw", code) or (k in ("left",) and is_bound("rotate_ccw", code)):
-        if app.tetr.try_rotate(-1): 
+        if app.tetr.try_rotate(-1):
             play_sfx("tetr.rotate", pitch=0.92, floor=app.tetr.stats["lines"]//5)
         return
     if k=="x" or is_bound("rotate_cw", code) or k in ("up","w") or is_bound("rotate_cw", "KEYW") or is_bound("rotate_cw", "ARROWUP"):
-        # If up/w is explicitly bound to hard_drop, don't rotate — let hard_drop below handle it
-        # But if up/w is bound to rotate_cw (user custom), rotate
-        # Check: if key is up/w and hard_drop bind is exclusive and rotate not bound, treat as hard_drop
         is_hard_only = False
         if k in ("up","w"):
-            # If this key code is ONLY bound to hard_drop and not rotate, do hard_drop later
             if is_bound("hard_drop", code) and not is_bound("rotate_cw", code) and not is_bound("rotate_ccw", code):
                 is_hard_only = True
         if not is_hard_only:
-            if app.tetr.try_rotate(1): 
+            if app.tetr.try_rotate(1):
                 play_sfx("tetr.rotate", pitch=1.0, floor=app.tetr.stats["lines"]//5)
             return
-
     if k=="c" or is_bound("rotate_180", code):
-        # 180 — try hold first if hold is bound to same key
         if is_bound("hold", code) and k=="c":
-            # In WASD, c is both 180 and hold — prioritize hold
             do_hold(app)
         else:
-            if app.tetr.try_rotate(2): 
+            if app.tetr.try_rotate(2):
                 play_sfx("tetr.rotate", pitch=0.85, floor=app.tetr.stats["lines"]//5)
         return
-
     if is_bound("hold", code) or k in ("shift","shiftleft"):
         do_hold(app)
         return
-
-    # Hard drop — space always, plus up/w if they are bound to hard_drop and not rotate
     if k in ("space"," ") or is_bound("hard_drop", code) or (k in ("up","w") and not is_bound("rotate_cw", code) and not is_bound("rotate_ccw", code)):
         dist = 0
-        while not app.tetr.board.collides(app.tetr.current,0,1): 
+        while not app.tetr.board.collides(app.tetr.current,0,1):
             app.tetr.current.y+=1
             dist+=1
         play_sfx("tetr.harddrop", volume=0.5+min(dist*0.05,0.5), pitch=1.0-dist*0.01, floor=app.tetr.stats["lines"]//5)
@@ -2106,15 +2104,13 @@ def onKeyPress(app,key):
         handle_piece_lock(app,attack,cleared,tspin,is_pc,is_opener,difficult)
         app.tetr.spawn(); app.tetr.lock_delay=0
         return
-
-    if k=="escape" or is_bound("forfeit", code): 
+    if k=="escape" or is_bound("forfeit", code):
         go_title(app)
         return
 
-
 def draw_stats_tetrio(app):
     try:
-        ox, oy = app.board_x, app.board_y + 420
+        ox, oy = 20, 240
         drawRoundedRect(ox-8, oy, 260, 80, 8, rgb(20,22,32), border=rgb(60,65,90), borderWidth=1)
         s = app.tetr.stats
         elapsed = max(1, time.time()-s.get('start', time.time()))
