@@ -768,6 +768,11 @@ def onAppStart(app):
     app.is_anonymous=False  # final flag
     app.registered_users={"OSK","ZET","TETR.IO","ADMIN","MOD","BOT"}  # simulated registered names
     app.random_names=["GUEST","ANON","TETRON","BLOCKER","STACKER","SPINNER","CLUTCH","ZENITH","BLITZ","COMBO","B2B","T-SPIN","PERFECT","TETRA","LEAGUE","QUICK","SWEeper","LINES","ATTACK","GARBAGE"]
+    app.welcome_state="enter"
+    app.welcome_focus="user"
+    app.welcome_username=""; app.welcome_password=""; app.welcome_error=""
+    app.chat_client=None
+    window.eval("if(!window._chatSlayer) window._chatSlayer={token:null,userId:null,connected:false,lastResp:null,lastError:null,clientId:'web-demo'}")
     # Load registered from localStorage if available
     try:
         ls = window.localStorage
@@ -2253,6 +2258,67 @@ def onKeyPress(app,key):
     if k=="escape" or is_bound("forfeit", code): 
         go_title(app)
         return
+
+
+def draw_stats_tetrio(app):
+    try:
+        ox, oy = app.board_x, app.board_y + 420
+        drawRoundedRect(ox-8, oy, 260, 80, 8, rgb(20,22,32), border=rgb(60,65,90), borderWidth=1)
+        s = app.tetr.stats
+        elapsed = max(1, time.time()-s.get('start', time.time()))
+        apm = int(s.get('attack',0)/elapsed*60)
+        pps = s.get('pieces',0)/elapsed
+        drawLabel(f"SCORE {s.get('score',0)}", ox+6, oy+8, size=10, fill=rgb(220,220,230), bold=True, align="left-top")
+        drawLabel(f"LINES {s.get('lines',0)}  ATTACK {app.tetr.board.attack}  B2B x{app.tetr.board.b2b_streak}", ox+6, oy+24, size=9, fill=rgb(160,170,190), align="left-top")
+        drawLabel(f"COMBO {app.tetr.board.combo}  APM {apm}  PPS {pps:.2f}", ox+6, oy+40, size=9, fill=rgb(160,170,190), align="left-top")
+    except: pass
+
+def draw_garbage_meter(app):
+    try:
+        ox = app.board_x + BOARD_W*CELL + 18
+        oy = app.board_y
+        incoming = app.mp_wrapper.match["garbage"]["incoming"]
+        total = sum(g.get('lines',0) for g in incoming)
+        if total>0:
+            drawRoundedRect(ox, oy, 12, BOARD_H_VISIBLE*CELL, 6, rgb(30,32,48), border=rgb(80,90,120), borderWidth=1)
+            h = min(BOARD_H_VISIBLE*CELL, int(total*12))
+            drawRoundedRect(ox+1, oy+BOARD_H_VISIBLE*CELL - h, 10, h, 4, rgb(220,80,80))
+    except: pass
+
+# ===== TITLE per demo =====
+def drawTitleScreen(app):
+    drawRect(0,0,app.width,app.height,fill=rgb(18,19,23))
+    cx = app.width//2
+    card_w, card_h = 480, 500
+    card_x, card_y = cx-card_w//2, 68
+    drawRoundedRect(card_x,card_y,card_w,card_h,14,rgb(32,36,52),border=rgb(70,80,110),borderWidth=1.2)
+    drawLabel("TETR.IO",cx,card_y+32,size=32,fill=rgb(240,240,255),bold=True)
+    drawLabel("CHAT-SLAYER AUTH REQUIRED",cx,card_y+62,size=11,fill=rgb(140,200,255),bold=True)
+    # username field
+    input_w, input_x = 320, cx-160
+    input_y1, input_y2 = card_y+108, card_y+170
+    focus_user = getattr(app,'welcome_focus','user')=='user'
+    drawRoundedRect(input_x,input_y1,input_w,38,8,rgb(28,34,52) if focus_user else rgb(22,26,38),border=rgb(90,110,160) if focus_user else rgb(60,70,95),borderWidth=1.2)
+    drawLabel(getattr(app,'welcome_username','') or "username (required)", input_x+12,input_y1+19,size=11,fill=rgb(230,235,245) if getattr(app,'welcome_username','') else rgb(100,110,130),align="left-top")
+    # password field
+    focus_pass = getattr(app,'welcome_focus','user')=='pass'
+    drawRoundedRect(input_x,input_y2,input_w,38,8,rgb(28,34,52) if focus_pass else rgb(22,26,38),border=rgb(90,110,160) if focus_pass else rgb(60,70,95),borderWidth=1.2)
+    masked = "*" * len(getattr(app,'welcome_password',''))
+    drawLabel(masked or "password (8+ chars, required)", input_x+12,input_y2+19,size=11,fill=rgb(230,235,245) if masked else rgb(100,110,130),align="left-top")
+    # REGISTER / LOGIN per CLIENT_GUIDE lines 407-450
+    bx1, bx2, btn_y, btn_w = cx-160, cx+10, input_y2+62, 150
+    drawRoundedRect(bx1,btn_y,btn_w,40,8,rgb(90,160,90),border=rgb(120,200,120),borderWidth=1.2)
+    drawLabel("REGISTER",bx1+btn_w//2,btn_y+20,size=12,fill="white",bold=True)
+    drawRoundedRect(bx2,btn_y,btn_w,40,8,rgb(90,100,220),border=rgb(120,130,250),borderWidth=1.2)
+    drawLabel("LOGIN",bx2+btn_w//2,btn_y+20,size=12,fill="white",bold=True)
+    # verification status
+    try:
+        lr = getattr(window,'_chatSlayer',None)
+        if lr and getattr(lr,'token',None) and str(lr.token) not in ("null","undefined"):
+            drawLabel(f"VERIFIED: {lr.username}",cx,btn_y+62,size=10,fill=rgb(100,255,100),bold=True)
+            drawRoundedRect(cx-160,btn_y+98,320,42,8,rgb(240,180,60),border=rgb(255,210,100),borderWidth=1.2)
+            drawLabel("JOIN TETR.IO →",cx,btn_y+119,size=14,fill=rgb(30,20,10),bold=True)
+    except: pass
 
 def onKeyRelease(app,key):
     k=_norm_key(key)
