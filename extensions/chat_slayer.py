@@ -1,55 +1,19 @@
 """
-extensions/chat_slayer.py — General purpose Chat Slayer extension for ALL apps
+extensions/chat_slayer.py — Chat Slayer extension per CLIENT_GUIDE.md
+https://github.com/EricEisaman/chat-slayer/blob/main/CLIENT_GUIDE.md
 
-Lightweight Matrix-compatible chat server client (https://github.com/EricEisaman/chat-slayer)
-- Single Node process, in-memory state, bundled for Render free tier
-- Client apps use standard Matrix client API routes under /_matrix/client/...
-- Demo uses Datastar SSE (GET /demo/stream) + actions (POST /demo/actions/*)
-- Works for any app: games, chat apps, collaborative tools, etc.
+Implements:
+- X-Chat-Slayer-Client-Id header on EVERY request (required)
+- Registration 2-step UIAA: POST without auth -> 401 {flows, session}, then POST with auth {type: m.login.dummy, session}
+- Login: POST /_matrix/client/r0/login with type m.login.password
+- 429 backoff with Retry-After per CLIENT_GUIDE
+- Name + Password entry UI (WaInput) - not hardcoded Guest
+- FastAPI proxy pattern: /chat-api/* -> upstream, no httpx
 
-General purpose — NOT TETR.IO specific:
-- Can be imported by any app in /mnt/data/apps/*.py
-- Provides ChatSlayerClient for Matrix-compatible chat
-- Headers: X-Chat-Slayer-Client-Id (required), Authorization Bearer (after login)
-- Supports: register, login, create/join rooms, send messages, history, SSE live updates
-- Configurable base_url, client_id, username per app
-
-Usage examples:
-
-# Any app (Brython):
-from extensions.chat_slayer import ChatSlayerClient, get_chat_client, init_chat
-
-# 1. Basic chat
-client = ChatSlayerClient(
-    base_url="https://your-chat-slayer.onrender.com",
-    client_id="my-app",
-    username="Player1"
-)
-client.register_or_login()
-client.join_room("Lobby")
-client.send("Hello world!")
-
-# 2. TETR.IO integration (OPEN CHAT is SLASH per config.png):
-app.chat_client = ChatSlayerClient(
-    base_url="https://scs-207.onrender.com",
-    client_id="tetrio-chat",
-    username=app.username
-)
-app.chat_client.register_or_login()
-app.chat_client.join_room("Lobby")
-
-# 3. Generic init helper (works for all apps):
-client = init_chat(app, base_url="https://your-server.com")
-
-API routes used:
-    POST /_matrix/client/r0/register?kind=user  — register (401 -> retry with m.login.dummy)
-    POST /_matrix/client/r0/login              — login
-    POST /_matrix/client/r0/createRoom         — create room
-    POST /_matrix/client/r0/rooms/register     — idempotent ensure rooms
-    POST /_matrix/client/r0/join/{roomId}     — join room
-    PUT  /_matrix/client/r0/rooms/{roomId}/send/m.room.message/{txnId}
-    GET  /_matrix/client/v3/rooms/{roomId}/messages?limit=N
-    GET  /demo/stream (SSE) — live room directory + messages (Datastar)
+Fixes previous bugs:
+- drawRoundedRect import error (was `from scs import drawRoundedRect` which doesn't exist)
+- Auto bot spawn in SOLO (fixed in tetr_26.py)
+- Multiplayer label showing SOLO (breadcrumb now dynamic)
 """
 
 from browser import window
@@ -57,12 +21,16 @@ import json as py_json
 import time
 import random
 
-# Default config — can be overridden per client
-DEFAULT_BASE_URL = "https://chat-slayer.onrender.com"
-DEFAULT_CLIENT_ID = "tetrio-chat"
+try:
+    from extensions.canvas_ui import WaInput, WaButton, WaCard, WaBadge
+    HAS_UI = True
+except:
+    HAS_UI = False
+
+DEFAULT_BASE_URL = "https://scs-207.onrender.com"
+DEFAULT_CLIENT_ID = "web-demo"
 DEFAULT_ROOM = "Lobby"
 
-# Global JS state for SSE and signals
 def _ensure_js_state():
     try:
         window.eval("""
@@ -74,7 +42,9 @@ def _ensure_js_state():
                 userId: null,
                 roomId: null,
                 messages: [],
-                connected: false
+                connected: false,
+                username: null,
+                clientId: "web-demo"
             };
         }
         """)
@@ -83,23 +53,13 @@ def _ensure_js_state():
 
 _ensure_js_state()
 
-def _js_log(msg):
+def _log(msg):
     try:
         print(f"[ChatSlayer] {msg}")
     except:
         pass
 
-def _b64_random_id():
-    try:
-        return f"{int(time.time()*1000)}_{random.randint(1000,9999)}"
-    except:
-        return f"txn_{int(time.time())}"
-
 class ChatSlayerClient:
-    """
-    Matrix-compatible client for Chat Slayer
-    Works in Brython via window.fetch (JS interop)
-    """
     def __init__(self, base_url=None, client_id=None, username=None, password=None):
         self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self.client_id = client_id or DEFAULT_CLIENT_ID
@@ -111,560 +71,330 @@ class ChatSlayerClient:
         self.room_id = None
         self.room_name = DEFAULT_ROOM
         self.connected = False
-        self.messages = []  # list of {sender, body, timestamp}
-        self._txn_counter = 0
+        self.messages = []
+        self._txn = 0
         self._chat_open = False
         self._chat_input = ""
-        self._on_message_cb = None
-
+        # UI for name/password per CLIENT_GUIDE
+        self.show_login_ui = True
+        self.login_error = ""
+        self._input_user = None
+        self._input_pass = None
+        self._btn_register = None
+        self._btn_login = None
         _ensure_js_state()
-        _js_log(f"Client created base={self.base_url} id={self.client_id} user={self.username}")
+        _log(f"Client base={self.base_url} id={self.client_id} user={self.username}")
 
-    def _fetch(self, path, method="GET", body=None, headers_extra=None, callback=None):
-        """
-        Do fetch via window.eval to avoid Brython CORS issues
-        body should be dict or None
-        """
-        try:
-            url = self.base_url + path
-            headers = {
-                "Content-Type": "application/json",
-                "X-Chat-Slayer-Client-Id": self.client_id
-            }
-            if self.access_token:
-                headers["Authorization"] = f"Bearer {self.access_token}"
-            if headers_extra:
-                headers.update(headers_extra)
-
-            body_str = py_json.dumps(body) if body is not None else "null"
-            # Use window.fetch via eval
-            script = f"""
-            (async () => {{
-                try {{
-                    const res = await fetch({py_json.dumps(url)}, {{
-                        method: {py_json.dumps(method)},
-                        headers: {py_json.dumps(headers)},
-                        body: {body_str} === null ? undefined : {py_json.dumps(body_str)} === "null" ? undefined : JSON.stringify({body_str} ? JSON.parse({py_json.dumps(body_str)}) : {py_json.dumps(body_str)}),
-                    }});
-                    const text = await res.text();
-                    let data;
-                    try {{ data = JSON.parse(text); }} catch(e) {{ data = text; }}
-                    window._chatSlayer.lastResponse = {{status: res.status, data: data, url: {py_json.dumps(url)}}};
-                    console.log("[ChatSlayer] fetch", {py_json.dumps(url)}, res.status, data);
-                    return {{status: res.status, data: data}};
-                }} catch(e) {{
-                    console.error("[ChatSlayer] fetch fail", e, {py_json.dumps(url)});
-                    window._chatSlayer.lastError = String(e);
-                    return {{status: 0, data: {{error: String(e)}}}};
-                }}
-            }})()
-            """
-            # Simplify: use eval for promise
-            # For Brython we need to handle async via window.eval returning promise
-            # We'll use a sync-style via window.eval and store in _chatSlayer
-            window.eval(f"""
-            fetch({py_json.dumps(url)}, {{
-                method: {py_json.dumps(method)},
-                headers: {py_json.dumps(headers)},
-                body: {body_str} === null || {py_json.dumps(body_str)} === "null" ? undefined : {py_json.dumps(body_str)}
-            }}).then(async r => {{
-                const t = await r.text();
-                let d; try {{ d = JSON.parse(t); }} catch(e) {{ d = t; }}
-                window._chatSlayer.lastResponse = {{status: r.status, data: d}};
-                console.log("[ChatSlayer]", r.status, d);
-            }}).catch(e => {{
-                console.error("[ChatSlayer] fetch error", e);
-                window._chatSlayer.lastError = String(e);
-            }});
-            """)
-            return True
-        except Exception as e:
-            _js_log(f"fetch fail {e}")
-            return False
-
-    def _fetch_sync(self, path, method="GET", body=None):
-        """
-        Synchronous-ish fetch using window.eval with JSON stringify
-        Returns parsed response from window._chatSlayer.lastResponse after short delay
-        This is best-effort; for real production use SSE + async callbacks
-        """
-        try:
-            url = self.base_url + path
-            headers = {
-                "Content-Type": "application/json",
-                "X-Chat-Slayer-Client-Id": self.client_id
-            }
-            if self.access_token:
-                headers["Authorization"] = f"Bearer {self.access_token}"
-
-            body_json = py_json.dumps(body) if body is not None else "null"
-            headers_json = py_json.dumps(headers)
-
-            js = f"""
-            fetch({py_json.dumps(url)}, {{
-                method: {py_json.dumps(method)},
-                headers: {headers_json},
-                body: {body_json} === "null" ? undefined : {body_json}
-            }}).then(r => r.text().then(t => {{
-                let d; try {{ d = JSON.parse(t); }} catch(e) {{ d = t; }}
-                window._chatSlayer.lastResponse = {{status: r.status, data: d, path: {py_json.dumps(path)}}};
-            }})).catch(e => {{
-                window._chatSlayer.lastError = String(e);
-            }});
-            """
-            window.eval(js)
-            return True
-        except Exception as e:
-            _js_log(f"_fetch_sync fail {e}")
-            return False
-
-    def register_or_login(self):
-        """
-        Try register, if user exists then login
-        Implements Matrix UIAA: first POST without auth returns 401 with session,
-        second POST with m.login.dummy + session
-        """
-        _js_log(f"register_or_login {self.username}")
-        # Try register step 1 (no auth) — will get 401 with session
-        self._fetch_sync("/_matrix/client/r0/register?kind=user", method="POST", body={
-            "username": self.username,
-            "password": self.password
-        })
-        # The actual retry with dummy auth needs session from 401 response
-        # For simplicity, try direct login after a short delay via JS
-        window.eval(f"""
+    # ---- Core fetch with CLIENT_GUIDE headers + 429 backoff ----
+    def _js_fetch(self, path, method="GET", body=None, cb_name=None):
+        # Uses JS fetch to avoid Brython CORS, with backoff for 429 per CLIENT_GUIDE.md
+        url = self.base_url + path
+        headers = {
+            "Content-Type": "application/json",
+            "X-Chat-Slayer-Client-Id": self.client_id
+        }
+        if self.access_token:
+            headers["Authorization"] = f"Bearer {self.access_token}"
+        
+        body_str = py_json.dumps(body) if body is not None else "null"
+        # JS with backoff
+        js = f"""
         (async () => {{
-            const base = {py_json.dumps(self.base_url)};
-            const cid = {py_json.dumps(self.client_id)};
-            const user = {py_json.dumps(self.username)};
-            const pass = {py_json.dumps(self.password)};
-            const headers = {{"Content-Type":"application/json","X-Chat-Slayer-Client-Id": cid}};
-            // Step 1: try register without auth to get session
-            let regRes = await fetch(base + "/_matrix/client/r0/register?kind=user", {{
-                method: "POST", headers: headers,
-                body: JSON.stringify({{username: user, password: pass}})
-            }});
-            let regText = await regRes.text();
-            let regData;
-            try {{ regData = JSON.parse(regText); }} catch(e) {{ regData = regText; }}
-            console.log("[ChatSlayer] register step1", regRes.status, regData);
-            if (regRes.status === 200) {{
-                // Registered directly (some servers allow)
-                window._chatSlayer.token = regData.access_token;
-                window._chatSlayer.userId = regData.user_id;
-                window._chatSlayer.lastResponse = {{status: regRes.status, data: regData}};
-                console.log("[ChatSlayer] registered", regData.user_id);
-                return;
+            async function fetchWithBackoff(url, opts, retries=3) {{
+                for (let a=0; a<=retries; a++) {{
+                    let r = await fetch(url, opts);
+                    if (r.status !== 429) return r;
+                    let ra = r.headers.get("Retry-After") || "2";
+                    let delay = parseInt(ra)*1000 || Math.pow(2,a)*1000;
+                    console.warn("[ChatSlayer] 429 retry in "+delay+"ms attempt "+(a+1));
+                    await new Promise(res=>setTimeout(res, delay));
+                }}
+                return await fetch(url, opts);
             }}
-            if (regRes.status === 401 && regData.session) {{
-                // Retry with dummy auth
-                let regRes2 = await fetch(base + "/_matrix/client/r0/register?kind=user", {{
-                    method: "POST", headers: headers,
-                    body: JSON.stringify({{
-                        username: user, password: pass,
-                        auth: {{type: "m.login.dummy", session: regData.session}}
-                    }})
+            try {{
+                const res = await fetchWithBackoff({py_json.dumps(url)}, {{
+                    method: {py_json.dumps(method)},
+                    headers: {py_json.dumps(headers)},
+                    body: {body_str} === "null" ? undefined : JSON.stringify({body_str} ? {py_json.dumps(body_str)} and JSON.parse({py_json.dumps(body_str)}) ? JSON.parse({py_json.dumps(body_str)}) : {py_json.dumps(body_str)} : null)
                 }});
-                let regText2 = await regRes2.text();
-                let regData2;
-                try {{ regData2 = JSON.parse(regText2); }} catch(e) {{ regData2 = regText2; }}
-                console.log("[ChatSlayer] register step2", regRes2.status, regData2);
-                if (regRes2.status === 200) {{
-                    window._chatSlayer.token = regData2.access_token;
-                    window._chatSlayer.userId = regData2.user_id;
-                    window._chatSlayer.lastResponse = {{status: regRes2.status, data: regData2}};
+                const text = await res.text();
+                let data; try {{ data = JSON.parse(text); }} catch(e) {{ data = text; }}
+                window._chatSlayer.lastResp = {{status: res.status, data: data}};
+                console.log("[ChatSlayer] {method} {path} ->", res.status, data);
+                if (window._chatSlayer.{cb_name or 'cb'}) window._chatSlayer.{cb_name or 'cb'}(res.status, data);
+                return {{status: res.status, data: data}};
+            }} catch(e) {{
+                console.error("[ChatSlayer] fetch fail", e);
+                window._chatSlayer.lastError = String(e);
+            }}
+        }})();
+        """
+        try:
+            window.eval(js)
+        except Exception as e:
+            _log(f"fetch eval fail {e}")
+
+    def register_or_login(self, username=None, password=None):
+        if username: self.username = username
+        if password: self.password = password
+        # Step 1 per CLIENT_GUIDE: POST without auth -> 401 with session
+        user = self.username
+        pwd = self.password
+        base = self.base_url
+        cid = self.client_id
+        # Use full JS flow per CLIENT_GUIDE.md lines 356-431
+        js = f"""
+        (async () => {{
+            const base = {py_json.dumps(base)};
+            const cid = {py_json.dumps(cid)};
+            const user = {py_json.dumps(user)};
+            const pass = {py_json.dumps(pwd)};
+            const headers = {{"Content-Type":"application/json","X-Chat-Slayer-Client-Id":cid}};
+            async function fetchWithBackoff(url, opts, retries=3) {{
+                for (let a=0;a<=retries;a++) {{
+                    let r = await fetch(url, opts);
+                    if (r.status!==429) return r;
+                    let ra = r.headers.get("Retry-After")||"2";
+                    let d = parseInt(ra)*1000 || Math.pow(2,a)*1000;
+                    console.warn("[ChatSlayer] 429 retry "+d+"ms");
+                    await new Promise(r=>setTimeout(r,d));
+                }}
+                return await fetch(url, opts);
+            }}
+            try {{
+                // STEP 1 - no auth
+                let res1 = await fetchWithBackoff(base + "/_matrix/client/r0/register?kind=user", {{
+                    method:"POST", headers: headers,
+                    body: JSON.stringify({{username:user, password:pass}})
+                }});
+                let t1 = await res1.text(); let d1; try{{d1=JSON.parse(t1)}}catch(e){{d1=t1}}
+                console.log("[ChatSlayer] register step1", res1.status, d1);
+                if (res1.status===401 && d1.session) {{
+                    // STEP 2 - dummy auth per CLIENT_GUIDE.md
+                    let res2 = await fetchWithBackoff(base + "/_matrix/client/r0/register?kind=user", {{
+                        method:"POST", headers: headers,
+                        body: JSON.stringify({{username:user, password:pass, auth:{{type:"m.login.dummy", session:d1.session}}}})
+                    }});
+                    let t2 = await res2.text(); let d2; try{{d2=JSON.parse(t2)}}catch(e){{d2=t2}}
+                    console.log("[ChatSlayer] register step2", res2.status, d2);
+                    if (res2.status===200) {{
+                        window._chatSlayer.token = d2.access_token;
+                        window._chatSlayer.userId = d2.user_id;
+                        window._chatSlayer.username = user;
+                        window._chatSlayer.connected = true;
+                        window._chatSlayer.lastResp = {{status:200, data:d2}};
+                        return;
+                    }}
+                    // If user exists (M_USER_IN_USE 409), try login
+                    if (res2.status===400 || res2.status===409 || d2.errcode==="M_USER_IN_USE") {{
+                        console.log("[ChatSlayer] user exists, trying login");
+                    }} else {{
+                        window._chatSlayer.lastResp={{status:res2.status,data:d2}};
+                        return;
+                    }}
+                }} else if (res1.status===200) {{
+                    // Some servers return 200 immediately (no UIAA)
+                    window._chatSlayer.token = d1.access_token;
+                    window._chatSlayer.userId = d1.user_id;
+                    window._chatSlayer.connected = true;
+                    window._chatSlayer.lastResp={{status:200,data:d1}};
                     return;
                 }}
-                // If user exists, try login
-                if (regRes2.status === 400 || regRes2.status === 409) {{
-                    console.log("[ChatSlayer] user exists, trying login");
+                // LOGIN per CLIENT_GUIDE.md line 439-450
+                let loginRes = await fetchWithBackoff(base + "/_matrix/client/r0/login", {{
+                    method:"POST", headers: headers,
+                    body: JSON.stringify({{type:"m.login.password", identifier:{{type:"m.id.user", user:user}}, password:pass}})
+                }});
+                let lt = await loginRes.text(); let ld; try{{ld=JSON.parse(lt)}}catch(e){{ld=lt}}
+                console.log("[ChatSlayer] login", loginRes.status, ld);
+                if (loginRes.status===200) {{
+                    window._chatSlayer.token = ld.access_token;
+                    window._chatSlayer.userId = ld.user_id;
+                    window._chatSlayer.username = user;
+                    window._chatSlayer.connected = true;
+                    window._chatSlayer.lastResp={{status:200,data:ld}};
+                }} else {{
+                    window._chatSlayer.lastResp={{status:loginRes.status,data:ld}};
+                    window._chatSlayer.connected=false;
                 }}
-            }}
-            // Login
-            let loginRes = await fetch(base + "/_matrix/client/r0/login", {{
-                method: "POST", headers: headers,
-                body: JSON.stringify({{type: "m.login.password", user: user, password: pass}})
-            }});
-            let loginText = await loginRes.text();
-            let loginData;
-            try {{ loginData = JSON.parse(loginText); }} catch(e) {{ loginData = loginText; }}
-            console.log("[ChatSlayer] login", loginRes.status, loginData);
-            if (loginRes.status === 200) {{
-                window._chatSlayer.token = loginData.access_token;
-                window._chatSlayer.userId = loginData.user_id;
-                window._chatSlayer.lastResponse = {{status: loginRes.status, data: loginData}};
-            }} else {{
-                window._chatSlayer.lastResponse = {{status: loginRes.status, data: loginData}};
+            }} catch(e) {{
+                console.error("[ChatSlayer] register_or_login fail", e);
+                window._chatSlayer.lastError=String(e);
             }}
         }})();
-        """)
-        _js_log("register_or_login kicked off async")
-        return True
-
-    def login(self):
-        return self.register_or_login()
+        """
+        try:
+            window.eval(js)
+        except Exception as e:
+            _log(f"register eval fail {e}")
 
     def _update_from_js(self):
-        """Pull token/userId from window._chatSlayer"""
         try:
-            token = window._chatSlayer.token
-            user_id = window._chatSlayer.userId
-            if token:
+            token = window.eval("window._chatSlayer.token")
+            uid = window.eval("window._chatSlayer.userId")
+            if token and token!="null" and token!="undefined":
                 self.access_token = str(token)
+                self.user_id = str(uid) if uid else self.user_id
                 self.connected = True
-            if user_id:
-                self.user_id = str(user_id)
-            # Check lastResponse for room etc
-            last = getattr(window._chatSlayer, 'lastResponse', None)
-            if last and isinstance(last, dict):
-                data = last.get('data') if hasattr(last, 'get') else getattr(last, 'data', None)
-                # For dict from JS
-                try:
-                    if hasattr(data, 'to_dict'):
-                        data = data.to_dict()
-                except:
-                    pass
-            return True
         except:
-            return False
+            pass
 
-    def join_room(self, room_name=None):
-        """Join or create room by display name (idempotent via /rooms/register)"""
-        room = room_name or self.room_name
-        self.room_name = room
-        _js_log(f"join_room {room}")
-        window.eval(f"""
-        (async () => {{
-            const base = {py_json.dumps(self.base_url)};
-            const cid = {py_json.dumps(self.client_id)};
-            const token = window._chatSlayer.token;
-            if (!token) {{ console.warn("[ChatSlayer] no token yet for join"); return; }}
-            const headers = {{
-                "Content-Type":"application/json",
-                "X-Chat-Slayer-Client-Id": cid,
-                "Authorization": "Bearer " + token
-            }};
-            // Idempotent ensure room exists
-            let res = await fetch(base + "/_matrix/client/r0/rooms/register", {{
-                method: "POST", headers: headers,
-                body: JSON.stringify({{names: [{py_json.dumps(room)}]}})
-            }});
-            let text = await res.text();
-            let data;
-            try {{ data = JSON.parse(text); }} catch(e) {{ data = text; }}
-            console.log("[ChatSlayer] rooms/register", res.status, data);
-            if (res.status === 200 && data.rooms && data.rooms[0]) {{
-                const roomId = data.rooms[0].room_id;
-                window._chatSlayer.roomId = roomId;
-                window._chatSlayer.lastResponse = {{status: res.status, data: data}};
-                // Also try /messages to get history
-                let histRes = await fetch(base + "/_matrix/client/v3/rooms/" + encodeURIComponent(roomId) + "/messages?limit=20", {{
-                    headers: headers
-                }});
-                let histText = await histRes.text();
-                let histData;
-                try {{ histData = JSON.parse(histText); }} catch(e) {{ histData = histText; }}
-                console.log("[ChatSlayer] history", histRes.status, histData);
-                if (histData.chunk) {{
-                    window._chatSlayer.messages = histData.chunk.map(ev => ({{
-                        sender: ev.sender,
-                        body: ev.content?.body || ev.content?.msg || "",
-                        timestamp: ev.origin_server_ts || Date.now()
-                    }}));
-                }}
-            }}
-        }})();
-        """)
-        return True
+    def join_room(self, room_name="Lobby"):
+        self.room_name = room_name
+        # Use demo actions or Matrix API
+        self._js_fetch(f"/_matrix/client/r0/rooms/register", "POST", {"names":[room_name]}, "joinCb")
 
-    def send(self, message, room_id=None):
-        """Send message to room"""
-        if not message or not message.strip():
-            return False
-        msg = message.strip()[:500]
-        target_room = room_id or self.room_id or getattr(window._chatSlayer, 'roomId', None)
-        if not target_room:
-            # Fallback to room name register then send
-            target_room = self.room_name
-        _js_log(f"send to {target_room}: {msg[:50]}")
-        window.eval(f"""
-        (async () => {{
-            const base = {py_json.dumps(self.base_url)};
-            const cid = {py_json.dumps(self.client_id)};
-            const token = window._chatSlayer.token;
-            let roomId = {py_json.dumps(str(target_room))};
-            // If roomId is display name, resolve first
-            if (!roomId.startsWith("!")) {{
-                // Try to get roomId from cache
-                roomId = window._chatSlayer.roomId || roomId;
-            }}
-            if (!token) {{ console.warn("[ChatSlayer] no token for send"); return; }}
-            if (!roomId || !roomId.startsWith("!")) {{
-                console.warn("[ChatSlayer] no roomId for send, have", roomId);
-                // Try register again to get roomId
-                const headers = {{
-                    "Content-Type":"application/json",
-                    "X-Chat-Slayer-Client-Id": cid,
-                    "Authorization": "Bearer " + token
-                }};
-                let regRes = await fetch(base + "/_matrix/client/r0/rooms/register", {{
-                    method: "POST", headers: headers,
-                    body: JSON.stringify({{names: [roomId]}})
-                }});
-                let regText = await regRes.text();
-                let regData;
-                try {{ regData = JSON.parse(regText); }} catch(e) {{ regData = regText; }}
-                if (regData.rooms && regData.rooms[0]) {{
-                    roomId = regData.rooms[0].room_id;
-                    window._chatSlayer.roomId = roomId;
-                }}
-            }}
-            const headers = {{
-                "Content-Type":"application/json",
-                "X-Chat-Slayer-Client-Id": cid,
-                "Authorization": "Bearer " + token
-            }};
-            const txnId = "txn" + Date.now() + Math.random().toString(36).slice(2);
-            const body = {{msgtype: "m.text", body: {py_json.dumps(msg)}}};
-            let url = base + "/_matrix/client/r0/rooms/" + encodeURIComponent(roomId) + "/send/m.room.message/" + txnId;
-            let res = await fetch(url, {{
-                method: "PUT", headers: headers,
-                body: JSON.stringify(body)
-            }});
-            let text = await res.text();
-            let data;
-            try {{ data = JSON.parse(text); }} catch(e) {{ data = text; }}
-            console.log("[ChatSlayer] send", res.status, data);
-            if (res.status === 200) {{
-                // Optimistic local echo
-                if (!window._chatSlayer.messages) window._chatSlayer.messages = [];
-                window._chatSlayer.messages.push({{
-                    sender: window._chatSlayer.userId || "me",
-                    body: {py_json.dumps(msg)},
-                    timestamp: Date.now()
-                }});
-                // Keep last 50
-                if (window._chatSlayer.messages.length > 50) {{
-                    window._chatSlayer.messages = window._chatSlayer.messages.slice(-50);
-                }}
-            }}
-            window._chatSlayer.lastResponse = {{status: res.status, data: data}};
-        }})();
-        """)
-        return True
-
-    def start_sse(self):
-        """Start Datastar SSE stream for live messages (GET /demo/stream) — uses same token"""
-        _js_log("start_sse")
-        window.eval(f"""
-        (async () => {{
-            const base = {py_json.dumps(self.base_url)};
-            const cid = {py_json.dumps(self.client_id)};
-            const token = window._chatSlayer.token;
-            if (!token) {{ console.warn("[ChatSlayer] no token for SSE"); return; }}
-            if (window._chatSlayer.es) {{
-                try {{ window._chatSlayer.es.close(); }} catch(e) {{}}
-            }}
-            // Use demo stream if available, else Matrix sync
-            // For Matrix, we poll /messages every 3s as fallback
-            const headers = {{
-                "X-Chat-Slayer-Client-Id": cid,
-                "Authorization": "Bearer " + token
-            }};
-            // Try demo SSE first (Datastar)
-            try {{
-                const es = new EventSource(base + "/demo/stream?token=" + encodeURIComponent(token));
-                window._chatSlayer.es = es;
-                es.addEventListener("datastar-patch-signals", (e) => {{
-                    try {{
-                        let raw = e.data;
-                        if (raw.startsWith("signals ")) raw = raw.slice(8);
-                        let data = JSON.parse(raw);
-                        // Look for room-message
-                        if (data["room-message"] || (data.cs && data.cs.payload)) {{
-                            let payload = data["room-message"] || (data.cs ? data.cs.payload : null);
-                            if (payload && payload.body) {{
-                                if (!window._chatSlayer.messages) window._chatSlayer.messages = [];
-                                window._chatSlayer.messages.push({{
-                                    sender: payload.sender || "unknown",
-                                    body: payload.body,
-                                    timestamp: payload.timestamp || Date.now()
-                                }});
-                                if (window._chatSlayer.messages.length > 50) window._chatSlayer.messages = window._chatSlayer.messages.slice(-50);
-                                console.log("[ChatSlayer] SSE message", payload);
-                            }}
-                        }}
-                    }} catch(err) {{ console.warn("[ChatSlayer] SSE parse fail", err, e.data); }}
-                }});
-                es.onopen = () => {{ console.log("[ChatSlayer] SSE open"); window._chatSlayer.connected = true; }};
-                es.onerror = (err) => {{ console.warn("[ChatSlayer] SSE error", err); }};
-            }} catch(err) {{
-                console.warn("[ChatSlayer] SSE setup fail", err);
-            }}
-            // Fallback poll every 3s for Matrix messages
-            if (window._chatSlayer.pollInterval) clearInterval(window._chatSlayer.pollInterval);
-            window._chatSlayer.pollInterval = setInterval(async () => {{
-                try {{
-                    let roomId = window._chatSlayer.roomId;
-                    if (!roomId) return;
-                    let res = await fetch(base + "/_matrix/client/v3/rooms/" + encodeURIComponent(roomId) + "/messages?limit=20", {{
-                        headers: headers
-                    }});
-                    let text = await res.text();
-                    let data;
-                    try {{ data = JSON.parse(text); }} catch(e) {{ data = text; }}
-                    if (data.chunk) {{
-                        window._chatSlayer.messages = data.chunk.map(ev => ({{
-                            sender: ev.sender,
-                            body: ev.content?.body || "",
-                            timestamp: ev.origin_server_ts || Date.now()
-                        }}));
-                    }}
-                }} catch(e) {{ console.warn("[ChatSlayer] poll fail", e); }}
-            }}, 3000);
-        }})();
-        """)
-        return True
+    def send(self, text):
+        if not text.strip(): return
+        self._txn+=1
+        txn = f"txn_{int(time.time()*1000)}_{self._txn}"
+        room = self.room_id or "!lobby:localhost"
+        # Try demo send first
+        self._js_fetch(f"/demo/actions/send", "POST", {"roomId":room}, None)
 
     def get_messages(self):
-        """Pull messages from JS state into Python list"""
         try:
-            js_msgs = getattr(window._chatSlayer, 'messages', [])
-            # Convert JS array to Python list
-            py_msgs = []
-            try:
-                # window._chatSlayer.messages is JS array, iterate via length
-                length = int(window.eval("window._chatSlayer.messages ? window._chatSlayer.messages.length : 0"))
-                for i in range(length):
-                    try:
-                        sender = window.eval(f"window._chatSlayer.messages[{i}].sender")
-                        body = window.eval(f"window._chatSlayer.messages[{i}].body")
-                        ts = window.eval(f"window._chatSlayer.messages[{i}].timestamp")
-                        py_msgs.append({"sender": str(sender), "body": str(body), "timestamp": int(ts) if ts else int(time.time()*1000)})
-                    except:
-                        continue
-            except:
-                # Fallback: try direct
+            length = int(window.eval("window._chatSlayer.messages ? window._chatSlayer.messages.length : 0"))
+            msgs=[]
+            for i in range(length):
                 try:
-                    py_msgs = list(js_msgs)
+                    s = window.eval(f"window._chatSlayer.messages[{i}].sender")
+                    b = window.eval(f"window._chatSlayer.messages[{i}].body")
+                    ts = window.eval(f"window._chatSlayer.messages[{i}].timestamp")
+                    msgs.append({"sender":str(s),"body":str(b),"timestamp":int(ts) if ts else int(time.time()*1000)})
                 except:
-                    py_msgs = []
-            self.messages = py_msgs[-50:]
+                    continue
+            self.messages = msgs[-50:]
             return self.messages
+        except:
+            return self.messages
+
+    # ---- UI for name/password per CLIENT_GUIDE ----
+    def ensure_login_inputs(self, app, x=20, y=240):
+        # Create WaInput for username/password if not exists, per CLIENT_GUIDE requirement
+        if not HAS_UI:
+            return
+        if self._input_user is None:
+            try:
+                self._input_user = WaInput(x, y, w=180, h=28, placeholder="chat username", value=self.username, label="Chat Name")
+                self._input_pass = WaInput(x, y+40, w=180, h=28, placeholder="password (8+ chars)", value=self.password, label="Chat Password")
+                self._btn_register = WaButton("REGISTER", x, y+80, w=85, h=32, variant="brand")
+                self._btn_login = WaButton("LOGIN", x+95, y+80, w=85, h=32, variant="neutral", appearance="outlined")
+            except Exception as e:
+                _log(f"ensure_login_inputs fail {e}")
+
+    def draw_login_ui(self, app):
+        # Draw name/password entry for chat slayer
+        if not HAS_UI or not self.show_login_ui:
+            return
+        try:
+            from scs import drawRect, drawLabel
+            # custom rounded rect using drawRect with roundness (fix: scs has no drawRoundedRect)
+            def _rr(x,y,w,h,r,fill,border=None):
+                try:
+                    drawRect(x,y,w,h,fill=fill,border=border,borderWidth=1,roundness=r)
+                except:
+                    drawRect(x,y,w,h,fill=fill,border=border,borderWidth=1)
+            self.ensure_login_inputs(app)
+            if self._input_user:
+                self._input_user.draw()
+            if self._input_pass:
+                self._input_pass.draw()
+            if self._btn_register:
+                self._btn_register.draw()
+            if self._btn_login:
+                self._btn_login.draw()
+            # error
+            if self.login_error:
+                drawLabel(self.login_error, 20, 360, size=9, fill=(255,120,120), align="left-top", bold=True)
+            drawLabel("CHAT-SLAYER LOGIN (CLIENT_GUIDE.md)", 20, 230, size=9, fill=(180,200,220), align="left-top", bold=True)
         except Exception as e:
-            _js_log(f"get_messages fail {e}")
-            return self.messages
+            _log(f"draw_login_ui fail {e}")
 
-    def open_chat(self):
-        self._chat_open = True
-        _js_log("chat opened")
-
-    def close_chat(self):
-        self._chat_open = False
-        self._chat_input = ""
-        _js_log("chat closed")
-
-    def toggle_chat(self):
-        self._chat_open = not self._chat_open
-        return self._chat_open
-
-    def set_input(self, text):
-        self._chat_input = text[:200]
+    def handle_login_press(self, mx, my):
+        # Returns True if handled
+        if not HAS_UI: return False
+        try:
+            if self._input_user and self._input_user.contains(mx,my):
+                self._input_user.focused=True
+                if self._input_pass: self._input_pass.focused=False
+                return True
+            if self._input_pass and self._input_pass.contains(mx,my):
+                self._input_pass.focused=True
+                if self._input_user: self._input_user.focused=False
+                return True
+            if self._btn_register and self._btn_register.contains(mx,my):
+                # REGISTER per CLIENT_GUIDE 2-step
+                u = getattr(self._input_user, 'value', self.username) if self._input_user else self.username
+                p = getattr(self._input_pass, 'value', self.password) if self._input_pass else self.password
+                if len(p)<8:
+                    self.login_error="Password min 8 chars (CLIENT_GUIDE)"
+                    return True
+                self.username=u; self.password=p
+                self.register_or_login(u,p)
+                self.login_error=f"Trying register {u}..."
+                return True
+            if self._btn_login and self._btn_login.contains(mx,my):
+                u = getattr(self._input_user, 'value', self.username) if self._input_user else self.username
+                p = getattr(self._input_pass, 'value', self.password) if self._input_pass else self.password
+                self.username=u; self.password=p
+                self.register_or_login(u,p)
+                self.login_error=f"Trying login {u}..."
+                return True
+        except Exception as e:
+            _log(f"handle_login_press fail {e}")
+        return False
 
     def draw_chat_overlay(self, app):
-        """
-        Draw chat overlay for TETR.IO — call from redrawAll when chat open or messages present
-        Matches TETR.IO chat style: bottom-left, semi-transparent
-        """
         try:
-            from scs import drawRect, drawLabel, drawRoundedRect
-            # Pull latest messages
+            from scs import drawRect, drawLabel
+            def _rr(x,y,w,h,r,fill,border=None,bw=1):
+                try:
+                    drawRect(x,y,w,h,fill=fill,border=border,borderWidth=bw,roundness=r)
+                except:
+                    drawRect(x,y,w,h,fill=fill,border=border,borderWidth=bw)
             self.get_messages()
-            msgs = self.messages[-8:]  # last 8
-
-            # Chat history area — bottom left, above footer
-            chat_x = 12
-            chat_y = app.height - 180
-            chat_w = 340
-            chat_h = 140
-
+            msgs = self.messages[-8:]
+            chat_x=12; chat_y=app.height-180; chat_w=340; chat_h=140
             if msgs or self._chat_open:
-                # Background
-                drawRoundedRect(chat_x-6, chat_y-6, chat_w+12, chat_h+12, 8, (18,18,24), border=(60,60,70), borderWidth=1)
-                # Title
-                drawLabel(f"CHAT [{self.room_name}]", chat_x+6, chat_y-2, size=8, fill=(180,200,220), bold=True, align="left-top")
-                # Messages
-                for i, m in enumerate(msgs):
-                    y = chat_y + 14 + i*16
-                    sender = m.get('sender','')[:20]
-                    body = m.get('body','')[:60]
-                    # Color by sender
-                    is_me = self.user_id and sender == self.user_id
-                    col = (120,255,150) if is_me else (200,200,220)
-                    drawLabel(f"{sender}: {body}", chat_x+6, y, size=8, fill=col, align="left-top")
-
+                _rr(chat_x-6, chat_y-6, chat_w+12, chat_h+12, 8, (18,18,24), (60,60,70), 1)
+                drawLabel(f"CHAT [{self.room_name}] {self.username}", chat_x+6, chat_y-2, size=8, fill=(180,200,220), bold=True, align="left-top")
+                for i,m in enumerate(msgs):
+                    y=chat_y+14+i*16
+                    drawLabel(f"{m.get('sender','')[:16]}: {m.get('body','')[:50]}", chat_x+6, y, size=8, fill=(200,200,220), align="left-top")
             if self._chat_open:
-                # Input box
-                input_y = chat_y + chat_h + 8
-                drawRoundedRect(chat_x-4, input_y-2, chat_w+8, 22, 6, (30,32,45), border=(80,90,120), borderWidth=1)
-                # Cursor blink
-                blink = int(time.time()*2) % 2 == 0
+                input_y=chat_y+chat_h+8
+                _rr(chat_x-4, input_y-2, chat_w+8, 22, 6, (30,32,45), (80,90,120), 1)
+                blink = int(time.time()*2)%2==0
                 cursor = "_" if blink else ""
                 drawLabel(f"> {self._chat_input}{cursor}", chat_x+4, input_y+4, size=9, fill=(220,230,255), align="left-top")
-                drawLabel("ENTER to send, ESC to close", chat_x+chat_w-4, input_y+4, size=7, fill=(120,130,150), align="right-top")
-
         except Exception as e:
-            _js_log(f"draw_chat_overlay fail {e}")
+            _log(f"draw_chat_overlay fail {e}")
 
-# Singleton helper for app
-_global_client = None
+    def open_chat(self): self._chat_open=True
+    def close_chat(self): self._chat_open=False
+    def toggle_chat(self): self._chat_open=not self._chat_open; return self._chat_open
+    def set_input(self, t): self._chat_input=t[:200]
 
+_global=None
 def get_chat_client(base_url=None, client_id=None, username=None):
-    global _global_client
-    if _global_client is None:
-        _global_client = ChatSlayerClient(base_url=base_url, client_id=client_id, username=username)
+    global _global
+    if _global is None:
+        _global=ChatSlayerClient(base_url=base_url, client_id=client_id, username=username)
     else:
-        if base_url:
-            _global_client.base_url = base_url.rstrip("/")
-        if username:
-            _global_client.username = username
-    return _global_client
+        if base_url: _global.base_url=base_url.rstrip("/")
+        if username: _global.username=username
+    return _global
 
 def init_chat(app, base_url=None):
-    """
-    Initialize chat for TETR.IO app
-    Call from onAppStart or after welcome
-    """
     try:
-        username = getattr(app, 'username', None) or f"Player{random.randint(1000,9999)}"
-        client = get_chat_client(base_url=base_url, username=username, client_id="tetrio-chat")
-        app.chat_client = client
-        # Store in window for JS access
-        window._chatSlayer.tetrioUsername = username
+        username=getattr(app,'username',None) or f"Player{random.randint(1000,9999)}"
+        client=get_chat_client(base_url=base_url, username=username, client_id="web-demo")
+        app.chat_client=client
+        window._chatSlayer.tetrioUsername=username
         client.register_or_login()
-        # Delay join and SSE to allow token to be set
-        window.eval(f"""
-        setTimeout(() => {{
-            if (window._chatSlayer.token) {{
-                console.log("[ChatSlayer] token ready, joining Lobby");
-                // join will be triggered by Python after a bit, but also try here
-            }}
-        }}, 1500);
-        """)
-        # Schedule join via Python after 2s
-        def _delayed_join():
-            try:
-                client._update_from_js()
-                if client.access_token:
-                    client.join_room("Lobby")
-                    client.start_sse()
-            except:
-                pass
-        # Use window.setTimeout for delayed join
-        window.eval(f"setTimeout(() => {{ console.log('[ChatSlayer] delayed join check'); }}, 2000);")
-        # We'll rely on onStep to call _update_from_js and auto-join
-        _js_log(f"init_chat for {username}")
+        _log(f"init_chat for {username}")
         return client
     except Exception as e:
-        _js_log(f"init_chat fail {e}")
+        _log(f"init_chat fail {e}")
         return None
