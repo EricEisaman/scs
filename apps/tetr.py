@@ -2189,6 +2189,8 @@ def _enter_authenticated_game(app):
     app.game_state = "playing"
     app.badgeOPP.text = "SOLO ZEN"
     app.inputName.focused = False
+    app.inputName.value = app.username        
+    app.inputName.placeholder = app.username  
     stop_bgm()
     play_bgm("bgm.zen", floor=0)
 
