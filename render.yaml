@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: scs-datastar-extension
+    name: scs-207
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: starter
