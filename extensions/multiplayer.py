@@ -3,7 +3,7 @@ import extensions.datastar as ds
 import json
 
 class CharacterState:
-    pass  # for import compatibility - wire shape is dict per MULTIPLAYER_SYNCH.md §5.1.1
+    pass # for import compatibility - wire shape is dict per MULTIPLAYER_SYNCH.md §5.1.1
 
 class MultiplayerClient:
     def __init__(self, base_url="https://scs-207.onrender.com", environment="level1", environment_name=None, character_name="Player", **kw):
@@ -96,6 +96,11 @@ class MultiplayerClient:
                 "onGround": bool(onGround),
                 "timestamp": int(window.Date.now())
             }
+            # FIX: allow name to be sent with state so VS label shows username not BGS
+            if "character_name" in kw:
+                char["character_name"] = kw["character_name"]
+                char["characterName"] = kw["character_name"]
+                char["name"] = kw["character_name"]
             url = f"{self.base_url}/api/multiplayer/character-state"
             body = window.JSON.stringify({"updates": [char], "timestamp": char["timestamp"]})
             await window.fetch(url, {
@@ -106,6 +111,31 @@ class MultiplayerClient:
             })
         except Exception as e:
             print(f"[mp] send_character_state failed {e}")
+
+    async def update_character_name(self, new_name):
+        # FIXED INDENTATION + headers + timestamp
+        self.character_name = new_name
+        if not self.client_id:
+            return
+        try:
+            char = {
+                "clientId": self.client_id,
+                "character_name": new_name,
+                "characterName": new_name,
+                "name": new_name,
+                "timestamp": int(window.Date.now())
+            }
+            url = f"{self.base_url}/api/multiplayer/character-state"
+            body = window.JSON.stringify({"updates": [char], "timestamp": char["timestamp"]})
+            await window.fetch(url, {
+                "method": "PATCH",
+                "headers": {"Content-Type": "application/json", "X-Client-ID": self.client_id},
+                "body": body,
+                "mode": "cors"
+            })
+            print(f"[mp] name updated to {new_name}")
+        except Exception as e:
+            print(f"[mp] update_character_name failed {e}")
 
     async def switch_environment(self, environment_name):
         if not self.client_id or not environment_name:
