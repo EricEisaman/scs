@@ -1,4 +1,5 @@
 from browser import window, aio
+import extensions.datastar as ds
 import json
 
 class CharacterState:
@@ -46,7 +47,6 @@ class MultiplayerClient:
                 # SSE - Datastar best practice: ONE EventSource via extensions.datastar
                 stream_url = f"{self.base_url}/api/multiplayer/stream?sid={self.session_id}"
                 try:
-                    import extensions.datastar as ds
                     ds.connect_sse(stream_url)
                 except Exception as ex:
                     print(f"[mp] datastar.connect_sse failed {ex}, using direct EventSource")
@@ -58,11 +58,8 @@ class MultiplayerClient:
                             raw = raw[8:]
                         try:
                             d = json.loads(raw)
-                            try:
-                                import extensions.datastar as ds2
-                                ds2._signals.update(d)
-                            except:
-                                pass
+                            if isinstance(d, dict):
+                                ds._signals.update(d)
                             # callbacks
                             if "character-state-update" in d and self.on_character_state:
                                 self.on_character_state(d.get("character-state-update", {}).get("updates", []) or d.get("updates", []))

@@ -65,6 +65,7 @@ class CharacterState:
     score: int = 0
     onGround: bool = False
     timestamp: int = field(default_factory=lambda: int(time.time()*1000))
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_payload(cls, payload: Dict[str, Any]):
@@ -74,6 +75,8 @@ class CharacterState:
         unknown = set(payload)-allowed
         if unknown:
             raise ValueError("unsupported character fields: " + ", ".join(sorted(unknown)))
+        if "metadata" in payload and not isinstance(payload["metadata"], dict):
+            raise ValueError("metadata must be an object")
         if not isinstance(payload.get("clientId"), str) or not payload["clientId"]:
             raise ValueError("clientId must be a non-empty string")
         values = dict(payload)
@@ -104,7 +107,10 @@ class CharacterState:
         return cls(**values)
 
     def to_dict(self):
-        return asdict(self)
+        payload = asdict(self)
+        if not self.metadata:
+            payload.pop("metadata")
+        return payload
 
 @dataclass
 class CharacterStateUpdate:
