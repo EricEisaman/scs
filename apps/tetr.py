@@ -278,10 +278,12 @@ def is_datastar_connected():
     except:
         return False
 
-# ---------- FIXED IMPORT WITH INLINE FALLBACK V4 — from platformer_bgs proven working ----------
+# ---------- FORCED FALLBACK V25 — extension join has $B.$import bug reading '2'/'3', use inline V24 FIXED ----------
 try:
     import extensions.multiplayer as mp_ext
     import extensions.datastar as ds_ext
+    # Force fallback to avoid extension's Brython $B.$import bug in async join
+    raise Exception("force fallback V25 to fix SIGMA $B.$import bug")
     if not hasattr(mp_ext,'MultiplayerClient'):
         raise AttributeError("cached mp_ext has no MultiplayerClient")
     MultiplayerClient = mp_ext.MultiplayerClient
@@ -340,7 +342,11 @@ except Exception as e:
                     return data
                 except Exception as ex:
                     print(f"[BGS] join fail attempt {attempt+1}: {ex}")
-                    await aio.sleep(1.5)
+                    # No aio.sleep to avoid $B.$import bug, use JS promise delay via window
+                    try:
+                        await window.eval("new Promise(r=>setTimeout(r,1500))")
+                    except:
+                        pass
             print("[BGS] join failed after retries - running LOCAL DEMO mode")
             return {"client_id": None, "session_id": None, "local_demo": True}
 def send_bgs_patch(app,path,payload):
@@ -793,6 +799,7 @@ def onAppStart(app):
     app.btnBot=WaButton("PLAY VS BOT",20,200,w=200,h=32,variant="warning",appearance="outlined",onClick=lambda: play_vs_bot(app))
     app.btnReset=WaButton("RESET (R)",20,156,w=200,h=36,variant="brand",onClick=lambda: reset_game(app))
     app.btnBack=WaButton("BACK TO HOME",20,600,w=200,h=32,variant="neutral",appearance="outlined",onClick=lambda: go_title(app))
+    app.btnConfig=WaButton("CONFIG",20,560,w=200,h=32,variant="neutral",appearance="outlined",onClick=lambda: go_config(app))
     app.badgeTR=WaBadge("TR 12500",20,204,variant="brand")
     app.badgeAPM=WaBadge("APM 0",100,204,variant="success")
     app.badgePPS=WaBadge("PPS 0",170,204,variant="warning")
@@ -1162,6 +1169,19 @@ def redrawAll(app):
             app.btnFind.x = app.width/2 - 100
             app.btnFind.y = base_y
             app.btnFind.draw()
+        elif app.game_state=="menu":
+            # MODE PICKER SECOND SCREEN — MUST HAVE: tabs for mode + FIND + CONFIG
+            app.btnFind.x = app.width/2 - 220
+            app.btnFind.y = base_y
+            app.btnFind.w = 200
+            app.btnFind.draw()
+            app.btnConfig.x = app.width/2 + 20
+            app.btnConfig.y = base_y
+            app.btnConfig.w = 200
+            app.btnConfig.draw()
+            app.btnBack.x = app.width/2 - 100
+            app.btnBack.y = base_y + 48
+            app.btnBack.draw()
         else:
             app.btnReset.x = app.width/2 - 100
             app.btnReset.y = base_y
@@ -1487,6 +1507,47 @@ def draw_opponent_tetrio(app):
                     if idx < len(board) and board[idx]: drawRoundedRect(ox+c*cell+1,oy+r*cell+1,cell-2,cell-2,2,rgb(100,120,160))
     except: pass
 
+
+def draw_stats_tetrio(app):
+    try:
+        ox=app.board_x; oy=app.board_y
+        if app.tetr.board.b2b_streak>=1:
+            drawLabel(f"B2B x{app.tetr.board.b2b_streak}",ox-90,oy+160,size=13,fill=rgb(255,210,120),bold=True)
+        if app.tetr.board.combo>=1:
+            combo_num=app.tetr.board.combo+1
+            cx=ox-70; cy=oy+190
+            for i in range(8):
+                ang=i*45*math.pi/180
+                x2=cx+math.cos(ang)*30; y2=cy+math.sin(ang)*30
+                drawLine(cx,cy,x2,y2,fill=rgb(255,210,60),lineWidth=7)
+            drawCircle(cx,cy,24,fill=rgb(255,210,60),border=rgb(255,230,120))
+            drawLabel(str(combo_num),cx,cy+2,size=20,fill="black",bold=True)
+        elapsed=time.time()-app.tetr.stats["start"]
+        pps=app.tetr.stats["pieces"]/max(1,elapsed)
+        apm=int(app.tetr.stats["attack"]/max(1,elapsed)*60)
+        drawLabel(f"PIECES",ox-90,oy+260,size=10,fill=rgb(201,168,124))
+        drawLabel(f"{app.tetr.stats['pieces']}",ox-90,oy+278,size=18,fill=rgb(220,200,180),bold=True)
+        drawLabel(f"{pps:.2f}/S",ox-30,oy+280,size=10,fill=rgb(150,130,110))
+        drawLabel(f"ATTACK",ox-90,oy+304,size=10,fill=rgb(201,168,124))
+        drawLabel(f"{app.tetr.stats['attack']}",ox-90,oy+322,size=18,fill=rgb(220,200,180),bold=True)
+        drawLabel(f"{apm}/M",ox-30,oy+324,size=10,fill=rgb(150,130,110))
+        drawLabel(f"TIME",ox-90,oy+348,size=10,fill=rgb(201,168,124))
+        drawLabel(f"{int(elapsed//60)}:{elapsed%60:06.3f}",ox-90,oy+366,size=16,fill=rgb(220,200,180),bold=True)
+    except Exception as e:
+        print(f"draw_stats fail {e}")
+
+def draw_garbage_meter(app):
+    try:
+        ox=app.board_x; oy=app.board_y; bh=BOARD_H_VISIBLE*CELL
+        drawRoundedRect(ox-12,oy,6,bh,3,rgb(40,35,25))
+        inc=len(app.mp_wrapper.match["garbage"]["incoming"])
+        if inc:
+            h=min(bh,inc*18)
+            drawRoundedRect(ox-12,oy+bh-h,6,h,3,rgb(220,200,80))
+    except Exception as e:
+        print(f"garbage meter fail {e}")
+
+
 # ===== TRUE 1v1 like tetrio.webp — faithful recreation =====
 def draw_multiplayer_vs(app):
     try:
@@ -1808,7 +1869,7 @@ def onMousePress(app,mx,my):
                 play_sfx("ui.click")
                 name = app.welcome_username.strip()
                 if not name:
-                    # Blank -> random
+                    # Blank -> random -> go to MODE PICKER (second screen) NOT directly to playing
                     rnd = gen_random_name()
                     app.username = rnd
                     app.is_anonymous = True
@@ -1816,11 +1877,10 @@ def onMousePress(app,mx,my):
                     app.game_state="menu"
                     app.tabGroup.active=2
                     app.tetr=TetrGame(mode="zen")
-                    app.game_state="playing"
                     app.badgeOPP.text="SOLO ZEN"
                     app.inputName.focused=False
-                    stop_bgm(); play_bgm("bgm.zen", floor=0)
-                    print(f"Random name {rnd}")
+                    stop_bgm(); play_bgm("bgm.menu_watchful_eye", spectating=False)
+                    print(f"Random name {rnd} -> menu")
                 else:
                     if len(name) < 2:
                         app.welcome_error="Name too short"
@@ -1843,22 +1903,21 @@ def onMousePress(app,mx,my):
             btn_x = cx - btn_w//2
             y1 = card_y+150
             y2 = y1+62
-            # STAY ANONYMOUS
+            # STAY ANONYMOUS -> MODE PICKER second screen
             if btn_x <= mx <= btn_x+btn_w and y1 <= my <= y1+38:
                 play_sfx("ui.click")
                 app.username = app.welcome_username.strip()
                 app.is_anonymous = True
                 app.inputName.value = app.username
                 app.inputName.text = app.username
-                # Go to main menu
+                # Go to MODE PICKER (second screen) - MUST HAVE
                 app.game_state="menu"
                 app.tabGroup.active=2
                 app.tetr=TetrGame(mode="zen")
-                app.game_state="playing"
                 app.badgeOPP.text="SOLO ZEN"
                 app.inputName.focused=False
-                stop_bgm(); play_bgm("bgm.zen", floor=0)
-                print(f"Stay anonymous as {app.username}")
+                stop_bgm(); play_bgm("bgm.menu_watchful_eye", spectating=False)
+                print(f"Stay anonymous as {app.username} -> menu")
                 return True
             # REGISTER
             if btn_x <= mx <= btn_x+btn_w and y2 <= my <= y2+38:
@@ -1923,11 +1982,10 @@ def onMousePress(app,mx,my):
                     app.game_state="menu"
                     app.tabGroup.active=2
                     app.tetr=TetrGame(mode="zen")
-                    app.game_state="playing"
                     app.badgeOPP.text="SOLO ZEN"
                     app.inputName.focused=False
-                    stop_bgm(); play_bgm("bgm.zen", floor=0)
-                    print(f"Logged in as {app.username}")
+                    stop_bgm(); play_bgm("bgm.menu_watchful_eye", spectating=False)
+                    print(f"Logged in as {app.username} -> menu")
                 return True
             # BACK
             back_y = card_y+420-32
@@ -1947,8 +2005,8 @@ def onMousePress(app,mx,my):
                 if item["id"]=="multiplayer":
                     app.game_state="menu"; app.tabGroup.active=0; start_search(app); app.game_state="searching"
                 elif item["id"]=="solo":
-                    app.game_state="menu"; app.tabGroup.active=2; app.tetr=TetrGame(mode="zen"); app.game_state="playing"; app.badgeOPP.text="SOLO ZEN"; app.inputName.focused=False
-                    stop_bgm(); play_bgm("bgm.zen", floor=0)
+                    app.game_state="menu"; app.tabGroup.active=2; app.tetr=TetrGame(mode="zen"); app.badgeOPP.text="SOLO ZEN"; app.inputName.focused=False
+                    stop_bgm(); play_bgm("bgm.menu_watchful_eye", spectating=False)
                 elif item["id"]=="config":
                     go_config(app)
                 elif item["id"]=="tetra":
@@ -1992,6 +2050,9 @@ def onMousePress(app,mx,my):
     if app.btnBack.contains(mx,my) and app.btnBack.handlePress(mx,my): 
         play_sfx("ui.back")
         return True
+    if hasattr(app, "btnConfig") and app.btnConfig.contains(mx,my) and app.btnConfig.handlePress(mx,my):
+        play_sfx("ui.click")
+        return True
     if app.inputName.contains(mx,my): app.inputName.focused=True; return True
     else: app.inputName.focused=False
     return False
@@ -2006,11 +2067,11 @@ def onMouseMove(app,mx,my):
             play_sfx("ui.hover", volume=0.15)
         app._hoverTitle=hover
         return False
-    for comp in [app.btnFind, app.btnCancel, app.btnBot, app.btnReset, app.btnBack, app.tabGroup, app.inputName]:
+    for comp in [app.btnFind, app.btnCancel, app.btnBot, app.btnReset, app.btnBack, getattr(app, "btnConfig", app.btnBack), app.tabGroup, app.inputName]:
         if hasattr(comp,'handleMove'): comp.handleMove(mx,my)
     return False
 def onMouseRelease(app,mx,my):
-    for comp in [app.btnFind, app.btnCancel, app.btnBot, app.btnReset, app.btnBack]:
+    for comp in [app.btnFind, app.btnCancel, app.btnBot, app.btnReset, app.btnBack, getattr(app, "btnConfig", app.btnBack)]:
         if hasattr(comp,'handleRelease'): comp.handleRelease(mx,my)
     return False
 def onMouseDrag(app,mx,my): return onMouseMove(app,mx,my)
@@ -2061,8 +2122,8 @@ def onKeyPress(app,key):
                     rnd = gen_random_name()
                     app.username = rnd
                     app.is_anonymous = True
-                    app.game_state="menu"; app.tabGroup.active=2; app.tetr=TetrGame(mode="zen"); app.game_state="playing"; app.badgeOPP.text="SOLO ZEN"; app.inputName.focused=False
-                    stop_bgm(); play_bgm("bgm.zen", floor=0)
+                    app.game_state="menu"; app.tabGroup.active=2; app.tetr=TetrGame(mode="zen"); app.badgeOPP.text="SOLO ZEN"; app.inputName.focused=False
+                    stop_bgm(); play_bgm("bgm.menu_watchful_eye", spectating=False)
                 else:
                     if is_registered(name):
                         app.welcome_state="taken"; app.welcome_password=""
