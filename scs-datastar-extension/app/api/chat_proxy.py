@@ -7,25 +7,25 @@ PURPOSE:
   This is the ONLY new file required for chat integration.
 
 FASTAPI PATTERN (no httpx):
-  - Uses only fastapi + stdlib (urllib, http.client) — matches health.py pattern
-  - APIRouter with @router.api_route("/chat-api/{path:path}")
-  - No external deps — works even if httpx not installed (fixes ModuleNotFoundError on Render)
-  - Same pattern as health: from fastapi import APIRouter; router = APIRouter()
+    - Uses only fastapi + stdlib (urllib, http.client) — matches health.py pattern
+    - APIRouter with @router.api_route("/chat-api/{path:path}")
+    - No external deps — works even if httpx not installed (fixes ModuleNotFoundError on Render)
+    - Same pattern as health: from fastapi import APIRouter; router = APIRouter()
 
 DO NOT CREATE:
   app/chat_proxy.py (flat) — WRONG LOCATION
   app/chat_proxy_1.py — WRONG
 
 CORRECT USAGE IN main.py (2 lines only):
-  from .api.chat_proxy import router as chat_proxy_router
+  from.api.chat_proxy import router as chat_proxy_router
   app.include_router(chat_proxy_router)
 
 Implements:
-  - Per babylon-game-starter CHAT.md: serviceUrl "/chat-api" same-origin
-  - Uses web-demo clientId which allows https://ericeisaman.github.io origin
-  - Headers preserved: X-Chat-Slayer-Client-Id (required), Authorization Bearer,
+    - Per babylon-game-starter CHAT.md: serviceUrl "/chat-api" same-origin
+    - Uses web-demo clientId which allows https://ericeisaman.github.io origin
+    - Headers preserved: X-Chat-Slayer-Client-Id (required), Authorization Bearer,
     X-Demo-Room-Id, X-Demo-Room-Name, X-Demo-Room-Names, X-Demo-Message
-  - SSE: /chat-api/demo/stream streamed via http.client (X-Accel-Buffering: no)
+    - SSE: /chat-api/demo/stream streamed via http.client (X-Accel-Buffering: no)
 
 LESSON LEARNED:
   Previous version used httpx -> ModuleNotFoundError on Render tetr-21 branch.
@@ -60,7 +60,6 @@ FORWARD_HEADER_NAMES = [
 
 HOP_BY_HOP = {"content-encoding", "transfer-encoding", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "upgrade"}
 
-
 @router.api_route("/chat-api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
 async def chat_api_proxy(path: str, request: Request):
     # Build upstream URL with query string preserved
@@ -88,6 +87,8 @@ async def chat_api_proxy(path: str, request: Request):
                 headers["X-Demo-Room-Names"] = v
             elif name == "x-demo-message":
                 headers["X-Demo-Message"] = v
+            elif name == "origin":
+                headers["Origin"] = v
             else:
                 headers[name] = v
 
@@ -95,6 +96,8 @@ async def chat_api_proxy(path: str, request: Request):
     lowered = {k.lower() for k in headers.keys()}
     if "x-chat-slayer-client-id" not in lowered:
         headers["X-Chat-Slayer-Client-Id"] = CHAT_CLIENT_ID_DEFAULT
+    if "origin" not in lowered:
+        headers["Origin"] = request.headers.get("origin") or request.headers.get("Origin") or "https://ericeisaman.github.io"
 
     body = await request.body()
     # urllib requires None for no body, not empty bytes for GET
