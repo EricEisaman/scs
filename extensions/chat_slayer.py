@@ -166,7 +166,7 @@ class ChatSlayerClient:
 
     async def register_or_login(self, username=None, password=None):
         if username:
-            self.display_name = username  # Mark - preserve case for display
+            self.display_name = username  # Mark - preserve case
             self.username = username.lower()  # mark - for Matrix
         if password: self.password = password
         if len(self.password) < 8:
@@ -175,8 +175,27 @@ class ChatSlayerClient:
 
         base, cid, user_lower, display, pwd = self.base_url, self.client_id, self.username, self.display_name, self.password
         headers = {"Content-Type":"application/json","X-Chat-Slayer-Client-Id":cid}
-        self._set_status(f"Registering {display}...")
 
+        # 1. EXISTING USER - login first = no 401 spam
+        self._set_status(f"Logging in {display}...")
+        bodyL = {"type":"m.login.password","identifier":{"type":"m.id.user","user":user_lower},"password":pwd}
+        optsL = {"method":"POST","headers":headers,"body":py_json.dumps(bodyL)}
+        try:
+            resL = await self._fetch_with_backoff(base+"/_matrix/client/r0/login", optsL, retries=2, wake_mode=True)
+            tL = await resL.text(); dL = py_json.loads(tL) if tL else {}
+            if resL.status == 200 and dL.get("access_token"):
+                window._chatSlayer.token = dL["access_token"]
+                window._chatSlayer.userId = dL["user_id"]
+                window._chatSlayer.username = display  # Mark
+                window._chatSlayer.displayName = display
+                window._chatSlayer.connected = True
+                self.access_token = dL["access_token"]; self.user_id = dL["user_id"]; self.connected=True
+                self._set_status(f"Connected as {display}")
+                return dL
+        except: pass
+
+        # 2. NEW USER - register + UIAA 401 is expected
+        self._set_status(f"Registering {display}...")
         opts1 = {"method":"POST","headers":headers,"body":py_json.dumps({"username":user_lower,"password":pwd})}
         res1 = await self._fetch_with_backoff(base+"/_matrix/client/r0/register?kind=user", opts1, retries=5, wake_mode=True)
         t1 = await res1.text()
