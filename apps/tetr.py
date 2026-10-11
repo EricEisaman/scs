@@ -792,15 +792,20 @@ def onAppStart(app):
     if HAS_MP:
         base_url="https://scs-207.onrender.com"
         try:
-            if hasattr(window,'location') and 'localhost' in window.location.hostname: base_url="http://localhost:10000"
-        except: pass
+            if hasattr(window,'location') and 'localhost' in window.location.hostname:
+                base_url="http://localhost:10000"
+        except:
+            pass
         app.mp_client=MultiplayerClient(base_url=base_url,environment_name="tetr_1v1",character_name="TetrPlayer")
         def on_char_state(updates):
             for u in updates:
                 cid=u.get("clientId")
-                if cid and cid!=app.client_id: app.remote_players[cid]=u
-        if hasattr(app.mp_client,'on_character_state'): app.mp_client.on_character_state=on_char_state
-                async def join_mp():
+                if cid and cid!=app.client_id:
+                    app.remote_players[cid]=u
+        if hasattr(app.mp_client,'on_character_state'):
+            app.mp_client.on_character_state=on_char_state
+
+        async def join_mp():
             try:
                 res=await app.mp_client.join()
                 cid=res.get("client_id") if isinstance(res,dict) else None
@@ -809,32 +814,25 @@ def onAppStart(app):
                         json_str = window.JSON.stringify(res) if hasattr(window,'JSON') else "{}"
                         d=py_json.loads(json_str) if isinstance(json_str, str) else {}
                         cid=d.get("client_id")
-                    except: 
+                    except:
                         cid=getattr(res,"client_id",None)
-                # Always set client_id, even if None -> local fallback so MP UI doesn't crash
-                if not cid:
-                    cid = f"local_{int(time.time()*1000)}"
-                    print(f"BGS offline, using {cid}")
                 if not cid:
                     cid = f"local_{int(time.time()*1000)}"
                     print(f"BGS offline, using local {cid}")
                 app.client_id=cid
                 print(f"Joined BGS as {cid}")
-            except Exception as e: 
+            except Exception as e:
                 print(f"Join failed {e}")
-                # Don't crash — continue as solo with local id
                 app.client_id = f"local_{int(time.time()*1000)}"
+
         try:
             aio.run(join_mp())
         except Exception as e:
             print(f"aio.run join failed {e}")
             app.client_id = f"local_{int(time.time()*1000)}"
-        # Ensure client_id set even if join_mp didn't run
         if not app.client_id:
-            app.client_id = f"local_{int(time.time()*1000)}" 
-        except Exception as e:
-            print(f"aio.run join failed {e}")
             app.client_id = f"local_{int(time.time()*1000)}"
+            print(f"Fallback local id {app.client_id}")
 
     app.dialogGameOver=WaDialog("Match Finished","You topped out.",w=380,h=160,variant="danger")
     app.dialogGameOver.buttons=[WaButton("RETRY (R)",0,0,w=110,h=36,variant="brand",onClick=lambda: reset_game(app)), WaButton("MENU",0,0,w=80,h=36,variant="neutral",appearance="outlined",onClick=lambda: go_title(app))]
