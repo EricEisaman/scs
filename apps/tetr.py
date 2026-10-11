@@ -2153,13 +2153,13 @@ def onKeyPress(app,key):
         return
 
     if hasattr(app,'inputName') and app.inputName.focused:
-    if k=="escape": app.inputName.focused=False
-    return
+        if k=="escape":
+            app.inputName.focused=False
+        return
 
     # ===== CHAT OPENER - wake on demand like babylon-game-starter =====
     if is_bound("open_chat", code) or k in ("/", "t", "slash"):
         try:
-            # first time: boot chat server, don't spam health on load
             if not getattr(app, 'chat_client', None):
                 print("[CHAT] waking on demand (T pressed)")
                 aio.run(init_chat())
@@ -2172,8 +2172,10 @@ def onKeyPress(app,key):
         return
 
     if app.game_state!="playing":
-        if k=="r": reset_game(app)
-        if k=="escape": go_title(app)
+        if k=="r":
+            reset_game(app)
+        if k=="escape":
+            go_title(app)
         return
 
     # ===== GAMEPLAY - lowercased correct =====
