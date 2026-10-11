@@ -11,7 +11,7 @@ from browser import window, aio
 import math, random, json as py_json, time
 
 # ===== Audio — TETR.IO kinetic soundscape (proper sound) =====
-# Uses proc_audio.py 1662-line core + proc_audio_tetrio.py extension
+# Uses proc_audio.py 1662-line core + proc_audio_tetrio.py extension — ONLY extensions path to avoid 404
 # Implements: B2B escalating, thunder attacks, garbage pressure cues, clutch, surge, mode-varying BGM, Watchful Eye, Zenith floor adaptive
 try:
     from extensions.proc_audio_tetrio import tetrio_sfx as _sfx, tetrio_bgm as _bgm_engine, TETR_PRESETS
@@ -28,29 +28,20 @@ except Exception as e:
         HAS_TETRIO_AUDIO = False
         sfx = _sfx
         tetrio_bgm = None
-    except:
-        try:
-            from proc_audio import sfx as _sfx
-            HAS_AUDIO = True
-            HAS_TETRIO_AUDIO = False
-            sfx = _sfx
-            tetrio_bgm = None
-        except Exception as e2:
-            print(f"proc_audio import failed: {e2}")
-            HAS_AUDIO = False
-            HAS_TETRIO_AUDIO = False
-            sfx = None
-            tetrio_bgm = None
+        print("Base proc_audio loaded from extensions")
+    except Exception as e2:
+        print(f"proc_audio import failed: {e2}")
+        HAS_AUDIO = False
+        HAS_TETRIO_AUDIO = False
+        sfx = None
+        tetrio_bgm = None
 
 try:
     from extensions.proc_audio import AudioEngine as _AudioEngine
     audio = _AudioEngine(quality="high")
-except:
-    try:
-        from proc_audio import AudioEngine as _AudioEngine
-        audio = _AudioEngine(quality="high")
-    except:
-        audio = None
+except Exception as e3:
+    print(f"AudioEngine load failed: {e3}")
+    audio = None
 
 # Fallback direct WebAudio (only for emergency)
 _fallback_ctx = None
@@ -199,91 +190,147 @@ def set_spectating(is_spec):
         pass
 
 
-try:
-    from extensions.canvas_ui import WaBreadcrumb, WaTabGroup, WaInput, WaAvatar, WaButton, WaBadge, WaDialog
-except:
-    from canvas_ui import WaBreadcrumb, WaTabGroup, WaInput, WaAvatar, WaButton, WaBadge, WaDialog
+# Only extensions path — avoids 404
+from extensions.canvas_ui import WaBreadcrumb, WaTabGroup, WaInput, WaAvatar, WaButton, WaBadge, WaDialog
 
+# Global signals - V24 FIX from platformer_bgs: use Python global dict, not window dict (Brython window dict bug)
 _bgs_signals_py = {}
-try: window._bgs_signals = {}
-except: pass
-try: window._bgs_es = None
-except: pass
+try:
+    window._bgs_signals = {}
+except:
+    pass
+try:
+    window._bgs_es = None
+except:
+    pass
 ds_ext = None
 USE_EXTENSION_SIGNAL_STORE = False
+
 def _bgs_on_datastar_patch(evt):
+    # Proven from platformer_bgs — handles "signals " prefix and JSON via window.JSON
     try:
         raw = evt.data
-        if isinstance(raw, str) and raw.startswith("signals "): raw = raw[8:]
+        if isinstance(raw, str) and raw.startswith("signals "):
+            raw = raw[8:]
         try:
-            parsed=py_json.loads(raw)
+            import json as _jj
+            parsed = _jj.loads(raw)
         except:
-            try:
-                parsed=window.JSON.parse(raw)
-            except:
-                parsed={}
-        # Stringify roundtrip via py_json, not re-importing json
-        try:
-            # If parsed is JS object, stringify via window.JSON then loads via py_json
-            json_str = window.JSON.stringify(parsed) if hasattr(window,'JSON') else py_json.dumps(parsed)
-            parsed = py_json.loads(json_str) if isinstance(json_str, str) else parsed
-        except:
-            pass
+            parsed = window.JSON.parse(raw)
+            import json as _jj2
+            parsed = _jj2.loads(window.JSON.stringify(parsed))
         if isinstance(parsed, dict):
-            for k,v in parsed.items(): _bgs_signals_py[k]=v
-            try:
-                for k,v in parsed.items(): window._bgs_signals[k]=v
-            except: pass
-    except: pass
+            for kk, vv in parsed.items():
+                _bgs_signals_py[kk] = vv
+                try:
+                    window._bgs_signals[kk] = vv
+                except:
+                    pass
+    except Exception as ex:
+        pass
+
 def get_signal(n,d=None):
     if USE_EXTENSION_SIGNAL_STORE and ds_ext:
-        try: return ds_ext.get_signal(n,d)
-        except: pass
+        try:
+            return ds_ext.get_signal(n,d)
+        except:
+            pass
     try:
-        if n in _bgs_signals_py: return _bgs_signals_py.get(n,d)
+        # V24: try Python global first (reliable)
+        if n in _bgs_signals_py:
+            return _bgs_signals_py.get(n,d)
         return window._bgs_signals.get(n,d)
-    except: return _bgs_signals_py.get(n,d) if n in _bgs_signals_py else d
+    except:
+        try:
+            return _bgs_signals_py.get(n,d)
+        except:
+            return d
+
 def is_datastar_connected():
     if USE_EXTENSION_SIGNAL_STORE and ds_ext:
-        try: return ds_ext.is_datastar_connected()
-        except: pass
+        try:
+            return ds_ext.is_datastar_connected()
+        except:
+            pass
     try:
-        es=window._bgs_es
-        if not es: return False
-        return es.readyState==1
-    except: return False
+        es = window._bgs_es
+        # FIXED: avoid 'is None' entirely - use truthiness to dodge $B.$is null __class__ bug
+        if not es:
+            return False
+        # check if es is truthy and has readyState
+        try:
+            rs = es.readyState
+            return rs == 1
+        except:
+            return False
+    except:
+        return False
+
+# ---------- FIXED IMPORT WITH INLINE FALLBACK V4 — from platformer_bgs proven working ----------
 try:
     import extensions.multiplayer as mp_ext
     import extensions.datastar as ds_ext
-    if not hasattr(mp_ext,'MultiplayerClient'): raise AttributeError
-    MultiplayerClient=mp_ext.MultiplayerClient
-    USE_EXTENSION_SIGNAL_STORE=True
-    HAS_MP=True
-except:
-    HAS_MP=True
+    if not hasattr(mp_ext,'MultiplayerClient'):
+        raise AttributeError("cached mp_ext has no MultiplayerClient")
+    MultiplayerClient = mp_ext.MultiplayerClient
+    USE_EXTENSION_SIGNAL_STORE = True
+    HAS_MP = True
+    print("[BGS] MP imports OK from extensions/ - using V4 handlers")
+except Exception as e:
+    print(f"[BGS] MP import failed ({e}) - using inline fallback client V24 FIXED")
+    HAS_MP = True
+
     class MultiplayerClient:
-        def __init__(self,base_url="https://scs-207.onrender.com",environment="level1",environment_name=None,character_name="Player",**kw):
-            self.base_url=base_url.rstrip("/"); self.environment_name=environment_name or environment or "level1"; self.client_id=None; self.session_id=None
-        async def join(self,retries=3):
-            base_url=self.base_url; env_name=self.environment_name
-            for _ in range(retries):
+        def __init__(self, base_url="https://scs-207.onrender.com", environment="level1", environment_name=None, character_name="Player", **kw):
+            self.base_url = base_url.rstrip("/")
+            self.environment_name = environment_name or environment or "level1"
+            self.character_name = kw.get("character_name", character_name) or "Player"
+            self.client_id = None
+            self.session_id = None
+            self._es = None
+
+        async def join(self, retries=3):
+            base_url = self.base_url
+            env_name = self.environment_name
+            char_name = self.character_name
+            for attempt in range(retries):
                 try:
-                    url=base_url+"/api/multiplayer/join"
-                    payload={"environment_name":env_name,"character_name":"Player"}
-                    body=window.JSON.stringify(payload)
-                    resp=await window.fetch(url,{"method":"POST","headers":{"Content-Type":"application/json"},"body":body,"mode":"cors"})
-                    js=await resp.json(); data=py_json.loads(window.JSON.stringify(js))
-                    cid=data.get("client_id"); sid=data.get("session_id")
-                    if not cid or not sid: raise Exception("no ids")
-                    self.client_id=cid; self.session_id=sid
+                    url = base_url + "/api/multiplayer/join"
+                    payload = {"environment_name": env_name, "character_name": char_name}
+                    body = window.JSON.stringify(payload)
+                    print(f"[BGS] Joining {url} env={env_name} attempt {attempt+1}")
+                    resp = await window.fetch(url, {"method":"POST","headers":{"Content-Type":"application/json"},"body":body,"mode":"cors"})
+                    # check ok - Render 502 returns no CORS
+                    ok = True
                     try:
-                        su=base_url+"/api/multiplayer/stream?sid="+str(sid)
-                        es=window.eval("new EventSource('"+su+"')")
-                        window._bgs_es=es; es.addEventListener("datastar-patch-signals",_bgs_on_datastar_patch)
-                    except: pass
+                        _tmp_ok = resp.ok
+                    except:
+                        ok = True
+                    if not ok:
+                        raise Exception(f"HTTP {resp.status if hasattr(resp,'status') else 'fail'}")
+                    js_data = await resp.json()
+                    data = py_json.loads(window.JSON.stringify(js_data))
+                    cid = data.get("client_id")
+                    sid = data.get("session_id")
+                    if not cid or not sid:
+                        raise Exception("missing ids")
+                    self.client_id = cid
+                    self.session_id = sid
+                    print(f"[BGS] Joined {cid} sid={sid} - MP V24")
+                    try:
+                        stream_url = base_url + "/api/multiplayer/stream?sid=" + str(sid)
+                        es_obj = window.eval("new EventSource('" + stream_url + "')")
+                        window._bgs_es = es_obj
+                        es_obj.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
+                        print(f"[BGS] SSE OPEN V24 {stream_url}")
+                    except Exception as sse_e:
+                        print(f"[BGS] SSE fail {sse_e}")
                     return data
-                except: await aio.sleep(1.5)
-            return {"client_id":None,"session_id":None}
+                except Exception as ex:
+                    print(f"[BGS] join fail attempt {attempt+1}: {ex}")
+                    await aio.sleep(1.5)
+            print("[BGS] join failed after retries - running LOCAL DEMO mode")
+            return {"client_id": None, "session_id": None, "local_demo": True}
 def send_bgs_patch(app,path,payload):
     try:
         url=app.mp_client.base_url+path
@@ -338,6 +385,21 @@ COLORS = {'I':rgb(0,212,212),'J':rgb(0,75,212),'L':rgb(212,127,0),'O':rgb(212,21
 COLORS_MP = {'I':rgb(0,200,200),'J':rgb(30,90,220),'L':rgb(220,140,10),'O':rgb(220,210,10),'S':rgb(20,200,20),'T':rgb(150,20,220),'Z':rgb(220,20,20),'G':rgb(85,85,85)}
 KICKS_JLSTZ={(0,1):[(0,0),(-1,0),(-1,1),(0,-2),(-1,-2)],(1,0):[(0,0),(1,0),(1,-1),(0,2),(1,2)],(1,2):[(0,0),(1,0),(1,-1),(0,2),(1,2)],(2,1):[(0,0),(-1,0),(-1,1),(0,-2),(-1,-2)],(2,3):[(0,0),(1,0),(1,1),(0,-2),(1,-2)],(3,2):[(0,0),(-1,0),(-1,-1),(0,2),(-1,2)],(3,0):[(0,0),(-1,0),(-1,-1),(0,2),(-1,2)],(0,3):[(0,0),(1,0),(1,1),(0,-2),(1,-2)]}
 KICKS_I={(0,1):[(0,0),(-2,0),(1,0),(-2,-1),(1,2)],(1,0):[(0,0),(2,0),(-1,0),(2,1),(-1,-2)],(1,2):[(0,0),(-1,0),(2,0),(-1,2),(2,-1)],(2,1):[(0,0),(1,0),(-2,0),(1,-2),(-2,1)],(2,3):[(0,0),(2,0),(-1,0),(2,1),(-1,-2)],(3,2):[(0,0),(-2,0),(1,0),(-2,-1),(1,2)],(3,0):[(0,0),(1,0),(-2,0),(1,-2),(-2,1)],(0,3):[(0,0),(-1,0),(2,0),(-1,2),(2,-1)]}
+# TETR.IO 180 KICK TABLE — from 1400px-TETR.IO_180kicks.png
+# Engine tries every kick left to right until one fits. If none, rotation canceled.
+# Note: no downward 180 kicks from East/West — instead "jumps" that kick 2 up.
+KICKS_180_JLSTZ={
+    (0,2):[(0,0),(0,1),(1,1),(-1,1),(1,0),(-1,0)],  # NORTH->SOUTH: NO KICK, OFF-THE-FLOOR, UNHOOK RIGHT/LEFT, RIGHT/LEFT ZIPPER
+    (2,0):[(0,0),(0,-1),(-1,-1),(1,-1),(-1,0),(1,0)], # SOUTH->NORTH: NO KICK, OFF-THE-CEILING, UNHOOK LEFT/RIGHT, LEFT/RIGHT ZIPPER
+    (1,3):[(0,0),(1,0),(1,2),(1,1),(0,2),(0,1)],     # EAST->WEST: NO KICK, OFF-THE-WALL, TALL JUMP, CONSTRICTED JUMP, TALL ZIPPER, CONSTRICTED ZIPPER
+    (3,1):[(0,0),(-1,0),(-1,2),(-1,1),(0,2),(0,1)],  # WEST->EAST: NO KICK, OFF-THE-WALL, TALL JUMP, CONSTRICTED JUMP, TALL ZIPPER, CONSTRICTED ZIPPER
+}
+KICKS_180_I={
+    (0,2):[(0,1)],  # N->S: (0,-1) DOWN = up1
+    (2,0):[(0,-1)], # S->N: (0,1) DOWN = down1
+    (1,3):[(1,0)],  # E->W: (1,0) DOWN = right
+    (3,1):[(-1,0)], # W->E: (-1,0) DOWN = left
+}  # O never rotates but keep for completeness
 BASE_ATTACK={(1,False,False,False):0,(2,False,False,False):1,(3,False,False,False):2,(4,False,False,False):4,(0,True,False,False):0,(1,True,False,False):2,(2,True,False,False):4,(3,True,False,False):6,(1,True,True,False):0,(2,True,True,False):1,(0,False,False,True):10}
 def calc_attack(base,combo,mode="DOWN"):
     if combo<=0: return base
@@ -461,7 +523,16 @@ class TetrGame:
         if self.game_over: return False
         old=[r[:] for r in self.current.shape]; old_rot=self.current.rot; ox,oy=self.current.x,self.current.y
         new=rotate_matrix(old,dir); new_rot=(old_rot+(1 if dir==1 else -1 if dir==-1 else 2))%4
-        kicks=KICKS_I if self.current.kind=='I' else KICKS_JLSTZ
+        # Proper kicks: 90 deg uses SRS, 180 uses TETR.IO 180 table from image
+        if dir==2 or abs(new_rot-old_rot)==2:
+            if self.current.kind=='I':
+                kicks=KICKS_180_I
+            elif self.current.kind=='O':
+                kicks=KICKS_180_O
+            else:
+                kicks=KICKS_180_JLSTZ
+        else:
+            kicks=KICKS_I if self.current.kind=='I' else KICKS_JLSTZ
         table=kicks.get((old_rot,new_rot),[(0,0)])
         for kx,ky in table:
             self.current.shape=new; self.current.x=ox+kx; self.current.y=oy-ky; self.current.rot=new_rot
@@ -654,6 +725,29 @@ def onAppStart(app):
     app.room_id="tetr_zen"; app.client_id=None; app.mp_client=None; app.datastar_connected=False
     app.remote_players={}; app.single_opponent_id=None; app.single_opponent_board=None
     app.last_send_ms=0; app.last_character_state=None; app.remote_timestamps={}
+    # TETR.IO welcome screen state — enter username to join, blank = random
+    app.welcome_state="enter"  # enter | available | taken | login
+    app.welcome_username=""  # what user typed
+    app.welcome_password=""  # for registered login
+    app.welcome_error=""
+    app.welcome_anon=True  # is anonymous?
+    app.is_anonymous=False  # final flag
+    app.registered_users={"OSK","ZET","TETR.IO","ADMIN","MOD","BOT"}  # simulated registered names
+    app.random_names=["GUEST","ANON","TETRON","BLOCKER","STACKER","SPINNER","CLUTCH","ZENITH","BLITZ","COMBO","B2B","T-SPIN","PERFECT","TETRA","LEAGUE","QUICK","SWEeper","LINES","ATTACK","GARBAGE"]
+    # Load registered from localStorage if available
+    try:
+        import json as _js
+        ls = window.localStorage
+        if ls:
+            reg = ls.getItem("tetrio_registered")
+            if reg:
+                import json
+                extra = json.loads(reg)
+                if isinstance(extra, list):
+                    for n in extra:
+                        app.registered_users.add(n.upper())
+    except:
+        pass
 
     BOARD_X=420; BOARD_Y=95
     HOLD_W=100
@@ -706,7 +800,7 @@ def onAppStart(app):
                 cid=u.get("clientId")
                 if cid and cid!=app.client_id: app.remote_players[cid]=u
         if hasattr(app.mp_client,'on_character_state'): app.mp_client.on_character_state=on_char_state
-        async def join_mp():
+                async def join_mp():
             try:
                 res=await app.mp_client.join()
                 cid=res.get("client_id") if isinstance(res,dict) else None
@@ -717,14 +811,27 @@ def onAppStart(app):
                         cid=d.get("client_id")
                     except: 
                         cid=getattr(res,"client_id",None)
+                # Always set client_id, even if None -> local fallback so MP UI doesn't crash
+                if not cid:
+                    cid = f"local_{int(time.time()*1000)}"
+                    print(f"BGS offline, using {cid}")
+                if not cid:
+                    cid = f"local_{int(time.time()*1000)}"
+                    print(f"BGS offline, using local {cid}")
                 app.client_id=cid
                 print(f"Joined BGS as {cid}")
             except Exception as e: 
                 print(f"Join failed {e}")
-                # Don't crash — continue as solo
+                # Don't crash — continue as solo with local id
                 app.client_id = f"local_{int(time.time()*1000)}"
         try:
             aio.run(join_mp())
+        except Exception as e:
+            print(f"aio.run join failed {e}")
+            app.client_id = f"local_{int(time.time()*1000)}"
+        # Ensure client_id set even if join_mp didn't run
+        if not app.client_id:
+            app.client_id = f"local_{int(time.time()*1000)}" 
         except Exception as e:
             print(f"aio.run join failed {e}")
             app.client_id = f"local_{int(time.time()*1000)}"
@@ -805,21 +912,56 @@ def onStep(app):
     if HAS_MP:
         try:
             sig=get_signal("character-state-update")
-            if sig and isinstance(sig,dict):
+            if sig and isinstance(sig, dict):
                 for u in sig.get("updates",[]):
                     cid=u.get("clientId")
-                    if not cid or cid==app.client_id: continue
-                    if app.tetr.mode in ("zen","40lines","blitz"): continue
+                    if not cid or cid==app.client_id:
+                        continue
+                    if app.tetr.mode in ("zen","40lines","blitz"):
+                        continue
                     if app.single_opponent_id is None:
-                        app.single_opponent_id=cid; app.mp_wrapper._secureOpponent({"id":cid}); app.badgeOPP.text=f"OPP {cid[:4]}"
+                        app.single_opponent_id=cid
+                        # Prefer username if provided
+                        if "username" in u:
+                            app.single_opponent_id = str(u.get("username"))[:12]
+                        app.mp_wrapper._secureOpponent({"id":cid})
+                        app.badgeOPP.text=f"OPP {str(app.single_opponent_id)[:4]}"
                         stop_bgm()
                         play_bgm("bgm.battle_tetra_league")
                         play_sfx("tetr.clutch", volume=0.8)
-                    if cid!=app.single_opponent_id: continue
+                    # Only process designated opponent
+                    if cid!=app.single_opponent_id and str(u.get("username",""))!=str(app.single_opponent_id):
+                        # Allow any if single opponent is username-based
+                        if app.single_opponent_id not in [cid, str(u.get("username",""))[:12]]:
+                            continue
                     ts=u.get("timestamp",0)
                     if ts>app.remote_timestamps.get(cid,-1):
-                        app.remote_timestamps[cid]=ts; app.remote_players[cid]=u
-                        if "tetrBoard" in u: app.single_opponent_board=u.get("tetrBoard")
+                        app.remote_timestamps[cid]=ts
+                        app.remote_players[cid]=u
+                        # Full board with types preferred
+                        if "tetrBoardFull" in u:
+                            app.single_opponent_board = u.get("tetrBoardFull")
+                        elif "tetrBoard" in u:
+                            app.single_opponent_board = u.get("tetrBoard")
+                        # Meta
+                        if "tetrScore" in u:
+                            app._opp_score = int(u.get("tetrScore",0))
+                        if "tetrB2B" in u:
+                            app._opp_b2b = int(u.get("tetrB2B",0))
+                        if "tetrCombo" in u:
+                            app._opp_combo = int(u.get("tetrCombo",0))
+                        if "tetrAPM" in u:
+                            app._opp_apm = int(u.get("tetrAPM",0))
+                        if "tetrPPS" in u:
+                            app._opp_pps = float(u.get("tetrPPS",0))
+                        if "tetrHold" in u:
+                            app._opp_hold = u.get("tetrHold")
+                        if "tetrNext" in u:
+                            app._opp_next = u.get("tetrNext",[])[:5]
+                        if "tetrCurrent" in u:
+                            app._opp_cur = u.get("tetrCurrent")
+                            app._opp_cur_x = float(u.get("tetrCurrentX",0))
+                            app._opp_cur_y = float(u.get("tetrCurrentY",0))
                         if "tetrAttack" in u:
                             atk=int(u.get("tetrAttack",0))
                             if atk>0:
@@ -827,7 +969,9 @@ def onStep(app):
                                 app.mp_wrapper.match["garbage"]["incoming"].append({"lines":atk,"hole":hole})
                                 play_sfx("tetr.garbage_incoming", volume=0.5+min(atk*0.12,0.5), pitch=1.0+atk*0.04)
             app.datastar_connected=is_datastar_connected()
-        except: pass
+        except Exception as _e:
+            print(f"[BGS] onStep parse fail {_e}")
+            pass
     if app.game_state=="searching":
         app.mp_wrapper.search_timer+=1
         if app.single_opponent_id is not None: 
@@ -888,17 +1032,71 @@ def onStep(app):
         now=0
         try: now=int(window.Date.now())
         except: now=int(app.tetr.board.lines*100)
+        # === TETR.IO-appropriate sync schema — full board with types ===
+        kind_to_code = {"I":1,"J":2,"L":3,"O":4,"S":5,"T":6,"Z":7,"G":8}
         flat=[]
+        flat_full=[]
         for r in range(BOARD_H_INTERNAL-20,BOARD_H_INTERNAL):
             for c in range(BOARD_W):
-                flat.append(1 if app.tetr.board.grid[r][c] is not None else 0)
-        state=(round(float(app.tetr.current.x),2),round(float(app.tetr.current.y),2),float(app.tetr.board.attack))
+                k = app.tetr.board.grid[r][c]
+                if k is None:
+                    flat.append(0)
+                    flat_full.append(0)
+                else:
+                    flat.append(1)
+                    flat_full.append(kind_to_code.get(k,8))
+        cur_kind = getattr(app.tetr.current, 'kind', 'T')
+        cur_x = float(app.tetr.current.x)
+        cur_y = float(app.tetr.current.y)
+        cur_rot = int(getattr(app.tetr.current, 'rot', 0))
+        hold_kind = app.tetr.hold_piece if app.tetr.hold_piece else None
+        next_queue = app.tetr.next_queue[:5] if hasattr(app.tetr, 'next_queue') else []
+        ghost_y = float(getattr(app.tetr, 'ghost_y', cur_y))
+        elapsed = max(1, time.time()-app.tetr.stats["start"])
+        pps = app.tetr.stats["pieces"]/elapsed
+        apm = int(app.tetr.stats["attack"]/elapsed*60)
+        board_hash = sum(flat_full[::7])
+        state=(round(cur_x,2),round(cur_y,2),cur_rot,cur_kind,board_hash,int(app.tetr.board.attack),int(app.tetr.board.b2b_streak),int(app.tetr.board.combo))
         changed=state!=app.last_character_state
-        if now-app.last_send_ms>=100 and (changed or now-app.last_send_ms>=1000):
+        if now-app.last_send_ms>=80 and (changed or now-app.last_send_ms>=600):
             app.last_send_ms=now; app.last_character_state=state
-            payload={"updates":[{"clientId":str(app.client_id),"characterModelId":"tetr-1v1","position":[float(app.tetr.current.x),float(app.tetr.current.y)],"velocity":[float(app.tetr.board.attack),float(app.tetr.board.combo)],"animationState":"topped" if app.tetr.game_over else "playing","score":int(app.tetr.board.lines),"timestamp":now,"tetrBoard":flat,"tetrAttack":int(app.tetr.board.attack),"tetrB2B":int(app.tetr.board.b2b_streak),"tetrSurge":int(app.tetr.board.surge_charged),"tetrCombo":int(app.tetr.board.combo)}],"timestamp":now}
+            payload={"updates":[{
+                "clientId":str(app.client_id),
+                "characterModelId":"tetr-1v1",
+                "position":[cur_x,cur_y],
+                "velocity":[float(app.tetr.board.attack),float(app.tetr.board.combo)],
+                "animationState":"topped" if app.tetr.game_over else "playing",
+                "score":int(app.tetr.stats["score"]),
+                "lines":int(app.tetr.stats["lines"]),
+                "timestamp":now,
+                "username":str(app.username)[:16],
+                "isAnonymous":bool(app.is_anonymous),
+                "tetrBoard":flat,
+                "tetrBoardFull":flat_full,
+                "tetrBoardW":BOARD_W,
+                "tetrBoardH":BOARD_H_VISIBLE,
+                "tetrCurrent":cur_kind,
+                "tetrCurrentX":cur_x,
+                "tetrCurrentY":cur_y,
+                "tetrCurrentRot":cur_rot,
+                "tetrGhostY":ghost_y,
+                "tetrHold":hold_kind,
+                "tetrNext":next_queue,
+                "tetrAttack":int(app.tetr.board.attack),
+                "tetrB2B":int(app.tetr.board.b2b_streak),
+                "tetrSurge":int(app.tetr.board.surge_charged),
+                "tetrCombo":int(app.tetr.board.combo),
+                "tetrAPM":int(apm),
+                "tetrPPS":float(f"{pps:.2f}"),
+                "tetrLines":int(app.tetr.stats["lines"]),
+                "tetrScore":int(app.tetr.stats["score"]),
+                "tetrPieces":int(app.tetr.stats["pieces"]),
+                "tetrTime":int(elapsed),
+                "tetrGarbageIncoming":len(app.mp_wrapper.match["garbage"]["incoming"]),
+            }],"timestamp":now}
             send_bgs_patch(app,"/api/multiplayer/character-state",payload)
             if app.tetr.board.attack>0: app.tetr.board.attack=0
+
 
 def redrawAll(app):
     if app.game_state=="title":
@@ -918,42 +1116,22 @@ def redrawAll(app):
     is_mp = is_mp_tab and (is_mp_mode or app.game_state in ("menu","searching","playing","gameover"))
 
     if is_mp:
-        # MP UI — restore connection info but layout without overlap
-        # Top bar: YOU and OPP avatars + TR/APM/PPS moved up, not overlapping HOLD
-        # HOLD is at y=68, so place HUD at y=32-56 with small size
-        # Draw compact MP HUD
+        # MP — true split-screen, no overlapping HUD
+        # Connection indicator top-right, not behind HOLD
         try:
-            # Compact top HUD
-            drawRoundedRect(20, 64, 220, 36, 8, rgb(30,32,48), border=rgb(60,65,90), borderWidth=1)
-            app.avatarLocal.x = 28; app.avatarLocal.y = 66
-            app.avatarLocal.w = 28; app.avatarLocal.h = 28
-            app.avatarLocal.draw()
-            app.inputName.x = 62; app.inputName.y = 66
-            app.inputName.w = 90; app.inputName.h = 22
-            app.inputName.draw()
-            app.badgeTR.x = 160; app.badgeTR.y = 68
-            app.badgeTR.draw()
-        except:
-            pass
-        try:
-            drawRoundedRect(260, 64, 220, 36, 8, rgb(30,32,48), border=rgb(60,65,90), borderWidth=1)
-            app.avatarOpp.x = 268; app.avatarOpp.y = 66
-            app.avatarOpp.w = 28; app.avatarOpp.h = 28
-            app.avatarOpp.draw()
-            app.badgeOPP.x = 304; app.badgeOPP.y = 68
-            app.badgeOPP.draw()
-            # Connection indicator
             col = rgb(100,255,100) if app.datastar_connected else rgb(255,180,80) if app.client_id else rgb(255,80,80)
-            drawCircle(450, 82, 5, fill=col)
-            status = "BGS CONNECTED" if app.datastar_connected else f"ID:{str(app.client_id)[:6]}" if app.client_id else "OFFLINE - BOT ONLY"
-            drawLabel(status, 470, 82, size=8, fill=rgb(180,180,200), bold=True, align="left-top")
+            # Top bar connection — to the right of tabs, not overlapping board
+            drawRoundedRect(540, 32, 160, 22, 6, rgb(30,32,48), border=rgb(60,65,90), borderWidth=1)
+            drawCircle(552, 43, 4, fill=col)
+            status = "BGS" if app.datastar_connected else f"{str(app.client_id)[:8]}" if app.client_id else "OFFLINE"
+            drawLabel(status, 562, 38, size=8, fill=rgb(180,180,200), bold=True, align="left-top")
+            drawLabel("BOT READY" if not app.datastar_connected else "VS", 620, 38, size=8, fill=rgb(120,200,120) if not app.datastar_connected else rgb(120,140,180), bold=True, align="left-top")
         except:
             pass
 
         app.btnBack.draw()
-        # Buttons centered below boards with NO overlap
         bh = BOARD_H_VISIBLE*CELL_MP
-        base_y = app.board_y + bh + 16
+        base_y = 110 + bh + 16  # boards now at y=110
         if app.game_state=="searching":
             app.btnCancel.x = app.width/2 - 220
             app.btnCancel.y = base_y
@@ -971,13 +1149,6 @@ def redrawAll(app):
             app.btnReset.x = app.width/2 - 100
             app.btnReset.y = base_y
             app.btnReset.draw()
-            # Show APM/PPS in vs layout
-            try:
-                app.badgeAPM.x = app.width/2 - 80; app.badgeAPM.y = base_y + 40
-                app.badgePPS.x = app.width/2 + 20; app.badgePPS.y = base_y + 40
-                app.badgeAPM.draw(); app.badgePPS.draw()
-            except:
-                pass
         draw_multiplayer_vs(app)
     else:
         # SOLO — original centered layout
@@ -1015,27 +1186,127 @@ def redrawAll(app):
 
 # ===== TITLE =====
 def drawTitleScreen(app):
+    # TETR.IO welcome screen — enter username to join, blank = random
+    # Matches spec: "enter a username to join, or leave it blank to get a random one."
+    # If available: STAY ANONYMOUS or REGISTER
+    # If registered: ask password, login or back
+    # Blank -> random name
+    # Anonymous cannot submit leaderboard or ranked
     drawRect(0,0,app.width,app.height,fill=rgb(18,19,23))
-    drawRoundedRect(0,app.height-80,app.width,80,0,rgb(0,0,0),opacity=60)
     drawRoundedRect(0,0,app.width,28,0,rgb(25,26,32))
     drawLabel("HOME",20,14,size=12,fill=rgb(200,200,210),bold=True,align="left-top")
-    drawLabel("TETRISWIKI  ANONYMOUS",app.width-20,14,size=10,fill=rgb(220,80,80),bold=True,align="right-top")
-    banner_y=52
-    drawRoundedRect(120,banner_y,880,38,8,rgb(45,28,18),border=rgb(210,120,40),borderWidth=1,opacity=90)
-    drawLabel("★",app.width/2,banner_y-8,size=20,fill=rgb(255,200,80),bold=True)
-    drawLabel("DID YOU KNOW: TETR.IO IS DEVELOPED BY A SINGLE PERSON",app.width/2,banner_y+12,size=9,fill=rgb(220,180,160),bold=True)
-    drawLabel("PLEASE CONSIDER SUPPORTING THEM!",app.width/2,banner_y+24,size=9,fill=rgb(200,160,140))
-    for item in app.titleItems:
-        x=120; y=item["y"]; w=880; h=58; r=10
-        is_hover=getattr(app,"_hoverTitle",None)==item["id"]
-        drawRoundedRect(x+2,y+3,w,h,r,rgb(0,0,0),opacity=18)
-        drawRoundedRect(x,y,w,h,r,item["dark"],border=item["color"],borderWidth=1,opacity=100 if is_hover else 90)
-        drawRoundedRect(x+6,y+6,78,h-12,8,item["color"],opacity=95)
-        drawLabel(item["icon"],x+45,y+h/2+2,size=20,fill="black",bold=True)
-        drawLabel(item["label"],x+100,y+18,size=16,fill=rgb(235,230,240),bold=True,align="left-top")
-        drawLabel(item["sub"],x+100,y+36,size=9,fill=rgb(160,160,180),align="left-top")
-    drawLabel("WELCOME TO TETR.IO!",14,app.height-12,size=10,fill=rgb(180,180,190),align="left-top")
+    anon_label = f"ANONYMOUS" if app.is_anonymous else (app.username if app.username else "GUEST")
+    drawLabel(f"TETR.IO  {anon_label}",app.width-20,14,size=10,fill=rgb(220,80,80) if app.is_anonymous else rgb(120,200,120),bold=True,align="right-top")
+
+    # Center card — TETR.IO welcome
+    cx = app.width//2
+    card_w = 460
+    card_x = cx - card_w//2
+    card_y = 88
+    card_h = 420
+
+    drawRoundedRect(card_x-2,card_y-2,card_w+4,card_h+4,16,rgb(0,0,0),opacity=30)
+    drawRoundedRect(card_x,card_y,card_w,card_h,14,rgb(32,36,52),border=rgb(70,80,110),borderWidth=1.2)
+
+    # Logo
+    drawLabel("TETR.IO",cx,card_y+38,size=32,fill=rgb(240,240,255),bold=True)
+    drawLabel("WELCOME BACK" if app.welcome_state!="enter" else "WELCOME",cx,card_y+68,size=12,fill=rgb(160,170,190),bold=True)
+
+    # State: enter username
+    if app.welcome_state=="enter":
+        drawLabel("enter a username to join, or leave it blank to get a random one.",cx,card_y+96,size=9,fill=rgb(140,150,170),align="center")
+        # Input field
+        input_w = 300
+        input_x = cx - input_w//2
+        input_y = card_y+118
+        is_focused = getattr(app.inputName,'focused',False) or app.welcome_state=="enter"
+        bg = rgb(22,26,38) if not is_focused else rgb(28,34,52)
+        border = rgb(90,110,160) if is_focused else rgb(60,70,95)
+        drawRoundedRect(input_x,input_y,input_w,38,8,bg,border=border,borderWidth=1.2)
+        txt = app.welcome_username if app.welcome_username else ""
+        placeholder = "username"
+        if txt:
+            drawLabel(txt,input_x+12,input_y+19,size=13,fill=rgb(230,235,245),bold=True,align="left-top")
+        else:
+            drawLabel(placeholder,input_x+12,input_y+19,size=13,fill=rgb(100,110,130),align="left-top")
+        # Cursor
+        if is_focused:
+            try:
+                blink = int(time.time()*2) % 2
+                if blink==0:
+                    drawRect(input_x+12+len(txt)*7.2,input_y+10,2,18,fill=rgb(180,190,220))
+            except:
+                pass
+        # JOIN button
+        btn_w = 300
+        btn_x = cx - btn_w//2
+        btn_y = input_y+56
+        drawRoundedRect(btn_x+1,btn_y+2,btn_w,36,8,rgb(0,0,0),opacity=18)
+        drawRoundedRect(btn_x,btn_y,btn_w,36,8,rgb(90,100,220),border=rgb(120,130,250),borderWidth=1)
+        drawLabel("JOIN",cx,btn_y+18,size=14,fill="white",bold=True)
+
+        # Error
+        if app.welcome_error:
+            drawLabel(app.welcome_error,cx,btn_y+54,size=9,fill=rgb(255,120,120),bold=True)
+
+        # Info bottom
+        drawLabel("Anonymous players cannot submit leaderboard scores",cx,card_y+card_h-52,size=8,fill=rgb(110,120,140))
+        drawLabel("or participate in ranked matchmaking.",cx,card_y+card_h-40,size=8,fill=rgb(110,120,140))
+
+    elif app.welcome_state=="available":
+        # Nickname available — choose STAY ANONYMOUS or REGISTER
+        drawLabel(f'"{app.welcome_username}" is available!',cx,card_y+96,size=12,fill=rgb(120,220,130),bold=True)
+        drawLabel("You can play anonymously with this name, or register to claim it.",cx,card_y+118,size=8,fill=rgb(140,150,170))
+        # Buttons
+        btn_w = 300
+        btn_x = cx - btn_w//2
+        # Stay anonymous
+        y1 = card_y+150
+        drawRoundedRect(btn_x+1,y1+2,btn_w,38,8,rgb(0,0,0),opacity=18)
+        drawRoundedRect(btn_x,y1,btn_w,38,8,rgb(45,55,80),border=rgb(80,95,130),borderWidth=1)
+        drawLabel("STAY ANONYMOUS",cx,y1+19,size=12,fill=rgb(200,210,230),bold=True)
+        drawLabel(f'Play as "{app.welcome_username}" without account',cx,y1+32,size=7,fill=rgb(110,120,140))
+        # Register
+        y2 = y1+62
+        drawRoundedRect(btn_x+1,y2+2,btn_w,38,8,rgb(0,0,0),opacity=18)
+        drawRoundedRect(btn_x,y2,btn_w,38,8,rgb(90,160,90),border=rgb(120,200,120),borderWidth=1)
+        drawLabel("REGISTER",cx,y2+19,size=12,fill="white",bold=True)
+        drawLabel(f'Claim "{app.welcome_username}" with password',cx,y2+32,size=7,fill=rgb(200,230,200))
+        # Back
+        drawLabel("BACK",cx,card_y+card_h-32,size=10,fill=rgb(120,130,150),bold=True)
+
+    elif app.welcome_state=="taken":
+        # Nickname belongs to registered account — ask password
+        drawLabel(f'"{app.welcome_username}" is taken!',cx,card_y+96,size=12,fill=rgb(255,120,120),bold=True)
+        drawLabel("This nickname belongs to a registered account.",cx,card_y+118,size=8,fill=rgb(140,150,170))
+        drawLabel("Enter password to log in, or go back and choose another name.",cx,card_y+132,size=8,fill=rgb(140,150,170))
+        # Password field
+        input_w = 300
+        input_x = cx - input_w//2
+        input_y = card_y+154
+        is_focused = True
+        bg = rgb(28,34,52)
+        border = rgb(90,110,160)
+        drawRoundedRect(input_x,input_y,input_w,38,8,bg,border=border,borderWidth=1.2)
+        masked = "*" * len(app.welcome_password)
+        if masked:
+            drawLabel(masked,input_x+12,input_y+19,size=13,fill=rgb(230,235,245),bold=True,align="left-top")
+        else:
+            drawLabel("password",input_x+12,input_y+19,size=13,fill=rgb(100,110,130),align="left-top")
+        # Login button
+        btn_w = 300
+        btn_x = cx - btn_w//2
+        btn_y = input_y+56
+        drawRoundedRect(btn_x+1,btn_y+2,btn_w,36,8,rgb(0,0,0),opacity=18)
+        drawRoundedRect(btn_x,btn_y,btn_w,36,8,rgb(90,100,220),border=rgb(120,130,250),borderWidth=1)
+        drawLabel("LOG IN",cx,btn_y+18,size=14,fill="white",bold=True)
+        if app.welcome_error:
+            drawLabel(app.welcome_error,cx,btn_y+54,size=9,fill=rgb(255,120,120),bold=True)
+        drawLabel("BACK",cx,card_y+card_h-32,size=10,fill=rgb(120,130,150),bold=True)
+
+    # Footer music
     drawLabel("♪ Watchful Eye — Lobby Theme",app.width/2,app.height-28,size=9,fill=rgb(120,140,160))
+    drawLabel("TETR.IO is developed by a single person — please consider supporting them!",app.width/2,app.height-12,size=8,fill=rgb(100,110,130))
 
 # ===== CONFIG — matching config.png =====
 def drawConfigScreen(app):
@@ -1201,123 +1472,175 @@ def draw_opponent_tetrio(app):
 
 # ===== NEW: TRUE 1v1 like tetrio.webp =====
 def draw_multiplayer_vs(app):
-    # layout — two boards side by side like tetrio.webp
-    p1_hold_x, p1_hold_y = 28, 68
-    p1_board_x, p1_board_y = 110, 68
-    p1_next_x, p1_next_y = 340, 68
+    try:
+        # layout — two boards side by side like tetrio.webp — moved down to y=110 to avoid tab overlap
+        p1_hold_x, p1_hold_y = 28, 110
+        p1_board_x, p1_board_y = 110, 110
+        p1_next_x, p1_next_y = 340, 110
 
-    p2_hold_x, p2_hold_y = 590, 68
-    p2_board_x, p2_board_y = 670, 68
-    p2_next_x, p2_next_y = 900, 68
+        p2_hold_x, p2_hold_y = 590, 110
+        p2_board_x, p2_board_y = 670, 110
+        p2_next_x, p2_next_y = 900, 110
 
-    cell = CELL_MP
-    bw = BOARD_W*cell
-    bh = BOARD_H_VISIBLE*cell
+        cell = CELL_MP
+        bw = BOARD_W*cell
+        bh = BOARD_H_VISIBLE*cell
 
-    # frames — TETR.IO pink/magenta like tetrio.webp
-    frame = rgb(190,60,110)
-    frame2 = rgb(201,168,124)
+        frame = rgb(190,60,110)
 
-    # P1
-    drawRoundedRect(p1_hold_x-4,p1_hold_y-4,74,54,8,rgb(0,0,0),border=frame,borderWidth=1)
-    drawRoundedRect(p1_hold_x,p1_hold_y,66,46,6,rgb(18,19,23))
-    drawLabel("HOLD",p1_hold_x+33,p1_hold_y+8,size=8,fill=rgb(220,100,150),bold=True)
-    draw_hold_tetrio(app, ox=p1_hold_x, oy=p1_hold_y, cell=PREVIEW_CELL_MP, hold_kind=app.tetr.hold_piece)
+        # P1
+        drawRoundedRect(p1_hold_x-4,p1_hold_y-4,74,54,8,rgb(0,0,0),border=frame,borderWidth=1)
+        drawRoundedRect(p1_hold_x,p1_hold_y,66,46,6,rgb(18,19,23))
+        drawLabel("HOLD",p1_hold_x+33,p1_hold_y+8,size=8,fill=rgb(220,100,150),bold=True)
+        try:
+            draw_hold_tetrio(app, ox=p1_hold_x, oy=p1_hold_y, cell=PREVIEW_CELL_MP, hold_kind=app.tetr.hold_piece)
+        except:
+            pass
 
-    drawRoundedRect(p1_board_x-6,p1_board_y-6,bw+12,bh+12,8,rgb(0,0,0),border=frame,borderWidth=1.5)
-    drawRoundedRect(p1_board_x-2,p1_board_y-2,bw+4,bh+4,6,rgb(0,0,0))
-    draw_board_tetrio(app, app.tetr.board, p1_board_x, p1_board_y, cell, app.tetr.current, app.tetr.ghost_y, True, colors=COLORS_MP)
+        drawRoundedRect(p1_board_x-6,p1_board_y-6,bw+12,bh+12,8,rgb(0,0,0),border=frame,borderWidth=1.5)
+        drawRoundedRect(p1_board_x-2,p1_board_y-2,bw+4,bh+4,6,rgb(0,0,0))
+        try:
+            draw_board_tetrio(app, app.tetr.board, p1_board_x, p1_board_y, cell, app.tetr.current, app.tetr.ghost_y, True, colors=COLORS_MP)
+        except:
+            pass
 
-    drawRoundedRect(p1_next_x-4,p1_next_y-4,90,bh+12,8,rgb(0,0,0),border=frame,borderWidth=1)
-    drawRoundedRect(p1_next_x,p1_next_y,82,bh+4,6,rgb(18,19,23))
-    drawLabel("NEXT",p1_next_x+41,p1_next_y+10,size=8,fill=rgb(220,100,150),bold=True)
-    drawLabel("REPLAY",p1_board_x+bw-28,p1_next_y+10,size=7,fill=rgb(180,180,190),bold=True)
-    # next queue
-    for i,kind in enumerate(app.tetr.next_queue[:5]):
-        shape=TETROMINOES[kind]
-        base_y=p1_next_y+28+i*58; base_x=p1_next_x+12
-        for r in range(len(shape)):
-            for c in range(len(shape[0])):
-                if shape[r][c]: drawRoundedRect(base_x+c*PREVIEW_CELL_MP,base_y+r*PREVIEW_CELL_MP,PREVIEW_CELL_MP-1,PREVIEW_CELL_MP-1,1,COLORS_MP[kind])
+        drawRoundedRect(p1_next_x-4,p1_next_y-4,90,bh+12,8,rgb(0,0,0),border=frame,borderWidth=1)
+        drawRoundedRect(p1_next_x,p1_next_y,82,bh+4,6,rgb(18,19,23))
+        drawLabel("NEXT",p1_next_x+41,p1_next_y+10,size=8,fill=rgb(220,100,150),bold=True)
+        drawLabel("REPLAY",p1_board_x+bw-28,p1_next_y+10,size=7,fill=rgb(180,180,190),bold=True)
+        for i,kind in enumerate(app.tetr.next_queue[:5]):
+            try:
+                shape=TETROMINOES[kind]
+                base_y=p1_next_y+28+i*58; base_x=p1_next_x+12
+                for r in range(len(shape)):
+                    for c in range(len(shape[0])):
+                        if shape[r][c]: drawRoundedRect(base_x+c*PREVIEW_CELL_MP,base_y+r*PREVIEW_CELL_MP,PREVIEW_CELL_MP-1,PREVIEW_CELL_MP-1,1,COLORS_MP[kind])
+            except:
+                pass
 
-    # P1 stats like tetrio.webp — B2B x1 left, PIECES, ATTACK, TIME
-    sx = 12
-    sy = p1_board_y + 140
-    if app.tetr.board.b2b_streak>=1:
-        drawLabel(f"B2B x{app.tetr.board.b2b_streak}",sx+32,sy,size=12,fill=rgb(255,210,120),bold=True,align="left-top")
-        sy+=22
-    drawLabel("PIECES",sx,sy,size=8,fill=rgb(160,160,180),align="left-top"); sy+=10
-    elapsed=time.time()-app.tetr.stats["start"]
-    pps=app.tetr.stats["pieces"]/max(1,elapsed)
-    drawLabel(f"{app.tetr.stats['pieces']}",sx,sy,size=14,fill=rgb(220,220,240),bold=True,align="left-top")
-    drawLabel(f"{pps:.1f}/S",sx+36,sy+2,size=8,fill=rgb(120,120,140),align="left-top"); sy+=18
-    drawLabel("ATTACK",sx,sy,size=8,fill=rgb(160,160,180),align="left-top"); sy+=10
-    drawLabel(f"{app.tetr.stats['attack']}",sx,sy,size=14,fill=rgb(220,220,240),bold=True,align="left-top")
-    apm=int(app.tetr.stats["attack"]/max(1,elapsed)*60)
-    drawLabel(f"{apm}/M",sx+28,sy+2,size=8,fill=rgb(120,120,140),align="left-top"); sy+=18
-    drawLabel("TIME",sx,sy,size=8,fill=rgb(160,160,180),align="left-top"); sy+=10
-    drawLabel(f"{int(elapsed//60)}:{elapsed%60:02d}",sx,sy,size=14,fill=rgb(220,220,240),bold=True,align="left-top")
+        # P1 stats
+        try:
+            sx = 12
+            sy = p1_board_y + 140
+            if app.tetr.board.b2b_streak>=1:
+                drawLabel(f"B2B x{app.tetr.board.b2b_streak}",sx+32,sy,size=12,fill=rgb(255,210,120),bold=True,align="left-top")
+                sy+=22
+            drawLabel("PIECES",sx,sy,size=8,fill=rgb(160,160,180),align="left-top"); sy+=10
+            elapsed=time.time()-app.tetr.stats["start"]
+            pps=app.tetr.stats["pieces"]/max(1,elapsed)
+            drawLabel(f"{app.tetr.stats['pieces']}",sx,sy,size=14,fill=rgb(220,220,240),bold=True,align="left-top")
+            drawLabel(f"{pps:.1f}/S",sx+36,sy+2,size=8,fill=rgb(120,120,140),align="left-top"); sy+=18
+            drawLabel("ATTACK",sx,sy,size=8,fill=rgb(160,160,180),align="left-top"); sy+=10
+            drawLabel(f"{app.tetr.stats['attack']}",sx,sy,size=14,fill=rgb(220,220,240),bold=True,align="left-top")
+            apm=int(app.tetr.stats["attack"]/max(1,elapsed)*60)
+            drawLabel(f"{apm}/M",sx+28,sy+2,size=8,fill=rgb(120,120,140),align="left-top"); sy+=18
+            drawLabel("TIME",sx,sy,size=8,fill=rgb(160,160,180),align="left-top"); sy+=10
+            drawLabel(f"{int(elapsed//60)}:{elapsed%60:02d}",sx,sy,size=14,fill=rgb(220,220,240),bold=True,align="left-top")
+        except:
+            pass
 
-    # P2 — opponent
-    drawRoundedRect(p2_hold_x-4,p2_hold_y-4,74,54,8,rgb(0,0,0),border=frame,borderWidth=1)
-    drawRoundedRect(p2_hold_x,p2_hold_y,66,46,6,rgb(18,19,23))
-    drawLabel("HOLD",p2_hold_x+33,p2_hold_y+8,size=8,fill=rgb(220,100,150),bold=True)
+        # P2 — opponent — ALWAYS rendered now, even if no board data
+        try:
+            drawRoundedRect(p2_hold_x-4,p2_hold_y-4,74,54,8,rgb(0,0,0),border=frame,borderWidth=1)
+            drawRoundedRect(p2_hold_x,p2_hold_y,66,46,6,rgb(18,19,23))
+            drawLabel("HOLD",p2_hold_x+33,p2_hold_y+8,size=8,fill=rgb(220,100,150),bold=True)
+        except:
+            pass
 
-    drawRoundedRect(p2_board_x-6,p2_board_y-6,bw+12,bh+12,8,rgb(0,0,0),border=frame,borderWidth=1.5)
-    drawRoundedRect(p2_board_x-2,p2_board_y-2,bw+4,bh+4,6,rgb(0,0,0))
+        try:
+            drawRoundedRect(p2_board_x-6,p2_board_y-6,bw+12,bh+12,8,rgb(0,0,0),border=frame,borderWidth=1.5)
+            drawRoundedRect(p2_board_x-2,p2_board_y-2,bw+4,bh+4,6,rgb(0,0,0))
+        except:
+            pass
 
-    # opponent board from remote
-    # build fake board from flat array if available
-    opp_board = app.single_opponent_board
-    if opp_board and len(opp_board)>=200:
-        # draw gray bottom like tetrio
-        for r in range(BOARD_H_VISIBLE):
-            for c in range(BOARD_W):
-                idx = r*BOARD_W + c
-                if idx < len(opp_board) and opp_board[idx]:
-                    # if bottom rows, draw gray garbage as in webp
-                    if r >= BOARD_H_VISIBLE-3:
-                        drawRect(p2_board_x+c*cell+1,p2_board_y+r*cell+1,cell-2,cell-2,fill=rgb(85,85,85))
-                    else:
-                        drawRoundedRect(p2_board_x+c*cell+1,p2_board_y+r*cell+1,cell-2,cell-2,1,rgb(120,140,180))
-    else:
-        # placeholder grid
-        for y in range(BOARD_H_VISIBLE+1): drawLine(p2_board_x,p2_board_y+y*cell,p2_board_x+bw,p2_board_y+y*cell,fill=rgb(30,30,40),lineWidth=1)
-        for x in range(BOARD_W+1): drawLine(p2_board_x+x*cell,p2_board_y,p2_board_x+x*cell,p2_board_y+bh,fill=rgb(30,30,40),lineWidth=1)
-        if app.game_state=="searching":
-            drawLabel("SEARCHING...",p2_board_x+bw/2,p2_board_y+bh/2-16,size=12,fill=rgb(120,130,150),bold=True)
-            drawLabel(f"{app.mp_wrapper.search_timer//60}s",p2_board_x+bw/2,p2_board_y+bh/2+2,size=10,fill=rgb(90,100,120))
-            drawLabel("WAIT or PLAY VS BOT",p2_board_x+bw/2,p2_board_y+bh/2+18,size=8,fill=rgb(201,168,124),bold=True)
+            # opp_board = set above, now render
+        try:
+            opp_board = app.single_opponent_board
+            # Decode: 0 empty, 1-7 pieces, 8 garbage — or legacy binary 1
+            code_to_color = {1:rgb(0,240,240),2:rgb(0,0,240),3:rgb(240,160,0),4:rgb(240,240,0),5:rgb(0,240,0),6:rgb(160,0,240),7:rgb(240,0,0),8:rgb(80,80,80)}
+            if opp_board and len(opp_board)>=200:
+                # Check if full board (values up to 8) or binary (only 0/1)
+                is_full = max(opp_board) > 1 if opp_board else False
+                for r in range(BOARD_H_VISIBLE):
+                    for c in range(BOARD_W):
+                        idx = r*BOARD_W + c
+                        if idx < len(opp_board) and opp_board[idx]:
+                            val = opp_board[idx]
+                            if is_full:
+                                col = code_to_color.get(val, rgb(120,140,180))
+                                if val==8: # garbage gray
+                                    drawRect(p2_board_x+c*cell+1,p2_board_y+r*cell+1,cell-2,cell-2,fill=rgb(80,80,80))
+                                else:
+                                    drawRoundedRect(p2_board_x+c*cell+1,p2_board_y+r*cell+1,cell-2,cell-2,1,col)
+                            else:
+                                # legacy binary
+                                if r >= BOARD_H_VISIBLE-3:
+                                    drawRect(p2_board_x+c*cell+1,p2_board_y+r*cell+1,cell-2,cell-2,fill=rgb(85,85,85))
+                                else:
+                                    drawRoundedRect(p2_board_x+c*cell+1,p2_board_y+r*cell+1,cell-2,cell-2,1,rgb(120,140,180))
+                        idx = r*BOARD_W + c
+                        if idx < len(opp_board) and opp_board[idx]:
+                            if r >= BOARD_H_VISIBLE-3:
+                                drawRect(p2_board_x+c*cell+1,p2_board_y+r*cell+1,cell-2,cell-2,fill=rgb(85,85,85))
+                            else:
+                                drawRoundedRect(p2_board_x+c*cell+1,p2_board_y+r*cell+1,cell-2,cell-2,1,rgb(120,140,180))
+            else:
+                # placeholder grid — ALWAYS show for P2
+                for y in range(BOARD_H_VISIBLE+1): 
+                    try: drawLine(p2_board_x,p2_board_y+y*cell,p2_board_x+bw,p2_board_y+y*cell,fill=rgb(30,30,40),lineWidth=1)
+                    except: pass
+                for x in range(BOARD_W+1): 
+                    try: drawLine(p2_board_x+x*cell,p2_board_y,p2_board_x+x*cell,p2_board_y+bh,fill=rgb(30,30,40),lineWidth=1)
+                    except: pass
+                if app.game_state=="searching":
+                    try:
+                        drawLabel("SEARCHING...",p2_board_x+bw/2,p2_board_y+bh/2-16,size=12,fill=rgb(120,130,150),bold=True)
+                        drawLabel(f"{app.mp_wrapper.search_timer//60}s",p2_board_x+bw/2,p2_board_y+bh/2+2,size=10,fill=rgb(90,100,120))
+                        drawLabel("WAIT or PLAY VS BOT",p2_board_x+bw/2,p2_board_y+bh/2+18,size=8,fill=rgb(201,168,124),bold=True)
+                    except:
+                        pass
+                else:
+                    try:
+                        drawLabel("WAITING",p2_board_x+bw/2,p2_board_y+bh/2,size=11,fill=rgb(100,110,130),bold=True)
+                    except:
+                        pass
+        except Exception as e:
+            print(f"P2 board render failed {e}")
 
-    drawRoundedRect(p2_next_x-4,p2_next_y-4,90,bh+12,8,rgb(0,0,0),border=frame,borderWidth=1)
-    drawRoundedRect(p2_next_x,p2_next_y,82,bh+4,6,rgb(18,19,23))
-    drawLabel("NEXT",p2_next_x+41,p2_next_y+10,size=8,fill=rgb(220,100,150),bold=True)
-    drawLabel("REPLAY",p2_board_x+bw-28,p2_next_y+10,size=7,fill=rgb(180,180,190),bold=True)
+        try:
+            drawRoundedRect(p2_next_x-4,p2_next_y-4,90,bh+12,8,rgb(0,0,0),border=frame,borderWidth=1)
+            drawRoundedRect(p2_next_x,p2_next_y,82,bh+4,6,rgb(18,19,23))
+            drawLabel("NEXT",p2_next_x+41,p2_next_y+10,size=8,fill=rgb(220,100,150),bold=True)
+            drawLabel("REPLAY",p2_board_x+bw-28,p2_next_y+10,size=7,fill=rgb(180,180,190),bold=True)
+        except:
+            pass
 
-    # VS SCORE center like tetrio.webp
-    vs_x = 520
-    vs_y = p1_board_y + bh - 90
-    drawLabel("VS SCORE",vs_x,vs_y,size=8,fill=rgb(160,160,180),bold=True)
-    score1 = app.tetr.stats["score"]
-    # opp score from remote?
-    score2 = 33
-    if app.single_opponent_board:
-        score2 = getattr(app,'_opp_score',33)
-    drawLabel(str(score1),vs_x-18,vs_y+16,size=16,fill=rgb(220,220,240),bold=True)
-    drawLabel(str(score2),vs_x+18,vs_y+16,size=16,fill=rgb(180,180,200),bold=True)
-
-    # names bottom like KAASYU / WOORAM
-    drawLabel(app.username.upper()[:10],p1_board_x+bw/2,p1_board_y+bh+14,size=10,fill=rgb(200,200,210),bold=True)
-    opp_name = str(app.single_opponent_id)[:10] if app.single_opponent_id else "BOT_2901"
-    drawLabel(opp_name.upper(),p2_board_x+bw/2,p2_board_y+bh+14,size=10,fill=rgb(180,180,190),bold=True)
-
-    # garbage meters left of each board
-    drawRoundedRect(p1_board_x-10,p1_board_y,4,bh,2,rgb(40,35,25))
-    inc=len(app.mp_wrapper.match["garbage"]["incoming"])
-    if inc:
-        h=min(bh,inc*14)
-        drawRoundedRect(p1_board_x-10,p1_board_y+bh-h,4,h,2,rgb(220,200,80))
-    drawRoundedRect(p2_board_x+bw+6,p2_board_y,4,bh,2,rgb(40,35,25))
+        try:
+            vs_x = 520
+            vs_y = p1_board_y + bh - 90
+            drawLabel("VS SCORE",vs_x,vs_y,size=8,fill=rgb(160,160,180),bold=True)
+            score1 = app.tetr.stats["score"]
+            score2 = getattr(app,'_opp_score',33)
+            drawLabel(str(score1),vs_x-18,vs_y+16,size=16,fill=rgb(220,220,240),bold=True)
+            drawLabel(str(score2),vs_x+18,vs_y+16,size=16,fill=rgb(180,180,200),bold=True)
+            drawLabel(app.username.upper()[:10],p1_board_x+bw/2,p1_board_y+bh+14,size=10,fill=rgb(200,200,210),bold=True)
+            opp_name = str(app.single_opponent_id)[:10] if app.single_opponent_id else "BOT_2901"
+            drawLabel(opp_name.upper(),p2_board_x+bw/2,p2_board_y+bh+14,size=10,fill=rgb(180,180,190),bold=True)
+            drawRoundedRect(p1_board_x-10,p1_board_y,4,bh,2,rgb(40,35,25))
+            inc=len(app.mp_wrapper.match["garbage"]["incoming"])
+            if inc:
+                h=min(bh,inc*14)
+                drawRoundedRect(p1_board_x-10,p1_board_y+bh-h,4,h,2,rgb(220,200,80))
+            drawRoundedRect(p2_board_x+bw+6,p2_board_y,4,bh,2,rgb(40,35,25))
+        except Exception as e:
+            print(f"VS UI failed {e}")
+    except Exception as e:
+        print(f"draw_multiplayer_vs failed {e}")
+        # Fallback: draw at least something
+        try:
+            drawLabel(f"VS ERR {e}", 520, 200, size=10, fill=rgb(255,100,100))
+        except:
+            pass
 
 def draw_stats_tetrio(app):
     try:
@@ -1357,46 +1680,177 @@ def draw_garbage_meter(app):
     except: pass
 
 def onMousePress(app,mx,my):
-    if HAS_AUDIO:
-        try: sfx.resume()
-        except: pass
-
-    # CONFIG screen handling
-    if app.game_state=="config":
-        # tabs
-        tab_y=56; tab_w=(app.width-24)//3
-        for i,t in enumerate(["GUIDELINE","WASD","CUSTOM"]):
-            x=12+i*(tab_w+4)
-            if x<=mx<=x+tab_w and tab_y<=my<=tab_y+28:
-                app.configTab=t
-                play_sfx("ui.click")
-                if t=="GUIDELINE": app.keybinds = {k:v[:] for k,v in app.keybinds_guideline.items()}
-                elif t=="CUSTOM": app.keybinds = {k:v[:] for k,v in app.keybinds_custom.items()}
-                else: app.keybinds = {k:v[:] for k,v in DEFAULT_BINDS_WASD.items()}
-                return True
-        # list slots
-        y0=100
-        visible=14
-        for idx in range(visible):
-            real_idx=app.config_scroll+idx
-            if real_idx>=len(ACTION_LABELS): break
-            y=y0+idx*36
-            action,label=ACTION_LABELS[real_idx]
-            for s in range(3):
-                sx=app.width-300 + s*96
-                if sx<=mx<=sx+90 and y+4<=my<=y+30:
-                    app.config_selected=(action,s)
-                    play_sfx("ui.click")
-                    return True
-        # back
-        if 12<=mx<=172 and app.height-52<=my<=app.height-20:
-            app.keybinds_custom = {k:v[:] for k,v in app.keybinds.items()}
-            go_title(app)
-            return True
-        return False
-
     if app.game_state=="title":
-        play_sfx("ui.click")
+        # TETR.IO welcome screen handling
+        cx = app.width//2
+        card_w = 460
+        card_x = cx - card_w//2
+        card_y = 88
+        import random as _r
+        def gen_random_name():
+            adj = _r.choice(app.random_names) if hasattr(app,'random_names') else "GUEST"
+            num = _r.randint(100,9999)
+            return f"{adj}_{num}"
+
+        def is_registered(name):
+            if not name:
+                return False
+            return name.strip().upper() in app.registered_users
+
+        if app.welcome_state=="enter":
+            # Input field
+            input_w = 300
+            input_x = cx - input_w//2
+            input_y = card_y+118
+            # Click on input -> focus
+            if input_x <= mx <= input_x+input_w and input_y <= my <= input_y+38:
+                app.inputName.focused=True
+                play_sfx("ui.click")
+                return True
+            else:
+                app.inputName.focused=False
+            # JOIN button
+            btn_w = 300
+            btn_x = cx - btn_w//2
+            btn_y = input_y+56
+            if btn_x <= mx <= btn_x+btn_w and btn_y <= my <= btn_y+36:
+                play_sfx("ui.click")
+                name = app.welcome_username.strip()
+                if not name:
+                    # Blank -> random
+                    rnd = gen_random_name()
+                    app.username = rnd
+                    app.is_anonymous = True
+                    app.welcome_error=""
+                    app.game_state="menu"
+                    app.tabGroup.active=2
+                    app.tetr=TetrGame(mode="zen")
+                    app.game_state="playing"
+                    app.badgeOPP.text="SOLO ZEN"
+                    app.inputName.focused=False
+                    stop_bgm(); play_bgm("bgm.zen", floor=0)
+                    print(f"Random name {rnd}")
+                else:
+                    if len(name) < 2:
+                        app.welcome_error="Name too short"
+                    elif len(name) > 16:
+                        app.welcome_error="Name too long (max 16)"
+                    elif is_registered(name):
+                        app.welcome_state="taken"
+                        app.welcome_error=""
+                        app.welcome_password=""
+                        print(f"Name taken {name}")
+                    else:
+                        app.welcome_state="available"
+                        app.welcome_error=""
+                        print(f"Name available {name}")
+                return True
+            return False
+
+        elif app.welcome_state=="available":
+            btn_w = 300
+            btn_x = cx - btn_w//2
+            y1 = card_y+150
+            y2 = y1+62
+            # STAY ANONYMOUS
+            if btn_x <= mx <= btn_x+btn_w and y1 <= my <= y1+38:
+                play_sfx("ui.click")
+                app.username = app.welcome_username.strip()
+                app.is_anonymous = True
+                app.inputName.value = app.username
+                app.inputName.text = app.username
+                # Go to main menu
+                app.game_state="menu"
+                app.tabGroup.active=2
+                app.tetr=TetrGame(mode="zen")
+                app.game_state="playing"
+                app.badgeOPP.text="SOLO ZEN"
+                app.inputName.focused=False
+                stop_bgm(); play_bgm("bgm.zen", floor=0)
+                print(f"Stay anonymous as {app.username}")
+                return True
+            # REGISTER
+            if btn_x <= mx <= btn_x+btn_w and y2 <= my <= y2+38:
+                play_sfx("ui.click")
+                # Simulate registration — add to registered, not anonymous
+                name = app.welcome_username.strip()
+                app.registered_users.add(name.upper())
+                try:
+                    ls = window.localStorage
+                    if ls:
+                        import json
+                        lst = list(app.registered_users)
+                        ls.setItem("tetrio_registered", json.dumps(lst))
+                except:
+                    pass
+                app.username = name
+                app.is_anonymous = False
+                app.inputName.value = name
+                app.inputName.text = name
+                app.game_state="menu"
+                app.tabGroup.active=2
+                app.tetr=TetrGame(mode="zen")
+                app.game_state="playing"
+                app.badgeOPP.text="SOLO ZEN"
+                app.inputName.focused=False
+                stop_bgm(); play_bgm("bgm.zen", floor=0)
+                print(f"Registered {name}")
+                return True
+            # BACK
+            back_y = card_y+420-32
+            if cx-30 <= mx <= cx+30 and back_y-10 <= my <= back_y+10:
+                app.welcome_state="enter"
+                app.welcome_error=""
+                play_sfx("ui.back")
+                return True
+            return False
+
+        elif app.welcome_state=="taken":
+            input_w = 300
+            input_x = cx - input_w//2
+            input_y = card_y+154
+            btn_w = 300
+            btn_x = cx - btn_w//2
+            btn_y = input_y+56
+            # Password field focus
+            if input_x <= mx <= input_x+input_w and input_y <= my <= input_y+38:
+                # focus password — for simplicity use same inputName focused
+                app.inputName.focused=True
+                play_sfx("ui.click")
+                return True
+            # LOGIN
+            if btn_x <= mx <= btn_x+btn_w and btn_y <= my <= btn_y+36:
+                play_sfx("ui.click")
+                # Simulate login — any password works if name registered, unless we stored one
+                # For demo, accept any non-empty password
+                if not app.welcome_password:
+                    app.welcome_error="Enter password"
+                else:
+                    app.username = app.welcome_username.strip()
+                    app.is_anonymous = False
+                    app.inputName.value = app.username
+                    app.inputName.text = app.username
+                    app.game_state="menu"
+                    app.tabGroup.active=2
+                    app.tetr=TetrGame(mode="zen")
+                    app.game_state="playing"
+                    app.badgeOPP.text="SOLO ZEN"
+                    app.inputName.focused=False
+                    stop_bgm(); play_bgm("bgm.zen", floor=0)
+                    print(f"Logged in as {app.username}")
+                return True
+            # BACK
+            back_y = card_y+420-32
+            if cx-30 <= mx <= cx+30 and back_y-10 <= my <= back_y+10:
+                app.welcome_state="enter"
+                app.welcome_error=""
+                app.welcome_password=""
+                play_sfx("ui.back")
+                return True
+            app.inputName.focused=False
+            return False
+
+        # Old titleItems fallback (should not happen with new welcome)
         for item in app.titleItems:
             x=120; y=item["y"]; w=880; h=58
             if x<=mx<=x+w and y<=my<=y+h:
@@ -1430,6 +1884,13 @@ def onMousePress(app,mx,my):
             return True
     else:
         if app.btnFind.contains(mx,my) and app.btnFind.handlePress(mx,my): 
+            # Check anonymous restriction for ranked
+            if app.is_anonymous and app.tetr.mode=="tetra_league":
+                app.welcome_error="Anonymous cannot play ranked"
+                # Force quick play
+                app.tabGroup.active=1
+                start_search(app)
+                return True
             play_sfx("ui.click")
             return True
         if app.btnCancel.contains(mx,my) and app.btnCancel.handlePress(mx,my): 
@@ -1486,6 +1947,80 @@ def _code_from_key(k):
     return kl
 
 def onKeyPress(app,key):
+    # Welcome screen typing
+    if app.game_state=="title":
+        k=_norm_key(key)
+        code = _code_from_key(key)
+        # Handle backspace, enter, typing for username/password
+        if app.welcome_state=="enter":
+            if k=="backspace":
+                app.welcome_username = app.welcome_username[:-1]
+                app.inputName.value = app.welcome_username
+                play_sfx("tetr.move", volume=0.15)
+                return
+            elif k=="enter" or k==" " and False:
+                # Simulate JOIN click
+                import random as _r
+                def gen_random_name():
+                    adj = _r.choice(app.random_names) if hasattr(app,'random_names') else "GUEST"
+                    num = _r.randint(100,9999)
+                    return f"{adj}_{num}"
+                def is_registered(name):
+                    return name.strip().upper() in app.registered_users if name else False
+                name = app.welcome_username.strip()
+                if not name:
+                    rnd = gen_random_name()
+                    app.username = rnd
+                    app.is_anonymous = True
+                    app.game_state="menu"; app.tabGroup.active=2; app.tetr=TetrGame(mode="zen"); app.game_state="playing"; app.badgeOPP.text="SOLO ZEN"; app.inputName.focused=False
+                    stop_bgm(); play_bgm("bgm.zen", floor=0)
+                else:
+                    if is_registered(name):
+                        app.welcome_state="taken"; app.welcome_password=""
+                    else:
+                        app.welcome_state="available"
+                play_sfx("ui.click")
+                return
+            elif len(k)==1 and k.isprintable() and len(app.welcome_username)<16:
+                # Only allow alphanumeric and _ and -
+                if k in "abcdefghijklmnopqrstuvwxyz0123456789_-" or (k.isalnum()):
+                    app.welcome_username += key if len(key)==1 else k
+                    # Keep original case for display — use key as typed
+                    if len(key)==1 and key.isalnum():
+                        # Replace last char with actual key to preserve case
+                        app.welcome_username = app.welcome_username[:-1] + key
+                    app.inputName.value = app.welcome_username
+                    play_sfx("tetr.move", volume=0.1, pitch=1.1)
+                return
+            elif k=="escape":
+                app.welcome_username=""
+                app.welcome_error=""
+                return
+        elif app.welcome_state=="taken":
+            # typing password
+            if k=="backspace":
+                app.welcome_password = app.welcome_password[:-1]
+                play_sfx("tetr.move", volume=0.15)
+                return
+            elif k=="enter":
+                # Try login
+                if app.welcome_password:
+                    app.username = app.welcome_username.strip()
+                    app.is_anonymous=False
+                    app.inputName.value=app.username
+                    app.game_state="menu"; app.tabGroup.active=2; app.tetr=TetrGame(mode="zen"); app.game_state="playing"; app.badgeOPP.text="SOLO ZEN"; app.inputName.focused=False
+                    stop_bgm(); play_bgm("bgm.zen", floor=0)
+                    play_sfx("ui.click")
+                return
+            elif len(k)==1 and k.isprintable() and len(app.welcome_password)<24:
+                app.welcome_password += key if len(key)==1 else k
+                play_sfx("tetr.move", volume=0.1)
+                return
+            elif k=="escape":
+                app.welcome_state="enter"; app.welcome_password=""; app.welcome_error=""
+                play_sfx("ui.back")
+                return
+
     k=_norm_key(key)
     code = _code_from_key(key)
 
@@ -1494,12 +2029,10 @@ def onKeyPress(app,key):
         if app.config_selected:
             action,slot = app.config_selected
             if k=="escape":
-                # clear
                 if app.configTab=="GUIDELINE": app.keybinds_guideline[action][slot]="[NOT SET]"
                 elif app.configTab=="CUSTOM": app.keybinds_custom[action][slot]="[NOT SET]"; app.keybinds[action][slot]="[NOT SET]"
                 else: app.keybinds[action][slot]="[NOT SET]"
             else:
-                # set
                 disp = code
                 if app.configTab=="GUIDELINE": app.keybinds_guideline[action][slot]=disp
                 elif app.configTab=="CUSTOM": app.keybinds_custom[action][slot]=disp; app.keybinds[action][slot]=disp
@@ -1524,52 +2057,84 @@ def onKeyPress(app,key):
         if k=="r": reset_game(app)
         if k=="escape": go_title(app)
         return
-    # use custom binds — check if key matches any action
-    # For now keep original WASD + arrows logic, but also support custom
-    # We'll map custom binds to actions
-    # Simple: if code in move_left binds etc
+
     def is_bound(action_name, key_code):
         binds = app.keybinds.get(action_name, [])
-        return key_code in binds or k in [b.lower() for b in binds] or _norm_key(binds[0] if binds else "").lower()==k
+        # Check code exact or key lower
+        if key_code in binds:
+            return True
+        # Also check normalized lower versions
+        low_binds = [b.lower() for b in binds if isinstance(b,str)]
+        if k in low_binds:
+            return True
+        # Check if any bind's normalized equals k
+        for b in binds:
+            if isinstance(b,str) and _norm_key(b).lower()==k:
+                return True
+        return False
 
+    # Movement first
     if k in ("left","a") or is_bound("move_left", code): 
-        if app.tetr.try_move(-1,0): play_sfx("tetr.move", pitch=0.98)
-    elif k in ("right","d") or is_bound("move_right", code): 
-        if app.tetr.try_move(1,0): play_sfx("tetr.move", pitch=1.02)
-    elif k in ("down","s") or is_bound("soft_drop", code): 
+        if app.tetr.try_move(-1,0): play_sfx("tetr.move", pitch=0.98, floor=app.tetr.stats["lines"]//5)
+        return
+    if k in ("right","d") or is_bound("move_right", code): 
+        if app.tetr.try_move(1,0): play_sfx("tetr.move", pitch=1.02, floor=app.tetr.stats["lines"]//5)
+        return
+    if k in ("down","s") or is_bound("soft_drop", code): 
         app.tetr.soft_drop=True
-        play_sfx("tetr.softdrop", volume=0.2)
-    elif k in ("up","w") or is_bound("hard_drop", code): 
+        play_sfx("tetr.softdrop", volume=0.2, floor=app.tetr.stats["lines"]//5)
+        return
+
+    # Rotation — FIXED: up and w now work for rotation, not just hard_drop
+    # TETR.IO: x= cw, z= ccw, c= 180/hold, up= cw (many players), w= cw (WASD)
+    # We prioritize rotation binds over hard_drop for up/w if they are bound to rotate
+    if k=="z" or is_bound("rotate_ccw", code) or (k in ("left",) and is_bound("rotate_ccw", code)):
+        if app.tetr.try_rotate(-1): 
+            play_sfx("tetr.rotate", pitch=0.92, floor=app.tetr.stats["lines"]//5)
+        return
+    if k=="x" or is_bound("rotate_cw", code) or k in ("up","w") or is_bound("rotate_cw", "KEYW") or is_bound("rotate_cw", "ARROWUP"):
+        # If up/w is explicitly bound to hard_drop, don't rotate — let hard_drop below handle it
+        # But if up/w is bound to rotate_cw (user custom), rotate
+        # Check: if key is up/w and hard_drop bind is exclusive and rotate not bound, treat as hard_drop
+        is_hard_only = False
+        if k in ("up","w"):
+            # If this key code is ONLY bound to hard_drop and not rotate, do hard_drop later
+            if is_bound("hard_drop", code) and not is_bound("rotate_cw", code) and not is_bound("rotate_ccw", code):
+                is_hard_only = True
+        if not is_hard_only:
+            if app.tetr.try_rotate(1): 
+                play_sfx("tetr.rotate", pitch=1.0, floor=app.tetr.stats["lines"]//5)
+            return
+
+    if k=="c" or is_bound("rotate_180", code):
+        # 180 — try hold first if hold is bound to same key
+        if is_bound("hold", code) and k=="c":
+            # In WASD, c is both 180 and hold — prioritize hold
+            do_hold(app)
+        else:
+            if app.tetr.try_rotate(2): 
+                play_sfx("tetr.rotate", pitch=0.85, floor=app.tetr.stats["lines"]//5)
+        return
+
+    if is_bound("hold", code) or k in ("shift","shiftleft"):
+        do_hold(app)
+        return
+
+    # Hard drop — space always, plus up/w if they are bound to hard_drop and not rotate
+    if k in ("space"," ") or is_bound("hard_drop", code) or (k in ("up","w") and not is_bound("rotate_cw", code) and not is_bound("rotate_ccw", code)):
         dist = 0
         while not app.tetr.board.collides(app.tetr.current,0,1): 
             app.tetr.current.y+=1
             dist+=1
-        play_sfx("tetr.harddrop", volume=0.5+min(dist*0.05,0.5), pitch=1.0-dist*0.01)
+        play_sfx("tetr.harddrop", volume=0.5+min(dist*0.05,0.5), pitch=1.0-dist*0.01, floor=app.tetr.stats["lines"]//5)
         attack,cleared,tspin,is_pc,is_opener,difficult=app.tetr.lock()
         handle_piece_lock(app,attack,cleared,tspin,is_pc,is_opener,difficult)
         app.tetr.spawn(); app.tetr.lock_delay=0
         return
-    elif k=="z" or is_bound("rotate_ccw", code): 
-        if app.tetr.try_rotate(-1): play_sfx("tetr.rotate_ccw", pitch=1.0)
-    elif k in ("up","w") and False: pass
-    elif k=="x" or is_bound("rotate_cw", code): 
-        if app.tetr.try_rotate(1): play_sfx("tetr.rotate", pitch=1.0)
-    elif k=="c" or is_bound("rotate_180", code) or is_bound("hold", code): 
-        # c is both rotate 180 and hold in different presets — prioritize hold if hold bound
-        if is_bound("hold", code) or k=="c":
-            do_hold(app)
-        else:
-            if app.tetr.try_rotate(2): play_sfx("tetr.rotate", pitch=0.85)
-    elif k in ("space"," "):
-        dist = 0
-        while not app.tetr.board.collides(app.tetr.current,0,1): 
-            app.tetr.current.y+=1
-            dist+=1
-        play_sfx("tetr.harddrop", volume=0.5+min(dist*0.05,0.5), pitch=1.0-dist*0.01)
-        attack,cleared,tspin,is_pc,is_opener,difficult=app.tetr.lock()
-        handle_piece_lock(app,attack,cleared,tspin,is_pc,is_opener,difficult)
-        app.tetr.spawn(); app.tetr.lock_delay=0
-    elif k=="escape" or is_bound("forfeit", code): go_title(app)
+
+    if k=="escape" or is_bound("forfeit", code): 
+        go_title(app)
+        return
 
 def onKeyRelease(app,key):
     k=_norm_key(key)
