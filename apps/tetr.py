@@ -207,30 +207,29 @@ ds_ext = None
 USE_EXTENSION_SIGNAL_STORE = False
 
 def _bgs_on_datastar_patch(evt):
-    # V25 FIX: No inner imports — Brython $B.$import bug reading '2'/'3' when import inside function
-    # Uses py_json (global import json as py_json) and window.JSON
+    # V26 FIX: Robust MP — log and handle both datastar and generic message
     try:
-        raw = evt.data
+        raw = evt.data if hasattr(evt, 'data') else str(evt)
+        # print(f"[BGS] SSE raw: {str(raw)[:200]}")
         if isinstance(raw, str) and raw.startswith("signals "):
             raw = raw[8:]
         parsed = None
-        # Try py_json first
         try:
             parsed = py_json.loads(raw)
         except:
             try:
-                # raw may be JS object already parsed by EventSource? Try window.JSON path
                 js_obj = window.JSON.parse(raw) if isinstance(raw, str) else raw
-                # Stringify via window.JSON then parse via py_json for Python dict
                 json_str = window.JSON.stringify(js_obj)
                 parsed = py_json.loads(json_str)
             except:
-                # Last resort: if raw is already dict-like from Brython, use as is
                 try:
                     parsed = raw if isinstance(raw, dict) else {}
                 except:
                     parsed = {}
         if isinstance(parsed, dict):
+            # Log if character-state-update present
+            if "character-state-update" in parsed:
+                print(f"[BGS] Got character-state-update with {len(parsed.get('character-state-update',{}).get('updates',[]))} updates")
             for kk, vv in parsed.items():
                 _bgs_signals_py[kk] = vv
                 try:
@@ -238,7 +237,14 @@ def _bgs_on_datastar_patch(evt):
                 except:
                     pass
     except Exception as ex:
-        # print(f"[BGS] patch parse fail {ex}")
+        print(f"[BGS] patch parse fail {ex}")
+        pass
+
+def _bgs_on_any_message(evt):
+    # Fallback for generic message event
+    try:
+        _bgs_on_datastar_patch(evt)
+    except:
         pass
 
 def get_signal(n,d=None):
@@ -336,7 +342,15 @@ except Exception as e:
                         es_obj = window.eval("new EventSource('" + stream_url + "')")
                         window._bgs_es = es_obj
                         es_obj.addEventListener("datastar-patch-signals", _bgs_on_datastar_patch)
+                        es_obj.addEventListener("message", _bgs_on_any_message)
+                        es_obj.addEventListener("open", lambda e: print(f"[BGS] SSE OPEN OK {stream_url}"))
+                        es_obj.addEventListener("error", lambda e: print(f"[BGS] SSE ERROR {e}"))
                         print(f"[BGS] SSE OPEN V24 {stream_url}")
+                        # Store for reconnection check
+                        try:
+                            window._bgs_last_sid = sid
+                        except:
+                            pass
                     except Exception as sse_e:
                         print(f"[BGS] SSE fail {sse_e}")
                     return data
