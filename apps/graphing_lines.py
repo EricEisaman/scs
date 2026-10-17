@@ -1,4 +1,4 @@
-from scs import *
+from cmu_graphics import *
 import random
 
 C_BG=rgb(11,14,20); C_PANEL=rgb(22,26,36); C_PANEL2=rgb(32,38,52)
@@ -31,11 +31,12 @@ def onAppStart(app):
     app.attemptM=0; app.attemptB=0; app.attemptX1=0; app.attemptY1=0
     app.buildCorrect=False; app.formulaCorrect=False
     app.feedback=''; app.feedbackColor=C_TEXT
-    generateBuildTarget(app)
+    # generate both targets but end with feedback for current mode
     generateFormulaTarget(app)
+    generateBuildTarget(app)
+    checkBuild(app)
 
 def generateBuildTarget(app):
-    # keep x1,y1 between -10 and 10 for intuitive point-slope graphing
     app.buildForm = random.choice(['slope','point'])
     if app.buildForm == 'point':
         for _ in range(100):
@@ -43,7 +44,7 @@ def generateBuildTarget(app):
             app.buildX1 = random.randint(-8,8)
             app.buildY1 = random.randint(-8,8)
             app.buildB = app.buildY1 - app.buildM*app.buildX1
-            if -10 <= app.buildB <= 10 and -10 <= app.buildX1 <= 10 and -10 <= app.buildY1 <= 10:
+            if -10 <= app.buildB <= 10:
                 break
     else:
         app.buildM = random.choice([-2,-1.5,-1,-0.5,0.5,1,1.5,2])
@@ -55,11 +56,12 @@ def generateBuildTarget(app):
                 break
     app.userP1=[-4,1]; app.userP2=[4,3]
     app.buildCorrect=False
-    app.feedback='Drag P1 & P2 to match the equation'
-    app.feedbackColor=C_TEXT
+    # only set this message when we are actually in build mode
+    if app.mode=='build':
+        app.feedback='Drag P1 & P2 to match the equation'
+        app.feedbackColor=C_TEXT
 
 def generateFormulaTarget(app):
-    # integer slope & intercept, x1,y1 clamped to [-10,10]
     app.fM = random.choice([-3,-2,-1,1,2,3])
     app.fB = random.randint(-5,5)
     for _ in range(100):
@@ -72,8 +74,9 @@ def generateFormulaTarget(app):
     app.fP1=[x1,y1]; app.fP2=[x2,y2]
     app.attemptM=0; app.attemptB=0; app.attemptX1=x1; app.attemptY1=y1
     app.formulaCorrect=False
-    app.feedback='Find m, b and a point on this line'
-    app.feedbackColor=C_TEXT
+    if app.mode=='formula':
+        app.feedback='Find m, b and a point on this line'
+        app.feedbackColor=C_TEXT
 
 def mathToPixel(app,mx,my):
     px=app.gLeft+(mx-app.xMin)/(app.xMax-app.xMin)*app.gW
@@ -97,12 +100,13 @@ def checkBuild(app):
         return False
     ok = abs(um-app.buildM)<0.2 and abs(ub-app.buildB)<0.5
     app.buildCorrect = ok
-    if ok:
-        app.feedback='✓ Perfect! New equation?'
-        app.feedbackColor=C_GOOD
-    else:
-        app.feedback='Drag P1 & P2 to match the equation'
-        app.feedbackColor=C_TEXT
+    if app.mode=='build':
+        if ok:
+            app.feedback='✓ Perfect! New equation?'
+            app.feedbackColor=C_GOOD
+        else:
+            app.feedback='Drag P1 & P2 to match the equation'
+            app.feedbackColor=C_TEXT
     return ok
 
 def drawGrid(app):
@@ -210,8 +214,16 @@ def redrawAll(app):
 
 def onMousePress(app,mx,my):
     if 932<=mx<=988 and 92<=my<=114: app.snap=not app.snap; return
-    if 730<=mx<=872 and 145<=my<=185: app.mode='build'; return
-    if 878<=mx<=1022 and 145<=my<=185: app.mode='formula'; return
+    if 730<=mx<=872 and 145<=my<=185:
+        app.mode='build'
+        checkBuild(app)
+        return
+    if 878<=mx<=1022 and 145<=my<=185:
+        app.mode='formula'
+        app.feedback='Find m, b and a point on this line'
+        app.feedbackColor=C_TEXT
+        app.formulaCorrect=False
+        return
     if app.mode=='build' and 755<=mx<=995 and 329<=my<=371: generateBuildTarget(app); return
     if app.mode=='formula' and 755<=mx<=995 and 523<=my<=567:
         mOk = abs(app.attemptM-app.fM)<0.01
