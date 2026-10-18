@@ -47,6 +47,7 @@ main()
 <div style="margin-top:8px;"><button id="run-btn">▶ Run</button><button id="stop-btn">■ Stop</button></div>
 <div id="log"></div>
 </div>
+
 <script type="text/python" id="main">
 from browser import document, timer
 import scs
@@ -203,8 +204,14 @@ def sandbox_run_app(width=400, height=400, stepsPerSecond=30):
                 scs._ctx.fillStyle = scs._app.background
                 scs._ctx.fillRect(0, 0, width, height)
             _call_callback('redrawAll', scs._app)
-            for shape in list(scs._all_shapes):
-                shape.draw(scs._ctx)
+            shapes = getattr(scs, '_all_shapes', None)
+            if shapes is None:
+                shapes = getattr(scs, '_shapes', [])
+            for shape in list(shapes):
+                try:
+                    shape.draw(scs._ctx)
+                except:
+                    pass
         except Exception:
             log(f'Frame failed:\n{traceback.format_exc()}')
             stop_app()
@@ -212,6 +219,7 @@ def sandbox_run_app(width=400, height=400, stepsPerSecond=30):
     frame()
     interval = int(1000 / stepsPerSecond) if stepsPerSecond > 0 else 33
     _app_timer = timer.set_interval(frame, interval)
+    log(f'Running {width}x{height} at {stepsPerSecond} fps; canvas={_canvas.width}x{_canvas.height}')
 
 def exec_user_code(event=None):
     global _user_ns
@@ -226,7 +234,7 @@ def exec_user_code(event=None):
 
 document['run-btn'].bind('click', exec_user_code)
 document['stop-btn'].bind('click', lambda event: stop_app())
-log('Sandbox ready.')
+log('Sandbox ready. The graphics API is loaded from root scs.py.')
 </script>
 </body>
 </html>
