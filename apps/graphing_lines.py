@@ -1,4 +1,4 @@
-from cmu_graphics import *
+from scs import *
 import random
 
 C_BG=rgb(11,14,20); C_PANEL=rgb(22,26,36); C_PANEL2=rgb(32,38,52)
