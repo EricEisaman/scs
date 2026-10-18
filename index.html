@@ -32,7 +32,6 @@ _app_timer = None
 _user_ns = {}
 _callback_names = ('onAppStart','appStarted','redrawAll','onStep','onMousePress','onMouseRelease','onMouseMove','onMouseDrag','onKeyPress','onKeyRelease','onKeyHold','onResize')
 
-# FORCE single canvas - never let scs create a second one
 scs._canvas = _canvas
 try:
     scs._ctx = _canvas.getContext('2d')
@@ -51,6 +50,9 @@ def _call(name, *args):
     except:
         pass
 
+_is_dragging = False
+_pressed_keys = set()
+
 def _pos(ev):
     r = _canvas.getBoundingClientRect()
     sx = _canvas.width / r.width if r.width else 1
@@ -58,28 +60,86 @@ def _pos(ev):
     return ((ev.clientX - r.left) * sx, (ev.clientY - r.top) * sy)
 
 def _mp(ev):
-    _canvas.focus()
+    global _is_dragging
+    _is_dragging = True
+    try:
+        _canvas.focus()
+    except:
+        pass
     if scs._app is not None:
         _call('onMousePress', scs._app, *_pos(ev))
 
 def _mr(ev):
+    global _is_dragging
     if scs._app is not None:
         _call('onMouseRelease', scs._app, *_pos(ev))
+    _is_dragging = False
 
 def _mm(ev):
-    if scs._app is not None:
-        _call('onMouseMove', scs._app, *_pos(ev))
+    if scs._app is None:
+        return
+    x, y = _pos(ev)
+    if _is_dragging:
+        _call('onMouseDrag', scs._app, x, y)
+    _call('onMouseMove', scs._app, x, y)
 
 def _kp(ev):
-    if ev.target != _canvas or scs._app is None:
+    if scs._app is None:
         return
-    k = 'space' if ev.key == ' ' else ev.key.lower()
-    _call('onKeyPress', scs._app, k)
+    try:
+        ae = document.activeElement
+        if ae is not None and ae.tagName in ('INPUT','TEXTAREA','SELECT'):
+            return
+    except:
+        pass
+    k = ev.key
+    if k == ' ':
+        k = 'space'
+    else:
+        k = k.lower()
+        if k == 'arrowleft':
+            k = 'left'
+        elif k == 'arrowright':
+            k = 'right'
+        elif k == 'arrowup':
+            k = 'up'
+        elif k == 'arrowdown':
+            k = 'down'
+    if k not in _pressed_keys:
+        _pressed_keys.add(k)
+        _call('onKeyPress', scs._app, k)
+
+def _kr(ev):
+    if scs._app is None:
+        return
+    k = ev.key
+    if k == ' ':
+        k = 'space'
+    else:
+        k = k.lower()
+        if k == 'arrowleft':
+            k = 'left'
+        elif k == 'arrowright':
+            k = 'right'
+        elif k == 'arrowup':
+            k = 'up'
+        elif k == 'arrowdown':
+            k = 'down'
+    if k in _pressed_keys:
+        _pressed_keys.discard(k)
+    _call('onKeyRelease', scs._app, k)
+
+def _kh():
+    if scs._app is None:
+        return
+    for k in list(_pressed_keys):
+        _call('onKeyHold', scs._app, k)
 
 _canvas.bind('mousedown', _mp)
 _canvas.bind('mouseup', _mr)
 _canvas.bind('mousemove', _mm)
 document.bind('keydown', _kp)
+document.bind('keyup', _kr)
 
 def stop():
     global _app_timer
@@ -90,7 +150,7 @@ def stop():
 def run_app(width=400, height=400, stepsPerSecond=30):
     global _user_funcs, _app_timer
     stop()
-    _user_funcs = {n: _user_ns[n] for n in _callback_names if callable(_user_ns.get(n))}
+    _user_funcs = {n: _user_ns for n in _callback_names if callable(_user_ns.get(n))}
     _canvas.setAttribute('width', str(width))
     _canvas.setAttribute('height', str(height))
     _canvas.style.width = f"{width}px"
@@ -103,6 +163,7 @@ def run_app(width=400, height=400, stepsPerSecond=30):
         _call('appStarted', scs._app)
     def frame():
         try:
+            _kh()
             if 'onStep' in _user_funcs and not scs._app.paused:
                 _call('onStep', scs._app)
             scs._ctx.clearRect(0, 0, width, height)
@@ -110,7 +171,7 @@ def run_app(width=400, height=400, stepsPerSecond=30):
                 try:
                     bg = scs._app.background
                     if isinstance(bg, dict) and bg.get('_is_grad'):
-                        scs._ctx.fillStyle = bg['colors'][0]
+                        scs._ctx.fillStyle = bg['colors']
                     else:
                         scs._ctx.fillStyle = bg
                     scs._ctx.fillRect(0, 0, width, height)
@@ -129,7 +190,7 @@ def run_app(width=400, height=400, stepsPerSecond=30):
             stop()
     frame()
     iv = int(1000 / stepsPerSecond) if stepsPerSecond > 0 else 33
-    _app_timer = timer.set_interval(frame, iv)
+    _app_timer = timer.set_interval(frame, iv)[n][0]
 
 def app_file():
     d = "apps/app.py"
@@ -184,11 +245,11 @@ def exec_code(code, fn):
     try:
         for name in scs.__all__:
             if hasattr(scs, name):
-                _user_ns[name] = getattr(scs, name)
+                _user_ns = getattr(scs, name)
     except:
         for k in dir(scs):
             if not k.startswith('_'):
-                _user_ns[k] = getattr(scs, k)
+                _user_ns = getattr(scs, k)
     _user_ns['sin']=math.sin
     _user_ns['cos']=math.cos
     _user_ns['atan2']=math.atan2
@@ -204,11 +265,11 @@ def exec_code(code, fn):
         exec(code, _user_ns)
         has = any(n in _user_ns and callable(_user_ns.get(n)) for n in _callback_names)
         if has and not _user_funcs:
-            _user_funcs = {n: _user_ns[n] for n in _callback_names if callable(_user_ns.get(n))}
+            _user_funcs = {n: _user_ns for n in _callback_names if callable(_user_ns.get(n))}
             if _user_funcs:
                 run_app(width=1050, height=700)
     except:
-        pass
+        pass[name][k][n]
 
 def load():
     t = app_file()
