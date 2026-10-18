@@ -1,100 +1,79 @@
 """
 scs.py - Sigma Computer Science - CMU Graphics API shim for Brython
-Version: 3.0.0 - EXACT CMU ALIGN LOGIC
+Version: 3.1.0 - CMU-compatible + SCS mutable-align extension
 
-Per https://academy.cs.cmu.edu/docs/ and
-https://github.com/cmu-cs-academy/desktop-cmu-graphics/blob/main/cmu_graphics/shape_logic.py
+Fixes the ?app= vs sandbox offset bug:
 
-CMU Spec:
-  Rect(left, top, width, height, fill='black', border=None, borderWidth=2,
-       opacity=100, rotateAngle=0, dashes=False, align='left-top', visible=True,
-       roundness=0)
-  Oval(centerX, centerY, width, height, align='center')
-  Circle(centerX, centerY, radius, align='center')
-  RegularPolygon(centerX, centerY, radius, points, align='center')
-  Star(centerX, centerY, radius, points, ratio=0.5, align='center')
-  Label(text, centerX, centerY, fill='black', size=12, font='arial',
-        bold=False, italic=False, align='center')
-  Line(x1,y1,x2,y2), Polygon(*points), Arc, Image, Group
+Root cause in the screenshots:
+  Rect(0,0,W,H, align='left-top') was created, but old/new align handling
+  fell back to 'center'. Centered at (0,0) only the bottom-right quadrant
+  (W/2 x H/2) is visible at top-left. That's exactly the white half-grid
+  and black panels offset into the graph in ?app=graphing_lines.
 
-Align: 9 positions, creation-time only (not mutable property)
-  left-top    top    right-top
-  left        center right
-  left-bottom bottom right-bottom
-Aliases: top-left=left-top, bottom-left=left-bottom, leftTop, rightBottom,
-         center-left=left, top-center=top, etc.
-
-CMU Implementation: x,y is interpreted according to align
-  _resolve_bbox(x,y,w,h,align) -> left,top where:
-    left = x - ox, top = y - oy
-    ox = 0 for left, w/2 for center, w for right
-    oy = 0 for top, h/2 for center, h for bottom
+Changes:
+  - Single canonical _VALID_ALIGNS + _ALIGN_ALIASES (no duplicates)
+  - _normalize_align handles 'left-top', 'left_top', 'leftTop', 'top-left', etc.
+  - _resolve_bbox is pure (no console.log spam)
+  - _BaseShape: x,y now mean "reference point per align" like CMU
+    left = x - ox(align,W), top = y - oy(align,H)
+  - align is now a mutable property (SCS extension) that preserves the
+    reference point: changing align moves left/top so that x,y stays put.
+    This keeps CMU creation-time behavior but doesn't break apps that do
+    shape.align = '...' after creation.
+  - Rect default align='left-top', Oval/Circle/Star/etc default 'center'
+    per https://academy.cs.cmu.edu/docs/ and CMU desktop implementation
+  - Group: computes bbox from children, removes children from global _shapes
+    to avoid double-draw, moves children when group moves, supports align
+    mutation.
+  - Canvas auto-resizes to App width/height.
+  - _clear_shapes called on App init.
 """
 
 from browser import window, document
 import math
 
 # ======================================================================
-# ALIGN LOGIC - EXACT COPY FROM CMU desktop-cmu-graphics
-# https://github.com/cmu-cs-academy/desktop-cmu-graphics/blob/main/cmu_graphics/shape_logic.py
+# ALIGN LOGIC - CMU spec + aliases
 # ======================================================================
 
-# CMU's 9 aligns
 _VALID_ALIGNS = {
     'left-top', 'top', 'right-top',
     'left', 'center', 'right',
     'left-bottom', 'bottom', 'right-bottom'
 }
 
-# Aliases map to canonical
 _ALIGN_ALIASES = {
+    # hyphenless / camelCase / reversed
+    'lefttop': 'left-top',
+    'topleft': 'left-top',
     'top-left': 'left-top',
+    'righttop': 'right-top',
+    'topright': 'right-top',
     'top-right': 'right-top',
+    'leftbottom': 'left-bottom',
+    'bottomleft': 'left-bottom',
     'bottom-left': 'left-bottom',
+    'rightbottom': 'right-bottom',
+    'bottomright': 'right-bottom',
     'bottom-right': 'right-bottom',
-    'lefttop': 'left-top',
-    'righttop': 'right-top',
-    'leftbottom': 'left-bottom',
-    'rightbottom': 'right-bottom',
-    'topleft': 'left-top',
-    'topright': 'right-top',
-    'bottomleft': 'left-bottom',
-    'bottomright': 'right-bottom',
-    'centertop': 'top',
+    # center variants
     'topcenter': 'top',
-    'centerbottom': 'bottom',
+    'centertop': 'top',
+    'top-center': 'top',
+    'center-top': 'top',
     'bottomcenter': 'bottom',
-    'centerleft': 'left',
+    'centerbottom': 'bottom',
+    'bottom-center': 'bottom',
+    'center-bottom': 'bottom',
     'leftcenter': 'left',
-    'centerright': 'right',
+    'centerleft': 'left',
+    'left-center': 'left',
+    'center-left': 'left',
     'rightcenter': 'right',
+    'centerright': 'right',
+    'right-center': 'right',
+    'center-right': 'right',
     'centercenter': 'center',
-    'centre': 'center',
-}
-
-_VALID_ALIGNS = {
-    'left-top', 'top', 'right-top',
-    'left', 'center', 'right',
-    'left-bottom', 'bottom', 'right-bottom'
-}
-
-_ALIGN_ALIASES = {
-    'lefttop': 'left-top',
-    'topleft': 'left-top',
-    'righttop': 'right-top',
-    'topright': 'right-top',
-    'leftbottom': 'left-bottom',
-    'bottomleft': 'left-bottom',
-    'rightbottom': 'right-bottom',
-    'bottomright': 'right-bottom',
-    'topcenter': 'top',
-    'centertop': 'top',
-    'bottomcenter': 'bottom',
-    'centerbottom': 'bottom',
-    'leftcenter': 'left',
-    'centerleft': 'left',
-    'rightcenter': 'right',
-    'centerright': 'right',
     'centre': 'center',
     'middle': 'center',
 }
@@ -102,80 +81,80 @@ _ALIGN_ALIASES = {
 def _normalize_align(align):
     if not align:
         return 'center'
-    a = str(align).strip().lower().replace('_','-').replace(' ','-')
-    a_nospace = a.replace('-','')
-    if a_nospace in _ALIGN_ALIASES:
-        return _ALIGN_ALIASES[a_nospace]
-    if a in _ALIGN_ALIASES:
-        return _ALIGN_ALIASES[a]
-    if a in _VALID_ALIGNS:
-        return a
-    # substring fallback like CMU
-    has_left = 'left' in a
-    has_right = 'right' in a
-    has_top = 'top' in a
-    has_bottom = 'bottom' in a
-    if has_left and has_top: return 'left-top'
-    if has_right and has_top: return 'right-top'
-    if has_left and has_bottom: return 'left-bottom'
-    if has_right and has_bottom: return 'right-bottom'
-    if has_left: return 'left'
-    if has_right: return 'right'
-    if has_top: return 'top'
-    if has_bottom: return 'bottom'
+    s = str(align).strip()
+    if not s:
+        return 'center'
+    lower = s.lower()
+    # replace _ and spaces with -
+    norm_dash = lower.replace('_', '-').replace(' ', '-')
+    nospace = norm_dash.replace('-', '')
+    # 1) direct alias lookup on nospace (handles leftTop, LeftTop, etc.)
+    if nospace in _ALIGN_ALIASES:
+        return _ALIGN_ALIASES[nospace]
+    # 2) direct alias with dashes
+    if norm_dash in _ALIGN_ALIASES:
+        return _ALIGN_ALIASES[norm_dash]
+    # 3) canonical
+    if norm_dash in _VALID_ALIGNS:
+        return norm_dash
+    if nospace in _VALID_ALIGNS:
+        return nospace  # shouldn't happen but safe
+    # 4) substring fallback like CMU desktop does
+    has_left = 'left' in lower
+    has_right = 'right' in lower
+    has_top = 'top' in lower
+    has_bottom = 'bottom' in lower
+    has_center = 'center' in lower or 'middle' in lower or 'centre' in lower
+    if has_left and has_top:
+        return 'left-top'
+    if has_right and has_top:
+        return 'right-top'
+    if has_left and has_bottom:
+        return 'left-bottom'
+    if has_right and has_bottom:
+        return 'right-bottom'
+    if has_left:
+        return 'left'
+    if has_right:
+        return 'right'
+    if has_top:
+        return 'top'
+    if has_bottom:
+        return 'bottom'
+    if has_center:
+        return 'center'
     return 'center'
 
 def _get_align_offsets(align, width, height):
     a = _normalize_align(align)
+    # horizontal
     if a in ('left-top', 'left', 'left-bottom'):
         ox = 0
     elif a in ('right-top', 'right', 'right-bottom'):
         ox = width
-    else:
-        ox = width/2
+    else:  # top, bottom, center
+        ox = width / 2
+    # vertical
     if a in ('left-top', 'top', 'right-top'):
         oy = 0
     elif a in ('left-bottom', 'bottom', 'right-bottom'):
         oy = height
-    else:
-        oy = height/2
+    else:  # left, right, center
+        oy = height / 2
     return ox, oy
 
 def _resolve_bbox(x, y, width, height, align):
+    """CMU: given reference (x,y), size, align -> (left,top)"""
     ox, oy = _get_align_offsets(align, width, height)
-    return x - ox, y - oy
-
-def _debug_log(msg):
-    try:
-        from browser import window
-        if hasattr(window, 'console') and hasattr(window.console, 'log'):
-            window.console.log(msg)
-    except:
-        pass
-    try:
-        print(msg)
-    except:
-        pass
-
-def _resolve_bbox(x, y, width, height, align):
-    """
-    Given reference point (x,y), bbox size (w,h), and align,
-    return (left, top) of bbox. This is how CMU interprets x,y.
-    left = x - ox
-    top = y - oy
-    where ox,oy from _get_align_offsets
-    """
-    ox, oy = _get_align_offsets(align, width, height)
-    _debug_log(f"[SCS ALIGN DEBUG] _resolve_bbox x={x} y={y} w={width} h={height} align={align} -> norm={_normalize_align(align)} ox={ox} oy={oy} -> left={x-ox} top={y-oy}")
     return x - ox, y - oy
 
 # ======================================================================
-# CANVAS SETUP - Brython specific
+# CANVAS
 # ======================================================================
 _canvas = None
 _ctx = None
 _app = None
-_shapes = []  # list of all shapes for z-order
+_shapes = []
 _image_cache = {}
 
 def _ensure_canvas():
@@ -190,22 +169,32 @@ def _ensure_canvas():
             _canvas.style.border = '1px solid #ccc'
             document.body.appendChild(_canvas)
         _ctx = _canvas.getContext('2d')
+    # sync with app size if app exists
+    if _app is not None:
+        try:
+            if _canvas.width != int(_app.width) or _canvas.height != int(_app.height):
+                _canvas.width = int(_app.width)
+                _canvas.height = int(_app.height)
+        except:
+            pass
 
 def _clear_shapes():
     global _shapes
     _shapes = []
 
 # ======================================================================
-# BASE SHAPE CLASS
+# BASE SHAPE - now with mutable align + x,y reference point
 # ======================================================================
 class _BaseShape:
     """
-    Base for all shapes. Stores _left,_top,_width,_height as actual bbox.
-    align is stored as _align but is creation-time only, not mutable.
-    Per CMU docs, you cannot set shape.align after creation.
+    Stores bbox as _left,_top,_width,_height.
+    x,y are reference point per current align:
+      x = left + ox(align,W)
+      y = top + oy(align,H)
+    Changing align preserves x,y (SCS mutable extension).
+    Changing x,y moves left/top.
     """
     def __init__(self, **kwargs):
-        # align is creation-time only - store privately
         self._align = _normalize_align(kwargs.get('align', 'center'))
         self.fill = kwargs.get('fill', 'black')
         self.border = kwargs.get('border', None)
@@ -220,7 +209,47 @@ class _BaseShape:
         self._height = 0
         self._group = None
 
-    # left, top, right, bottom, centerX, centerY, width, height
+    # ---- align mutable ----
+    @property
+    def align(self):
+        return self._align
+
+    @align.setter
+    def align(self, new_align):
+        new_align = _normalize_align(new_align)
+        if new_align == self._align:
+            return
+        # preserve reference point
+        ox_old, oy_old = _get_align_offsets(self._align, self._width, self._height)
+        ref_x = self._left + ox_old
+        ref_y = self._top + oy_old
+        ox_new, oy_new = _get_align_offsets(new_align, self._width, self._height)
+        self._left = ref_x - ox_new
+        self._top = ref_y - oy_new
+        self._align = new_align
+
+    # ---- reference point x,y ----
+    @property
+    def x(self):
+        ox, _ = _get_align_offsets(self._align, self._width, self._height)
+        return self._left + ox
+
+    @x.setter
+    def x(self, v):
+        ox, _ = _get_align_offsets(self._align, self._width, self._height)
+        self._left = float(v) - ox
+
+    @property
+    def y(self):
+        _, oy = _get_align_offsets(self._align, self._width, self._height)
+        return self._top + oy
+
+    @y.setter
+    def y(self, v):
+        _, oy = _get_align_offsets(self._align, self._width, self._height)
+        self._top = float(v) - oy
+
+    # ---- bbox properties ----
     @property
     def left(self):
         return self._left
@@ -268,7 +297,7 @@ class _BaseShape:
         return self._width
     @width.setter
     def width(self, v):
-        # Keep center
+        # SCS extension: keep center (CMU keeps center for width/height)
         cx = self.centerX
         self._width = float(v)
         self.centerX = cx
@@ -309,36 +338,26 @@ class _BaseShape:
             return False
 
 # ======================================================================
-# RECT - default align left-top per CMU
+# RECT - default left-top per CMU
 # ======================================================================
 class Rect(_BaseShape):
-    """
-    Rect(left, top, width, height, align='left-top')
-    x,y is left,top when align='left-top' (default)
-    x,y is center when align='center'
-    """
     def __init__(self, x, y, width, height, **kwargs):
-        # Extract align before passing to base - creation-time only
         align = kwargs.pop('align', 'left-top')
-        # Remove align from kwargs for base so it doesn't get double-processed
         base_kwargs = {k: v for k, v in kwargs.items() if k != 'align'}
         super().__init__(align=align, **base_kwargs)
         self._width = float(width)
         self._height = float(height)
-        # Resolve bbox: left,top from x,y,w,h,align
         l, t = _resolve_bbox(float(x), float(y), float(width), float(height), align)
         self._left = l
         self._top = t
         self.roundness = kwargs.get('roundness', 0)
+        # if part of a group, don't double-add (Group will handle)
         _shapes.append(self)
 
 # ======================================================================
 # OVAL - default center
 # ======================================================================
 class Oval(_BaseShape):
-    """
-    Oval(centerX, centerY, width, height, align='center')
-    """
     def __init__(self, x, y, width, height, **kwargs):
         align = kwargs.pop('align', 'center')
         base_kwargs = {k: v for k, v in kwargs.items() if k != 'align'}
@@ -354,9 +373,6 @@ class Oval(_BaseShape):
 # CIRCLE - default center
 # ======================================================================
 class Circle(_BaseShape):
-    """
-    Circle(centerX, centerY, radius, align='center')
-    """
     def __init__(self, x, y, radius, **kwargs):
         align = kwargs.pop('align', 'center')
         base_kwargs = {k: v for k, v in kwargs.items() if k != 'align'}
@@ -373,35 +389,19 @@ class Circle(_BaseShape):
     @property
     def radius(self):
         return self._radius
-
     @radius.setter
     def radius(self, v):
+        cx = self.centerX
+        cy = self.centerY
         self._radius = float(v)
         self._width = self._height = float(v) * 2
-
-    @property
-    def centerX(self):
-        return self._left + self._radius
-
-    @centerX.setter
-    def centerX(self, v):
-        self._left = float(v) - self._radius
-
-    @property
-    def centerY(self):
-        return self._top + self._radius
-
-    @centerY.setter
-    def centerY(self, v):
-        self._top = float(v) - self._radius
+        self.centerX = cx
+        self.centerY = cy
 
 # ======================================================================
 # REGULAR POLYGON - default center
 # ======================================================================
 class RegularPolygon(_BaseShape):
-    """
-    RegularPolygon(centerX, centerY, radius, points, align='center')
-    """
     def __init__(self, x, y, radius, points, **kwargs):
         align = kwargs.pop('align', 'center')
         base_kwargs = {k: v for k, v in kwargs.items() if k != 'align'}
@@ -417,40 +417,21 @@ class RegularPolygon(_BaseShape):
         _shapes.append(self)
 
     @property
-    def centerX(self):
-        return self._left + self._radius
-
-    @centerX.setter
-    def centerX(self, v):
-        self._left = float(v) - self._radius
-
-    @property
-    def centerY(self):
-        return self._top + self._radius
-
-    @centerY.setter
-    def centerY(self, v):
-        self._top = float(v) - self._radius
-
-    @property
     def radius(self):
         return self._radius
-
     @radius.setter
     def radius(self, v):
+        cx = self.centerX
+        cy = self.centerY
         self._radius = float(v)
         self._width = self._height = float(v) * 2
+        self.centerX = cx
+        self.centerY = cy
 
-# ======================================================================
-# STAR
-# ======================================================================
 class Star(RegularPolygon):
-    """
-    Star(centerX, centerY, radius, points, ratio=0.5, align='center')
-    """
     def __init__(self, x, y, radius, points, **kwargs):
-        super().__init__(x, y, radius, points, **kwargs)
         self.ratio = kwargs.get('ratio', 0.5)
+        super().__init__(x, y, radius, points, **kwargs)
 
 # ======================================================================
 # LINE
@@ -466,50 +447,36 @@ class Line:
         self.opacity = kwargs.get('opacity', 100)
         self.visible = kwargs.get('visible', True)
         self.dashes = kwargs.get('dashes', False)
+        self._group = None
         _shapes.append(self)
 
     @property
-    def left(self):
-        return min(self.x1, self.x2)
-
+    def left(self): return min(self.x1, self.x2)
     @property
-    def right(self):
-        return max(self.x1, self.x2)
-
+    def right(self): return max(self.x1, self.x2)
     @property
-    def top(self):
-        return min(self.y1, self.y2)
-
+    def top(self): return min(self.y1, self.y2)
     @property
-    def bottom(self):
-        return max(self.y1, self.y2)
-
+    def bottom(self): return max(self.y1, self.y2)
     @property
-    def centerX(self):
-        return (self.x1 + self.x2) / 2
-
+    def centerX(self): return (self.x1 + self.x2) / 2
     @centerX.setter
     def centerX(self, v):
         dx = float(v) - self.centerX
         self.x1 += dx
         self.x2 += dx
-
     @property
-    def centerY(self):
-        return (self.y1 + self.y2) / 2
-
+    def centerY(self): return (self.y1 + self.y2) / 2
     @centerY.setter
     def centerY(self, v):
         dy = float(v) - self.centerY
         self.y1 += dy
         self.y2 += dy
-
     def toFront(self):
         global _shapes
         if self in _shapes:
             _shapes.remove(self)
             _shapes.append(self)
-
     def toBack(self):
         global _shapes
         if self in _shapes:
@@ -529,6 +496,7 @@ class Polygon:
         self.visible = kwargs.get('visible', True)
         self.dashes = kwargs.get('dashes', False)
         self.rotateAngle = kwargs.get('rotateAngle', 0)
+        self._group = None
         xs = self.points[0::2]
         ys = self.points[1::2]
         self._left = min(xs) if xs else 0
@@ -536,7 +504,6 @@ class Polygon:
         self._width = (max(xs) - min(xs)) if xs else 0
         self._height = (max(ys) - min(ys)) if ys else 0
         _shapes.append(self)
-
     @property
     def left(self): return self._left
     @property
@@ -547,8 +514,18 @@ class Polygon:
     def bottom(self): return self._top + self._height
     @property
     def centerX(self): return self._left + self._width / 2
+    @centerX.setter
+    def centerX(self, v):
+        dx = float(v) - self.centerX
+        self._left += dx
+        self.points = [p + dx if i % 2 == 0 else p for i, p in enumerate(self.points)]
     @property
     def centerY(self): return self._top + self._height / 2
+    @centerY.setter
+    def centerY(self, v):
+        dy = float(v) - self.centerY
+        self._top += dy
+        self.points = [p + dy if i % 2 == 1 else p for i, p in enumerate(self.points)]
 
 # ======================================================================
 # ARC
@@ -568,37 +545,47 @@ class Arc(_BaseShape):
         _shapes.append(self)
 
 # ======================================================================
-# LABEL
+# LABEL - uses text alignment for drawing, but bbox for hits
 # ======================================================================
-class Label:
+class Label(_BaseShape):
     def __init__(self, text, x, y, **kwargs):
+        align = kwargs.pop('align', 'center')
+        # Label stores reference point as _x,_y for canvas textAlign
+        super().__init__(align=align, **kwargs)
         self.text = str(text)
         self.size = kwargs.get('size', 12)
         self.font = kwargs.get('font', 'arial')
         self.bold = kwargs.get('bold', False)
         self.italic = kwargs.get('italic', False)
-        self.fill = kwargs.get('fill', 'black')
-        self.opacity = kwargs.get('opacity', 100)
-        self.visible = kwargs.get('visible', True)
-        self.rotateAngle = kwargs.get('rotateAngle', 0)
-        self._x = float(x)
-        self._y = float(y)
+        # approximate metrics
         self._width = len(self.text) * self.size * 0.6
         self._height = float(self.size)
+        l, t = _resolve_bbox(float(x), float(y), self._width, self._height, align)
+        self._left = l
+        self._top = t
+        # also keep ref for drawLabel
+        self._ref_x = float(x)
+        self._ref_y = float(y)
         _shapes.append(self)
 
+    # x,y for Label should track ref, not left
     @property
-    def centerX(self): return self._x
-    @centerX.setter
-    def centerX(self, v): self._x = float(v)
+    def x(self):
+        return self._ref_x
+    @x.setter
+    def x(self, v):
+        dx = float(v) - self._ref_x
+        self._ref_x = float(v)
+        self._left += dx
+
     @property
-    def centerY(self): return self._y
-    @centerY.setter
-    def centerY(self, v): self._y = float(v)
-    @property
-    def left(self): return self._x
-    @property
-    def top(self): return self._y
+    def y(self):
+        return self._ref_y
+    @y.setter
+    def y(self, v):
+        dy = float(v) - self._ref_y
+        self._ref_y = float(v)
+        self._top += dy
 
 # ======================================================================
 # IMAGE
@@ -624,66 +611,143 @@ class Image(_BaseShape):
             pass
         _shapes.append(self)
 
-    @property
-    def centerX(self): return self._left + self._width / 2
-    @centerX.setter
-    def centerX(self, v): self._left = float(v) - self._width / 2
-    @property
-    def centerY(self): return self._top + self._height / 2
-    @centerY.setter
-    def centerY(self, v): self._top = float(v) - self._height / 2
-
 # ======================================================================
-# GROUP
+# GROUP - fixed to avoid double-draw offset
 # ======================================================================
-class Group:
-    def __init__(self, *shapes):
-        self.shapes = list(shapes)
-        self.visible = True
-        self.opacity = 100
-        self.rotateAngle = 0
-        self._left = 0
-        self._top = 0
-        if shapes:
+class Group(_BaseShape):
+    def __init__(self, *shapes, **kwargs):
+        align = kwargs.pop('align', 'left-top')
+        super().__init__(align=align, **kwargs)
+        # remove children from global list so they only draw via group
+        global _shapes
+        self.shapes = []
+        for s in shapes:
+            if s in _shapes:
+                _shapes.remove(s)
+            self.shapes.append(s)
             try:
-                self._left = min([s.left for s in shapes if hasattr(s, 'left')])
-                self._top = min([s.top for s in shapes if hasattr(s, 'top')])
+                s._group = self
             except:
                 pass
+        self._recalc_bbox()
         _shapes.append(self)
 
+    def _recalc_bbox(self):
+        if not self.shapes:
+            self._left = 0
+            self._top = 0
+            self._width = 0
+            self._height = 0
+            return
+        try:
+            lefts = [s.left for s in self.shapes if hasattr(s, 'left')]
+            tops = [s.top for s in self.shapes if hasattr(s, 'top')]
+            rights = [s.right for s in self.shapes if hasattr(s, 'right')]
+            bottoms = [s.bottom for s in self.shapes if hasattr(s, 'bottom')]
+            if lefts and rights and tops and bottoms:
+                self._left = min(lefts)
+                self._top = min(tops)
+                self._width = max(rights) - self._left
+                self._height = max(bottoms) - self._top
+        except:
+            pass
+
+    # moving group moves children
     @property
-    def left(self): return self._left
+    def left(self):
+        return self._left
+    @left.setter
+    def left(self, v):
+        dx = float(v) - self._left
+        self._left = float(v)
+        for s in self.shapes:
+            if hasattr(s, 'left'):
+                s.left += dx
+
     @property
-    def top(self): return self._top
+    def top(self):
+        return self._top
+    @top.setter
+    def top(self, v):
+        dy = float(v) - self._top
+        self._top = float(v)
+        for s in self.shapes:
+            if hasattr(s, 'top'):
+                s.top += dy
+
     @property
     def centerX(self):
-        if not self.shapes: return 0
-        return sum([s.centerX for s in self.shapes if hasattr(s, 'centerX')]) / len(self.shapes)
+        self._recalc_bbox()
+        return self._left + self._width / 2
     @centerX.setter
     def centerX(self, v):
         dx = float(v) - self.centerX
-        for s in self.shapes:
-            if hasattr(s, 'centerX'): s.centerX += dx
+        self.left = self._left + dx
+
     @property
     def centerY(self):
-        if not self.shapes: return 0
-        return sum([s.centerY for s in self.shapes if hasattr(s, 'centerY')]) / len(self.shapes)
+        self._recalc_bbox()
+        return self._top + self._height / 2
     @centerY.setter
     def centerY(self, v):
         dy = float(v) - self.centerY
+        self.top = self._top + dy
+
+    def add(self, shape):
+        global _shapes
+        if shape in _shapes:
+            _shapes.remove(shape)
+        self.shapes.append(shape)
+        try:
+            shape._group = self
+        except:
+            pass
+        self._recalc_bbox()
+
+    def remove(self, shape):
+        if shape in self.shapes:
+            self.shapes.remove(shape)
+            _shapes.append(shape)
+            try:
+                shape._group = None
+            except:
+                pass
+            self._recalc_bbox()
+
+    # align mutation for group preserves ref point too
+    @property
+    def align(self):
+        return self._align
+    @align.setter
+    def align(self, new_align):
+        new_align = _normalize_align(new_align)
+        if new_align == self._align:
+            return
+        ox_old, oy_old = _get_align_offsets(self._align, self._width, self._height)
+        ref_x = self._left + ox_old
+        ref_y = self._top + oy_old
+        ox_new, oy_new = _get_align_offsets(new_align, self._width, self._height)
+        dx = (ref_x - ox_new) - self._left
+        dy = (ref_y - oy_new) - self._top
+        self._left = ref_x - ox_new
+        self._top = ref_y - oy_new
         for s in self.shapes:
-            if hasattr(s, 'centerY'): s.centerY += dy
+            if hasattr(s, 'left'):
+                s.left += dx
+            if hasattr(s, 'top'):
+                s.top += dy
+        self._align = new_align
 
 # ======================================================================
-# DRAW FUNCTIONS - CMU API Compliant
+# DRAW FUNCTIONS
 # ======================================================================
 def drawRect(x, y, width, height, fill='black', border=None, borderWidth=2, opacity=100, rotateAngle=0, dashes=False, align='left-top', visible=True, roundness=0):
     _ensure_canvas()
-    if not visible: return
+    if not visible:
+        return
     left, top = _resolve_bbox(float(x), float(y), float(width), float(height), _normalize_align(align))
     ctx = _ctx
-    ctx.save() 
+    ctx.save()
     try:
         ctx.globalAlpha = opacity / 100
         if rotateAngle != 0:
@@ -707,7 +771,8 @@ def drawRect(x, y, width, height, fill='black', border=None, borderWidth=2, opac
             if border is not None:
                 ctx.strokeStyle = border if isinstance(border, str) else str(border)
                 ctx.lineWidth = borderWidth
-                if dashes: ctx.setLineDash([6, 3])
+                if dashes:
+                    ctx.setLineDash([6, 3])
                 ctx.stroke()
         else:
             if fill is not None:
@@ -716,14 +781,16 @@ def drawRect(x, y, width, height, fill='black', border=None, borderWidth=2, opac
             if border is not None:
                 ctx.strokeStyle = border if isinstance(border, str) else str(border)
                 ctx.lineWidth = borderWidth
-                if dashes: ctx.setLineDash([6, 3])
+                if dashes:
+                    ctx.setLineDash([6, 3])
                 ctx.strokeRect(left, top, width, height)
     finally:
         ctx.restore()
 
 def drawCircle(x, y, radius, fill='black', border=None, borderWidth=2, opacity=100, rotateAngle=0, dashes=False, align='center', visible=True):
     _ensure_canvas()
-    if not visible: return
+    if not visible:
+        return
     w = h = float(radius) * 2
     left, top = _resolve_bbox(float(x), float(y), w, h, align)
     cx = left + radius
@@ -744,14 +811,16 @@ def drawCircle(x, y, radius, fill='black', border=None, borderWidth=2, opacity=1
         if border is not None:
             ctx.strokeStyle = border if isinstance(border, str) else str(border)
             ctx.lineWidth = borderWidth
-            if dashes: ctx.setLineDash([6, 3])
+            if dashes:
+                ctx.setLineDash([6, 3])
             ctx.stroke()
     finally:
         ctx.restore()
 
 def drawOval(x, y, width, height, fill='black', border=None, borderWidth=2, opacity=100, rotateAngle=0, dashes=False, align='center', visible=True):
     _ensure_canvas()
-    if not visible: return
+    if not visible:
+        return
     left, top = _resolve_bbox(float(x), float(y), float(width), float(height), align)
     cx = left + width / 2
     cy = top + height / 2
@@ -771,14 +840,16 @@ def drawOval(x, y, width, height, fill='black', border=None, borderWidth=2, opac
         if border is not None:
             ctx.strokeStyle = border if isinstance(border, str) else str(border)
             ctx.lineWidth = borderWidth
-            if dashes: ctx.setLineDash([6, 3])
+            if dashes:
+                ctx.setLineDash([6, 3])
             ctx.stroke()
     finally:
         ctx.restore()
 
 def drawRegularPolygon(x, y, radius, points, fill='black', border=None, borderWidth=2, opacity=100, rotateAngle=0, dashes=False, align='center', visible=True):
     _ensure_canvas()
-    if not visible: return
+    if not visible:
+        return
     w = h = float(radius) * 2
     left, top = _resolve_bbox(float(x), float(y), w, h, align)
     cx = left + radius
@@ -807,14 +878,16 @@ def drawRegularPolygon(x, y, radius, points, fill='black', border=None, borderWi
         if border is not None:
             ctx.strokeStyle = border if isinstance(border, str) else str(border)
             ctx.lineWidth = borderWidth
-            if dashes: ctx.setLineDash([6, 3])
+            if dashes:
+                ctx.setLineDash([6, 3])
             ctx.stroke()
     finally:
         ctx.restore()
 
 def drawStar(x, y, radius, points, fill='black', border=None, borderWidth=2, opacity=100, rotateAngle=0, dashes=False, align='center', visible=True, ratio=0.5):
     _ensure_canvas()
-    if not visible: return
+    if not visible:
+        return
     w = h = float(radius) * 2
     left, top = _resolve_bbox(float(x), float(y), w, h, align)
     cx = left + radius
@@ -844,22 +917,26 @@ def drawStar(x, y, radius, points, fill='black', border=None, borderWidth=2, opa
         if border is not None:
             ctx.strokeStyle = border if isinstance(border, str) else str(border)
             ctx.lineWidth = borderWidth
-            if dashes: ctx.setLineDash([6, 3])
+            if dashes:
+                ctx.setLineDash([6, 3])
             ctx.stroke()
     finally:
         ctx.restore()
 
 def drawLabel(text, x, y, fill='black', size=12, font='arial', bold=False, italic=False, opacity=100, align='center', visible=True, rotateAngle=0):
     _ensure_canvas()
-    if not visible: return
+    if not visible:
+        return
     ctx = _ctx
     ctx.save()
     try:
         ctx.globalAlpha = opacity / 100
         ctx.fillStyle = fill if fill else 'black'
         style = ''
-        if italic: style += 'italic '
-        if bold: style += 'bold '
+        if italic:
+            style += 'italic '
+        if bold:
+            style += 'bold '
         ctx.font = f"{style}{size}px {font}"
         a = _normalize_align(align)
         if 'left' in a:
@@ -884,14 +961,16 @@ def drawLabel(text, x, y, fill='black', size=12, font='arial', bold=False, itali
 
 def drawLine(x1, y1, x2, y2, fill='black', lineWidth=2, opacity=100, dashes=False, visible=True):
     _ensure_canvas()
-    if not visible: return
+    if not visible:
+        return
     ctx = _ctx
     ctx.save()
     try:
         ctx.globalAlpha = opacity / 100
         ctx.strokeStyle = fill if fill else 'black'
         ctx.lineWidth = lineWidth
-        if dashes: ctx.setLineDash([6, 3])
+        if dashes:
+            ctx.setLineDash([6, 3])
         ctx.beginPath()
         ctx.moveTo(x1, y1)
         ctx.lineTo(x2, y2)
@@ -901,7 +980,8 @@ def drawLine(x1, y1, x2, y2, fill='black', lineWidth=2, opacity=100, dashes=Fals
 
 def drawPolygon(*points, fill='black', border=None, borderWidth=2, opacity=100, rotateAngle=0, dashes=False, visible=True):
     _ensure_canvas()
-    if not visible or len(points) < 4: return
+    if not visible or len(points) < 4:
+        return
     ctx = _ctx
     ctx.save()
     try:
@@ -917,14 +997,16 @@ def drawPolygon(*points, fill='black', border=None, borderWidth=2, opacity=100, 
         if border is not None:
             ctx.strokeStyle = border if isinstance(border, str) else str(border)
             ctx.lineWidth = borderWidth
-            if dashes: ctx.setLineDash([6, 3])
+            if dashes:
+                ctx.setLineDash([6, 3])
             ctx.stroke()
     finally:
         ctx.restore()
 
 def drawArc(x, y, width, height, startAngle, sweepAngle, fill=None, border=None, borderWidth=2, opacity=100, dashes=False, align='center', visible=True):
     _ensure_canvas()
-    if not visible: return
+    if not visible:
+        return
     left, top = _resolve_bbox(float(x), float(y), float(width), float(height), align)
     cx = left + width / 2
     cy = top + height / 2
@@ -942,14 +1024,16 @@ def drawArc(x, y, width, height, startAngle, sweepAngle, fill=None, border=None,
         if border is not None:
             ctx.strokeStyle = border if isinstance(border, str) else str(border)
             ctx.lineWidth = borderWidth
-            if dashes: ctx.setLineDash([6, 3])
+            if dashes:
+                ctx.setLineDash([6, 3])
             ctx.stroke()
     finally:
         ctx.restore()
 
 def drawImage(path, x, y, width=None, height=None, opacity=100, rotateAngle=0, align='center', visible=True):
     _ensure_canvas()
-    if not visible: return
+    if not visible:
+        return
     ctx = _ctx
     img = _image_cache.get(path)
     if not img:
@@ -1017,7 +1101,6 @@ def random(a=None, b=None):
         return random.random() * a
     return random.uniform(a, b)
 
-# ---------- Sound ----------
 class Sound:
     def __init__(self, path):
         self.path = path
@@ -1026,7 +1109,6 @@ class Sound:
             self._audio = window.Audio.new(path)
         except:
             pass
-
     def play(self, loop=False, restart=False):
         try:
             if self._audio:
@@ -1036,7 +1118,6 @@ class Sound:
                 self._audio.play()
         except:
             pass
-
     def pause(self):
         try:
             if self._audio:
@@ -1044,7 +1125,6 @@ class Sound:
         except:
             pass
 
-# ---------- App ----------
 class App:
     def __init__(self, width=400, height=400):
         global _app
@@ -1053,11 +1133,9 @@ class App:
         self.background = 'white'
         self.stepsPerSecond = 30
         self.paused = False
-        self._onAppStart = None
-        self._onStep = None
-        self._redrawAll = None
         _app = self
         _clear_shapes()
+        _ensure_canvas()
 
 def runApp(width=400, height=400):
     pass
@@ -1065,7 +1143,7 @@ def runApp(width=400, height=400):
 def cmu_graphics_run(app=None, width=400, height=400):
     runApp(width, height)
 
-# Compatibility aliases
+# Aliases
 Rect = Rect
 Oval = Oval
 Circle = Circle
