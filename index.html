@@ -16,17 +16,32 @@ canvas{display:block;background:black;outline:none;}
 from browser import document, window, timer
 import scs
 import math
-_canvas = document['cmu-canvas']
+
+_canvas = None
+try:
+    _canvas = document['cmu-canvas']
+except:
+    pass
+if _canvas is None:
+    try:
+        _canvas = document.getElementById('cmu-canvas')
+    except:
+        pass
 _user_funcs = {}
 _app_timer = None
 _user_ns = {}
 _callback_names = ('onAppStart','appStarted','redrawAll','onStep','onMousePress','onMouseRelease','onMouseMove','onMouseDrag','onKeyPress','onKeyRelease','onKeyHold','onResize')
+
+# FORCE single canvas - never let scs create a second one
+scs._canvas = _canvas
+try:
+    scs._ctx = _canvas.getContext('2d')
+except:
+    pass
 scs._ensure_canvas()
 _canvas = scs._canvas
-if _canvas is None:
-    _canvas = document['cmu-canvas']
 scs._canvas = _canvas
-scs._ctx = _canvas.getContext('2d')
+
 def _call(name, *args):
     cb = _user_funcs.get(name)
     if cb is None:
@@ -35,35 +50,43 @@ def _call(name, *args):
         cb(*args)
     except:
         pass
+
 def _pos(ev):
     r = _canvas.getBoundingClientRect()
     sx = _canvas.width / r.width if r.width else 1
     sy = _canvas.height / r.height if r.height else 1
     return ((ev.clientX - r.left) * sx, (ev.clientY - r.top) * sy)
+
 def _mp(ev):
     _canvas.focus()
     if scs._app is not None:
         _call('onMousePress', scs._app, *_pos(ev))
+
 def _mr(ev):
     if scs._app is not None:
         _call('onMouseRelease', scs._app, *_pos(ev))
+
 def _mm(ev):
     if scs._app is not None:
         _call('onMouseMove', scs._app, *_pos(ev))
+
 def _kp(ev):
     if ev.target != _canvas or scs._app is None:
         return
     k = 'space' if ev.key == ' ' else ev.key.lower()
     _call('onKeyPress', scs._app, k)
+
 _canvas.bind('mousedown', _mp)
 _canvas.bind('mouseup', _mr)
 _canvas.bind('mousemove', _mm)
 document.bind('keydown', _kp)
+
 def stop():
     global _app_timer
     if _app_timer is not None:
         timer.clear_interval(_app_timer)
         _app_timer = None
+
 def run_app(width=400, height=400, stepsPerSecond=30):
     global _user_funcs, _app_timer
     stop()
@@ -107,6 +130,7 @@ def run_app(width=400, height=400, stepsPerSecond=30):
     frame()
     iv = int(1000 / stepsPerSecond) if stepsPerSecond > 0 else 33
     _app_timer = timer.set_interval(frame, iv)
+
 def app_file():
     d = "apps/app.py"
     try:
@@ -143,6 +167,7 @@ def app_file():
             return "apps/" + b + ".py" if b else d
     except:
         return d
+
 def exec_code(code, fn):
     global _user_ns, _user_funcs
     stop()
@@ -184,6 +209,7 @@ def exec_code(code, fn):
                 run_app(width=1050, height=700)
     except:
         pass
+
 def load():
     t = app_file()
     def ok(txt):
@@ -195,6 +221,7 @@ def load():
         window.fetch(t).then(lambda r: r.text().then(ok)).catch(fail)
     except:
         pass
+
 load()
 </script>
 </body></html>
