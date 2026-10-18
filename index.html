@@ -22,6 +22,28 @@ def log(msg):
     _log_el.style.display = 'block'
     _log_el.text += str(msg) + chr(10)
     print(msg)
+def _safe_clear():
+    try:
+        if hasattr(scs, '_clear_all_shapes'):
+            scs._clear_all_shapes()
+            return
+    except: pass
+    try:
+        if hasattr(scs, '_clear_shapes'):
+            scs._clear_shapes()
+            return
+    except: pass
+    try:
+        if hasattr(scs, '_all_shapes'):
+            try: scs._all_shapes.clear()
+            except: scs._all_shapes = []
+            return
+    except: pass
+def _safe_ensure():
+    try:
+        if hasattr(scs, '_ensure_canvas'):
+            scs._ensure_canvas()
+    except: pass
 def get_requested_app_filename():
     default = "apps/app.py"
     try:
@@ -43,7 +65,6 @@ def get_requested_app_filename():
         app_val = app_val.strip()
         if app_val == "": return default
         if ".." in app_val or app_val.startswith("/") or "\\" in app_val:
-            log("Blocked unsafe app param")
             return default
         if app_val.endswith(".py"): app_val = app_val[:-3]
         if app_val.startswith("apps/"):
@@ -53,17 +74,22 @@ def get_requested_app_filename():
         else:
             if "/" in app_val: app_val = app_val.split("/")[-1]
             safe = "".join(c for c in app_val if c.isalnum() or c in "_-")
-            if safe != app_val and app_val != "": app_val = safe
             if app_val == "": return default
             return "apps/" + app_val + ".py"
     except Exception as e:
         return default
 def exec_user_code(code, filename):
     global _user_funcs
-    scs._clear_all_shapes()
+    _safe_clear()
     user_ns = {}
-    for name in scs.__all__:
-        if hasattr(scs, name): user_ns[name] = getattr(scs, name)
+    try:
+        for name in scs.__all__:
+            if hasattr(scs, name):
+                user_ns[name] = getattr(scs, name)
+    except:
+        for k in dir(scs):
+            if not k.startswith('_'):
+                user_ns[k] = getattr(scs, k)
     import math
     user_ns['sin']=math.sin; user_ns['cos']=math.cos; user_ns['atan2']=math.atan2; user_ns['sqrt']=math.sqrt; user_ns['pi']=math.pi; user_ns['__builtins__']=__builtins__
     def custom_runApp(width=400, height=400, stepsPerSecond=30):
@@ -71,16 +97,26 @@ def exec_user_code(code, filename):
         _user_funcs={}
         for n in ['onAppStart','appStarted','onAppStopped','appStopped','redrawAll','onStep','onMousePress','onMouseRelease','onMouseMove','onMouseDrag','onKeyPress','onKeyRelease','onKeyHold','onResize']:
             if n in user_ns and callable(user_ns[n]): _user_funcs[n]=user_ns[n]
-        scs._app=None; scs._ensure_canvas()
+        try:
+            if hasattr(scs, '_app'): scs._app=None
+        except: pass
+        _safe_ensure()
         canvas=document['cmu-canvas']
         canvas.width=width; canvas.height=height
         canvas.style.width=str(width)+"px"; canvas.style.height=str(height)+"px"
-        scs._ctx = canvas.getContext('2d')
-        scs._app=scs.App(width, height)
-        scs._app.stepsPerSecond=stepsPerSecond
-        try: scs._start_app(_user_funcs)
+        try: scs._ctx = canvas.getContext('2d')
+        except: pass
+        try:
+            scs._app=scs.App(width, height)
+            scs._app.stepsPerSecond=stepsPerSecond
         except Exception as e:
-            import traceback; log(traceback.format_exc())
+            log(f"App create failed: {e}")
+            return
+        try:
+            if hasattr(scs, '_start_app'): scs._start_app(_user_funcs)
+            elif hasattr(scs, '_start'): scs._start(_user_funcs)
+        except Exception as e:
+            import traceback; log(f"start_app failed: {e}\n{traceback.format_exc()}")
     user_ns['runApp']=custom_runApp; user_ns['run']=custom_runApp; user_ns['loop']=custom_runApp
     scs.runApp=custom_runApp; scs.run=custom_runApp; scs.loop=custom_runApp
     try:
@@ -93,10 +129,12 @@ def exec_user_code(code, filename):
                 _user_funcs = tmp
                 custom_runApp(width=1050, height=700)
     except Exception as e:
-        import traceback; log(traceback.format_exc())
+        import traceback; log(f"Error in {filename}: {e}\n{traceback.format_exc()}")
 def load_app_py():
     target = get_requested_app_filename()
+    log(f"Requesting {target} ...")
     def on_text(txt):
+        log(f"Got {len(txt)} chars")
         if txt: exec_user_code(txt, target)
     def on_fail(err): log(f"Failed to load {target}: {err}")
     try: window.fetch(target).then(lambda resp: resp.text().then(on_text)).catch(on_fail)
