@@ -13,26 +13,20 @@ canvas{display:block;background:black;}
 <body onload="brython({debug:1, pythonpath:['.']})">
 <div id="canvas-container"><canvas id="cmu-canvas" width="1050" height="700"></canvas></div>
 <div id="log"></div>
-
 <script type="text/python" id="main">
 from browser import document, window, timer, ajax
 import scs
-from scs import _ensure_canvas, _clear_all_shapes, _start_app, App
-
 _log_el = document['log']
 _user_funcs = {}
-
 def log(msg):
     _log_el.style.display = 'block'
     _log_el.text += str(msg) + chr(10)
     print(msg)
-
 def get_requested_app_filename():
     default = "apps/app.py"
     try:
         search = window.location.search
-        if not search:
-            return default
+        if not search: return default
         app_val = None
         try:
             params = window.URLSearchParams.new(search)
@@ -43,119 +37,70 @@ def get_requested_app_filename():
                 if part.startswith("app="):
                     app_val = part[4:]
                     break
-        if not app_val:
-            return default
-        try:
-            app_val = window.decodeURIComponent(app_val)
-        except:
-            pass
+        if not app_val: return default
+        try: app_val = window.decodeURIComponent(app_val)
+        except: pass
         app_val = app_val.strip()
-        if app_val == "":
-            return default
+        if app_val == "": return default
         if ".." in app_val or app_val.startswith("/") or "\\" in app_val:
             log("Blocked unsafe app param")
             return default
-        if app_val.endswith(".py"):
-            app_val = app_val[:-3]
+        if app_val.endswith(".py"): app_val = app_val[:-3]
         if app_val.startswith("apps/"):
             base = app_val[5:]
-            if "/" in base:
-                base = base.split("/")[-1]
+            if "/" in base: base = base.split("/")[-1]
             return "apps/" + base + ".py"
         else:
-            if "/" in app_val:
-                app_val = app_val.split("/")[-1]
+            if "/" in app_val: app_val = app_val.split("/")[-1]
             safe = "".join(c for c in app_val if c.isalnum() or c in "_-")
-            if safe != app_val and app_val != "":
-                log("Sanitized app param")
-                app_val = safe
-            if app_val == "":
-                return default
+            if safe != app_val and app_val != "": app_val = safe
+            if app_val == "": return default
             return "apps/" + app_val + ".py"
     except Exception as e:
-        print("get_requested_app_filename error")
         return default
-
 def exec_user_code(code, filename):
     global _user_funcs
-    log(f"exec_user_code start for {filename}, code len {len(code)}")
     scs._clear_all_shapes()
     user_ns = {}
     for name in scs.__all__:
-        if hasattr(scs, name):
-            user_ns[name] = getattr(scs, name)
+        if hasattr(scs, name): user_ns[name] = getattr(scs, name)
     import math
-    user_ns['sin']=math.sin
-    user_ns['cos']=math.cos
-    user_ns['atan2']=math.atan2
-    user_ns['sqrt']=math.sqrt
-    user_ns['pi']=math.pi
-    user_ns['__builtins__']=__builtins__
-
+    user_ns['sin']=math.sin; user_ns['cos']=math.cos; user_ns['atan2']=math.atan2; user_ns['sqrt']=math.sqrt; user_ns['pi']=math.pi; user_ns['__builtins__']=__builtins__
     def custom_runApp(width=400, height=400, stepsPerSecond=30):
         global _user_funcs
-        log(f"custom_runApp called {width}x{height}")
         _user_funcs={}
         for n in ['onAppStart','appStarted','onAppStopped','appStopped','redrawAll','onStep','onMousePress','onMouseRelease','onMouseMove','onMouseDrag','onKeyPress','onKeyRelease','onKeyHold','onResize']:
-            if n in user_ns and callable(user_ns[n]):
-                _user_funcs[n]=user_ns[n]
-        log(f"Found funcs: {list(_user_funcs.keys())}")
-        scs._app=None
-        scs._ensure_canvas()
+            if n in user_ns and callable(user_ns[n]): _user_funcs[n]=user_ns[n]
+        scs._app=None; scs._ensure_canvas()
         canvas=document['cmu-canvas']
-        canvas.width=width
-        canvas.height=height
-        canvas.style.width=str(width)+"px"
-        canvas.style.height=str(height)+"px"
+        canvas.width=width; canvas.height=height
+        canvas.style.width=str(width)+"px"; canvas.style.height=str(height)+"px"
         scs._ctx = canvas.getContext('2d')
-        scs._app=App(width, height)
+        scs._app=scs.App(width, height)
         scs._app.stepsPerSecond=stepsPerSecond
-        try:
-            scs._start_app(_user_funcs)
-            log("Loaded " + filename)
+        try: scs._start_app(_user_funcs)
         except Exception as e:
-            import traceback
-            log(f"start_app failed: {e}")
-            log(traceback.format_exc())
-
-    user_ns['runApp']=custom_runApp
-    user_ns['run']=custom_runApp
-    user_ns['loop']=custom_runApp
-    scs.runApp=custom_runApp
-    scs.run=custom_runApp
-    scs.loop=custom_runApp
-
+            import traceback; log(traceback.format_exc())
+    user_ns['runApp']=custom_runApp; user_ns['run']=custom_runApp; user_ns['loop']=custom_runApp
+    scs.runApp=custom_runApp; scs.run=custom_runApp; scs.loop=custom_runApp
     try:
         exec(code, user_ns)
         if not _user_funcs:
             tmp = {}
             for n in ['onAppStart','appStarted','onAppStopped','appStopped','redrawAll','onStep','onMousePress','onMouseRelease','onMouseMove','onMouseDrag','onKeyPress','onKeyRelease','onKeyHold','onResize']:
-                if n in user_ns and callable(user_ns[n]):
-                    tmp[n]=user_ns[n]
+                if n in user_ns and callable(user_ns[n]): tmp[n]=user_ns[n]
             if tmp:
                 _user_funcs = tmp
-                log(f"Auto-starting {filename}")
                 custom_runApp(width=1050, height=700)
     except Exception as e:
-        import traceback
-        log("Error in " + filename + ": " + str(e))
-        log(traceback.format_exc())
-
+        import traceback; log(traceback.format_exc())
 def load_app_py():
     target = get_requested_app_filename()
-    log("Requesting " + target + " ...")
     def on_text(txt):
-        if txt:
-            exec_user_code(txt, target)
-        else:
-            log(target + " empty")
-    def on_fail(err):
-        log(f"Failed to load {target}: {err}")
-    try:
-        window.fetch(target).then(lambda resp: resp.text().then(on_text)).catch(on_fail)
-    except Exception as e:
-        log(f"Fetch exception {e}")
-
+        if txt: exec_user_code(txt, target)
+    def on_fail(err): log(f"Failed to load {target}: {err}")
+    try: window.fetch(target).then(lambda resp: resp.text().then(on_text)).catch(on_fail)
+    except Exception as e: log(f"Fetch exception {e}")
 load_app_py()
 </script>
 </body></html>
