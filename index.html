@@ -8,7 +8,7 @@ canvas{display:block;background:black;outline:none;}
 <script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython_stdlib.js"></script>
 <link rel="icon" type="image/png" href="favicon.png">
-<link rel="icon" href="favicon.png">
+<link rel="icon" href="favicon.ico">
 </head>
 <body onload="brython({debug:1, pythonpath:['.']})">
 <div id="canvas-container"><canvas id="cmu-canvas" width="1050" height="700" tabindex="0"></canvas></div>
@@ -27,6 +27,7 @@ if _canvas is None:
         _canvas = document.getElementById('cmu-canvas')
     except:
         pass
+
 _user_funcs = {}
 _app_timer = None
 _user_ns = {}
@@ -150,7 +151,7 @@ def stop():
 def run_app(width=400, height=400, stepsPerSecond=30):
     global _user_funcs, _app_timer
     stop()
-    _user_funcs = {n: _user_ns for n in _callback_names if callable(_user_ns.get(n))}
+    _user_funcs = {n: _user_ns[n] for n in _callback_names if callable(_user_ns.get(n))}
     _canvas.setAttribute('width', str(width))
     _canvas.setAttribute('height', str(height))
     _canvas.style.width = f"{width}px"
@@ -171,7 +172,7 @@ def run_app(width=400, height=400, stepsPerSecond=30):
                 try:
                     bg = scs._app.background
                     if isinstance(bg, dict) and bg.get('_is_grad'):
-                        scs._ctx.fillStyle = bg['colors']
+                        scs._ctx.fillStyle = bg['colors'][0]
                     else:
                         scs._ctx.fillStyle = bg
                     scs._ctx.fillRect(0, 0, width, height)
@@ -190,7 +191,7 @@ def run_app(width=400, height=400, stepsPerSecond=30):
             stop()
     frame()
     iv = int(1000 / stepsPerSecond) if stepsPerSecond > 0 else 33
-    _app_timer = timer.set_interval(frame, iv)[n][0]
+    _app_timer = timer.set_interval(frame, iv)
 
 def app_file():
     d = "apps/app.py"
@@ -245,11 +246,11 @@ def exec_code(code, fn):
     try:
         for name in scs.__all__:
             if hasattr(scs, name):
-                _user_ns = getattr(scs, name)
+                _user_ns[name] = getattr(scs, name)
     except:
         for k in dir(scs):
             if not k.startswith('_'):
-                _user_ns = getattr(scs, k)
+                _user_ns[k] = getattr(scs, k)
     _user_ns['sin']=math.sin
     _user_ns['cos']=math.cos
     _user_ns['atan2']=math.atan2
@@ -265,11 +266,11 @@ def exec_code(code, fn):
         exec(code, _user_ns)
         has = any(n in _user_ns and callable(_user_ns.get(n)) for n in _callback_names)
         if has and not _user_funcs:
-            _user_funcs = {n: _user_ns for n in _callback_names if callable(_user_ns.get(n))}
+            _user_funcs = {n: _user_ns[n] for n in _callback_names if callable(_user_ns.get(n))}
             if _user_funcs:
                 run_app(width=1050, height=700)
     except:
-        pass[name][k][n]
+        pass
 
 def load():
     t = app_file()
