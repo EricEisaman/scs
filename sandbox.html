@@ -14,7 +14,8 @@ button{background:#4c6ef5;color:white;border:0;padding:10px 18px;border-radius:6
 </style>
 <script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython_stdlib.js"></script>
-<link rel="icon" type="image/png" href="/scs/favicon.png">
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="icon" href="favicon.ico">
 </head>
 <body onload="brython({debug:1, pythonpath:['.']})">
 <div id="canvas-container"><canvas id="canvas" width="400" height="400" tabindex="0"></canvas></div>
@@ -46,7 +47,6 @@ main()
 <div style="margin-top:8px;"><button id="run-btn">▶ Run</button><button id="stop-btn">■ Stop</button></div>
 <div id="log"></div>
 </div>
-
 <script type="text/python" id="main">
 from browser import document, timer
 import scs
@@ -60,8 +60,8 @@ _user_funcs = {}
 _app_timer = None
 _user_ns = {}
 _callback_names = (
-    'onAppStart', 'redrawAll', 'onStep', 'onMousePress', 'onMouseRelease',
-    'onMouseMove', 'onMouseDrag', 'onKeyPress', 'onKeyRelease', 'onKeyHold'
+    'onAppStart', 'appStarted', 'redrawAll', 'onStep', 'onMousePress', 'onMouseRelease',
+    'onMouseMove', 'onMouseDrag', 'onKeyPress', 'onKeyRelease', 'onKeyHold', 'onResize'
 )
 
 def log(message):
@@ -77,6 +77,9 @@ def _call_callback(name, *args):
     except Exception:
         log(f'{name} failed:\n{traceback.format_exc()}')
 
+_is_dragging = False
+_pressed_keys = set()
+
 def _mouse_position(event):
     rect = _canvas.getBoundingClientRect()
     scale_x = _canvas.width / rect.width if rect.width else 1
@@ -85,23 +88,87 @@ def _mouse_position(event):
             (event.clientY - rect.top) * scale_y)
 
 def _on_mouse_press(event):
-    _canvas.focus()
+    global _is_dragging
+    _is_dragging = True
+    try:
+        _canvas.focus()
+    except:
+        pass
     if scs._app is not None:
         _call_callback('onMousePress', scs._app, *_mouse_position(event))
 
-def _on_mouse_move(event):
+def _on_mouse_release(event):
+    global _is_dragging
     if scs._app is not None:
-        _call_callback('onMouseMove', scs._app, *_mouse_position(event))
+        _call_callback('onMouseRelease', scs._app, *_mouse_position(event))
+    _is_dragging = False
+
+def _on_mouse_move(event):
+    if scs._app is None:
+        return
+    x, y = _mouse_position(event)
+    if _is_dragging:
+        _call_callback('onMouseDrag', scs._app, x, y)
+    _call_callback('onMouseMove', scs._app, x, y)
 
 def _on_key_press(event):
-    if event.target != _canvas or scs._app is None:
+    if scs._app is None:
         return
-    key = 'space' if event.key == ' ' else event.key.lower()
-    _call_callback('onKeyPress', scs._app, key)
+    try:
+        ae = document.activeElement
+        if ae is not None and ae.tagName in ('INPUT','TEXTAREA','SELECT'):
+            if ae.id == 'code-input':
+                return
+    except:
+        pass
+    k = event.key
+    if k == ' ':
+        k = 'space'
+    else:
+        k = k.lower()
+        if k == 'arrowleft':
+            k = 'left'
+        elif k == 'arrowright':
+            k = 'right'
+        elif k == 'arrowup':
+            k = 'up'
+        elif k == 'arrowdown':
+            k = 'down'
+    if k not in _pressed_keys:
+        _pressed_keys.add(k)
+    _call_callback('onKeyPress', scs._app, k)
+
+def _on_key_release(event):
+    if scs._app is None:
+        return
+    k = event.key
+    if k == ' ':
+        k = 'space'
+    else:
+        k = k.lower()
+        if k == 'arrowleft':
+            k = 'left'
+        elif k == 'arrowright':
+            k = 'right'
+        elif k == 'arrowup':
+            k = 'up'
+        elif k == 'arrowdown':
+            k = 'down'
+    if k in _pressed_keys:
+        _pressed_keys.discard(k)
+    _call_callback('onKeyRelease', scs._app, k)
+
+def _on_key_hold():
+    if scs._app is None:
+        return
+    for k in list(_pressed_keys):
+        _call_callback('onKeyHold', scs._app, k)
 
 _canvas.bind('mousedown', _on_mouse_press)
+_canvas.bind('mouseup', _on_mouse_release)
 _canvas.bind('mousemove', _on_mouse_move)
 document.bind('keydown', _on_key_press)
+document.bind('keyup', _on_key_release)
 
 def stop_app():
     global _app_timer
@@ -128,6 +195,7 @@ def sandbox_run_app(width=400, height=400, stepsPerSecond=30):
 
     def frame():
         try:
+            _on_key_hold()
             if 'onStep' in _user_funcs and not scs._app.paused:
                 _call_callback('onStep', scs._app)
             scs._ctx.clearRect(0, 0, width, height)
@@ -135,7 +203,7 @@ def sandbox_run_app(width=400, height=400, stepsPerSecond=30):
                 scs._ctx.fillStyle = scs._app.background
                 scs._ctx.fillRect(0, 0, width, height)
             _call_callback('redrawAll', scs._app)
-            for shape in list(scs._shapes):
+            for shape in list(scs._all_shapes):
                 shape.draw(scs._ctx)
         except Exception:
             log(f'Frame failed:\n{traceback.format_exc()}')
@@ -144,7 +212,6 @@ def sandbox_run_app(width=400, height=400, stepsPerSecond=30):
     frame()
     interval = int(1000 / stepsPerSecond) if stepsPerSecond > 0 else 33
     _app_timer = timer.set_interval(frame, interval)
-    log(f'Running {width}x{height} at {stepsPerSecond} fps; canvas={_canvas.width}x{_canvas.height}')
 
 def exec_user_code(event=None):
     global _user_ns
@@ -159,7 +226,7 @@ def exec_user_code(event=None):
 
 document['run-btn'].bind('click', exec_user_code)
 document['stop-btn'].bind('click', lambda event: stop_app())
-log('Sandbox ready. The graphics API is loaded from root scs.py.')
+log('Sandbox ready.')
 </script>
 </body>
 </html>
