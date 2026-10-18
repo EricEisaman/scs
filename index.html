@@ -1,86 +1,73 @@
-Here — latest working `index.html` (single canvas, external `scs.py`, fixed `global`):
-
-**index.html** — 8510 bytes
-
-```html
 <!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>SCS</title>
 <style>
-body{margin:0;padding:0;background:#0f1115;color:#e6e6e6;font-family:monospace;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;}
+body{margin:0;padding:0;background:#0f1115;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;}
 #canvas-container{border:2px solid #3a3f4b;border-radius:8px;background:#000;overflow:hidden;box-shadow:0 0 30px rgba(0,0,0,0.6);}
 canvas{display:block;background:black;outline:none;}
-#log{margin-top:12px;background:#1a1d24;border:1px solid #3a3f4b;border-radius:6px;padding:10px;width:1050px;max-width:95vw;min-height:40px;white-space:pre-wrap;font-size:11px;max-height:160px;overflow:auto;}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython_stdlib.js"></script>
-<link rel="icon" type="image/png" href="/scs/favicon.png">
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="icon" href="favicon.ico">
 </head>
 <body onload="brython({debug:1, pythonpath:['.']})">
 <div id="canvas-container"><canvas id="cmu-canvas" width="1050" height="700" tabindex="0"></canvas></div>
-<div id="log"></div>
 <script type="text/python" id="main">
 from browser import document, window, timer
 import scs
-import traceback
 import math
-_log = document['log']
-_canvas = None
+_canvas = document['cmu-canvas']
 _user_funcs = {}
 _app_timer = None
 _user_ns = {}
 _callback_names = ('onAppStart','appStarted','redrawAll','onStep','onMousePress','onMouseRelease','onMouseMove','onMouseDrag','onKeyPress','onKeyRelease','onKeyHold','onResize')
-def log(msg):
-    _log.text += str(msg) + chr(10)
-    print(msg)
-def _ensure():
-    global _canvas
-    scs._ensure_canvas()
-    _canvas = scs._canvas
-    if _canvas is None:
-        _canvas = document['cmu-canvas']
-    return _canvas
-_ensure()
-def _call_callback(name, *args):
+scs._ensure_canvas()
+_canvas = scs._canvas
+if _canvas is None:
+    _canvas = document['cmu-canvas']
+scs._canvas = _canvas
+scs._ctx = _canvas.getContext('2d')
+def _call(name, *args):
     cb = _user_funcs.get(name)
     if cb is None:
         return
     try:
         cb(*args)
-    except Exception:
-        log(f"{name} failed:\n{traceback.format_exc()}")
-def _mouse_position(event):
-    rect = _canvas.getBoundingClientRect()
-    scale_x = _canvas.width / rect.width if rect.width else 1
-    scale_y = _canvas.height / rect.height if rect.height else 1
-    return ((event.clientX - rect.left) * scale_x, (event.clientY - rect.top) * scale_y)
-def _on_mouse_press(event):
+    except:
+        pass
+def _pos(ev):
+    r = _canvas.getBoundingClientRect()
+    sx = _canvas.width / r.width if r.width else 1
+    sy = _canvas.height / r.height if r.height else 1
+    return ((ev.clientX - r.left) * sx, (ev.clientY - r.top) * sy)
+def _mp(ev):
     _canvas.focus()
     if scs._app is not None:
-        _call_callback('onMousePress', scs._app, *_mouse_position(event))
-def _on_mouse_release(event):
+        _call('onMousePress', scs._app, *_pos(ev))
+def _mr(ev):
     if scs._app is not None:
-        _call_callback('onMouseRelease', scs._app, *_mouse_position(event))
-def _on_mouse_move(event):
+        _call('onMouseRelease', scs._app, *_pos(ev))
+def _mm(ev):
     if scs._app is not None:
-        _call_callback('onMouseMove', scs._app, *_mouse_position(event))
-def _on_key_press(event):
-    if event.target != _canvas or scs._app is None:
+        _call('onMouseMove', scs._app, *_pos(ev))
+def _kp(ev):
+    if ev.target != _canvas or scs._app is None:
         return
-    key = 'space' if event.key == ' ' else event.key.lower()
-    _call_callback('onKeyPress', scs._app, key)
-_canvas.bind('mousedown', _on_mouse_press)
-_canvas.bind('mouseup', _on_mouse_release)
-_canvas.bind('mousemove', _on_mouse_move)
-document.bind('keydown', _on_key_press)
-def stop_app():
+    k = 'space' if ev.key == ' ' else ev.key.lower()
+    _call('onKeyPress', scs._app, k)
+_canvas.bind('mousedown', _mp)
+_canvas.bind('mouseup', _mr)
+_canvas.bind('mousemove', _mm)
+document.bind('keydown', _kp)
+def stop():
     global _app_timer
     if _app_timer is not None:
         timer.clear_interval(_app_timer)
         _app_timer = None
-def sandbox_run_app(width=400, height=400, stepsPerSecond=30):
+def run_app(width=400, height=400, stepsPerSecond=30):
     global _user_funcs, _app_timer
-    stop_app()
-    _user_funcs = {name: _user_ns[name] for name in _callback_names if callable(_user_ns.get(name))}
+    stop()
+    _user_funcs = {n: _user_ns[n] for n in _callback_names if callable(_user_ns.get(n))}
     _canvas.setAttribute('width', str(width))
     _canvas.setAttribute('height', str(height))
     _canvas.style.width = f"{width}px"
@@ -88,95 +75,84 @@ def sandbox_run_app(width=400, height=400, stepsPerSecond=30):
     scs._ctx = _canvas.getContext('2d')
     scs._app = scs.App(width, height)
     scs._app.stepsPerSecond = stepsPerSecond
-    _call_callback('onAppStart', scs._app)
+    _call('onAppStart', scs._app)
     if 'appStarted' in _user_funcs and 'onAppStart' not in _user_funcs:
-        _call_callback('appStarted', scs._app)
+        _call('appStarted', scs._app)
     def frame():
         try:
             if 'onStep' in _user_funcs and not scs._app.paused:
-                _call_callback('onStep', scs._app)
+                _call('onStep', scs._app)
             scs._ctx.clearRect(0, 0, width, height)
             if scs._app.background:
                 try:
                     bg = scs._app.background
-                    if isinstance(bg, dict) and bg.get('_is_gradient'):
+                    if isinstance(bg, dict) and bg.get('_is_grad'):
                         scs._ctx.fillStyle = bg['colors'][0]
                     else:
                         scs._ctx.fillStyle = bg
                     scs._ctx.fillRect(0, 0, width, height)
                 except:
                     pass
-            _call_callback('redrawAll', scs._app)
+            _call('redrawAll', scs._app)
             shapes = getattr(scs, '_all_shapes', None)
             if shapes is None:
                 shapes = getattr(scs, '_shapes', [])
-            for shape in list(shapes):
+            for s in list(shapes):
                 try:
-                    shape.draw(scs._ctx)
+                    s.draw(scs._ctx)
                 except:
                     pass
-        except Exception:
-            log(f"Frame failed:\n{traceback.format_exc()}")
-            stop_app()
+        except:
+            stop()
     frame()
-    interval = int(1000 / stepsPerSecond) if stepsPerSecond > 0 else 33
-    _app_timer = timer.set_interval(frame, interval)
-    log(f"Running {width}x{height} at {stepsPerSecond} fps")
-def get_requested_app_filename():
-    default = "apps/app.py"
+    iv = int(1000 / stepsPerSecond) if stepsPerSecond > 0 else 33
+    _app_timer = timer.set_interval(frame, iv)
+def app_file():
+    d = "apps/app.py"
     try:
-        search = window.location.search
-        if not search:
-            return default
-        app_val = None
+        s = window.location.search
+        if not s:
+            return d
+        v = None
         try:
-            params = window.URLSearchParams.new(search)
-            app_val = params.get("app")
-        except Exception:
-            qs = search.lstrip("?")
+            p = window.URLSearchParams.new(s)
+            v = p.get("app")
+        except:
+            qs = s.lstrip("?")
             for part in qs.split("&"):
                 if part.startswith("app="):
-                    app_val = part[4:]
+                    v = part[4:]
                     break
-        if not app_val:
-            return default
+        if not v:
+            return d
         try:
-            app_val = window.decodeURIComponent(app_val)
+            v = window.decodeURIComponent(v)
         except:
             pass
-        app_val = app_val.strip()
-        if app_val == "":
-            return default
-        if ".." in app_val or app_val.startswith("/") or "\\" in app_val:
-            return default
-        if app_val.endswith(".py"):
-            app_val = app_val[:-3]
-        if app_val.startswith("apps/"):
-            base = app_val[5:]
-            if "/" in base:
-                base = base.split("/")[-1]
-            return "apps/" + base + ".py"
+        v = v.strip()
+        if not v or ".." in v or v.startswith("/") or "\\" in v:
+            return d
+        if v.endswith(".py"):
+            v = v[:-3]
+        if v.startswith("apps/"):
+            b = v[5:].split("/")[-1]
+            return "apps/" + b + ".py"
         else:
-            if "/" in app_val:
-                app_val = app_val.split("/")[-1]
-            safe = "".join(c for c in app_val if c.isalnum() or c in "_-")
-            if app_val == "":
-                return default
-            return "apps/" + app_val + ".py"
+            b = v.split("/")[-1]
+            b = "".join(c for c in b if c.isalnum() or c in "_-")
+            return "apps/" + b + ".py" if b else d
     except:
-        return default
-def exec_user_code(code, filename):
+        return d
+def exec_code(code, fn):
     global _user_ns, _user_funcs
-    stop_app()
-    _log.text = ""
+    stop()
     try:
         if hasattr(scs, '_clear_all_shapes'):
             scs._clear_all_shapes()
         elif hasattr(scs, '_clear_shapes'):
             scs._clear_shapes()
         else:
-            if hasattr(scs, '_all_shapes'):
-                scs._all_shapes.clear()
+            scs._all_shapes.clear()
     except:
         pass
     _user_ns = {'__builtins__': __builtins__}
@@ -193,36 +169,32 @@ def exec_user_code(code, filename):
     _user_ns['atan2']=math.atan2
     _user_ns['sqrt']=math.sqrt
     _user_ns['pi']=math.pi
-    _user_ns['runApp']=sandbox_run_app
-    _user_ns['run']=sandbox_run_app
-    _user_ns['loop']=sandbox_run_app
-    scs.runApp=sandbox_run_app
-    scs.run=sandbox_run_app
-    scs.loop=sandbox_run_app
+    _user_ns['runApp']=run_app
+    _user_ns['run']=run_app
+    _user_ns['loop']=run_app
+    scs.runApp=run_app
+    scs.run=run_app
+    scs.loop=run_app
     try:
         exec(code, _user_ns)
-        has_callback = any(name in _user_ns and callable(_user_ns.get(name)) for name in _callback_names)
-        if has_callback and not _user_funcs:
-            _user_funcs = {name: _user_ns[name] for name in _callback_names if callable(_user_ns.get(name))}
+        has = any(n in _user_ns and callable(_user_ns.get(n)) for n in _callback_names)
+        if has and not _user_funcs:
+            _user_funcs = {n: _user_ns[n] for n in _callback_names if callable(_user_ns.get(n))}
             if _user_funcs:
-                log(f"Auto-starting {filename}")
-                sandbox_run_app(width=1050, height=700)
-    except Exception:
-        log(f"Error in {filename}:\n{traceback.format_exc()}")
-def load_app_py():
-    target = get_requested_app_filename()
-    log(f"Requesting {target} ...")
-    def on_text(txt):
-        log(f"Got {len(txt)} chars")
+                run_app(width=1050, height=700)
+    except:
+        pass
+def load():
+    t = app_file()
+    def ok(txt):
         if txt:
-            exec_user_code(txt, target)
-    def on_fail(err):
-        log(f"Failed to load {target}: {err}")
+            exec_code(txt, t)
+    def fail(e):
+        pass
     try:
-        window.fetch(target).then(lambda resp: resp.text().then(on_text)).catch(on_fail)
-    except Exception as e:
-        log(f"Fetch exception {e}")
-load_app_py()
+        window.fetch(t).then(lambda r: r.text().then(ok)).catch(fail)
+    except:
+        pass
+load()
 </script>
 </body></html>
-```
