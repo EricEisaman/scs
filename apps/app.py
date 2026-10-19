@@ -500,3 +500,8 @@ def redrawAll(app):
     if app.paused:
         drawRect(0,0,700,700, fill=rgb(0,0,0), opacity=35, border=None)
         drawLabel("PAUSED — press SPACE", 350, 350, size=28, bold=True, fill=rgb(255,255,255))
+
+def main():
+    runApp(1050,700, stepsPerSecond=60)
+    
+main()
