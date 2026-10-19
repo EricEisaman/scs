@@ -100,7 +100,7 @@ def redrawAll(app):
     drawLabel("A: Fewer molecules per volume aloft", 580, 595, size=13, fill=rgb(200,210,230), align='left')
 
     drawRect(0,0,1050,40, fill=rgb(10,12,20), opacity=92)
-    drawLabel("ATMOSPHERE TOWER - Composition & Structure", 15, 20, size=16, bold=True, fill=rgb(255,255,255), align='left')
+    drawLabel("ATMOSPHERE TOWER:  Composition & Structure", 15, 20, size=16, bold=True, fill=rgb(255,255,255), align='left')
 
 def main(): runApp(1050,700)
 main()

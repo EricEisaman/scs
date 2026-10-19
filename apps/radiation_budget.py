@@ -45,7 +45,7 @@ def redrawAll(app):
     drawRect(0,0,1050,700, fill=rgb(13,18,33))
     b=app.budget
     drawRect(0,0,1050,38, fill=rgb(10,12,20), opacity=92)
-    drawLabel("RADIATION BUDGET BOARD - In = Out at equilibrium", 15, 20, size=17, bold=True, fill=rgb(255,255,255), align='left')
+    drawLabel("RADIATION BUDGET BOARD:  In = Out at equilibrium", 15, 20, size=17, bold=True, fill=rgb(255,255,255), align='left')
 
     # LEFT FLOW - uses full width to 770
     drawCircle(70, 90, 30, fill=rgb(255,222,85), border=None)
