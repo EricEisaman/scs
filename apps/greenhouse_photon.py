@@ -154,7 +154,7 @@ def redrawAll(app):
     drawLabel("Yellow=sun, Red=IR. Molecule flashes=vibration", 880, 642, size=10, fill=rgb(150,160,180))
     drawLabel("Paper graph: X=CO2, Y1=Temp, Y2=Escape %", 880, 660, size=11, bold=True, fill=rgb(180,220,255))
     drawRect(0,0,1050,38, fill=rgb(10,12,20), opacity=88)
-    drawLabel("APP 2: GREENHOUSE BLANKET - More CO2 = fewer red dots escape", 15, 20, size=13, bold=True, fill=rgb(255,255,255), align='left')
+    drawLabel("GREENHOUSE BLANKET - More CO2 = fewer red dots escape", 15, 20, size=13, bold=True, fill=rgb(255,255,255), align='left')
 
 def main():
     runApp(1050,700, stepsPerSecond=40)
