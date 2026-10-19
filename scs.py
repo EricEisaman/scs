@@ -166,7 +166,7 @@ def _resolve_bbox(x, y, width, height, align):
     where ox,oy from _get_align_offsets
     """
     ox, oy = _get_align_offsets(align, width, height)
-    _debug_log(f"[SCS ALIGN DEBUG] _resolve_bbox x={x} y={y} w={width} h={height} align={align} -> norm={_normalize_align(align)} ox={ox} oy={oy} -> left={x-ox} top={y-oy}")
+    #_debug_log(f"[SCS ALIGN DEBUG] _resolve_bbox x={x} y={y} w={width} h={height} align={align} -> norm={_normalize_align(align)} ox={ox} oy={oy} -> left={x-ox} top={y-oy}")
     return x - ox, y - oy
 
 # ======================================================================
