@@ -29,9 +29,9 @@ def onMousePress(app,mx,my):
     elif 902 <= mx <= 1028 and 335 <= my <= 360: app.albedo,app.gh=0.10,0.10
     onMouseDrag(app,mx,my)
 
-def onMouseDrag(app,mx,my):
-    if app.dragging=='albedo': app.albedo=max(0.05,min(0.65,(mx-30)/330))
-    if app.dragging=='gh': app.gh=max(0.0,min(0.95,(mx-400)/330))
+def onMouseDrag(app,mx,my): 
+    if app.dragging=='albedo': app.albedo=max(0.05,min(0.65,(mx-30)/330 * 0.65))
+    if app.dragging=='gh': app.gh=max(0.0,min(0.95,(mx-400)/330 * 0.95))
     app.budget=calcBudget(app.albedo,app.gh)
 def onMouseRelease(app,mx,my): app.dragging=None
 def onKeyPress(app,k):
