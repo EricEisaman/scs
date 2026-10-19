@@ -67,7 +67,7 @@ def redrawAll(app):
     p = getPressureAtAlt(app.probeAlt)
     t = getTempAtAlt(app.probeAlt)
     drawRect(550, 60, 470, 250, fill=rgb(26,30,45), border=rgb(70,80,110), borderWidth=2)
-    drawLabel("COPY TO GRAPH PAPER - PAUSE WITH SPACE", 785, 82, size=14, bold=True, fill=rgb(255,230,100))
+    drawLabel("SAMPLE TWO POINTS PER LAYER TO INFORM YOUR GRAPHS", 785, 82, size=14, bold=True, fill=rgb(255,230,100))
     drawLabel(f"Altitude: {app.probeAlt:.1f} km", 580, 118, size=22, bold=True, fill=rgb(255,255,255), align='left')
     drawLabel(f"Pressure: {p:.1f} hPa", 580, 153, size=22, bold=True, fill=rgb(140,200,255), align='left')
     drawLabel(f"Temp: {t:.1f} C", 580, 188, size=22, bold=True, fill=rgb(255,140,80), align='left')
