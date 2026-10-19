@@ -5,24 +5,14 @@ def calcBudget(albedo, greenHouse):
     solarIn = 340.0
     reflected = solarIn * albedo
     absorbed = solarIn - reflected
-    # effective emission temp
-    # absorbed = sigma*T_e^4  -> T_e
     sigma = 5.67e-8
     Te = (absorbed / sigma) ** 0.25
-    # surface temp higher due to greenhouse: Ts = Te / (1-g/2)^0.25
-    Ts = Te / ((1 - greenHouse/2) ** 0.25) if greenHouse<1.9 else Te*1.8
-    # split
-    atmAbsorbed = absorbed * (0.2 + greenHouse*0.5)
+    Ts = Te / ((1 - greenHouse/2) ** 0.25) if greenHouse < 0.99 else Te*1.6
+    atmAbsorbed = absorbed * (0.20 + greenHouse*0.50)
     surfAbsorbed = absorbed - atmAbsorbed
-    # emission
     atmEmission = atmAbsorbed + surfAbsorbed*greenHouse
     surfEmission = 5.67e-8 * Ts**4
-    spaceEmission = absorbed  # at equilibrium must equal absorbed
-    return {
-        'in': solarIn, 'ref': reflected, 'abs': absorbed,
-        'atmAbs': atmAbsorbed, 'surfAbs': surfAbsorbed,
-        'Te': Te, 'Ts': Ts, 'surfEm': surfEmission, 'atmEm': atmEmission
-    }
+    return {'in':solarIn,'ref':reflected,'abs':absorbed,'atmAbs':atmAbsorbed,'surfAbs':surfAbsorbed,'Te':Te,'Ts':Ts,'surfEm':surfEmission,'atmEm':atmEmission}
 
 def onAppStart(app):
     app.width = 1050
@@ -30,130 +20,123 @@ def onAppStart(app):
     app.stepsPerSecond = 30
     app.albedo = 0.30
     app.gh = 0.40
-    app.dragging = None # 'albedo' or 'gh'
+    app.dragging = None
     app.budget = calcBudget(app.albedo, app.gh)
 
 def onMousePress(app, mx, my):
-    # sliders bottom
-    if 50 <= mx <= 450 and 610 <= my <= 630:
+    if 50 <= mx <= 450 and 620 <= my <= 640:
         app.dragging = 'albedo'
-    elif 550 <= mx <= 950 and 610 <= my <= 630:
+    elif 500 <= mx <= 750 and 620 <= my <= 640:
         app.dragging = 'gh'
-    onMouseDrag(app, mx, my)
-    # preset buttons
-    if 720 <= mx <= 820 and 120 <= my <= 145:
-        app.albedo, app.gh = 0.30, 0.40 # modern
-    if 830 <= mx <= 930 and 120 <= my <= 145:
-        app.albedo, app.gh = 0.50, 0.35 # ice age
-    if 720 <= mx <= 820 and 150 <= my <= 175:
-        app.albedo, app.gh = 0.30, 0.70 # high CO2
-    if 830 <= mx <= 930 and 150 <= my <= 175:
-        app.albedo, app.gh = 0.10, 0.10 # no GH
+    onMouseDrag(app,mx,my)
+    if 820 <= mx <= 920 and 135 <= my <= 160: app.albedo, app.gh = 0.30, 0.40
+    if 930 <= mx <= 1020 and 135 <= my <= 160: app.albedo, app.gh = 0.50, 0.35
+    if 820 <= mx <= 920 and 165 <= my <= 190: app.albedo, app.gh = 0.30, 0.70
+    if 930 <= mx <= 1020 and 165 <= my <= 190: app.albedo, app.gh = 0.10, 0.10
+    app.budget = calcBudget(app.albedo, app.gh)
 
 def onMouseDrag(app, mx, my):
     if app.dragging == 'albedo':
-        frac = (mx-50)/400
-        app.albedo = max(0.05, min(0.65, frac))
+        app.albedo = max(0.05, min(0.65, (mx-50)/400))
     elif app.dragging == 'gh':
-        frac = (mx-550)/400
-        app.gh = max(0.0, min(0.95, frac))
+        app.gh = max(0.0, min(0.95, (mx-500)/250))
     app.budget = calcBudget(app.albedo, app.gh)
 
-def onMouseRelease(app, mx, my):
+def onMouseRelease(app,mx,my):
     app.dragging = None
 
-def onKeyPress(app, key):
-    if key == 'up': app.albedo = min(0.65, app.albedo+0.02)
-    if key == 'down': app.albedo = max(0.05, app.albedo-0.02)
-    if key == 'right': app.gh = min(0.95, app.gh+0.02)
-    if key == 'left': app.gh = max(0, app.gh-0.02)
+def onKeyPress(app,key):
+    if key=='up': app.albedo = min(0.65, app.albedo+0.02)
+    if key=='down': app.albedo = max(0.05, app.albedo-0.02)
+    if key=='right': app.gh = min(0.95, app.gh+0.02)
+    if key=='left': app.gh = max(0.0, app.gh-0.02)
     app.budget = calcBudget(app.albedo, app.gh)
 
 def redrawAll(app):
-    drawRect(0,0,1050,700, fill=rgb(15,20,35))
+    drawRect(0,0,1050,700, fill=rgb(14,19,34))
     b = app.budget
+    drawRect(0,0,1050,38, fill=rgb(10,12,20), opacity=92)
+    drawLabel("APP 3: RADIATION BUDGET BOARD - In = Out at equilibrium", 15, 20, size=15, bold=True, fill=rgb(255,255,255), align='left')
 
-    # Header
-    drawRect(0,0,1050,38, fill=rgb(10,12,20), opacity=90)
-    drawLabel("APP 3: RADIATION BUDGET BOARD - In = Out at equilibrium", 15, 20, size=13, bold=True, fill=rgb(255,255,255), align='left')
+    # SUN
+    drawCircle(80, 115, 32, fill=rgb(255,222,85), border=None)
+    drawLabel("SUN", 80, 116, size=14, bold=True, fill=rgb(50,30,0))
 
-    # Visual budget - left sun
-    drawCircle(90, 130, 35, fill=rgb(255,220,80), border=None)
-    drawLabel("SUN", 90, 132, size=12, bold=True, fill=rgb(40,20,0))
-    # incoming arrow width = 340
-    drawLine(130, 130, 320, 130, fill=rgb(255,220,80), lineWidth=10)
-    drawLabel(f"{b['in']:.0f} W/m2 IN", 225, 110, size=12, bold=True, fill=rgb(255,220,80))
+    # IN arrow - yellow
+    drawRect(125, 105, 190, 20, fill=rgb(255,222,85), border=None)
+    drawLabel(f"{b['in']:.0f} W/m2 INCOMING", 220, 86, size=14, bold=True, fill=rgb(255,222,85))
 
-    # reflected arrow
-    refW = max(2, b['ref']/340*40)
-    drawLine(250, 130, 90, 70, fill=rgb(180,200,255), lineWidth=refW)
-    drawLabel(f"Reflected {b['ref']:.0f}", 120, 60, size=11, fill=rgb(180,200,255), bold=True)
+    # REFLECTED - separate diagonal, label OFF line
+    refW = max(3, b['ref']/340*28)
+    drawLine(210, 115, 75, 55, fill=rgb(160,200,255), lineWidth=refW)
+    drawLabel(f"Reflected {b['ref']:.0f} W/m2", 30, 38, size=13, bold=True, fill=rgb(160,200,255), align='left')
 
-    # atmosphere box
-    drawRect(320, 90, 160, 80, fill=rgb(70,90,140), opacity=70, border=rgb(120,150,220), borderWidth=2)
-    drawLabel("ATMOSPHERE", 400, 105, size=11, bold=True, fill=rgb(255,255,255))
-    drawLabel(f"Abs {b['atmAbs']:.0f}", 400, 125, size=11, fill=rgb(200,220,255))
-    drawLabel(f"Emits {b['atmEm']:.0f} up/down", 400, 145, size=10, fill=rgb(255,160,160))
+    # ATMOSPHERE box - centered top, larger
+    drawRect(330, 80, 220, 110, fill=rgb(50,70,125), opacity=95, border=rgb(130,160,230), borderWidth=2)
+    drawLabel("ATMOSPHERE", 440, 100, size=15, bold=True, fill=rgb(255,255,255))
+    drawLabel(f"Absorbs {b['atmAbs']:.0f} W/m2", 440, 124, size=13, fill=rgb(190,210,255))
+    drawLabel(f"Emits {b['atmEm']:.0f} W/m2 up & down", 440, 144, size=12, fill=rgb(255,150,150))
+    drawLabel(f"Greenhouse g={app.gh:.2f}", 440, 164, size=12, fill=rgb(255,180,180))
 
-    # surface
-    drawRect(200, 380, 400, 100, fill=rgb(90,70,40), border=rgb(200,170,110), borderWidth=2)
-    drawLabel("SURFACE", 400, 395, size=12, bold=True, fill=rgb(255,255,255))
-    drawLabel(f"Absorbs {b['surfAbs']:.0f} W/m2", 400, 415, size=11, fill=rgb(255,230,150))
-    drawLabel(f"Emits {b['surfEm']:.0f} W/m2 (IR)", 400, 435, size=10, fill=rgb(255,100,100))
-    
-    # surface temp thermometer
-    TsC = b['Ts'] - 273.15
-    drawRect(620, 380, 60, 100, fill=rgb(40,40,50), border=rgb(100,100,120))
-    # fill height based on -20 to +40 C
-    frac = (TsC + 20)/60
-    frac = max(0, min(1, frac))
-    drawRect(622, 480-frac*96, 56, frac*96, fill=rgb(255,80,80), border=None)
-    drawLabel(f"{TsC:.1f} C", 650, 365, size=16, bold=True, fill=rgb(255,80,80))
-    drawLabel(f"{b['Te']-273.15:.1f}C no GH", 650, 500, size=10, fill=rgb(150,170,200))
+    # ABSORBED vertical - orange, label to right of line
+    absW = max(4, b['abs']/340*32)
+    drawRect(430, 190, absW, 235, fill=rgb(255,175,60), border=None)
+    drawLabel(f"Absorbed {b['abs']:.0f} total", 455+absW, 300, size=14, bold=True, fill=rgb(255,175,60), align='left')
 
-    # arrows down
-    absW = max(2, b['abs']/340*35)
-    drawLine(400, 170, 400, 380, fill=rgb(255,180,60), lineWidth=absW)
-    drawLabel(f"Absorbed {b['abs']:.0f}", 460, 260, size=11, fill=rgb(255,180,60))
+    # TO SPACE - red, label above
+    drawRect(550, 105, 200, 20, fill=rgb(255,95,95), border=None)
+    drawLabel(f"To space {b['abs']:.0f} W/m2 = IN", 650, 84, size=13, bold=True, fill=rgb(255,95,95))
 
-    # emission to space
-    drawLine(480, 130, 700, 130, fill=rgb(255,100,100), lineWidth=absW)
-    drawLabel(f"To space {b['abs']:.0f} = IN", 600, 110, size=11, fill=rgb(255,100,100), bold=True)
+    # SURFACE box - LOWERED to use space, much larger
+    drawRect(150, 425, 500, 145, fill=rgb(95,75,45), border=rgb(210,180,120), borderWidth=2)
+    drawLabel("SURFACE", 400, 450, size=16, bold=True, fill=rgb(255,255,255))
+    drawLabel(f"Absorbs {b['surfAbs']:.0f} W/m2 solar + IR", 400, 475, size=13, fill=rgb(255,230,150))
+    drawLabel(f"Emits {b['surfEm']:.0f} W/m2 IR upward", 400, 498, size=13, fill=rgb(255,120,120))
+    drawLabel(f"Albedo {app.albedo:.2f} controls reflection", 400, 525, size=12, fill=rgb(200,210,230))
 
-    # Data panel for copying
-    drawRect(710, 40, 320, fill=rgb(25,30,48), border=rgb(70,80,110), borderWidth=2)
-    drawLabel("COPY TO PAPER - BUDGET TABLE", 870, 60, size=12, bold=True, fill=rgb(255,230,100))
-    drawLabel(f"Incoming: {b['in']:.0f} W/m2", 730, 90, size=14, fill=rgb(255,220,80), align='left')
-    drawLabel(f"Albedo: {app.albedo:.2f} -> Ref: {b['ref']:.1f}", 730, 115, size=14, fill=rgb(140,200,255), align='left')
-    drawLabel(f"Absorbed by system: {b['abs']:.1f}", 730, 140, size=14, bold=True, fill=rgb(255,180,60), align='left')
-    drawLabel(f"  - Atm absorbs: {b['atmAbs']:.1f}", 730, 165, size=12, fill=rgb(180,200,255), align='left')
-    drawLabel(f"  - Surf absorbs: {b['surfAbs']:.1f}", 730, 185, size=12, fill=rgb(255,230,150), align='left')
-    drawLabel(f"Effective T (no GH): {b['Te']:.0f}K {b['Te']-273.15:.1f}C", 730, 215, size=12, fill=rgb(180,190,210), align='left')
-    drawLabel(f"Surface T (with GH): {b['Ts']:.0f}K {b['Ts']-273.15:.1f}C", 730, 235, size=13, bold=True, fill=rgb(255,100,100), align='left')
-    drawLabel(f"GH opacity: {app.gh:.2f}", 730, 255, size=12, fill=rgb(255,160,160), align='left')
-    drawLabel("Check: In ({:.0f}) = Ref ({:.0f}) + Abs ({:.0f})".format(b['in'], b['ref'], b['abs']), 730, 285, size=10, fill=rgb(150,200,150), align='left')
-    drawLabel("At equilibrium Abs = Out to space", 730, 305, size=10, fill=rgb(150,200,150), align='left')
+    # THERMOMETER - enlarged, right of surface
+    drawRect(680, 425, 80, 145, fill=rgb(35,38,55), border=rgb(110,115,140), borderWidth=2)
+    TsC = b['Ts']-273.15
+    frac = (TsC+20)/60
+    frac = max(0,min(1,frac))
+    drawRect(682, 570-frac*143, 76, frac*143, fill=rgb(255,70,70), border=None)
+    drawLabel(f"{TsC:.1f} C", 720, 400, size=18, bold=True, fill=rgb(255,70,70))
+    drawLabel(f"Te={b['Te']-273.15:.1f}C w/o GH", 720, 585, size=11, fill=rgb(160,175,200))
+    drawLabel("SURFACE TEMP", 720, 610, size=12, bold=True, fill=rgb(230,240,255))
+
+    # DATA PANEL - fully on right, no overlap
+    drawRect(800, 40, 235, 290, fill=rgb(26,31,50), border=rgb(75,85,115), borderWidth=2)
+    drawLabel("COPY TO PAPER", 917, 60, size=14, bold=True, fill=rgb(255,230,100))
+    drawLabel(f"In: {b['in']:.0f} W/m2", 815, 85, size=16, fill=rgb(255,222,85), align='left')
+    drawLabel(f"Ref: {b['ref']:.0f} W/m2", 815, 110, size=16, fill=rgb(160,200,255), align='left')
+    drawLabel(f"Abs: {b['abs']:.0f} W/m2", 815, 135, size=16, bold=True, fill=rgb(255,175,60), align='left')
+    drawLabel(f"Atm Abs {b['atmAbs']:.0f}", 815, 160, size=14, fill=rgb(190,210,255), align='left')
+    drawLabel(f"Surf Abs {b['surfAbs']:.0f}", 815, 182, size=14, fill=rgb(255,230,150), align='left')
+    drawLabel(f"Te {b['Te']:.0f}K", 815, 210, size=14, fill=rgb(180,190,210), align='left')
+    drawLabel(f"Ts {b['Ts']:.0f}K {TsC:.1f}C", 815, 232, size=15, bold=True, fill=rgb(255,95,95), align='left')
+    drawLabel("In = Ref + Abs", 815, 260, size=12, fill=rgb(150,220,150), align='left')
+    drawLabel("Abs = Out (equil.)", 815, 278, size=12, fill=rgb(150,220,150), align='left')
 
     # presets
-    drawRect(720,120,100,25, fill=rgb(50,60,90), border=rgb(120,130,170))
-    drawLabel("Modern", 770, 133, size=11, fill=rgb(255,255,255))
-    drawRect(830,120,100,25, fill=rgb(70,80,100), border=rgb(120,130,170))
-    drawLabel("Ice Age", 880, 133, size=11, fill=rgb(255,255,255))
-    drawRect(720,150,100,25, fill=rgb(90,60,50), border=rgb(170,130,120))
-    drawLabel("High CO2", 770, 163, size=11, fill=rgb(255,255,255))
-    drawRect(830,150,100,25, fill=rgb(40,40,60), border=rgb(120,130,170))
-    drawLabel("No GH", 880, 163, size=11, fill=rgb(255,255,255))
+    drawRect(820,135,100,25, fill=rgb(55,65,95), border=rgb(120,135,175))
+    drawLabel("Modern", 870, 148, size=13, fill=rgb(255,255,255))
+    drawRect(930,135,90,25, fill=rgb(75,85,105), border=rgb(120,135,175))
+    drawLabel("Ice Age", 975, 148, size=13, fill=rgb(255,255,255))
+    drawRect(820,165,100,25, fill=rgb(95,65,55), border=rgb(175,135,125))
+    drawLabel("High CO2", 870, 178, size=13, fill=rgb(255,255,255))
+    drawRect(930,165,90,25, fill=rgb(45,45,65), border=rgb(120,135,175))
+    drawLabel("No GH", 975, 178, size=13, fill=rgb(255,255,255))
 
-    # sliders
-    drawLabel(f"Albedo (ice/cloud reflect) = {app.albedo:.2f}  <- drag ->", 50, 590, size=13, bold=True, fill=rgb(180,200,255), align='left')
-    drawRect(50, 610, 400, 18, fill=rgb(40,50,75), border=rgb(100,120,160))
-    drawCircle(50+app.albedo/0.65*400, 619, 11, fill=rgb(180,200,255), border=rgb(0,0,0), borderWidth=2)
+    # sliders - bottom, full width use
+    drawLabel(f"Albedo (reflect) {app.albedo:.2f} - ice/clouds", 50, 602, size=15, bold=True, fill=rgb(160,200,255), align='left')
+    drawRect(50, 620, 400, 20, fill=rgb(40,50,75), border=rgb(110,130,170))
+    drawCircle(50+app.albedo/0.65*400, 630, 13, fill=rgb(160,200,255), border=rgb(0,0,0), borderWidth=2)
 
-    drawLabel(f"Greenhouse opacity = {app.gh:.2f}  <- drag ->", 550, 590, size=13, bold=True, fill=rgb(255,160,160), align='left')
-    drawRect(550, 610, 400, 18, fill=rgb(70,45), border=rgb(160,100))
-    drawCircle(550+app.gh/0.95*400, 619, 11, fill=rgb(255,120,120), border=rgb(0,0,0), borderWidth=2)
+    drawLabel(f"Greenhouse {app.gh:.2f} - CO2/CH4", 500, 602, size=15, bold=True, fill=rgb(255,150,150), align='left')
+    drawRect(500, 620, 250, 20, fill=rgb(70,45,60), border=rgb(170,110,120))
+    drawCircle(500+app.gh/0.95*250, 630, 13, fill=rgb(255,120,120), border=rgb(0,0,0), borderWidth=2)
 
-    drawLabel("LEFT/RIGHT=GH  UP/DOWN=Albedo | Paper: Draw Sankey for 3 presets, then graph Ts vs Albedo and Ts vs GH", 525, 655, size=11, bold=True, fill=rgb(230,240,255))
+    drawLabel("DRAG SLIDERS - Paper: Sankey for 3 presets, graph Ts vs Albedo and Ts vs GH", 525, 665, size=13, bold=True, fill=rgb(230,240,255))
 
 def main():
     runApp(1050,700, stepsPerSecond=30)
