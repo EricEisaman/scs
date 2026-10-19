@@ -52,12 +52,12 @@ def redrawAll(app):
     drawLabel("SUN", 70, 92, size=14, bold=True, fill=rgb(50,30,0))
 
     drawRect(115, 82, 195, 20, fill=rgb(255,222,85), border=None)
-    drawLabel(f"{b['in']:.0f} W/m2 INCOMING", 212, 62, size=16, bold=True, fill=rgb(255,222,85))
+    drawLabel(f"{b['in']:.0f} W/m2 INCOMING", 232, 62, size=16, bold=True, fill=rgb(255,222,85))
 
     # reflected - label completely clear of line
     refW=max(3,b['ref']/340*26)
     drawLine(205, 92, 80, 48, fill=rgb(160,200,255), lineWidth=refW)
-    drawLabel(f"Reflected {b['ref']:.0f} W/m2", 10, 28, size=15, bold=True, fill=rgb(160,200,255), align='left')
+    drawLabel(f"Reflected {b['ref']:.0f} W/m2", 10, 38, size=15, bold=True, fill=rgb(160,200,255), align='left')
 
     # atmosphere - larger, centered
     drawRect(325, 58, 235, 115, fill=rgb(50,70,125), border=rgb(130,160,230), borderWidth=2)
