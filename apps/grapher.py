@@ -503,7 +503,6 @@ def redrawAll(app):
                     fSize = font_cell()
                     drawRect(x+3,y+3,w-6,h-6, fill=rgb(255,255,255), border=rgb(80,120,220), borderWidth=2.5)
                     drawLabel(app.editText+"|", x+12, y+h/2, size=fSize, fill=rgb(20,20,20), align='left')
-        drawLabel(f"baseFontSize={CONFIG['baseFontSize']} (edit CONFIG top of file) | CAPS: {'ON' if app.capsLock else 'off'} SHIFT:{'down' if app.shiftDown else 'up'} | Click to select, again to edit.", app.width/2, app.height-10, size=font_small(), bold=True, fill=rgb(80,90,120))
     else:
         drawRect(0,48,280,app.height-48, fill=rgb(238,241,248), border=rgb(200,210,230), borderWidth=1)
         drawLabel("GRAPH SETTINGS", 140, 72, size=font_base()+1, bold=True, fill=rgb(30,35,55))
