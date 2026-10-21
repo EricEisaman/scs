@@ -4,7 +4,7 @@ import math
 
 # ================= CONFIG - EDIT HERE =================
 CONFIG = {
-    "baseFontSize": 14,      # <-- CHANGE THIS to scale all fonts. Try 12, 14, 16, 18
+    "baseFontSize": 18,      # <-- CHANGE THIS to scale all fonts. Try 12, 14, 16, 18
     "headerBonus": 2,         # header = base + headerBonus
     "cellBonus": 1,           # cell = base + cellBonus
     "smallBonus": -2,         # tick labels, hints = base + smallBonus
