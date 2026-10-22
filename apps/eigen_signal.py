@@ -175,7 +175,7 @@ def redrawAll(app):
             drawLine(x1,y1,x2,y2, fill=rgb(255,220,80), lineWidth=2, dashes=True, opacity=70)
             drawLabel(f"λ={lam:.2f} eigen direction", x1, y1, size=18, fill=rgb(255,220,80), bold=True)
     else:
-        drawLabel("No real eigenvectors — rotation spins every vector (pure noise, no invariant signal)", app.centerX, 155, size=20, bold=True, fill=rgb(255,100,100))
+        drawLabel("No real eigenvectors — rotation spins every vector (pure noise, no invariant signal)", app.centerX + 20, 145, size=20, bold=True, fill=rgb(255,100,100))
 
     # test vector (blue) and transformed (red)
     tv = app.testVec
