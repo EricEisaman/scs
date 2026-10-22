@@ -115,7 +115,7 @@ def redrawAll(app):
     eig = eigen2x2(M)
 
     # title
-    drawLabel("Eigen Signal Lab — Invariant Truth in Multivariate Noise", 520, 30, size=18, bold=True, fill=rgb(230,230,240))
+    drawLabel("Eigen Signal Lab — Invariant Truth in Multivariate Noise", 520, 30, size=25, bold=True, fill=rgb(230,230,240))
     drawLabel(f"{app.transIndex+1}: {app.transformations[app.transIndex]['name']} — press 1-4 to switch, C ellipse, B blur (variance), S Sobel (edge), R reset", 520, 60, size=19, fill=rgb(160,160,170))
 
     # grid
@@ -175,7 +175,7 @@ def redrawAll(app):
             drawLine(x1,y1,x2,y2, fill=rgb(255,220,80), lineWidth=2, dashes=True, opacity=70)
             drawLabel(f"λ={lam:.2f} eigen direction", x1, y1, size=18, fill=rgb(255,220,80), bold=True)
     else:
-        drawLabel("No real eigenvectors — rotation spins every vector (pure noise, no invariant signal)", app.centerX, 105, size=20, bold=True, fill=rgb(255,100,100))
+        drawLabel("No real eigenvectors — rotation spins every vector (pure noise, no invariant signal)", app.centerX, 155, size=20, bold=True, fill=rgb(255,100,100))
 
     # test vector (blue) and transformed (red)
     tv = app.testVec
