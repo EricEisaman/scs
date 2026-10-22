@@ -1,196 +1,113 @@
-"""
-bp_effect.py
-SCS App 1 — 1050x700 — P-value vs Effect Size (Blood Pressure Trap)
-Run: ?app=bp_effect
 
-Uses full 1050x700: left 65% graph, right 35% stats
-"""
 from scs import *
 import math
-
 def gaussian(x, mean, sd):
     if sd < 0.5: sd = 0.5
     return (1.0 / (sd * math.sqrt(2*math.pi))) * math.exp(-0.5 * ((x-mean)/sd)**2)
-
 def onAppStart(app):
-    app.width = 1050
-    app.height = 700
-    app.stepsPerSecond = 30
-    app.background = rgb(248, 249, 252)
-
-    app.ctrlMean = 130.0
-    app.rawDiff = 1.0
-    app.sd = 12.0
-    app.ctrlSD = 12.0
-    app.n = 50000
-    app.useGlass = False
-
-    # LAYOUT 1050x700
-    app.gLeft = 70
-    app.gRight = 680
-    app.gTop = 80
-    app.gBottom = 400
-    app.pLeft = 700
-    app.pRight = 1030
-    app.pTop = 80
-
-    app.xMin = 88
-    app.xMax = 172
-    app.dragging = False
-
-def posX(app, v):
-    frac = (v - app.xMin) / (app.xMax - app.xMin)
-    return app.gLeft + frac * (app.gRight - app.gLeft)
-
-def valX(app, px):
-    frac = (px - app.gLeft) / (app.gRight - app.gLeft)
-    return app.xMin + frac * (app.xMax - app.xMin)
-
+    app.width=1050; app.height=700; app.background=rgb(248,249,252)
+    app.ctrlMean=130.0; app.rawDiff=22.4; app.sd=12.0; app.ctrlSD=12.0; app.n=120; app.useGlass=False
+    app.gL=55; app.gR=995; app.gT=72; app.gB=410; app.xMin=82; app.xMax=178; app.dragging=False
+def pX(app,v): return app.gL + (v-app.xMin)/(app.xMax-app.xMin)*(app.gR-app.gL)
+def vX(app,px): return app.xMin + (px-app.gL)/(app.gR-app.gL)*(app.xMax-app.xMin)
 def compute(app):
-    expMean = app.ctrlMean - app.rawDiff
-    d = app.rawDiff / app.sd if app.sd !=0 else 0
-    df = 2*app.n -2 if app.n>1 else 1
-    J = 1 - 3.0/(4*df -1) if df>1 else 1
-    g = d * J
-    delta = app.rawDiff / app.ctrlSD if app.ctrlSD!=0 else 0
-    t = d * math.sqrt(app.n/2) if app.n>1 else 0
-    if abs(t) > 3.5: p = 0.0004
-    elif abs(t) > 2.8: p = 0.005
-    elif abs(t) > 2.0: p = 0.04
-    elif abs(t) > 1.3: p = 0.18
-    else: p = 0.45
-    return expMean, d, g, delta, J, t, p
-
-def onMousePress(app, mx, my):
-    if app.gLeft <= mx <= app.gRight and app.gTop <= my <= app.gBottom:
-        app.dragging = True
-        app.rawDiff = max(0.2, min(30, app.ctrlMean - valX(app, mx)))
-
-def onMouseDrag(app, mx, my):
-    if app.dragging:
-        app.rawDiff = max(0.2, min(30, app.ctrlMean - valX(app, mx)))
-
-def onMouseRelease(app, mx, my):
-    app.dragging = False
-
-def onKeyPress(app, key):
-    if key == 'r' or key == 'R':
-        app.rawDiff = 1.0; app.n = 50000; app.sd = 12.0; app.ctrlSD = 12.0; app.useGlass=False
-    elif key == 'up': app.rawDiff = min(30, app.rawDiff + 0.5)
-    elif key == 'down': app.rawDiff = max(0.2, app.rawDiff - 0.5)
-    elif key == 'right': app.sd = min(30, app.sd + 1); app.ctrlSD = min(30, app.ctrlSD + 1)
-    elif key == 'left': app.sd = max(3, app.sd - 1); app.ctrlSD = max(3, app.ctrlSD - 1)
-    elif key == 'm' or key == 'M': app.n = min(50000, int(app.n*1.35+10))
-    elif key == 'n' or key == 'N': app.n = max(10, int(app.n/1.35))
-    elif key == 'g' or key == 'G': app.useGlass = not app.useGlass
-
+    expMean=app.ctrlMean-app.rawDiff
+    d=app.rawDiff/app.sd if app.sd else 0
+    df=2*app.n-2; J=1-3/(4*df-1) if df>1 else 1; g=d*J
+    delta=app.rawDiff/app.ctrlSD if app.ctrlSD else 0
+    t=d*math.sqrt(app.n/2)
+    if abs(t)>3.5: p=0.0004
+    elif abs(t)>2.8: p=0.005
+    elif abs(t)>2.0: p=0.04
+    elif abs(t)>1.3: p=0.18
+    else: p=0.42
+    return expMean,d,g,delta,J,t,p
+def onMousePress(app,mx,my):
+    if app.gL<=mx<=app.gR and app.gT<=my<=app.gB:
+        app.dragging=True; app.rawDiff=max(0.2,min(40,app.ctrlMean-vX(app,mx)))
+def onMouseDrag(app,mx,my):
+    if app.dragging: app.rawDiff=max(0.2,min(40,app.ctrlMean-vX(app,mx)))
+def onMouseRelease(app,mx,my): app.dragging=False
+def onKeyPress(app,key):
+    if key in ('r','R'): app.rawDiff=1.0; app.n=50000; app.sd=12; app.ctrlSD=12; app.useGlass=False
+    elif key=='up': app.rawDiff=min(40,app.rawDiff+0.6)
+    elif key=='down': app.rawDiff=max(0.2,app.rawDiff-0.6)
+    elif key=='right': app.sd=min(30,app.sd+1); app.ctrlSD=min(30,app.ctrlSD+1)
+    elif key=='left': app.sd=max(3,app.sd-1); app.ctrlSD=max(3,app.ctrlSD-1)
+    elif key in ('m','M'): app.n=min(50000,int(app.n*1.35+8))
+    elif key in ('n','N'): app.n=max(10,int(app.n/1.35))
+    elif key in ('g','G'): app.useGlass=not app.useGlass
 def redrawAll(app):
-    expMean, d, g, delta, J, t, p = compute(app)
-
-    # HEADER — full width
-    drawRect(0,0,1050,62, fill=rgb(20,22,30), border=None)
-    drawLabel("BP_EFFECT.PY — Why P < 0.05 Means Nothing Without Effect Size", 525, 20, size=18, bold=True, fill=rgb(255,255,255))
-    drawLabel("Drag graph to change drug effect | UP/DOWN effect | LEFT/RIGHT noise | N/M sample size | G Glass Δ | R reset", 525, 42, size=11, fill=rgb(180,180,190))
-
-    # GRAPH BACKGROUND — uses left 65%
-    drawRect(app.gLeft-1, app.gTop-1, app.gRight-app.gLeft+2, app.gBottom-app.gTop+2, fill=rgb(255,255,255), border=rgb(200,205,210), borderWidth=1, roundness=8)
-    # grid
-    for v in range(90, 171, 10):
-        x = posX(app, v)
-        drawLine(x, app.gTop, x, app.gBottom, fill=rgb(235,235,238), lineWidth=1)
-        drawLine(x, app.gBottom, x, app.gBottom+5, fill=rgb(180,180,180))
-        drawLabel(str(v), x, app.gBottom+14, size=11, fill=rgb(100,100,100))
-    drawLabel("Systolic BP (mmHg) — lower = better", (app.gLeft+app.gRight)//2, app.gBottom+30, size=12, bold=True, fill=rgb(80,80,80))
-
-    # compute scaled bells to fit height 220px
-    maxGaussC = 1.0/(app.ctrlSD*2.5066)
-    maxGaussE = 1.0/(app.sd*2.5066)
-    maxG = max(maxGaussC, maxGaussE)
-    hScale = 210 / maxG if maxG>0 else 200
-
-    # draw fills under curves
+    expMean,d,g,delta,J,t,p=compute(app)
+    drawRect(0,0,1050,60,fill=rgb(18,20,28))
+    drawLabel("Why P < 0.05 Means Nothing Without Effect Size",525,20,size=21,bold=True,fill=rgb(255,255,255))
+    drawLabel("DRAG curves | UP/DOWN effect | LEFT/RIGHT noise | N/M sample size | G Glass Δ | R 1-pt trap",525,42,size=12,fill=rgb(180,180,190))
+    drawRect(app.gL-2,app.gT-2,app.gR-app.gL+4,app.gB-app.gT+4,fill=rgb(255,255,255),border=rgb(190,200,210),borderWidth=1,roundness=12)
+    for v in range(85,176,5):
+        x=pX(app,v)
+        if v%10==0:
+            drawLine(x,app.gT,x,app.gB,fill=rgb(232,233,236),lineWidth=1)
+            drawLine(x,app.gB,x,app.gB+6,fill=rgb(160,160,160))
+            drawLabel(str(v),x,app.gB+16,size=13,bold=True,fill=rgb(80,80,80))
+        else:
+            drawLine(x,app.gT,x,app.gB,fill=rgb(242,243,245))
+    drawLabel("Systolic BP (mmHg) — lower is better →",525,app.gB+36,size=14,bold=True,fill=rgb(60,60,70))
+    maxG=max(1/(app.ctrlSD*2.5066),1/(app.sd*2.5066))
+    hScale=260/maxG if maxG>0 else 200
     ptsC=[]; ptsE=[]
-    for i in range(200):
-        xv = app.xMin + (app.xMax-app.xMin)*i/199
-        yc = gaussian(xv, app.ctrlMean, app.ctrlSD)
-        ye = gaussian(xv, expMean, app.sd)
-        xc = posX(app, xv)
-        ycPix = app.gBottom - yc*hScale
-        yePix = app.gBottom - ye*hScale
-        ptsC.append((xc, ycPix, yc))
-        ptsE.append((xc, yePix, ye))
-
-    # overlap shading first
+    for i in range(240):
+        xv=app.xMin + (app.xMax-app.xMin)*i/239
+        yc=gaussian(xv,app.ctrlMean,app.ctrlSD); ye=gaussian(xv,expMean,app.sd)
+        xpix=pX(app,xv)
+        ptsC.append((xpix,app.gB-yc*hScale)); ptsE.append((xpix,app.gB-ye*hScale))
+    for i in range(len(ptsC)):
+        x,y=ptsC[i]; drawLine(x,y,x,app.gB,fill=rgb(60,110,230),lineWidth=1,opacity=16)
+    for i in range(len(ptsE)):
+        x,y=ptsE[i]; drawLine(x,y,x,app.gB,fill=rgb(220,50,50),lineWidth=1,opacity=16)
     for i in range(len(ptsC)-1):
-        x1 = ptsC[i][0]
-        # fill under with low alpha
-        drawLine(x1, ptsC[i][1], x1, app.gBottom, fill=rgb(80,130,255), lineWidth=1, opacity=18)
-        drawLine(x1, ptsE[i][1], x1, app.gBottom, fill=rgb(255,80,80), lineWidth=1, opacity=18)
-    # lines
-    for i in range(len(ptsC)-1):
-        drawLine(ptsC[i][0], ptsC[i][1], ptsC[i+1][0], ptsC[i+1][1], fill=rgb(60,110,230), lineWidth=3, opacity=90)
-        drawLine(ptsE[i][0], ptsE[i][1], ptsE[i+1][0], ptsE[i+1][1], fill=rgb(220,50,50), lineWidth=3, opacity=90)
-
-    # mean dashed lines
-    cx = posX(app, app.ctrlMean)
-    ex = posX(app, expMean)
-    drawLine(cx, app.gTop+10, cx, app.gBottom, fill=rgb(60,110,230), lineWidth=2, dashes=True, opacity=80)
-    drawLine(ex, app.gTop+10, ex, app.gBottom, fill=rgb(220,50,50), lineWidth=2, dashes=True, opacity=80)
-    drawCircle(cx, app.gTop+18, 7, fill=rgb(60,110,230), border=rgb(255,255,255), borderWidth=2)
-    drawCircle(ex, app.gTop+18, 7, fill=rgb(220,50,50), border=rgb(255,255,255), borderWidth=2)
-    drawLabel(f"CTRL {app.ctrlMean:.0f}  σ={app.ctrlSD:.0f}", cx, app.gTop+6, size=11, bold=True, fill=rgb(60,110,230))
-    drawLabel(f"DRUG {expMean:.1f}  σ={app.sd:.0f}", ex, app.gTop+32, size=11, bold=True, fill=rgb(200,30,30))
-
-    # raw diff double arrow bottom of graph
-    drawLine(ex, app.gBottom-22, cx, app.gBottom-22, fill=rgb(30,30,30), lineWidth=2, arrowStart=True, arrowEnd=True)
-    drawLabel(f"raw diff = {app.rawDiff:.1f} mmHg", (ex+cx)/2, app.gBottom-38, size=12, bold=True, fill=rgb(20,20,20))
-
-    # RIGHT PANEL — full height usage
-    drawRect(app.pLeft, app.pTop, app.pRight-app.pLeft, 610, fill=rgb(255,255,255), border=rgb(200,205,210), borderWidth=1, roundness=10)
-
-    y = app.pTop + 18
-    drawLabel(f"n per group = {app.n:,}", app.pLeft+165, y, size=16, bold=True); y+=22
-    drawLabel(f"SD pooled={app.sd:.1f}  SD ctrl={app.ctrlSD:.1f}  J={J:.4f}", app.pLeft+165, y, size=11, fill=rgb(90,90,90)); y+=22
-
-    drawRect(app.pLeft+12, y, 306, 62, fill=rgb(240,245,255), border=rgb(180,195,230), borderWidth=1, roundness=8)
-    drawLabel("Cohen's d = diff / SD_pooled", app.pLeft+20, y+10, size=12, bold=True, align='left')
-    drawLabel(f"{app.rawDiff:.2f} / {app.sd:.2f} = {d:.3f}", app.pLeft+20, y+30, size=22, bold=True, align='left')
-    interp = "negligible" if abs(d)<0.2 else "small" if abs(d)<0.5 else "medium" if abs(d)<0.8 else "large"
-    drawLabel(f"{interp}  (0.2/0.5/0.8 benchmarks ≠ law!)", app.pLeft+20, y+50, size=11, fill=rgb(70,70,90), align='left')
-    y+=76
-
-    drawRect(app.pLeft+12, y, 306, 56, fill=rgb(245,240,255), border=rgb(190,175,220), borderWidth=1, roundness=8)
-    drawLabel(f"Hedges' g = d × J = {g:.3f}  (J penalizes n<20 by 5-10%)", app.pLeft+20, y+12, size=11, bold=True, fill=rgb(70,50,100), align='left')
-    drawLabel(f"Glass Δ = diff / SD_ctrl = {delta:.3f} {'[ON]' if app.useGlass else '[OFF press G]'}", app.pLeft+20, y+30, size=11, bold=True, fill=rgb(110,70,20), align='left')
-    drawLabel("Use Δ when treatment explodes variance", app.pLeft+20, y+44, size=10, fill=rgb(110,90,60), align='left')
-    y+=70
-
-    # P-VALUE ILLUSION — big, readable
-    drawRect(app.pLeft+12, y, 306, 108, fill=rgb(255,240,245), border=rgb(230,160,180), borderWidth=1, roundness=8)
-    drawLabel("P-VALUE ILLUSION", app.pLeft+20, y+12, size=12, bold=True, fill=rgb(150,30,60), align='left')
-    drawLabel(f"t ≈ d·√(n/2) = {t:.2f}", app.pLeft+20, y+30, size=12, align='left')
-    pCol = rgb(0,140,0) if p<0.05 else rgb(180,30,30)
-    drawLabel(f"p ≈ {p}  {'→ SIGNIFICANT!' if p<0.05 else '→ not significant'}", app.pLeft+20, y+48, size=14, bold=True, fill=pCol, align='left')
-    drawLabel("With n=50k, d=0.08 → p<0.05", app.pLeft+20, y+66, size=11, align='left', fill=rgb(120,40,50))
-    drawLabel("P = engine on? d = goes >5 mph?", app.pLeft+20, y+82, size=11, bold=True, align='left')
-    drawLabel("Same as transcript car analogy", app.pLeft+20, y+96, size=10, fill=rgb(100,80,80), align='left')
-    y+=122
-
-    drawRect(app.pLeft+12, y, 306, 108, fill=rgb(240,255,240), border=rgb(160,200,160), borderWidth=1, roundness=8)
-    drawLabel("CLINICAL CONTEXT > BENCHMARKS", app.pLeft+20, y+12, size=11, bold=True, fill=rgb(30,90,30), align='left')
+        drawLine(ptsC[i][0],ptsC[i][1],ptsC[i+1][0],ptsC[i+1][1],fill=rgb(45,90,210),lineWidth=4)
+        drawLine(ptsE[i][0],ptsE[i][1],ptsE[i+1][0],ptsE[i+1][1],fill=rgb(200,35,35),lineWidth=4)
+    cx=pX(app,app.ctrlMean); ex=pX(app,expMean)
+    drawLine(cx,app.gT+8,cx,app.gB,fill=rgb(45,90,210),lineWidth=2,dashes=True,opacity=80)
+    drawLine(ex,app.gT+8,ex,app.gB,fill=rgb(200,35,35),lineWidth=2,dashes=True,opacity=80)
+    drawCircle(cx,app.gT+16,10,fill=rgb(45,90,210),border=rgb(255,255,255),borderWidth=3)
+    drawCircle(ex,app.gT+16,10,fill=rgb(200,35,35),border=rgb(255,255,255),borderWidth=3)
+    drawLabel(f"CONTROL {app.ctrlMean:.0f} σ={app.ctrlSD:.0f}",cx,app.gT-6,size=14,bold=True,fill=rgb(45,90,210))
+    drawLabel(f"DRUG {expMean:.1f} σ={app.sd:.0f}",ex,app.gT-6,size=14,bold=True,fill=rgb(200,35,35))
+    drawLine(ex,app.gB-34,cx,app.gB-34,fill=rgb(20,20,20),lineWidth=3,arrowStart=True,arrowEnd=True)
+    drawLabel(f"RAW DIFFERENCE = {app.rawDiff:.1f} mmHg",(ex+cx)/2,app.gB-56,size=15,bold=True,fill=rgb(20,20,20))
+    cardY=462; cardH=226
+    drawRect(18,cardY,322,cardH,fill=rgb(255,255,255),border=rgb(190,200,215),borderWidth=1,roundness=12)
+    drawLabel("Effect Size (the real question)",32,cardY+18,size=13,bold=True,fill=rgb(20,20,30),align='left')
+    drawLabel(f"d = {app.rawDiff:.1f}/{app.sd:.1f} = {d:.3f}",32,cardY+42,size=20,bold=True,align='left')
+    interp="negligible" if abs(d)<0.2 else "small" if abs(d)<0.5 else "medium" if abs(d)<0.8 else "LARGE"
+    drawLabel(f"{interp} (0.2/0.5/0.8 ≠ law)",32,cardY+68,size=13,fill=rgb(60,60,70),align='left')
+    drawLabel(f"Hedges g={g:.3f} J={J:.4f}",32,cardY+94,size=12,bold=True,fill=rgb(70,50,100),align='left')
+    drawLabel(f"Glass Δ={delta:.3f} {'[ON]' if app.useGlass else '[OFF G]'}",32,cardY+114,size=12,bold=True,fill=rgb(120,70,15),align='left')
+    drawLabel("Use Δ when treatment explodes variance",32,cardY+132,size=11,fill=rgb(100,80,50),align='left')
+    drawLabel("Cohen warned: benchmarks ≠ law!",32,cardY+152,size=11,bold=True,align='left')
+    drawLabel("Context decides if effect matters.",32,cardY+170,size=11,align='left')
+    drawRect(364,cardY,322,cardH,fill=rgb(255,245,248),border=rgb(230,170,185),borderWidth=1,roundness=12)
+    drawLabel("P-VALUE ILLUSION",378,cardY+18,size=13,bold=True,fill=rgb(150,25,55),align='left')
+    drawLabel(f"n = {app.n:,} per group",378,cardY+42,size=14,bold=True,align='left')
+    drawLabel(f"t ≈ d·√(n/2) = {t:.2f}",378,cardY+66,size=14,align='left')
+    pCol=rgb(0,140,0) if p<0.05 else rgb(180,30,30)
+    drawLabel(f"p ≈ {p}",378,cardY+94,size=28,bold=True,fill=pCol,align='left')
+    drawLabel(f"{'→ SIGNIFICANT!' if p<0.05 else '→ NOT significant'}",378,cardY+122,size=14,bold=True,fill=pCol,align='left')
+    drawLabel("With n=50k, d=0.08 → p<0.05",378,cardY+148,size=12,fill=rgb(120,40,50),align='left')
+    drawLabel("P = engine on? d = >5 mph?",378,cardY+168,size=12,bold=True,align='left')
+    drawRect(710,cardY,322,cardH,fill=rgb(242,252,242),border=rgb(160,200,160),borderWidth=1,roundness=12)
+    drawLabel("CLINICAL CONTEXT",724,cardY+18,size=13,bold=True,fill=rgb(25,90,25),align='left')
     if app.rawDiff <= 1.5:
-        drawLabel("d≈0.08 small → 1 mmHg saves", app.pLeft+20, y+30, size=11, align='left')
-        drawLabel("~0 lives. Math sig, clinically useless.", app.pLeft+20, y+46, size=11, bold=True, fill=rgb(180,30,30), align='left')
-    elif app.rawDiff < 5:
-        drawLabel(f"d={d:.2f} small, but at scale of", app.pLeft+20, y+30, size=11, align='left')
-        drawLabel("millions, could matter.", app.pLeft+20, y+46, size=11, align='left')
+        drawLabel(f"d={d:.2f} → 1 mmHg drop",724,cardY+44,size=13,align='left')
+        drawLabel("Saves ~0 lives.",724,cardY+64,size=14,bold=True,fill=rgb(180,30,30),align='left')
+        drawLabel("Math sig, clinically USELESS.",724,cardY+106,size=13,bold=True,fill=rgb(180,30,30),align='left')
+    elif app.rawDiff < 6:
+        drawLabel(f"d={d:.2f} small, millions→matters",724,cardY+44,size=13,align='left')
+        drawLabel("0.2 mortality = thousands saved",724,cardY+90,size=12,bold=True,align='left')
     else:
-        drawLabel(f"d={d:.2f} medium/large!", app.pLeft+20, y+30, size=11, align='left')
-        drawLabel("10 mmHg prevents strokes.", app.pLeft+20, y+46, size=11, bold=True, fill=rgb(30,90,30), align='left')
-    drawLabel("Cohen warned: don't use 0.2/0.5/0.8", app.pLeft+20, y+66, size=10, align='left', fill=rgb(80,80,80))
-    drawLabel("blindly. Mortality 0.2 = thousands saved.", app.pLeft+20, y+80, size=10, align='left', fill=rgb(80,80,80))
-    drawLabel("Fun rating 0.8 = trivial.", app.pLeft+20, y+94, size=10, align='left', fill=rgb(80,80,80))
-
-    # footer bar
-    drawRect(0, 655, 1050, 45, fill=rgb(20,22,30), border=None)
-    drawLabel("Lesson: Effect size strips sample-size dependency. P tells you 'not zero', d tells you 'how much & does it matter?'", 525, 678, size=12, fill=rgb(220,220,230))
+        drawLabel(f"d={d:.2f} MEDIUM/LARGE",724,cardY+44,size=14,bold=True,align='left')
+        drawLabel(f"{app.rawDiff:.0f} mmHg prevents strokes",724,cardY+68,size=13,align='left')
+        drawLabel("Context > benchmarks!",724,cardY+92,size=12,bold=True,align='left')
+    drawLabel("Fun video d=0.8 = trivial.",724,cardY+148,size=11,fill=rgb(80,80,80),align='left')
+    drawLabel("Mortality d=0.2 = massive.",724,cardY+164,size=11,bold=True,fill=rgb(80,80,80),align='left')
