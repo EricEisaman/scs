@@ -77,9 +77,6 @@ def onAppStart(app):
     app.lockedLambda = None
     app.cov = [[1.0, 0.7],[0.7, 1.0]]
     app.rho = 0.7
-    app.dragCount = 0
-    app.moveCount = 0
-    app.lastEvent = "none"
     app.dataPoints = []
     for i in range(90):
         a = math.sin(i*12.9898)*43758.5453
@@ -157,18 +154,12 @@ def updateTestVecFromMouse(app, mx, my):
     app.lockedLambda = None
 
 def onMousePress(app, mx, my):
-    app.lastEvent = f"PRESS {mx:.0f},{my:.0f}"
-    app.dragCount += 1
     updateTestVecFromMouse(app, mx, my)
 
 def onMouseDrag(app, mx, my):
-    app.lastEvent = f"DRAG {mx:.0f},{my:.0f}"
-    app.dragCount += 1
     updateTestVecFromMouse(app, mx, my)
 
 def onMouseMove(app, mx, my):
-    app.lastEvent = f"MOVE {mx:.0f},{my:.0f}"
-    app.moveCount += 1
     updateTestVecFromMouse(app, mx, my)
 
 def onKeyPress(app, key):
@@ -188,15 +179,6 @@ def onKeyPress(app, key):
         app.locked = False
 
 def redrawAll(app):
-    # TEMP DEBUG - remove after fix
-    try:
-        drawRect(10, 70, 260, 110, fill=rgb(0,0,0), border=rgb(255,255,0), borderWidth=2, roundness=6, opacity=90)
-        drawLabel(f"last {app.lastEvent}", 15, 90, size=15, fill=rgb(255,255,0), align='left')
-        drawLabel(f"drag# {app.dragCount} move# {app.moveCount}", 15, 110, size=15, fill=rgb(255,255,0), align='left')
-        drawLabel(f"vec {app.testVec[0]:.2f} {app.testVec[1]:.2f}", 15, 130, size=15, fill=rgb(200,255,200), align='left')
-        drawLabel(f"mag {math.hypot(app.testVec[0], app.testVec[1]):.2f}", 15, 150, size=15, fill=rgb(200,255,200), align='left')
-    except:
-        pass
     M = getCurrentM(app)
     eig = getCurrentEig(app)
     tv = app.testVec
