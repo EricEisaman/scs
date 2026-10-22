@@ -314,7 +314,7 @@ def redrawAll(app):
     drawCircle(cx, app.graphTop+16, 10, fill=rgb(60,110,200), border=rgb(255,255,255), borderWidth=3)
     drawCircle(ex, app.graphTop+16, 10, fill=rgb(200,40,40), border=rgb(255,255,255), borderWidth=3)
     drawLabel(f"CTRL {stats['mC']:.2f}kg σ={stats['sC']:.2f}", cx, app.graphTop-2, size=20, bold=True, fill=rgb(40,80,180))
-    drawLabel(f"ENRICHED {stats['mE']:.2f}kg σ={stats['sE']:.2f}", ex, app.graphTop+18, size=20, bold=True, fill=rgb(180,30,30))
+    drawLabel(f"ENRICHED    {stats['mE']:.2f}kg σ={stats['sE']:.2f}", ex, app.graphTop+18, size=20, bold=True, fill=rgb(180,30,30))
 
     # raw diff arrow big
     drawLine(ex, app.graphBot-30, cx, app.graphBot-30, fill=rgb(20,20,20), lineWidth=3, arrowStart=True, arrowEnd=True)
