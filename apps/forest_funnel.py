@@ -1,6 +1,6 @@
 """
 forest_funnel.py
-SCS App 2: Meta-Analysis Lab — Forest Plot, Funnel Plot, File Drawer
+SCS Meta-Analysis Lab — Forest Plot, Funnel Plot, File Drawer
 Run: ?app=app2_forest_funnel
 
 Covers transcript: Gene Glass meta-analysis, fixed vs random (REML intuition),
@@ -165,7 +165,7 @@ def onMouseMove(app, mx, my):
             break
 
 def redrawAll(app):
-    drawLabel("APP 2: Forest + Funnel — The Engine of Meta-Analysis", app.width//2, 24, size=18, bold=True)
+    drawLabel("Forest + Funnel — The Engine of Meta-Analysis", app.width//2, 24, size=18, bold=True)
     drawLabel("F=fixed/random  B=file-drawer bias  T=trim+fill  SPACE=new studies  UP/DOWN=heterogeneity  R=reset", app.width//2, 44, size=11, fill=rgb(90,90,90))
 
     # left: forest plot

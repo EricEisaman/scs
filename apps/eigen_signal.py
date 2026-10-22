@@ -1,6 +1,6 @@
 """
 eigen_signal.py
-SCS App 3: Eigen Signal Lab — Finding Invariant Truth in Noise
+SCS Eigen Signal Lab — Finding Invariant Truth in Noise
 Run: ?app=app3_eigen_signal
 
 Covers transcript: eigenvalue.py, Mahalanobis D, covariance matrices, Sobel as effect size,
@@ -115,7 +115,7 @@ def redrawAll(app):
     eig = eigen2x2(M)
 
     # title
-    drawLabel("APP 3: Eigen Signal Lab — Invariant Truth in Multivariate Noise", 520, 30, size=18, bold=True, fill=rgb(230,230,240))
+    drawLabel("Eigen Signal Lab — Invariant Truth in Multivariate Noise", 520, 30, size=18, bold=True, fill=rgb(230,230,240))
     drawLabel(f"{app.transIndex+1}: {app.transformations[app.transIndex]['name']} — press 1-4 to switch, C ellipse, B blur (variance), S Sobel (edge), R reset", 520, 52, size=11, fill=rgb(160,160,170))
 
     # grid
