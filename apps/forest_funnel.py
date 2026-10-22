@@ -1,7 +1,7 @@
 """
 forest_funnel.py
 SCS Meta-Analysis Lab — Forest Plot, Funnel Plot, File Drawer
-Run: ?app=app2_forest_funnel
+Run: ?app=forest_funnel
 
 Covers transcript: Gene Glass meta-analysis, fixed vs random (REML intuition),
 Q / I² / tau², funnel plot asymmetry, trim-and-fill, publication bias,

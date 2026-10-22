@@ -1,7 +1,7 @@
 """
 eigen_signal.py
 SCS Eigen Signal Lab — Finding Invariant Truth in Noise
-Run: ?app=app3_eigen_signal
+Run: ?app=eigen_signal
 
 Covers transcript: eigenvalue.py, Mahalanobis D, covariance matrices, Sobel as effect size,
 Gaussian blur = variance
@@ -116,7 +116,7 @@ def redrawAll(app):
 
     # title
     drawLabel("Eigen Signal Lab — Invariant Truth in Multivariate Noise", 520, 30, size=18, bold=True, fill=rgb(230,230,240))
-    drawLabel(f"{app.transIndex+1}: {app.transformations[app.transIndex]['name']} — press 1-4 to switch, C ellipse, B blur (variance), S Sobel (edge), R reset", 520, 52, size=11, fill=rgb(160,160,170))
+    drawLabel(f"{app.transIndex+1}: {app.transformations[app.transIndex]['name']} — press 1-4 to switch, C ellipse, B blur (variance), S Sobel (edge), R reset", 520, 60, size=19, fill=rgb(160,160,170))
 
     # grid
     # draw axes
@@ -142,7 +142,7 @@ def redrawAll(app):
                 y2 = app.centerY - vec[1]*scale
                 col = rgb(80,200,120) if idx==0 else rgb(80,160,200)
                 drawLine(app.centerX, app.centerY, x2, y2, fill=col, lineWidth=3, opacity=70)
-                drawLabel(f"cov eigen {lam:.2f}", x2+8, y2, size=10, fill=col, bold=True)
+                drawLabel(f"cov eigen {lam:.2f}", x2+8, y2, size=18, fill=col, bold=True)
             # draw ellipse approx via polygon
             pts = []
             for theta in range(0, 360, 6):
@@ -173,21 +173,21 @@ def redrawAll(app):
             x2 = app.centerX - vec[0]*300
             y2 = app.centerY + vec[1]*300
             drawLine(x1,y1,x2,y2, fill=rgb(255,220,80), lineWidth=2, dashes=True, opacity=70)
-            drawLabel(f"λ={lam:.2f} eigen direction", x1, y1, size=10, fill=rgb(255,220,80), bold=True)
+            drawLabel(f"λ={lam:.2f} eigen direction", x1, y1, size=18, fill=rgb(255,220,80), bold=True)
     else:
-        drawLabel("No real eigenvectors — rotation spins every vector (pure noise, no invariant signal)", app.centerX, 105, size=12, bold=True, fill=rgb(255,100,100))
+        drawLabel("No real eigenvectors — rotation spins every vector (pure noise, no invariant signal)", app.centerX, 105, size=20, bold=True, fill=rgb(255,100,100))
 
     # test vector (blue) and transformed (red)
     tv = app.testVec
     tvScreen = (app.centerX + tv[0]*app.scale, app.centerY - tv[1]*app.scale)
     drawLine(app.centerX, app.centerY, tvScreen[0], tvScreen[1], fill=rgb(100,160,255), lineWidth=4, arrowEnd=True)
-    drawLabel("test v (you)", tvScreen[0]+10, tvScreen[1]-10, size=11, bold=True, fill=rgb(120,180,255))
+    drawLabel("test v (you)", tvScreen[0]+10, tvScreen[1]-10, size=19, bold=True, fill=rgb(120,180,255))
 
     transVec = matVecMul(M, tv)
     trScreen = (app.centerX + transVec[0]*app.scale, app.centerY - transVec[1]*app.scale)
     colTrans = rgb(255,80,80) if not app.sobelMode else rgb(255,255,255)
     drawLine(app.centerX, app.centerY, trScreen[0], trScreen[1], fill=colTrans, lineWidth=4, arrowEnd=True)
-    drawLabel("M·v (transformed)", trScreen[0]+10, trScreen[1]+10, size=11, bold=True, fill=colTrans)
+    drawLabel("M·v (transformed)", trScreen[0]+10, trScreen[1]+10, size=19, bold=True, fill=colTrans)
 
     # check if near eigenvector (signal lock)
     locked = False
@@ -207,50 +207,50 @@ def redrawAll(app):
                 break
 
     if locked:
-        drawLabel(f"SIGNAL LOCKED — direction preserved! {lockInfo}", 380, 85, size=14, bold=True, fill=rgb(255,220,80))
-        drawLabel("Eigenvector = invariant truth, like true effect inside noise", 380, 102, size=11, fill=rgb(220,220,180))
+        drawLabel(f"SIGNAL LOCKED — direction preserved! {lockInfo}", 380, 85, size=22, bold=True, fill=rgb(255,220,80))
+        drawLabel("Eigenvector = invariant truth, like true effect inside noise", 380, 102, size=19, fill=rgb(220,220,180))
     else:
         if eig:
-            drawLabel("Drag mouse — hunt for direction that doesn't spin", 380, 85, size=12, fill=rgb(180,180,190))
+            drawLabel("Drag mouse — hunt for direction that doesn't spin", 380, 85, size=20, fill=rgb(180,180,190))
 
     # right panel — explanation linking to transcript
     rx = 750
     drawRect(rx, 90, 280, 600, fill=rgb(30,32,40), border=rgb(60,60,70), borderWidth=1, roundness=10)
 
-    drawLabel("Mahalanobis D", rx+140, 110, size=14, bold=True, fill=rgb(230,230,240))
-    drawLabel("Multivariate effect size:", rx+12, 128, size=10, fill=rgb(180,180,190), align='left')
-    drawLabel("D² = (μ1-μ2)ᵀ Σ⁻¹ (μ1-μ2)", rx+12, 142, size=11, fill=rgb(150,220,180), align='left', bold=True)
-    drawLabel("Σ = covariance matrix", rx+12, 158, size=10, fill=rgb(160,160,160), align='left')
-    drawLabel("Accounts for correlation", rx+12, 172, size=10, fill=rgb(160,160,160), align='left')
-    drawLabel("between BP & cholesterol", rx+12, 186, size=10, fill=rgb(160,160,160), align='left')
+    drawLabel("Mahalanobis D", rx+140, 110, size=22, bold=True, fill=rgb(230,230,240))
+    drawLabel("Multivariate effect size:", rx+12, 128, size=18, fill=rgb(180,180,190), align='left')
+    drawLabel("D² = (μ1-μ2)ᵀ Σ⁻¹ (μ1-μ2)", rx+12, 142, size=19, fill=rgb(150,220,180), align='left', bold=True)
+    drawLabel("Σ = covariance matrix", rx+12, 158, size=18, fill=rgb(160,160,160), align='left')
+    drawLabel("Accounts for correlation", rx+12, 172, size=18, fill=rgb(160,160,160), align='left')
+    drawLabel("between BP & cholesterol", rx+12, 186, size=18, fill=rgb(160,160,160), align='left')
 
-    drawLabel("Gaussian Blur = Variance", rx+12, 215, size=11, bold=True, fill=rgb(180,180,255), align='left')
-    drawLabel(f"Blur level {app.blurAmount} → SD ×{1+app.blurAmount*0.4:.1f}", rx+12, 232, size=10, fill=rgb(160,160,180), align='left')
-    drawLabel("Blur = weighted avg with", rx+12, 246, size=10, fill=rgb(160,160,180), align='left')
-    drawLabel("Gaussian kernel (bell curve)", rx+12, 260, size=10, fill=rgb(160,160,180), align='left')
-    drawLabel("More blur = bigger denominator", rx+12, 274, size=10, fill=rgb(160,160,180), align='left')
-    drawLabel("= smaller Cohen's d", rx+12, 288, size=10, fill=rgb(160,160,180), align='left')
+    drawLabel("Gaussian Blur = Variance", rx+12, 215, size=19, bold=True, fill=rgb(180,180,255), align='left')
+    drawLabel(f"Blur level {app.blurAmount} → SD ×{1+app.blurAmount*0.4:.1f}", rx+12, 232, size=18, fill=rgb(160,160,180), align='left')
+    drawLabel("Blur = weighted avg with", rx+12, 246, size=18, fill=rgb(160,160,180), align='left')
+    drawLabel("Gaussian kernel (bell curve)", rx+12, 260, size=18, fill=rgb(160,160,180), align='left')
+    drawLabel("More blur = bigger denominator", rx+12, 274, size=18, fill=rgb(160,160,180), align='left')
+    drawLabel("= smaller Cohen's d", rx+12, 288, size=18, fill=rgb(160,160,180), align='left')
 
-    drawLabel("Sobel Edge = Effect Size", rx+12, 315, size=11, bold=True, fill=rgb(255,180,180), align='left')
-    drawLabel("Sobel finds max difference", rx+12, 332, size=10, fill=rgb(220,180,180), align='left')
-    drawLabel("between pixels: Gx, Gy gradient", rx+12, 346, size=10, fill=rgb(220,180,180), align='left')
-    drawLabel("d = (μ_exp-μ_ctrl)/SD_pooled", rx+12, 360, size=10, fill=rgb(255,200,200), align='left')
-    drawLabel("is a statistical Sobel filter —", rx+12, 374, size=10, fill=rgb(220,180,180), align='left')
-    drawLabel("cuts blur to find edge", rx+12, 388, size=10, fill=rgb(220,180,180), align='left')
+    drawLabel("Sobel Edge = Effect Size", rx+12, 315, size=19, bold=True, fill=rgb(255,180,180), align='left')
+    drawLabel("Sobel finds max difference", rx+12, 332, size=18, fill=rgb(220,180,180), align='left')
+    drawLabel("between pixels: Gx, Gy gradient", rx+12, 346, size=18, fill=rgb(220,180,180), align='left')
+    drawLabel("d = (μ_exp-μ_ctrl)/SD_pooled", rx+12, 360, size=18, fill=rgb(255,200,200), align='left')
+    drawLabel("is a statistical Sobel filter —", rx+12, 374, size=18, fill=rgb(220,180,180), align='left')
+    drawLabel("cuts blur to find edge", rx+12, 388, size=18, fill=rgb(220,180,180), align='left')
     if app.sobelMode:
-        drawLabel("SOBEL MODE ON: white = edge", rx+12, 404, size=10, bold=True, fill=rgb(255,255,255), align='left')
+        drawLabel("SOBEL MODE ON: white = edge", rx+12, 404, size=18, bold=True, fill=rgb(255,255,255), align='left')
 
-    drawLabel("Why eigenvectors matter:", rx+12, 435, size=11, bold=True, fill=rgb(255,220,80), align='left')
-    drawLabel("Covariance Σ decomposed via", rx+12, 452, size=10, fill=rgb(200,200,160), align='left')
-    drawLabel("eigenvalues/vectors = principal", rx+12, 466, size=10, fill=rgb(200,200,160), align='left')
-    drawLabel("axes of data cloud.", rx+12, 480, size=10, fill=rgb(200,200,160), align='left')
-    drawLabel("Finding true effect in noise", rx+12, 494, size=10, fill=rgb(200,200,160), align='left')
-    drawLabel("= finding direction that", rx+12, 508, size=10, fill=rgb(200,200,160), align='left')
-    drawLabel("doesn't spin under transform.", rx+12, 522, size=10, fill=rgb(200,200,160), align='left')
+    drawLabel("Why eigenvectors matter:", rx+12, 435, size=19, bold=True, fill=rgb(255,220,80), align='left')
+    drawLabel("Covariance Σ decomposed via", rx+12, 452, size=18, fill=rgb(200,200,160), align='left')
+    drawLabel("eigenvalues/vectors = principal", rx+12, 466, size=18, fill=rgb(200,200,160), align='left')
+    drawLabel("axes of data cloud.", rx+12, 480, size=18, fill=rgb(200,200,160), align='left')
+    drawLabel("Finding true effect in noise", rx+12, 494, size=18, fill=rgb(200,200,160), align='left')
+    drawLabel("= finding direction that", rx+12, 508, size=18, fill=rgb(200,200,160), align='left')
+    drawLabel("doesn't spin under transform.", rx+12, 522, size=18, fill=rgb(200,200,160), align='left')
 
-    drawLabel("Current M:", rx+12, 550, size=10, bold=True, fill=rgb(180,180,190), align='left')
-    drawLabel(f"[{M[0][0]:.1f}  {M[0][1]:.1f}]", rx+12, 566, size=11, fill=rgb(200,200,200), align='left')
-    drawLabel(f"[{M[1][0]:.1f}  {M[1][1]:.1f}]", rx+12, 582, size=11, fill=rgb(200,200,200), align='left')
+    drawLabel("Current M:", rx+12, 550, size=18, bold=True, fill=rgb(180,180,190), align='left')
+    drawLabel(f"[{M[0][0]:.1f}  {M[0][1]:.1f}]", rx+12, 566, size=19, fill=rgb(200,200,200), align='left')
+    drawLabel(f"[{M[1][0]:.1f}  {M[1][1]:.1f}]", rx+12, 582, size=19, fill=rgb(200,200,200), align='left')
 
-    drawLabel("1=stretch 2=shear 3=rot 4=refl", rx+140, 615, size=10, fill=rgb(140,140,150))
-    drawLabel("C=ellipse B=blur S=Sobel", rx+140, 630, size=10, fill=rgb(140,140,150))
+    drawLabel("1=stretch 2=shear 3=rot 4=refl", rx+140, 615, size=18, fill=rgb(140,140,150))
+    drawLabel("C=ellipse B=blur S=Sobel", rx+140, 630, size=18, fill=rgb(140,140,150))
