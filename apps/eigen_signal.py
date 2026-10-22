@@ -128,8 +128,8 @@ def findClosestEigen(app, testVec):
 def updateTestVecFromMouse(app, mx, my):
     dx, dy = screenToMath(app, mx, my)
     mag = math.hypot(dx, dy)
-    if mag < 0.12:
-        return
+    if mag < 0.02:
+        return  # tiny deadzone only
     nx = dx/mag*app.testMag
     ny = dy/mag*app.testMag
     # Check snap to eigen span
@@ -247,8 +247,8 @@ def redrawAll(app):
                 drawLabel(f"lambda={lam:.2f} LOCKED INVARIANT", x1+8, y1-6, size=15, fill=rgb(255,230,120), bold=True)
             else:
                 drawLine(x1,y1,x2,y2, fill=rgb(255,220,80), lineWidth=2, dashes=True, opacity=55)
-                if idx==0:
-                    drawLabel(f"lambda={lam:.2f} eigen span invisible until hit", x1-10, y1-10, size=15, fill=rgb(255,220,80))
+                # eigen direction label - always visible, not dumb invisible text
+                drawLabel(f"eigen λ={lam:.2f}", x1+8, y1+8, size=15, fill=rgb(255,220,80), bold=True)
 
     tvS = mathToScreen(app, tv)
     trS = mathToScreen(app, tr)
