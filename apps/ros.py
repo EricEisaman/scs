@@ -349,53 +349,71 @@ def onStep(app):
 
 def onMousePress(app,mx,my):
     def in_rect(px,py,rx,ry,rw,rh): return rx<=px<=rx+rw and ry<=py<=ry+rh
-    if in_rect(mx,my,16,8,60,28): app.mode="builder"; return
-    if in_rect(mx,my,86,8,40,28): app.mode="sim"; return
-    if in_rect(mx,my,136,8,70,28):
+    # Top bar pills - accurate hit zones matching 80x36, 90x36 visuals
+    if in_rect(mx,my,16,10,80,36): app.mode="builder"; return
+    if in_rect(mx,my,96,10,80,36): app.mode="sim"; return
+    if in_rect(mx,my,176,10,90,36):
         app.show_bus_viewer=not app.show_bus_viewer
         return
-    if in_rect(mx,my,216,8,60,28):
+    if in_rect(mx,my,266,10,80,36):
         app.bus_tab="TF"
         app.show_bus_viewer=True
         return
-    if in_rect(mx,my,W-180,8,70,28):
+    if in_rect(mx,my,W-120,10,108,36):
         async def do_connect(): await app.ros_client.connect()
         if aio: aio.run(do_connect())
         return
     if app.show_bus_viewer:
-        # === PERFECT CLEAN FULL-SCREEN OVERLAY HIT TEST - 0,0,W,H ===
+        # === PERFECT CLEAN FULL-SCREEN OVERLAY HIT TEST - accurate ===
+        # Close button - 32x32 at W-44,12
         if in_rect(mx,my,W-44, 12, 32,32):
             app.show_bus_viewer=False; return
+        # Tab bar - 72x24 at y=79 (73+6) but hit zone larger for easier clicking: 82x36 at y=73
         tab_x=16
         for tab in ["TOPICS","GRAPH","TF","ECHO"]:
-            if in_rect(mx,my,tab_x, 63, 72,24):
+            if in_rect(mx,my,tab_x, 73, 72,36):
                 app.bus_tab=tab; return
             tab_x+=82
+        # Topics list - rows now 44px high, y+=50, starting at 124 (72+52)
         if app.bus_tab=="TOPICS":
-            ty=106
+            ty=124
             for topic in sorted(app.bus_stats.keys()):
-                if in_rect(mx,my,12, ty, W-24, 24):
+                if in_rect(mx,my,12, ty, W-24, 44):
                     app.selected_bus_topic=topic; app.bus_tab="ECHO"; return
-                ty+=26
-                if ty>H-20: break
+                ty+=50
+                if ty>H-30: break
+        # Click outside content but inside overlay should not close (full-screen), only close button
+        # Allow clicking on GRAPH nodes? For now return to block underlying
         return
     if LEFT_X<=mx<=LEFT_X+LEFT_W and LEFT_Y<=my<=LEFT_Y+LEFT_H:
-        y=LEFT_Y+36
+        y=LEFT_Y+42
         for mod_id in MODULE_LIBRARY:
-            if y<=my<=y+20:
+            if y<=my<=y+52:
                 app.selected_module=mod_id
                 app.robot_build.add(mod_id)
                 for m_id, iface in app.robot_build.get_all_interfaces():
                     update_bus_stat(app, iface.topic, iface.msg_type, iface.direction, m_id, "", iface.frame_id)
                 app.logs.append("added %s" % mod_id)
                 return
-            y+=24
+            y+=58
+    # RIGHT panel LIVE BUS - accurate hit zones for 52px rows
+    if RIGHT_X<=mx<=RIGHT_X+RIGHT_W and RIGHT_Y<=my<=RIGHT_Y+RIGHT_H:
+        y=RIGHT_Y+44
+        for topic in sorted(app.bus_stats.keys())[:7]:
+            if y<=my<=y+52:
+                app.selected_bus_topic=topic
+                app.bus_tab="ECHO"
+                app.show_bus_viewer=True
+                return
+            y+=58
     if CENTER_X<=mx<=CENTER_X+CENTER_W and CENTER_Y<=my<=CENTER_Y+CENTER_H:
         sX=CENTER_X+16; sW=CENTER_W-32
-        if CENTER_Y+390<=my<=CENTER_Y+400:
-            t=(mx-sX)/sW; app.sim.set_cmd_vel(t*2-1, app.sim.w)
-        if CENTER_Y+420<=my<=CENTER_Y+430:
-            t=(mx-sX)/sW; app.sim.set_cmd_vel(app.sim.v, t*4-2)
+        # Linear slider - 20px height at CENTER_Y+390, hit zone 30px for easier grab
+        if CENTER_Y+385<=my<=CENTER_Y+415:
+            t=max(0,min(1,(mx-sX)/sW)); app.sim.set_cmd_vel(t*2-1, app.sim.w)
+        # Angular slider - 20px height at CENTER_Y+420
+        if CENTER_Y+415<=my<=CENTER_Y+445:
+            t=max(0,min(1,(mx-sX)/sW)); app.sim.set_cmd_vel(app.sim.v, t*4-2)
 
 def onKeyPress(app,key):
     if key.lower()=="b":
@@ -454,35 +472,28 @@ def draw_bus_overlay(app):
         tab_x+=82
     cx,cy,cw,ch=px+12, py+112, pw-24, ph-120
     if app.bus_tab=="TOPICS":
-        drawRect(cx, cy, cw, 36, fill=rgb(22,28,48), roundness=8)
-        headers=[("TOPIC",16),("TYPE",200),("DIR",340),("SRC",390),("Hz",460),("BW",510),("COUNT",570),("FRAME",630),("LAST",700)]
+        drawRect(cx, cy, cw, 40, fill=rgb(22,28,48), roundness=10)
+        headers=[("TOPIC",20),("TYPE",260),("FREQ",460),("COUNT",560),("FRAME",660)]
         for name,off in headers:
-            drawLabel(name, cx+off, cy+13, fill=DIM, size=15, bold=True, align="left-center")
-        y=cy+44
+            drawLabel(name, cx+off, cy+20, fill=DIM, size=15, bold=True, align="left-center")
+        y=cy+52
         for topic in sorted(app.bus_stats.keys()):
             stat=app.bus_stats[topic]
-            if y>py+ph-12: break
+            if y>py+ph-20: break
             is_sel=topic==app.selected_bus_topic
-            bg=rgb(24,32,56) if is_sel else (rgb(20,26,44) if (y//26)%2==0 else rgb(18,24,40))
+            bg=rgb(24,32,56) if is_sel else (rgb(20,26,44) if (y//40)%2==0 else rgb(18,24,40))
             bdr=CYAN if is_sel else rgb(32,40,68)
-            drawRect(cx, y, cw, 36, fill=bg, border=bdr, borderWidth=1 if is_sel else 0.5, roundness=8)
+            drawRect(cx, y, cw, 44, fill=bg, border=bdr, borderWidth=1.2 if is_sel else 0.8, roundness=10)
             col=type_color(stat["msg_type"])
-            drawCircle(cx+8, y+12, 3, fill=col)
-            drawLabel(topic, cx+18, y+12, fill=WHITE if is_sel else WHITE2, size=15, bold=is_sel, align="left-center")
-            drawLabel(stat["msg_type"][:24], cx+200, y+12, fill=col, size=15, align="left-center")
-            dir_col=GREEN if stat["direction"]=="pub" else PINK
-            drawLabel(stat["direction"].upper(), cx+340, y+12, fill=dir_col, size=15, bold=True, align="left-center")
-            src=",".join(list(stat["publishers"] if stat["direction"]=="pub" else stat["subscribers"])[:1])
-            drawLabel(src[:14], cx+390, y+12, fill=YELLOW, size=15, align="left-center")
-            try: hz_txt="%.1f" % float(stat["hz"])
-            except: hz_txt="0.0"
-            drawLabel(hz_txt, cx+460, y+12, fill=CYAN, size=15, bold=True, align="left-center")
-            try: bw_txt="%d" % int(stat["bw"])
-            except: bw_txt="0"
-            drawLabel(bw_txt, cx+510, y+12, fill=DIM, size=15, align="left-center")
-            drawLabel(str(stat["count"]), cx+570, y+12, fill=WHITE2, size=15, align="left-center")
-            drawLabel(stat["frame_id"][:12], cx+630, y+12, fill=ORANGE, size=15, align="left-center")
-            drawLabel(stat["last_preview"][:32], cx+700, y+12, fill=rgb(150,170,200), size=15, align="left-center")
+            drawCircle(cx+12, y+22, 5, fill=col)
+            drawLabel(topic[:24], cx+26, y+22, fill=WHITE if is_sel else WHITE2, size=15, bold=is_sel, align="left-center")
+            short_type = stat["msg_type"].split("/")[-1][:18]
+            drawLabel(short_type, cx+260, y+22, fill=col, size=15, align="left-center")
+            try: hz_txt="%.1f Hz" % float(stat["hz"])
+            except: hz_txt="0 Hz"
+            drawLabel(hz_txt, cx+460, y+22, fill=CYAN, size=15, bold=True, align="left-center")
+            drawLabel(str(stat["count"]), cx+560, y+22, fill=WHITE2, size=15, align="left-center")
+            drawLabel(stat["frame_id"][:14], cx+660, y+22, fill=ORANGE, size=15, align="left-center")
             hist=stat["hz_history"]
             if len(hist)>1:
                 sx=cx+cw-90; sy=y+4; sw=80; sh=16
@@ -492,7 +503,7 @@ def draw_bus_overlay(app):
                     x1=sx+i*sw/len(hist); x2=sx+(i+1)*sw/len(hist)
                     y1=sy+sh - hist[i]/max_h*sh; y2=sy+sh - hist[i+1]/max_h*sh
                     drawLine(x1,y1,x2,y2,fill=col,lineWidth=1.5,opacity=0.9)
-            y+=40
+            y+=50
     elif app.bus_tab=="GRAPH":
         gx,gy,gw,gh=cx,cy,cw,ch
         drawRect(gx,gy,gw,gh,fill=rgb(10,14,26),border=rgb(38,48,80),borderWidth=1,roundness=12)
@@ -560,25 +571,27 @@ def draw_bus_overlay(app):
         drawLabel("TF TREE  -  map -> odom -> base_link -> sensors", gx+24, gy+18, fill=YELLOW, size=15, bold=True, align="left-top")
         drawLabel("pyodide transforms3d quaternion via run_python_async() - top-tier like ferrers.py", gx+24, gy+36, fill=DIM, size=15, align="left-top")
         nodes=[
-            ("map", gx+120, gy+190, "static broadcaster"),
-            ("odom", gx+320, gy+190, "nav_msgs/Odometry  %.1fHz" % float(app.bus_stats.get("/odom",{}).get("hz",0))),
-            ("base_link", gx+540, gy+190, "x=%.2f y=%.2f th=%.0f deg" % (app.sim.robot_x, app.sim.robot_y, math.degrees(app.sim.robot_th))),
-            ("lidar_link", gx+760, gy+160, "sensor_msgs/LaserScan %.1fHz" % float(app.bus_stats.get("/scan",{}).get("hz",0))),
-            ("camera_link", gx+760, gy+220, "sensor_msgs/Image"),
-            ("imu_link", gx+540, gy+270, "sensor_msgs/Imu %.1fHz" % float(app.bus_stats.get("/imu/data",{}).get("hz",0))),
+            ("map", gx+110, gy+220, "static"),
+            ("odom", gx+350, gy+220, "Odom  %.1f Hz" % float(app.bus_stats.get("/odom",{}).get("hz",0))),
+            ("base_link", gx+590, gy+220, "x:%.1f y:%.1f th:%d°" % (app.sim.robot_x, app.sim.robot_y, int(math.degrees(app.sim.robot_th)))),
+            ("lidar_link", gx+830, gy+140, "LaserScan  %.1f Hz" % float(app.bus_stats.get("/scan",{}).get("hz",0))),
+            ("camera_link", gx+830, gy+300, "Image"),
+            ("imu_link", gx+590, gy+360, "IMU  %.1f Hz" % float(app.bus_stats.get("/imu/data",{}).get("hz",0))),
         ]
         for i in range(2):
             _,x1,y1,_=nodes[i]
             _,x2,y2,_=nodes[i+1]
-            drawLine(x1+56,y1,x2-56,y2,fill=YELLOW,lineWidth=2.5)
-            drawCircle(x2-56,y2,5,fill=YELLOW)
-        drawLine(540+56,190+4, 760-56, 160+4, fill=rgb(80,90,120), lineWidth=1.2)
-        drawLine(540+56,190+4, 760-56, 220+4, fill=rgb(80,90,120), lineWidth=1.2)
-        drawLine(540+16,190+20, 540, 270-16, fill=rgb(80,90,120), lineWidth=1.2)
+            drawLine(x1+80,y1,x2-80,y2,fill=YELLOW,lineWidth=3)
+            drawCircle(x2-80,y2,6,fill=YELLOW)
+        # base_link -> lidar_link, camera_link
+        drawLine(590+80,220, 830-80, 140, fill=rgb(100,110,140), lineWidth=1.5)
+        drawLine(590+80,220, 830-80, 300, fill=rgb(100,110,140), lineWidth=1.5)
+        # base_link -> imu_link
+        drawLine(590,220+40, 590, 360-40, fill=rgb(100,110,140), lineWidth=1.5)
         for name,x,y,info in nodes:
-            drawRect(x-70,y-28,140,68,fill=rgb(22,28,48),border=YELLOW if name in ["map","odom","base_link"] else CYAN,borderWidth=1.5,roundness=10)
-            drawLabel(name, x, y-4, fill=WHITE, size=15, bold=True, align="center")
-            drawLabel(info[:32], x, y+14, fill=DIM, size=15, align="center")
+            drawRect(x-80,y-32,160,80,fill=rgb(22,28,48),border=YELLOW if name in ["map","odom","base_link"] else CYAN,borderWidth=1.8,roundness=12)
+            drawLabel(name, x, y-10, fill=WHITE, size=15, bold=True, align="center")
+            drawLabel(info[:20], x, y+14, fill=DIM, size=15, align="center")
         tf=app.sim.get_tf()
         q=tf["transform"]["rotation"]
         drawRect(gx+24, gy+gh-96, gw-48, 84, fill=rgb(18,24,44), border=rgb(38,48,80), borderWidth=1, roundness=10)
@@ -652,14 +665,14 @@ def redrawAll(app):
     drawCircle(W-104,28,6,fill=GREEN if conn else ORANGE)
     drawLabel("LIVE" if conn else "CONNECT", W-66,28,fill=GREEN if conn else ORANGE,size=15,bold=True,align="center")
     drawPanel(LEFT_X,LEFT_Y,LEFT_W,LEFT_H, "ROBOT MODULES  %.1fkg  $%d" % (app.robot_build.total_mass(), app.robot_build.total_cost()), accent=CYAN)
-    y=LEFT_Y+36
+    y=LEFT_Y+42
     for mod_id, mod in MODULE_LIBRARY.items():
         sel=app.selected_module==mod_id
-        drawRect(LEFT_X+10, y, LEFT_W-20, 36, fill=rgb(30,36,62) if sel else rgb(22,28,48), border=PINK if sel else PANEL_BORDER, borderWidth=1.2 if sel else 0.8, roundness=8)
-        drawLabel(mod.icon, LEFT_X+18, y+18, fill=PINK if sel else WHITE2, size=15, align="left-center")
-        drawLabel(mod.label, LEFT_X+36, y+10, fill=WHITE if sel else WHITE2, size=15, bold=sel, align="left-top")
-        drawLabel("%d topics" % len(mod.interfaces), LEFT_X+36, y+22, fill=DIM, size=15, align="left-top")
-        y+=26
+        drawRect(LEFT_X+10, y, LEFT_W-20, 52, fill=rgb(30,36,62) if sel else rgb(22,28,48), border=PINK if sel else PANEL_BORDER, borderWidth=1.2 if sel else 0.8, roundness=10)
+        drawLabel(mod.icon, LEFT_X+20, y+26, fill=PINK if sel else WHITE2, size=15, align="left-center")
+        drawLabel(mod.label, LEFT_X+44, y+14, fill=WHITE if sel else WHITE2, size=15, bold=sel, align="left-top")
+        drawLabel("%d topics" % len(mod.interfaces), LEFT_X+44, y+30, fill=DIM, size=15, align="left-top")
+        y+=58
     drawPanel(CENTER_X,CENTER_Y,CENTER_W,CENTER_H, "SIM  x=%.2f y=%.2f th=%.0f deg  quat via pyodide" % (app.sim.robot_x, app.sim.robot_y, math.degrees(app.sim.robot_th)), accent=GREEN)
     gx,gy,gw,gh=CENTER_X+14, CENTER_Y+32, CENTER_W-28, 300
     drawRect(gx,gy,gw,gh,fill=rgb(10,14,26),border=PANEL_BORDER,borderWidth=1,roundness=10)
@@ -707,29 +720,25 @@ def redrawAll(app):
         drawLabel("/odom /scan /tf live", CENTER_X+24, CENTER_Y+468, fill=WHITE2, size=15, align="left-top")
     drawLabel("transforms3d via pyodide.run_python_async() - window.WebSocket", CENTER_X+24, CENTER_Y+482, fill=DIM, size=15, align="left-top")
     drawPanel(RIGHT_X,RIGHT_Y,RIGHT_W,RIGHT_H, "LIVE BUS  %d topics" % len(app.bus_stats), accent=YELLOW)
-    y=RIGHT_Y+36
-    for topic, stat in list(sorted(app.bus_stats.items(), key=lambda kv: -kv[1]["hz"]))[:9]:
+    y=RIGHT_Y+44
+    for topic, stat in list(sorted(app.bus_stats.items(), key=lambda kv: -kv[1]["hz"]))[:7]:
         col=type_color(stat["msg_type"])
         sel=topic==app.selected_bus_topic
-        drawRect(RIGHT_X+10, y, RIGHT_W-20, 36, fill=rgb(28,36,62) if sel else rgb(20,26,44), border=col if sel else PANEL_BORDER, borderWidth=1 if sel else 0.5, roundness=8)
-        drawCircle(RIGHT_X+18, y+11, 3, fill=col)
+        drawRect(RIGHT_X+10, y, RIGHT_W-20, 52, fill=rgb(28,36,62) if sel else rgb(20,26,44), border=col if sel else PANEL_BORDER, borderWidth=1.2 if sel else 0.8, roundness=10)
+        drawCircle(RIGHT_X+20, y+26, 5, fill=col)
         if stat["hz"]>3:
             pulse=(math.sin(app.time*6)+1)*0.5
-            drawCircle(RIGHT_X+18, y+11, 3+int(pulse*3), fill=col, opacity=0.15)
-        drawLabel(topic[:22], RIGHT_X+26, y+10, fill=WHITE if sel else WHITE2, size=15, bold=sel, align="left-top")
-        drawLabel(stat["msg_type"].split("/")[-1][:16], RIGHT_X+26, y+22, fill=DIM, size=15, align="left-top")
-        try: hz_txt="%.1fHz" % float(stat["hz"])
-        except: hz_txt="0Hz"
-        drawLabel(hz_txt, RIGHT_X+RIGHT_W-16, y+11, fill=col, size=15, bold=True, align="right-center")
-        hist=stat["hz_history"]
-        if len(hist)>1:
-            sx=RIGHT_X+120; sy=y+14; sw=60; sh=8
-            max_h=max(hist) if max(hist)>0 else 1
-            for i in range(len(hist)-1):
-                x1=sx+i*sw/len(hist); x2=sx+(i+1)*sw/len(hist)
-                y1=sy+sh - hist[i]/max_h*sh; y2=sy+sh - hist[i+1]/max_h*sh
-                drawLine(x1,y1,x2,y2,fill=col,lineWidth=1,opacity=0.7)
-        y+=26
+            drawCircle(RIGHT_X+20, y+26, 5+int(pulse*5), fill=col, opacity=0.18)
+        # Short topic name, no overlap
+        short_topic = topic[:20]
+        drawLabel(short_topic, RIGHT_X+34, y+10, fill=WHITE if sel else WHITE2, size=15, bold=sel, align="left-top")
+        # Short type only last part
+        short_type = stat["msg_type"].split("/")[-1][:14]
+        drawLabel(short_type, RIGHT_X+34, y+30, fill=DIM, size=15, align="left-top")
+        try: hz_txt="%.1f Hz" % float(stat["hz"])
+        except: hz_txt="0 Hz"
+        drawLabel(hz_txt, RIGHT_X+RIGHT_W-16, y+26, fill=col, size=15, bold=True, align="right-center")
+        y+=58
     drawRect(RIGHT_X+10, RIGHT_Y+RIGHT_H-130, RIGHT_W-20, 120, fill=rgb(10,14,26), border=PANEL_BORDER, borderWidth=1, roundness=8)
     ly=RIGHT_Y+RIGHT_H-100
     for line in app.logs[-6:]:
