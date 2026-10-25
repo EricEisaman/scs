@@ -1,26 +1,12 @@
 """
-extensions/pyodide.py — SCS Pyodide Extension
-Serious wrapper around Pyodide WASM runtime.
+extensions/pyodide.py — Top-tier Pyodide API wrapper for SCS
 
-Exposes reasonable subset of Pyodide JS API:
-https://pyodide.org/en/stable/usage/api/js-api.html
-https://pyodide.org/en/stable/usage/api/python-api.html
-
-- Lifecycle: ensure(), get_version(), is_ready()
-- Packages: load_package(), load_packages_from_imports(), install() via micropip
-- Execution: run_python(), run_python_async(), run_python_sync()
-- Imports: pyimport()
-- Globals: get_global(), set_global(), get_global_async(), set_global_async()
-- Conversion: to_py()
-- JS modules: register_js_module(), unregister_js_module()
-- I/O: set_stdout(), set_stderr(), set_stdin()
-- FS: fs_write_file(), fs_read_file(), fs_mkdir()
-
-Domain helpers (backwards compatible):
-- root() — nonlinear system via scipy.optimize.root
-- partition_stats() — partition conjugate, Durfee, hooks, p(n), f^lambda
-
-Backwards compatible: root(), partition_stats(), run_python(), run() still work.
+Follows SCS top-tier extension pattern:
+- Lazy singleton, cached WASM runtime
+- CDN loader with de-duplication
+- Full subset of official Pyodide JS API mirrored in Pythonic form
+- Robust across Pyodide 0.23-0.26 (globals is dict in 0.25+)
+- Optional Worker offload, non-breaking
 """
 
 from browser import window, document, aio
@@ -41,30 +27,25 @@ PYODIDE_WORKER_URL = "extensions/pyodide_worker.js"
 
 
 async def _load_script(src):
-    """Inject <script src> and wait for window.loadPyodide."""
     for _ in range(3):
-        scripts = document.head.getElementsByTagName("script")
-        for i in range(len(scripts)):
-            try:
-                if scripts[i].src and src in scripts[i].src:
-                    for _ in range(100):
-                        if hasattr(window, "loadPyodide"):
-                            return True
-                        await aio.sleep(0.1)
-            except:
-                pass
-        break
+        try:
+            scripts = document.head.getElementsByTagName("script")
+            for i in range(len(scripts)):
+                s = scripts[i]
+                try:
+                    if s.getAttribute("src") and src in s.getAttribute("src"):
+                        for _ in range(100):
+                            if hasattr(window, "loadPyodide"):
+                                return True
+                            await aio.sleep(0.1)
+                except:
+                    pass
+        except:
+            break
 
     script = document.createElement("script")
-    script.src = src
-    # 'async' is a Python keyword — use setattr with string
-    try:
-        setattr(script, "async", False)
-    except:
-        try:
-            script.setAttribute("async", "false")
-        except:
-            pass
+    script.setAttribute("src", src)
+    script.setAttribute("async", "false")
     document.head.appendChild(script)
 
     for _ in range(200):
@@ -76,10 +57,8 @@ async def _load_script(src):
 
 async def _ensure_pyodide(config=None):
     global _pyodide, _loading, _ready, _load_error
-
     if _ready and _pyodide is not None:
         return _pyodide
-
     if _loading:
         for _ in range(300):
             if not _loading:
@@ -96,7 +75,7 @@ async def _ensure_pyodide(config=None):
         if not hasattr(window, "loadPyodide"):
             ok = await _load_script(PYODIDE_CDN)
             if not ok:
-                raise RuntimeError("Failed to load Pyodide CDN")
+                raise RuntimeError("Failed to load Pyodide CDN: " + PYODIDE_CDN)
 
         cfg = config or {}
         if cfg:
@@ -107,7 +86,7 @@ async def _ensure_pyodide(config=None):
         try:
             await _pyodide.loadPackage(["numpy", "scipy"])
         except Exception as e:
-            print("pyodide preload warning: %s" % e)
+            print("pyodide preload warning: " + str(e))
 
         _ready = True
         return _pyodide
@@ -125,15 +104,7 @@ def _convert_proxy(obj):
         return None
     try:
         if hasattr(obj, "toJs"):
-            try:
-                # Use JS Object.fromEntries via window to avoid Python keyword issues
-                # Fall back to plain toJs
-                return obj.toJs()
-            except:
-                try:
-                    return obj.toJs({"dict_converter": window.Object.fromEntries})
-                except:
-                    return obj
+            return obj.toJs()
     except:
         pass
     return obj
@@ -191,8 +162,7 @@ async def run(code, options=None):
 
 async def pyimport(name):
     py = await _ensure_pyodide()
-    mod = py.pyimport(name)
-    return mod
+    return py.pyimport(name)
 
 
 async def to_py(js_obj, options=None):
@@ -206,7 +176,7 @@ async def install(package):
         await py.loadPackage("micropip")
     except:
         pass
-    code = "import micropip\nawait micropip.install(%s)" % repr(package)
+    code = "import micropip\nawait micropip.install(" + repr(package) + ")"
     await py.runPythonAsync(code)
     return True
 
@@ -247,7 +217,8 @@ def set_stdin(handler):
 def get_global(name):
     if _pyodide and hasattr(_pyodide, "globals"):
         try:
-            v = _pyodide.globals.get(name)
+            g = _pyodide.globals
+            v = g.get(name) if hasattr(g, "get") else g[name]
             return _convert_proxy(v)
         except:
             pass
@@ -257,22 +228,44 @@ def get_global(name):
 def set_global(name, value):
     if _pyodide and hasattr(_pyodide, "globals"):
         try:
-            _pyodide.globals.set(name, value)
+            g = _pyodide.globals
+            if hasattr(g, "set"):
+                g.set(name, value)
+            else:
+                g[name] = value
             return True
         except:
-            pass
+            try:
+                _pyodide.globals[name] = value
+                return True
+            except:
+                pass
     return False
 
 
 async def get_global_async(name):
     py = await _ensure_pyodide()
-    v = py.globals.get(name)
+    try:
+        g = py.globals
+        v = g.get(name) if hasattr(g, "get") else g[name]
+    except:
+        v = None
     return _convert_proxy(v)
 
 
 async def set_global_async(name, value):
     py = await _ensure_pyodide()
-    py.globals.set(name, value)
+    try:
+        g = py.globals
+        if hasattr(g, "set"):
+            g.set(name, value)
+        else:
+            g[name] = value
+    except:
+        try:
+            py.globals[name] = value
+        except:
+            await py.runPythonAsync(name + " = " + json.dumps(value))
     return True
 
 
@@ -282,7 +275,7 @@ async def fs_mkdir(path):
         py.FS.mkdirTree(path)
         return True
     except Exception as e:
-        print("fs_mkdir warning: %s" % e)
+        print("fs_mkdir warning: " + str(e))
         return False
 
 
@@ -299,11 +292,11 @@ async def fs_write_file(path, data, encoding="utf8"):
         return True
     except Exception:
         try:
-            code = "open(%s, 'w', encoding=%s).write(%s)" % (repr(path), repr(encoding), repr(data if isinstance(data, str) else str(data)))
+            code = "open(" + repr(path) + ", 'w', encoding=" + repr(encoding) + ").write(" + repr(data if isinstance(data, str) else str(data)) + ")"
             await py.runPythonAsync(code)
             return True
         except Exception as e:
-            print("fs_write_file error: %s" % e)
+            print("fs_write_file error: " + str(e))
             return False
 
 
@@ -313,26 +306,22 @@ async def fs_read_file(path, encoding="utf8"):
         return py.FS.readFile(path, {"encoding": encoding})
     except Exception:
         try:
-            code = "open(%s, 'r', encoding=%s).read()" % (repr(path), repr(encoding))
+            code = "open(" + repr(path) + ", 'r', encoding=" + repr(encoding) + ").read()"
             return await py.runPythonAsync(code)
         except Exception as e:
-            print("fs_read_file error: %s" % e)
+            print("fs_read_file error: " + str(e))
             return None
 
 
-# Optional worker support — non-breaking, used only if explicitly called
 async def _ensure_worker(config=None):
     global _worker, _worker_ready
     if _worker and _worker_ready:
         return _worker
-
     try:
         WorkerCtor = window.Worker
     except:
         raise RuntimeError("Worker not supported")
-
     if not _worker:
-        # Brython: window.Worker.new(url) creates worker
         try:
             _worker = WorkerCtor.new(PYODIDE_WORKER_URL)
         except:
@@ -362,8 +351,10 @@ async def _ensure_worker(config=None):
             if id_ is not None and id_ in _worker_pending:
                 fut = _worker_pending.pop(id_)
                 try:
-                    if data.get("success") if hasattr(data, "get") else getattr(data, "success", False):
-                        fut["resolve"](data.get("result") if hasattr(data, "get") else getattr(data, "result", None))
+                    success = data.get("success") if hasattr(data, "get") else getattr(data, "success", False)
+                    if success:
+                        res = data.get("result") if hasattr(data, "get") else getattr(data, "result", None)
+                        fut["resolve"](res)
                     else:
                         err = data.get("error") if hasattr(data, "get") else getattr(data, "error", "worker error")
                         fut["reject"](Exception(err))
@@ -382,20 +373,15 @@ def _worker_call(msg):
     cur_id = _worker_id
     _worker_id += 1
     msg["id"] = cur_id
-
     future = {"resolved": False, "value": None, "error": None}
-
     def resolve(v):
         future["resolved"] = True
         future["value"] = v
-
     def reject(e):
         future["resolved"] = True
         future["error"] = e
-
     _worker_pending[cur_id] = {"resolve": resolve, "reject": reject}
     _worker.postMessage(msg)
-
     async def waiter():
         for _ in range(500):
             if future["resolved"]:
@@ -404,7 +390,6 @@ def _worker_call(msg):
                 return future["value"]
             await aio.sleep(0.1)
         raise TimeoutError("worker call timeout")
-
     return waiter()
 
 
@@ -413,101 +398,79 @@ async def run_via_worker(code, action="runAsync"):
     return await _worker_call({"type": action, "code": code})
 
 
-# Domain helpers — kept for backwards compatibility
 async def root(residual_expressions, initial_values, variables=None):
     py = await _ensure_pyodide()
     variables = variables or []
+    exprs_json = json.dumps(residual_expressions)
+    x0_json = json.dumps(initial_values)
+    var_json = json.dumps(variables)
 
-    try:
-        py.globals.set("residual_exprs_py", residual_expressions)
-        py.globals.set("initial_vals_py", initial_values)
-        py.globals.set("variable_names_py", variables)
-    except:
-        pass
-
-    code = """
-import json, math, numpy as np
-from scipy.optimize import root as scipy_root
-
-try:
-    exprs = list(residual_exprs_py)
-except:
-    exprs = []
-try:
-    x0_list = list(initial_vals_py)
-except:
-    x0_list = []
-try:
-    var_names = list(variable_names_py)
-except:
-    var_names = []
-
-x0 = np.array(x0_list, dtype=float)
-
-SAFE_FUNCS = {
-    'sin': math.sin, 'cos': math.cos, 'tan': math.tan,
-    'asin': math.asin, 'acos': math.acos, 'atan': math.atan,
-    'sinh': math.sinh, 'cosh': math.cosh, 'tanh': math.tanh,
-    'exp': math.exp, 'log': math.log, 'ln': math.log,
-    'sqrt': math.sqrt, 'pi': math.pi, 'e': math.e,
-    'fabs': math.fabs, 'pow': math.pow,
-}
-
-def eval_residuals(vars_arr):
-    local = {}
-    for name, val in zip(var_names, vars_arr):
-        local[name] = float(val)
-    local.update(SAFE_FUNCS)
-    out = []
-    for expr in exprs:
-        try:
-            out.append(float(eval(expr, {"__builtins__": {}}, local)))
-        except Exception:
-            out.append(float('nan'))
-    return out
-
-def residual_np(vars_arr):
-    return np.array(eval_residuals(vars_arr), dtype=float)
-
-try:
-    init_res = residual_np(x0)
-    initial_norm = float(np.linalg.norm(init_res))
-except Exception:
-    initial_norm = float('nan')
-
-try:
-    sol = scipy_root(residual_np, x0, method='hybr')
-    x_list = sol.x.tolist() if hasattr(sol, 'x') and sol.x is not None else []
-    fun_list = sol.fun.tolist() if hasattr(sol, 'fun') and sol.fun is not None else []
-    success = bool(getattr(sol, 'success', False))
-    status = int(getattr(sol, 'status', -1))
-    message = str(getattr(sol, 'message', ''))
-    nfev = int(getattr(sol, 'nfev', 0))
-    try:
-        final_norm = float(np.linalg.norm(sol.fun)) if hasattr(sol, 'fun') else float('nan'))
-    except:
-        final_norm = float('nan')
-except Exception as e:
-    x_list = []
-    fun_list = []
-    success = False
-    status = -1
-    message = "Solver exception: %s" % e
-    nfev = 0
-    final_norm = float('nan')
-
-result = {
-    'x': x_list,
-    'fun': fun_list,
-    'success': success,
-    'status': status,
-    'message': message,
-    'nfev': nfev,
-    'initialResidualNorm': initial_norm,
-    'residualNorm': final_norm
-}
-json.dumps(result)
-"""
+    code = (
+        "import json, math, numpy as np\n"
+        "from scipy.optimize import root as scipy_root\n"
+        "exprs = " + exprs_json + "\n"
+        "x0_list = " + x0_json + "\n"
+        "var_names = " + var_json + "\n"
+        "x0 = np.array(x0_list, dtype=float)\n"
+        "SAFE_FUNCS = {\n"
+        "    'sin': math.sin, 'cos': math.cos, 'tan': math.tan,\n"
+        "    'asin': math.asin, 'acos': math.acos, 'atan': math.atan,\n"
+        "    'sinh': math.sinh, 'cosh': math.cosh, 'tanh': math.tanh,\n"
+        "    'exp': math.exp, 'log': math.log, 'ln': math.log,\n"
+        "    'sqrt': math.sqrt, 'pi': math.pi, 'e': math.e,\n"
+        "    'fabs': math.fabs, 'pow': math.pow,\n"
+        "}\n"
+        "def eval_residuals(vars_arr):\n"
+        "    local = {}\n"
+        "    for name, val in zip(var_names, vars_arr):\n"
+        "        local[name] = float(val)\n"
+        "    local.update(SAFE_FUNCS)\n"
+        "    out = []\n"
+        "    for expr in exprs:\n"
+        "        try:\n"
+        "            out.append(float(eval(expr, {'__builtins__': {}}, local)))\n"
+        "        except Exception:\n"
+        "            out.append(float('nan'))\n"
+        "    return out\n"
+        "def residual_np(vars_arr):\n"
+        "    return np.array(eval_residuals(vars_arr), dtype=float)\n"
+        "try:\n"
+        "    init_res = residual_np(x0)\n"
+        "    initial_norm = float(np.linalg.norm(init_res))\n"
+        "except Exception:\n"
+        "    initial_norm = float('nan')\n"
+        "try:\n"
+        "    sol = scipy_root(residual_np, x0, method='hybr')\n"
+        "    x_list = sol.x.tolist() if hasattr(sol, 'x') and sol.x is not None else []\n"
+        "    fun_list = sol.fun.tolist() if hasattr(sol, 'fun') and sol.fun is not None else []\n"
+        "    success = bool(getattr(sol, 'success', False))\n"
+        "    status = int(getattr(sol, 'status', -1))\n"
+        "    message = str(getattr(sol, 'message', ''))\n"
+        "    nfev = int(getattr(sol, 'nfev', 0))\n"
+        "    try:\n"
+        "        final_norm = float(np.linalg.norm(sol.fun)) if hasattr(sol, 'fun') else float('nan')\n"
+        "    except:\n"
+        "        final_norm = float('nan')\n"
+        "except Exception as e:\n"
+        "    x_list = []\n"
+        "    fun_list = []\n"
+        "    success = False\n"
+        "    status = -1\n"
+        "    message = 'Solver exception: %s' % e\n"
+        "    nfev = 0\n"
+        "    final_norm = float('nan')\n"
+        "result = {\n"
+        "    'x': x_list,\n"
+        "    'fun': fun_list,\n"
+        "    'success': success,\n"
+        "    'status': status,\n"
+        "    'message': message,\n"
+        "    'nfev': nfev,\n"
+        "    'initialResidualNorm': initial_norm,\n"
+        "    'residualNorm': final_norm\n"
+        "}\n"
+        "json.dumps(result)\n"
+    )
 
     json_str = await py.runPythonAsync(code)
     try:
@@ -515,100 +478,80 @@ json.dumps(result)
     except:
         if isinstance(json_str, dict):
             return json_str
-        try:
-            return json.loads(str(json_str))
-        except:
-            raise RuntimeError("Failed to parse root result: %s" % json_str)
+        return json.loads(str(json_str))
 
 
 async def partition_stats(part_list):
     py = await _ensure_pyodide()
+    part_json = json.dumps(part_list)
 
-    try:
-        py.globals.set("part_input_py", part_list)
-    except:
-        pass
+    code = (
+        "import json, math\n"
+        "part = " + part_json + "\n"
+        "part = [int(x) for x in part if int(x) > 0]\n"
+        "part = sorted(part, reverse=True)\n"
+        "n = sum(part)\n"
+        "max_len = max(part) if part else 0\n"
+        "conj = [sum(1 for r in part if r > i) for i in range(max_len)]\n"
+        "conj = [c for c in conj if c > 0]\n"
+        "d = 0\n"
+        "for i, rl in enumerate(part):\n"
+        "    if rl >= i+1:\n"
+        "        d = i+1\n"
+        "    else:\n"
+        "        break\n"
+        "hooks = []\n"
+        "for i, rl in enumerate(part):\n"
+        "    row = []\n"
+        "    for j in range(rl):\n"
+        "        right = rl - (j+1)\n"
+        "        down = conj[j] - (i+1) if j < len(conj) else 0\n"
+        "        row.append(right + down + 1)\n"
+        "    hooks.append(row)\n"
+        "def p_number(k):\n"
+        "    if k < 0:\n"
+        "        return 0\n"
+        "    if k == 0:\n"
+        "        return 1\n"
+        "    p = [0]*(k+1)\n"
+        "    p[0] = 1\n"
+        "    for kk in range(1, k+1):\n"
+        "        total = 0\n"
+        "        j = 1\n"
+        "        while True:\n"
+        "            pent1 = j*(3*j-1)//2\n"
+        "            if pent1 > kk:\n"
+        "                break\n"
+        "            sign = 1 if (j % 2 == 1) else -1\n"
+        "            total += sign * p[kk - pent1]\n"
+        "            pent2 = j*(3*j+1)//2\n"
+        "            if pent2 <= kk:\n"
+        "                total += sign * p[kk - pent2]\n"
+        "            j += 1\n"
+        "        p[kk] = total\n"
+        "    return p[k]\n"
+        "pn = p_number(n)\n"
+        "prod_hooks = 1\n"
+        "for row in hooks:\n"
+        "    for h in row:\n"
+        "        prod_hooks *= h\n"
+        "try:\n"
+        "    f_lambda = math.factorial(n) // prod_hooks if prod_hooks != 0 else 0\n"
+        "except:\n"
+        "    f_lambda = 0\n"
+        "result = {\n"
+        "    'conj': conj,\n"
+        "    'durfee': d,\n"
+        "    'hooks': hooks,\n"
+        "    'p_n': pn,\n"
+        "    'f_lambda': f_lambda,\n"
+        "    'n': n,\n"
+        "    'prod_hooks': prod_hooks,\n"
+        "    'part': part\n"
+        "}\n"
+        "json.dumps(result)\n"
+    )
 
-    code = """
-import json, math
-
-try:
-    part = list(part_input_py)
-except:
-    part = []
-
-part = [int(x) for x in part if int(x) > 0]
-part = sorted(part, reverse=True)
-
-n = sum(part)
-max_len = max(part) if part else 0
-
-conj = [sum(1 for r in part if r > i) for i in range(max_len)]
-conj = [c for c in conj if c > 0]
-
-d = 0
-for i, rl in enumerate(part):
-    if rl >= i+1:
-        d = i+1
-    else:
-        break
-
-hooks = []
-for i, rl in enumerate(part):
-    row = []
-    for j in range(rl):
-        right = rl - (j+1)
-        down = conj[j] - (i+1) if j < len(conj) else 0
-        row.append(right + down + 1)
-    hooks.append(row)
-
-def p_number(k):
-    if k < 0:
-        return 0
-    if k == 0:
-        return 1
-    p = [0]*(k+1)
-    p[0] = 1
-    for kk in range(1, k+1):
-        total = 0
-        j = 1
-        while True:
-            pent1 = j*(3*j-1)//2
-            if pent1 > kk:
-                break
-            sign = 1 if (j % 2 == 1) else -1
-            total += sign * p[kk - pent1]
-            pent2 = j*(3*j+1)//2
-            if pent2 <= kk:
-                total += sign * p[kk - pent2]
-            j += 1
-        p[kk] = total
-    return p[k]
-
-pn = p_number(n)
-
-prod_hooks = 1
-for row in hooks:
-    for h in row:
-        prod_hooks *= h
-
-try:
-    f_lambda = math.factorial(n) // prod_hooks if prod_hooks != 0 else 0
-except:
-    f_lambda = 0
-
-result = {
-    'conj': conj,
-    'durfee': d,
-    'hooks': hooks,
-    'p_n': pn,
-    'f_lambda': f_lambda,
-    'n': n,
-    'prod_hooks': prod_hooks,
-    'part': part
-}
-json.dumps(result)
-"""
     json_str = await py.runPythonAsync(code)
     try:
         return json.loads(json_str)
