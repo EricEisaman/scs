@@ -424,10 +424,13 @@ def drawHeader(app):
 
 
 def drawEarOverlay(app):
-    drawRect(0,0,W,H,fill=rgb(6,9,20),opacity=0.97)
+    # fully opaque background - covers everything
+    drawRect(0,0,W,H,fill=rgb(5,8,18))
+    drawRect(0,0,W,H,fill=rgb(8,12,26),opacity=0.96)
     drawRect(0,0,W,H,fill=None,border=rgb(80,90,140),borderWidth=2,roundness=12)
-    drawLabel("EAR -> COCHLEA: THE PHYSICAL FOURIER TRANSFORMER",W*0.5,18,fill=rgb(240,250,255),size=18,bold=True,align="center-top")
-    drawLabel("How 3500 hair cells turn vibration into spectrum",W*0.5,40,fill=rgb(160,180,210),size=11,align="center-top")
+    drawRect(0,0,W,HEADER_H,fill=rgb(8,12,26))
+    drawLabel("EAR -> COCHLEA: THE PHYSICAL FOURIER TRANSFORMER",W*0.5,16,fill=rgb(240,250,255),size=18,bold=True,align="center-top")
+    drawLabel("How 3500 hair cells turn vibration into spectrum",W*0.5,38,fill=rgb(160,180,210),size=12,align="center-top")
     closeBx,closeBy,closeBw,closeBh=W-52,HEADER_H+8,36,26
     drawRect(closeBx,closeBy,closeBw,closeBh,fill=rgb(60,70,90),border=rgb(200,210,230),borderWidth=1,roundness=7)
     drawLabel("X",closeBx+closeBw/2,closeBy+closeBh/2,fill=rgb(230,240,255),size=13,bold=True,align="center")
@@ -437,20 +440,24 @@ def drawEarOverlay(app):
     canalX,canalY=leftX+20,leftY+40; canalW,canalH=180,44
     drawRect(canalX,canalY,canalW,canalH,fill=rgb(40,35,55),border=rgb(90,80,110),borderWidth=1,roundness=22)
     drumX=canalX+canalW; drumY=canalY+canalH/2
-    drawLine(drumX,canalY+4,drumX,canalY+canalH-4,fill=rgb(255,220,180),lineWidth=3)
-    drawLabel("eardrum",drumX+6,canalY-2,fill=rgb(255,220,180),size=9,bold=True,align="left-top")
-    malX,malY=drumX+8,drumY-6
-    drawCircle(malX,malY,7,fill=rgb(220,200,180),border=rgb(255,255,255),borderWidth=0.8)
-    drawLabel("malleus",malX+10,malY-6,fill=rgb(220,200,180),size=8,align="left-center")
-    incX,incY=malX+22,malY+2
-    drawCircle(incX,incY,6,fill=rgb(220,200,180),border=rgb(255,255,255),borderWidth=0.8)
-    drawLabel("incus",incX+8,incY,fill=rgb(220,200,180),size=8,align="left-center")
-    stapX,stapY=incX+22,incY+6
-    drawOval(stapX,stapY,18,8,fill=rgb(220,200,180),border=rgb(255,255,255),borderWidth=0.8)
-    drawLabel("stapes",stapX+12,stapY+2,fill=rgb(220,200,180),size=8,align="left-center")
-    ovalX,ovalY=stapX+20,incY+10
-    drawRect(ovalX,ovalY-10,4,20,fill=rgb(140,200,255),border=rgb(200,230,255),borderWidth=1,roundness=3)
-    drawLabel("oval window",ovalX+8,ovalY+8,fill=rgb(140,200,255),size=8,align="left-center")
+    drawLine(drumX,canalY+4,drumX,canalY+canalH-4,fill=rgb(255,220,180),lineWidth=3.5)
+    drawLabel("eardrum",drumX+8,canalY-12,fill=rgb(255,220,180),size=9,bold=True,align="left-bottom")
+    # ossicles spaced with clear labels below
+    malX,malY=drumX+14,drumY
+    drawCircle(malX,malY,8,fill=rgb(220,200,180),border=rgb(255,255,255),borderWidth=1)
+    drawLine(malX,malY+8,malX,malY+22,fill=rgb(180,170,160),lineWidth=0.8)
+    drawLabel("malleus",malX,malY+28,fill=rgb(220,200,180),size=9,align="center-top")
+    incX,incY=malX+32,drumY
+    drawCircle(incX,incY,7,fill=rgb(220,200,180),border=rgb(255,255,255),borderWidth=1)
+    drawLine(incX,incY+7,incX,incY+20,fill=rgb(180,170,160),lineWidth=0.8)
+    drawLabel("incus",incX,incY+26,fill=rgb(220,200,180),size=9,align="center-top")
+    stapX,stapY=incX+32,drumY+2
+    drawOval(stapX,stapY,20,9,fill=rgb(220,200,180),border=rgb(255,255,255),borderWidth=1)
+    drawLine(stapX, stapY+5, stapX, stapY+18,fill=rgb(180,170,160),lineWidth=0.8)
+    drawLabel("stapes",stapX, stapY+24,fill=rgb(220,200,180),size=9,align="center-top")
+    ovalX,ovalY=stapX+24,drumY+4
+    drawRect(ovalX,ovalY-12,5,24,fill=rgb(140,200,255),border=rgb(200,230,255),borderWidth=1.2,roundness=4)
+    drawLabel("oval window",ovalX+12,ovalY+18,fill=rgb(140,200,255),size=9,align="left-top")
     waveT=app.earOverlayTime*3 % 1.0
     waveX=canalX + waveT*(ovalX - canalX)
     drawCircle(waveX,canalY+canalH/2 + math.sin(waveT*12)*6,4,fill=YELLOW,opacity=0.8)
@@ -514,11 +521,13 @@ def drawEarOverlay(app):
             drawCircle(hx+9,cellY+135,4,fill=rgb(100,200,255))
     drawLabel("stereocilia shear -> tip links",crossX+10,crossY+crossH-22,fill=rgb(180,200,160),size=8,align="left-bottom")
     midX,midY=botX+360,botY+40
-    drawLabel("MECHANO-ELECTRICAL:",midX,midY,fill=YELLOW,size=10,bold=True,align="left-top")
-    steps=["1. Eardrum = sum of sines","2. Ossicles amplify -> oval window","3. Perilymph wave in Vestibuli","4. Basilar membrane peaks at freq place","   Base=stiff=20kHz, Apex=floppy=20Hz","5. Organ of Corti rides, stereocilia shear","6. Tip links -> K+ channels open","7. Hair cell depolarizes -> glutamate","8. Nerve fires! = LIVE FFT","Result: Place=frequency, rate=amplitude"]
+    drawLabel("MECHANO-ELECTRICAL TRANSDUCTION:",midX,midY,fill=YELLOW,size=13,bold=True,align="left-top")
+    steps=["1. Eardrum = sum of sines (complex wave)","2. Ossicles amplify x20 -> oval window","3. Perilymph pressure wave in Vestibuli","4. Basilar membrane peaks at freq place","   Base=stiff/narrow=20kHz, Apex=floppy/wide=20Hz","5. Organ of Corti rides, stereocilia shear","6. Tip links stretch -> K+ channels open","7. Hair cell depolarizes -> glutamate release","8. Auditory nerve fires! = LIVE FFT","Result: Place = frequency, Rate = amplitude"]
     for i,txt in enumerate(steps):
-        col=CYAN if txt.startswith("Result") else rgb(200,220,255)
-        drawLabel(txt,midX,midY+16+i*15,fill=col,size=9,bold=txt.startswith("Result"),align="left-top")
+        isResult = txt.startswith("Result")
+        col=CYAN if isResult else rgb(220,235,255)
+        sz=12 if isResult else 11
+        drawLabel(txt,midX,midY+18+i*18,fill=col,size=sz,bold=isResult or i==0,align="left-top")
     nerveX,nerveY=botX+botW-280,botY+40; nerveW,nerveH=260,260
     drawRect(nerveX,nerveY,nerveW,nerveH,fill=rgb(12,16,30),border=rgb(60,70,100),borderWidth=1,roundness=8)
     drawLabel("auditory nerve",nerveX+10,nerveY+8,fill=rgb(180,190,220),size=9,bold=True,align="left-top")
