@@ -3,10 +3,8 @@
 apps/ferrers.py — Ferrers Diagram Explorer
 SCS app 1050x700
 
-Heavy combinatorics (p(n) Euler recurrence, hook-length formula, f^lambda)
-runs in Pyodide WASM worker, canvas stays 60fps.
-
-Controls are injected via browser.document into #canvas-container parent.
+Heavy combinatorics (p(n) Euler recurrence, hook-length, f^lambda)
+runs in Pyodide WASM, canvas stays 60fps.
 """
 
 from scs import *
@@ -28,8 +26,8 @@ _PANEL_ID = "ferrers-controls"
 
 _EXAMPLES = {
     "classic17": ("1. Classic 17 — 6+4+4+2+1", "6+4+4+2+1", "MathWorld classic, Durfee 3, conj (5,4,3,3,1,1)"),
-    "staircase15": ("2. Staircase 15 — 5+4+3+2+1 (self-conj)", "5+4+3+2+1", "self-conjugate, λ=λ', Durfee 3"),
-    "square16": ("3. Square 16 — 4+4+4+4 (in 4×4 box)", "4+4+4+4", "1 of C(8,4)=70 diagrams in 4×4 box"),
+    "staircase15": ("2. Staircase 15 — 5+4+3+2+1 (self-conj)", "5+4+3+2+1", "self-conjugate, lambda=lambda', Durfee 3"),
+    "square16": ("3. Square 16 — 4+4+4+4 (in 4x4 box)", "4+4+4+4", "1 of C(8,4)=70 diagrams in 4x4 box"),
     "hook12": ("4. Hook 12 — 7+1+1+1+1+1", "7+1+1+1+1+1", "hook shape, Durfee 1"),
     "irregular21": ("5. Irregular 21 — 8+5+3+2+2+1", "8+5+3+2+2+1", "conj (6,5,3,2,2,1,1,1), Durfee 3"),
 }
@@ -110,138 +108,203 @@ def _hit_test(app, mx, my):
     return None
 
 def _install_controls(app):
-    existing = document.getElementById(_PANEL_ID)
-    if existing:
-        existing.parentNode.removeChild(existing)
+    # Remove old panel safely
+    try:
+        old = document.getElementById(_PANEL_ID)
+        if old:
+            old.parentNode.removeChild(old)
+    except Exception:
+        pass
+
+    # Build panel
     panel = document.createElement("section")
     panel.id = _PANEL_ID
-    panel.style.cssText = "box-sizing:border-box;width:1050px;max-width:95vw;padding:20px 24px 16px;margin:0 0 14px;background:#191f22;border:1px solid #34413e;color:#e5eee8;font:15px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;border-radius:10px;"
-    options_html = ""
-    for key, (label, val, desc) in _EXAMPLES.items():
-        sel = " selected" if key == "classic17" else ""
-        options_html += f'<option value="{key}"{sel}>{label}</option>'
-    panel.innerHTML = f"""
-<div style="display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:16px">
-  <div>
-    <strong style="font-size:22px;color:#66e0b1;letter-spacing:0.5px">FERRERS DIAGRAMS — PARTITION GEOMETRY</strong>
-    <div style="margin-top:4px;color:#899d97;font-size:15px">Pyodide WASM · Euler recurrence · Hook-length · Durfee square</div>
-  </div>
-  <span style="color:#f4be5c;font-size:15px" id="ferrers-status">Ready</span>
-</div>
-<div style="display:grid;grid-template-columns:320px 1fr;gap:18px;align-items:start;margin-bottom:14px">
-  <label style="display:grid;gap:8px;color:#b6c6bf">
-    <span style="font-size:15px;font-weight:600;color:#e5eee8">EXAMPLES</span>
-    <select id="ferrers-example" style="box-sizing:border-box;width:100%;background:#0f1417;color:#e5eee8;border:1px solid #43524d;padding:12px;font:15px ui-monospace,SFMono-Regular,Consolas,monospace;border-radius:8px">
-      {options_html}
-    </select>
-    <span style="color:#899d97;font-size:14px" id="ferrers-example-desc">MathWorld classic, Durfee 3</span>
-  </label>
-  <label style="display:grid;gap:8px;color:#b6c6bf">
-    <span style="font-size:15px;font-weight:600;color:#e5eee8">PARTITION — LaTeX or + notation</span>
-    <input id="ferrers-input" value="6+4+4+2+1" spellcheck="false" style="box-sizing:border-box;width:100%;background:#0f1417;color:#e5eee8;border:1px solid #43524d;padding:12px;font:15px ui-monospace,SFMono-Regular,Consolas,monospace;border-radius:8px" placeholder="e.g. 6+4+4+2+1 or (6,4,4,2,1)">
-    <span style="color:#899d97;font-size:14px">Supports 6+4+4+2+1, (6,4,4,2,1), λ=(6,4,4,2,1)⊢17 — Enter to parse, Space cycles</span>
-  </label>
-</div>
-<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
-  <button id="ferrers-parse" style="height:42px;padding:0 18px;border:0;background:#66e0b1;color:#10201a;font-weight:800;font-size:15px;font-family:inherit;cursor:pointer;border-radius:8px">Parse</button>
-  <button id="ferrers-boxes" style="height:42px;padding:0 16px;border:1px solid #43524d;background:#232e2b;color:#e5eee8;font-weight:600;font-size:15px;font-family:inherit;cursor:pointer;border-radius:8px">Boxes</button>
-  <button id="ferrers-conj" style="height:42px;padding:0 16px;border:1px solid #43524d;background:#232e2b;color:#e5eee8;font-weight:600;font-size:15px;font-family:inherit;cursor:pointer;border-radius:8px">Conj OFF</button>
-  <button id="ferrers-durfee" style="height:42px;padding:0 16px;border:1px solid #43524d;background:#34413e;color:#f4be5c;font-weight:700;font-size:15px;font-family:inherit;cursor:pointer;border-radius:8px">Durfee ON</button>
-  <button id="ferrers-hooks" style="height:42px;padding:0 16px;border:1px solid #43524d;background:#232e2b;color:#e5eee8;font-weight:600;font-size:15px;font-family:inherit;cursor:pointer;border-radius:8px">Hooks OFF</button>
-  <span style="margin-left:8px;color:#899d97;font-size:14px">Click row end + to add, cell to remove • b/c/d/h • i info</span>
-</div>
-<div id="ferrers-latex" style="margin-top:8px;color:#f4be5c;font-size:16px;min-height:22px"></div>
-"""
-    container = document.getElementById("canvas-container")
-    container.parentNode.insertBefore(panel, container)
+    panel.style.cssText = "box-sizing:border-box;width:1050px;max-width:95vw;padding:20px 24px 16px;margin:0 0 14px;background:#191f22;border:1px solid #34413e;color:#e5eee8;font:15px/1.5 ui-monospace,monospace;border-radius:10px;"
 
+    # Options HTML built separately to avoid nested f-string issues
+    opts = ""
+    for key in _EXAMPLES:
+        label = _EXAMPLES[key][0]
+        sel = " selected" if key == "classic17" else ""
+        opts += '<option value="' + key + '"' + sel + '>' + label + '</option>'
+
+    html = ''
+    html += '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:16px">'
+    html += '<div><strong style="font-size:22px;color:#66e0b1;letter-spacing:0.5px">FERRERS DIAGRAMS — PARTITION GEOMETRY</strong>'
+    html += '<div style="margin-top:4px;color:#899d97;font-size:15px">Pyodide WASM - Euler recurrence - Hook-length - Durfee square</div></div>'
+    html += '<span style="color:#f4be5c;font-size:15px" id="ferrers-status">Ready</span></div>'
+
+    html += '<div style="display:grid;grid-template-columns:320px 1fr;gap:18px;align-items:start;margin-bottom:14px">'
+    html += '<label style="display:grid;gap:8px;color:#b6c6bf"><span style="font-size:15px;font-weight:600;color:#e5eee8">EXAMPLES</span>'
+    html += '<select id="ferrers-example" style="box-sizing:border-box;width:100%;background:#0f1417;color:#e5eee8;border:1px solid #43524d;padding:12px;font:15px ui-monospace,monospace;border-radius:8px">'
+    html += opts
+    html += '</select><span style="color:#899d97;font-size:14px" id="ferrers-example-desc">MathWorld classic, Durfee 3</span></label>'
+
+    html += '<label style="display:grid;gap:8px;color:#b6c6bf"><span style="font-size:15px;font-weight:600;color:#e5eee8">PARTITION - LaTeX or + notation</span>'
+    html += '<input id="ferrers-input" value="6+4+4+2+1" spellcheck="false" style="box-sizing:border-box;width:100%;background:#0f1417;color:#e5eee8;border:1px solid #43524d;padding:12px;font:15px ui-monospace,monospace;border-radius:8px" placeholder="e.g. 6+4+4+2+1 or (6,4,4,2,1)">'
+    html += '<span style="color:#899d97;font-size:14px">Supports 6+4+4+2+1, (6,4,4,2,1) - Enter to parse, Space cycles</span></label></div>'
+
+    html += '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px">'
+    html += '<button id="ferrers-parse" style="height:42px;padding:0 18px;border:0;background:#66e0b1;color:#10201a;font-weight:800;font-size:15px;font-family:inherit;cursor:pointer;border-radius:8px">Parse</button>'
+    html += '<button id="ferrers-boxes" style="height:42px;padding:0 16px;border:1px solid #43524d;background:#232e2b;color:#e5eee8;font-weight:600;font-size:15px;font-family:inherit;cursor:pointer;border-radius:8px">Boxes</button>'
+    html += '<button id="ferrers-conj" style="height:42px;padding:0 16px;border:1px solid #43524d;background:#232e2b;color:#e5eee8;font-weight:600;font-size:15px;font-family:inherit;cursor:pointer;border-radius:8px">Conj OFF</button>'
+    html += '<button id="ferrers-durfee" style="height:42px;padding:0 16px;border:1px solid #43524d;background:#34413e;color:#f4be5c;font-weight:700;font-size:15px;font-family:inherit;cursor:pointer;border-radius:8px">Durfee ON</button>'
+    html += '<button id="ferrers-hooks" style="height:42px;padding:0 16px;border:1px solid #43524d;background:#232e2b;color:#e5eee8;font-weight:600;font-size:15px;font-family:inherit;cursor:pointer;border-radius:8px">Hooks OFF</button>'
+    html += '<span style="margin-left:8px;color:#899d97;font-size:14px">Click row end + to add, cell to remove - b/c/d/h - i info</span></div>'
+
+    html += '<div id="ferrers-latex" style="margin-top:8px;color:#f4be5c;font-size:16px;min-height:22px"></div>'
+
+    panel.innerHTML = html
+
+    # Insert panel defensively
+    inserted = False
+    try:
+        cont = document.getElementById("canvas-container")
+        if cont and cont.parentNode:
+            cont.parentNode.insertBefore(panel, cont)
+            inserted = True
+    except Exception:
+        pass
+    if not inserted:
+        try:
+            q = document.querySelector("canvas")
+            if q and q.parentNode:
+                q.parentNode.insertBefore(panel, q)
+                inserted = True
+        except Exception:
+            pass
+    if not inserted:
+        try:
+            document.body.insertBefore(panel, document.body.firstChild)
+        except Exception as e:
+            try:
+                document.body.appendChild(panel)
+            except Exception:
+                print("panel insert failed: " + str(e))
+
+    # Bind events safely
     def submit_example(event):
-        key = document["ferrers-example"].value
-        label, val, desc = _EXAMPLES.get(key, _EXAMPLES["classic17"])
-        document["ferrers-input"].value = val
-        document["ferrers-example-desc"].innerText = desc[:110]
-        app.exampleKey = key
-        part = _parse_partition(val)
-        if part:
-            aio.run(_analyze(app, part))
+        try:
+            key = document["ferrers-example"].value
+            label, val, desc = _EXAMPLES.get(key, _EXAMPLES["classic17"])
+            document["ferrers-input"].value = val
+            document["ferrers-example-desc"].innerText = desc[:110]
+            app.exampleKey = key
+            part = _parse_partition(val)
+            if part:
+                aio.run(_analyze(app, part))
+        except Exception as e:
+            print("example error: " + str(e))
 
     def submit_parse(event):
-        if event:
-            event.preventDefault()
-        txt = document["ferrers-input"].value
-        part = _parse_partition(txt)
-        if not part:
-            app.error = f"Could not parse '{txt[:30]}'"
-            app.status = "Parse error"
-            _update_status(app)
-            return
-        aio.run(_analyze(app, part))
+        try:
+            if event:
+                event.preventDefault()
+            txt = document["ferrers-input"].value
+            part = _parse_partition(txt)
+            if not part:
+                app.error = "Could not parse '%s'" % txt[:30]
+                app.status = "Parse error"
+                _update_status(app)
+                return
+            aio.run(_analyze(app, part))
+        except Exception as e:
+            print("parse error: " + str(e))
 
     def toggle_boxes(event):
         app.modeBoxes = not app.modeBoxes
-        document["ferrers-boxes"].innerText = "Boxes" if app.modeBoxes else "Dots"
+        try:
+            document["ferrers-boxes"].innerText = "Boxes" if app.modeBoxes else "Dots"
+        except:
+            pass
+
     def toggle_conj(event):
         app.showConjugate = not app.showConjugate
-        document["ferrers-conj"].innerText = "Conj ON" if app.showConjugate else "Conj OFF"
-        document["ferrers-conj"].style.background = "#66e0b1" if app.showConjugate else "#232e2b"
-        document["ferrers-conj"].style.color = "#10201a" if app.showConjugate else "#e5eee8"
+        try:
+            document["ferrers-conj"].innerText = "Conj ON" if app.showConjugate else "Conj OFF"
+            if app.showConjugate:
+                document["ferrers-conj"].style.background = "#66e0b1"
+                document["ferrers-conj"].style.color = "#10201a"
+            else:
+                document["ferrers-conj"].style.background = "#232e2b"
+                document["ferrers-conj"].style.color = "#e5eee8"
+        except:
+            pass
+
     def toggle_durfee(event):
         app.showDurfee = not app.showDurfee
-        document["ferrers-durfee"].innerText = "Durfee ON" if app.showDurfee else "Durfee OFF"
+        try:
+            document["ferrers-durfee"].innerText = "Durfee ON" if app.showDurfee else "Durfee OFF"
+        except:
+            pass
+
     def toggle_hooks(event):
         app.showHooks = not app.showHooks
-        document["ferrers-hooks"].innerText = "Hooks ON" if app.showHooks else "Hooks OFF"
-        document["ferrers-hooks"].style.background = "#66e0b1" if app.showHooks else "#232e2b"
-        document["ferrers-hooks"].style.color = "#10201a" if app.showHooks else "#e5eee8"
+        try:
+            document["ferrers-hooks"].innerText = "Hooks ON" if app.showHooks else "Hooks OFF"
+            if app.showHooks:
+                document["ferrers-hooks"].style.background = "#66e0b1"
+                document["ferrers-hooks"].style.color = "#10201a"
+            else:
+                document["ferrers-hooks"].style.background = "#232e2b"
+                document["ferrers-hooks"].style.color = "#e5eee8"
+        except:
+            pass
 
-    document["ferrers-example"].bind("change", submit_example)
-    document["ferrers-parse"].bind("click", submit_parse)
-    document["ferrers-input"].bind("change", submit_parse)
-    document["ferrers-boxes"].bind("click", toggle_boxes)
-    document["ferrers-conj"].bind("click", toggle_conj)
-    document["ferrers-durfee"].bind("click", toggle_durfee)
-    document["ferrers-hooks"].bind("click", toggle_hooks)
-    def on_key(event):
-        if event.keyCode == 13:
-            submit_parse(event)
-    document["ferrers-input"].bind("keydown", on_key)
+    try:
+        document["ferrers-example"].bind("change", submit_example)
+        document["ferrers-parse"].bind("click", submit_parse)
+        document["ferrers-input"].bind("change", submit_parse)
+        document["ferrers-boxes"].bind("click", toggle_boxes)
+        document["ferrers-conj"].bind("click", toggle_conj)
+        document["ferrers-durfee"].bind("click", toggle_durfee)
+        document["ferrers-hooks"].bind("click", toggle_hooks)
+        def on_key(event):
+            if event.keyCode == 13:
+                submit_parse(event)
+        document["ferrers-input"].bind("keydown", on_key)
+    except Exception as e:
+        print("bind error: " + str(e))
 
 def _update_status(app):
-    el = document.getElementById("ferrers-status")
-    if not el:
-        return
-    if app.busy:
-        el.innerText = "Computing in Pyodide…"
-        el.style.color = "#f4be5c"
-    elif app.error:
-        el.innerText = f"Error: {app.error[:60]}"
-        el.style.color = "#f46f68"
-    else:
-        if app.partitionNumber is not None:
-            pn = app.partitionNumber
-            pn_str = str(pn)
-            if len(pn_str) > 12:
-                pn_str = pn_str[:5] + "…" + pn_str[-4:] + f" ({len(str(pn))}d)"
-            fl = app.f_lambda
-            fl_str = str(fl)
-            if len(fl_str) > 12:
-                fl_str = fl_str[:5] + "…" + fl_str[-4:]
-            el.innerText = f"p({app.n})={pn_str} · f^λ={fl_str} · Pyodide ✓"
-            el.style.color = "#66e0b1"
+    try:
+        el = document.getElementById("ferrers-status")
+        if not el:
+            return
+        if app.busy:
+            el.innerText = "Computing in Pyodide..."
+            el.style.color = "#f4be5c"
+        elif app.error:
+            el.innerText = "Error: %s" % app.error[:60]
+            el.style.color = "#f46f68"
         else:
-            el.innerText = app.status or "Ready"
-            el.style.color = "#66e0b1"
-    latex_el = document.getElementById("ferrers-latex")
-    if latex_el and app.partition:
-        inner = ",".join(map(str, app.partition))
-        plus = "+".join(map(str, app.partition))
-        conj = ",".join(map(str, app.conjugate)) if app.conjugate else ""
-        latex_el.innerText = f"λ=({inner})={plus}⊢{app.n}  λ'=({conj})  Durfee={app.durfee}  self={app.selfConj}  n={app.n} k={len(app.partition)}"
+            if app.partitionNumber is not None:
+                pn = app.partitionNumber
+                pn_str = str(pn)
+                if len(pn_str) > 12:
+                    pn_str = pn_str[:5] + "..." + pn_str[-4:] + " (%sd)" % len(str(pn))
+                fl = app.f_lambda
+                fl_str = str(fl)
+                if len(fl_str) > 12:
+                    fl_str = fl_str[:5] + "..." + fl_str[-4:]
+                el.innerText = "p(%s)=%s | f^lam=%s | Pyodide ok" % (app.n, pn_str, fl_str)
+                el.style.color = "#66e0b1"
+            else:
+                el.innerText = app.status or "Ready"
+                el.style.color = "#66e0b1"
+        latex_el = document.getElementById("ferrers-latex")
+        if latex_el and app.partition:
+            inner = ",".join(map(str, app.partition))
+            plus = "+".join(map(str, app.partition))
+            conj = ",".join(map(str, app.conjugate)) if app.conjugate else ""
+            latex_el.innerText = "lam=(%s)=%s |- %s  lam'=(%s)  Durfee=%s  self=%s  n=%s k=%s" % (inner, plus, app.n, conj, app.durfee, app.selfConj, app.n, len(app.partition))
+    except Exception:
+        pass
 
 async def _analyze(app, part):
     app.busy = True
     app.error = None
-    app.status = f"Computing p({sum(part)})…"
+    app.status = "Computing p(%s)..." % sum(part)
     _update_status(app)
     try:
         result = await partition_stats(part)
@@ -256,7 +319,7 @@ async def _analyze(app, part):
         app.n = result.get("n", sum(part))
         app.selfConj = app.partition == app.conjugate
         app.animT = 0
-        app.status = f"Ready — p({app.n})={app.partitionNumber}"
+        app.status = "Ready p(%s)=%s" % (app.n, app.partitionNumber)
         app.error = None
         try:
             document["ferrers-input"].value = "+".join(map(str, app.partition))
@@ -310,9 +373,12 @@ def onStep(app):
     if app.partition:
         max_len = max(app.partition)
         rows = len(app.partition)
-        scale = min(1.0, 520 / max(1, max_len * 52), 380 / max(1, rows * 52))
-        target = max(28, min(48, int(44 * scale)))
-        app.cellSize = int(app.cellSize * 0.88 + target * 0.12)
+        try:
+            scale = min(1.0, 520 / max(1, max_len * 52), 380 / max(1, rows * 52))
+            target = max(28, min(48, int(44 * scale)))
+            app.cellSize = int(app.cellSize * 0.88 + target * 0.12)
+        except:
+            pass
 
 def onMouseMove(app, mx, my):
     app.hover = _hit_test(app, mx, my)
@@ -447,8 +513,8 @@ def _draw_info_overlay(app):
     pw = app.width - 120
     ph = app.height - 100
     _draw_rounded_rect(px, py, pw, ph, 18, fill=gradient(rgb(20, 24, 38), rgb(28, 32, 52), start="top"), opacity=98, border=rgb(80, 90, 130), borderWidth=1)
-    drawLabel("Ferrers Diagrams — Partition Geometry", px + pw // 2, py + 36, size=26, fill=rgb(235, 240, 255), bold=True)
-    drawLabel("Pyodide WASM · Conjugate · Durfee · Hooks", px + pw // 2, py + 66, size=16, fill=MINT, bold=True)
+    drawLabel("Ferrers Diagrams - Partition Geometry", px + pw // 2, py + 36, size=26, fill=rgb(235, 240, 255), bold=True)
+    drawLabel("Pyodide WASM - Conjugate - Durfee - Hooks", px + pw // 2, py + 66, size=16, fill=MINT, bold=True)
     lines = [
         "USAGE:",
         "  from browser import document, aio",
@@ -458,19 +524,18 @@ def _draw_info_overlay(app):
         "      result = await partition_stats(part)",
         "      app.conjugate = result['conj']",
         "      app.partitionNumber = result['p_n']",
-        "      app.f_lambda = result['f_lambda']",
         "",
         "  def onAppStart(app):",
         "      aio.run(_analyze(app, [6,4,4,2,1]))",
         "",
-        "Heavy combinatorics runs in Pyodide worker, UI stays 60fps.",
+        "Heavy combinatorics runs in Pyodide, UI stays 60fps.",
         "",
         "MATHEMATICS:",
-        "• Ferrers diagram: left-justified rows, λ1 ≥ λ2 ≥ ... ⊢ n",
-        "• Conjugate λ': transpose, Durfee square d = max{i: λi ≥ i}",
-        "• Self-conjugate ⇔ λ = λ' — symmetric",
-        "• Hook length h(i,j) = λi - j + λ'j - i +1, f^λ = n! / ∏ h",
-        "• p(n): # partitions of n, Euler recurrence with pentagonal numbers",
+        "- Ferrers diagram: left-justified rows, lambda1 >= lambda2 >= ... |- n",
+        "- Conjugate lambda': transpose, Durfee square d = max{i: lambdai >= i}",
+        "- Self-conjugate <=> lambda = lambda' - symmetric",
+        "- Hook length h(i,j) = lambdai - j + lambda'j - i +1, f^lambda = n! / prod h",
+        "- p(n): # partitions of n, Euler recurrence with pentagonal numbers",
         "",
         "INTERACTION: Click row end + to add, click cell to remove, Space cycles examples",
     ]
@@ -478,7 +543,7 @@ def _draw_info_overlay(app):
     for line in lines:
         if y > py + ph - 30:
             break
-        col = MINT if "from" in line or "await" in line or "def " in line or "import" in line else (GOLD if line.startswith("•") or "MATH" in line else rgb(210, 220, 240))
+        col = MINT if "from" in line or "await" in line or "def " in line or "import" in line else (GOLD if line.startswith("-") or "MATH" in line else rgb(210, 220, 240))
         drawLabel(line, px + 28, y, size=15, fill=col, align="left-top")
         y += 20
 
@@ -491,14 +556,14 @@ def redrawAll(app):
             continue
         alpha = (math.sin(i * 0.7 + app.animT * 0.08) * 0.3 + 0.7) * 32
         drawCircle(sx, sy, 1, fill=rgb(200, 210, 255), opacity=int(alpha))
-    drawLabel("FERRERS DIAGRAM — PARTITION GEOMETRY", app.width // 2, 28, size=18, fill=INK, bold=True)
+    drawLabel("FERRERS DIAGRAM - PARTITION GEOMETRY", app.width // 2, 28, size=18, fill=INK, bold=True)
     if app.busy:
-        drawLabel("Computing p(n) in Pyodide…", app.width // 2, 52, size=15, fill=GOLD)
+        drawLabel("Computing p(n) in Pyodide...", app.width // 2, 52, size=15, fill=GOLD)
     elif app.error:
-        drawLabel(f"Error: {app.error[:70]}", app.width // 2, 52, size=15, fill=RED)
+        drawLabel("Error: %s" % app.error[:70], app.width // 2, 52, size=15, fill=RED)
     else:
         if app.partitionNumber is not None:
-            drawLabel(f"n={app.n}  λ=({','.join(map(str, app.partition))})  λ'=({','.join(map(str, app.conjugate))})  d={app.durfee}  p({app.n})={app.partitionNumber}  f^λ={app.f_lambda}", app.width // 2, 52, size=15, fill=MUTED)
+            drawLabel("n=%s  lam=(%s)  lam'=(%s)  d=%s  p(%s)=%s  f^lam=%s" % (app.n, ','.join(map(str, app.partition)), ','.join(map(str, app.conjugate)), app.durfee, app.n, app.partitionNumber, app.f_lambda), app.width // 2, 52, size=15, fill=MUTED)
     if app.showConjugate and app.conjugate:
         max_c = max(app.conjugate) if app.conjugate else 0
         cell = app.cellSize
@@ -560,41 +625,41 @@ def redrawAll(app):
     y = ry + 48
     def stat_line(label, value):
         nonlocal y
-        drawLabel(f"{label}:", rx + 14, y, size=15, fill=MUTED, align="left-top")
+        drawLabel("%s:" % label, rx + 14, y, size=15, fill=MUTED, align="left-top")
         drawLabel(str(value), rx + rw - 14, y, size=15, fill=INK, align="right-top", bold=True)
         y += 24
     if app.partition:
-        stat_line("λ", f"({','.join(map(str, app.partition))})")
+        stat_line("lam", "(%s)" % ','.join(map(str, app.partition)))
         stat_line("n", app.n)
         stat_line("k", len(app.partition))
-        stat_line("λ'", f"({','.join(map(str, app.conjugate))})")
+        stat_line("lam'", "(%s)" % ','.join(map(str, app.conjugate)))
         stat_line("Durfee d", app.durfee)
         stat_line("Self", "Yes" if app.selfConj else "No")
         y += 8
         drawLabel("Hook lengths:", rx + 14, y, size=15, fill=MUTED, align="left-top")
         y += 22
         for r, row in enumerate(app.hooks[:5]):
-            txt = " ".join(f"{h:2d}" for h in row[:7])
-            drawLabel(f"r{r+1}: {txt}", rx + 14, y, size=15, fill=rgb(200, 210, 230), align="left-top")
+            txt = " ".join("%2d" % h for h in row[:7])
+            drawLabel("r%s: %s" % (r+1, txt), rx + 14, y, size=15, fill=rgb(200, 210, 230), align="left-top")
             y += 20
         y += 8
         drawLabel("Pyodide", rx + 14, y, size=15, fill=MINT, bold=True, align="left-top")
         y += 22
         if app.busy:
-            drawLabel("Computing…", rx + 14, y, size=15, fill=GOLD, align="left-top")
+            drawLabel("Computing...", rx + 14, y, size=15, fill=GOLD, align="left-top")
         else:
             if app.partitionNumber is not None:
                 vs = str(app.partitionNumber)
                 if len(vs) > 14:
-                    vs = vs[:5] + "…" + vs[-4:] + f" ({len(str(app.partitionNumber))}d)"
-                drawLabel(f"p({app.n})={vs}", rx + 14, y, size=15, fill=rgb(200, 230, 255), align="left-top")
+                    vs = vs[:5] + "..." + vs[-4:] + " (%sd)" % len(str(app.partitionNumber))
+                drawLabel("p(%s)=%s" % (app.n, vs), rx + 14, y, size=15, fill=rgb(200, 230, 255), align="left-top")
                 y += 22
                 fl = str(app.f_lambda)
                 if len(fl) > 14:
-                    fl = fl[:5] + "…" + fl[-4:]
-                drawLabel(f"f^λ={fl}", rx + 14, y, size=15, fill=rgb(160, 200, 255), align="left-top")
+                    fl = fl[:5] + "..." + fl[-4:]
+                drawLabel("f^lam=%s" % fl, rx + 14, y, size=15, fill=rgb(160, 200, 255), align="left-top")
                 y += 22
-                drawLabel(f"∏h={app.prodHooks}", rx + 14, y, size=15, fill=MUTED, align="left-top")
-    drawLabel("Click end + to add/remove • Space cycles • Enter parses • b/c/d/h/i", app.width // 2, app.height - 16, size=15, fill=rgb(120, 130, 160), align="center")
+                drawLabel("prod h=%s" % app.prodHooks, rx + 14, y, size=15, fill=MUTED, align="left-top")
+    drawLabel("Click end + to add/remove - Space cycles - Enter parses - b/c/d/h/i", app.width // 2, app.height - 16, size=15, fill=rgb(120, 130, 160), align="center")
     if app.showInfo:
         _draw_info_overlay(app)
