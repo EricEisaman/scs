@@ -321,6 +321,49 @@ def onStep(app):
 
 def onMousePress(app,mx,my):
     def in_rect(px,py,rx,ry,rw,rh): return rx<=px<=rx+rw and ry<=py<=ry+rh
+    
+    # STATE LOGIC: if BUS overlay is open, it owns all input
+    # No underlying buttons (BUILD/SIM/BUS/TF/CONNECT) should fire
+    if app.show_bus_viewer:
+        # 1. X CLOSE BUTTON - must close, never connect
+        # Visual at W-44,12 32x32, exact hit
+        if in_rect(mx,my,W-44, 12, 32,32):
+            app.show_bus_viewer=False
+            return
+        # 2. Forgiving larger zone
+        if in_rect(mx,my,W-70, 5, 70,70):
+            app.show_bus_viewer=False
+            return
+        # 3. Top header right side 250px - any click there closes (prevents CONNECT overlap)
+        # CONNECT is at W-120,10,108,36 which is inside this area - so X wins, not CONNECT
+        if my < 72 and mx > W - 250:
+            app.show_bus_viewer=False
+            return
+        # 4. Extra fallback for scaled coords
+        if my < 80 and mx > W - 80:
+            app.show_bus_viewer=False
+            return
+        # 5. Tab bar inside overlay
+        tab_x=16
+        for tab in ["TOPICS","GRAPH","TF","ECHO"]:
+            if in_rect(mx,my,tab_x, 73, 72,36):
+                app.bus_tab=tab
+                return
+            tab_x+=82
+        # 6. Topics list
+        if app.bus_tab=="TOPICS":
+            ty=124
+            for topic in sorted(app.bus_stats.keys()):
+                if in_rect(mx,my,12, ty, W-24, 44):
+                    app.selected_bus_topic=topic
+                    app.bus_tab="ECHO"
+                    return
+                ty+=50
+                if ty>H-30: break
+        # 7. Any other click inside overlay blocks underlying UI, does NOT trigger CONNECT
+        return
+
+    # STATE: overlay closed - normal UI
     # Top bar pills - moved 100px more right to x=400
     if in_rect(mx,my,400,10,80,36): app.mode="builder"; return
     if in_rect(mx,my,500,10,80,36): app.mode="sim"; return
@@ -335,46 +378,7 @@ def onMousePress(app,mx,my):
         async def do_connect(): await app.ros_client.connect()
         if aio: aio.run(do_connect())
         return
-    if app.show_bus_viewer:
-        # === X CLOSE BUTTON - FINAL FIX ===
-        # State handler issue: ensure show_bus_viewer is set False BEFORE any other logic
-        # Huge hit zone: entire top bar right side, plus exact X
-        # Also handle responsive scaling by using relative checks
-        # 1. Exact X button 32x32 at W-44,12
-        if in_rect(mx,my,W-44, 12, 32,32):
-            app.show_bus_viewer=False
-            return
-        # 2. Larger forgiving zone 70x70 at W-70,5
-        if in_rect(mx,my,W-70, 5, 70,70):
-            app.show_bus_viewer=False
-            return
-        # 3. Entire top-right corner 250x80 - any click in header right side closes
-        # This catches scaled coords and misaligned clicks
-        if my < 80 and mx > W - 250:
-            # If clicking near OFFLINE / 7 TOPICS / KB/s / X area, close
-            app.show_bus_viewer=False
-            return
-        # 4. Also check if clicking on the X label area specifically (center at W-28,28)
-        if in_rect(mx,my,W-50, 10, 50,40):
-            app.show_bus_viewer=False
-            return
-        # Tab bar - 72x24 at y=79 (73+6) but hit zone larger for easier clicking: 82x36 at y=73
-        tab_x=16
-        for tab in ["TOPICS","GRAPH","TF","ECHO"]:
-            if in_rect(mx,my,tab_x, 73, 72,36):
-                app.bus_tab=tab; return
-            tab_x+=82
-        # Topics list - rows now 44px high, y+=50, starting at 124 (72+52)
-        if app.bus_tab=="TOPICS":
-            ty=124
-            for topic in sorted(app.bus_stats.keys()):
-                if in_rect(mx,my,12, ty, W-24, 44):
-                    app.selected_bus_topic=topic; app.bus_tab="ECHO"; return
-                ty+=50
-                if ty>H-30: break
-        # Click outside content but inside overlay should not close (full-screen), only close button
-        # Allow clicking on GRAPH nodes? For now return to block underlying
-        return
+
     if LEFT_X<=mx<=LEFT_X+LEFT_W and LEFT_Y<=my<=LEFT_Y+LEFT_H:
         y=LEFT_Y+42
         for mod_id in MODULE_LIBRARY:
