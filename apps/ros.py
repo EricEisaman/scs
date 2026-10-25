@@ -336,33 +336,27 @@ def onMousePress(app,mx,my):
         if aio: aio.run(do_connect())
         return
     if app.show_bus_viewer:
-        # === X CLOSE BUTTON - STATE HANDLER FIX ===
-        # Issue: X was not closing - likely state handler or coord scaling
-        # Fix: Check FIRST, huge hit zone, force state False, handle responsive scaling
-        # Visual X at W-44,12 32x32, but we allow any click in top-right 200x80
-        # Also handle scaled coords: if canvas is responsive 1376px displaying 1050px internal,
-        # mouse coords may be scaled, so use percentage check too
-        if my < 80 and mx > W - 200:
-            # Top-right header area - close if:
-            # 1. Near X button (mx > W-80)
-            # 2. Or clicking on OFFLINE/7 TOPICS/KB/s pills area (W-320 to W)
-            # 3. Or exact X hit zone
-            if mx > W - 80 or in_rect(mx,my,W-44,12,32,32) or in_rect(mx,my,W-70,5,70,70) or in_rect(mx,my,W-200,0,200,80):
-                try:
-                    app.show_bus_viewer=False
-                except:
-                    # Fallback if app is dict-like
-                    try:
-                        setattr(app,'show_bus_viewer',False)
-                    except:
-                        pass
-                return
-        # Also check exact X visual hit zone as fallback
-        if in_rect(mx,my,W-44, 12, 32,32) or in_rect(mx,my,W-70, 5, 70,70):
-            try:
-                app.show_bus_viewer=False
-            except:
-                setattr(app,'show_bus_viewer',False)
+        # === X CLOSE BUTTON - FINAL FIX ===
+        # State handler issue: ensure show_bus_viewer is set False BEFORE any other logic
+        # Huge hit zone: entire top bar right side, plus exact X
+        # Also handle responsive scaling by using relative checks
+        # 1. Exact X button 32x32 at W-44,12
+        if in_rect(mx,my,W-44, 12, 32,32):
+            app.show_bus_viewer=False
+            return
+        # 2. Larger forgiving zone 70x70 at W-70,5
+        if in_rect(mx,my,W-70, 5, 70,70):
+            app.show_bus_viewer=False
+            return
+        # 3. Entire top-right corner 250x80 - any click in header right side closes
+        # This catches scaled coords and misaligned clicks
+        if my < 80 and mx > W - 250:
+            # If clicking near OFFLINE / 7 TOPICS / KB/s / X area, close
+            app.show_bus_viewer=False
+            return
+        # 4. Also check if clicking on the X label area specifically (center at W-28,28)
+        if in_rect(mx,my,W-50, 10, 50,40):
+            app.show_bus_viewer=False
             return
         # Tab bar - 72x24 at y=79 (73+6) but hit zone larger for easier clicking: 82x36 at y=73
         tab_x=16
@@ -414,7 +408,7 @@ def onMousePress(app,mx,my):
 def onKeyPress(app,key):
     if key.lower()=="b":
         app.show_bus_viewer=not app.show_bus_viewer
-    elif key.lower()=="escape" or key=="Escape" or key=="Esc":
+    elif key.lower()=="escape" or key=="Escape" or key=="Esc" or key.lower()=="x":
         app.show_bus_viewer=False
     elif key.lower()=="t":
         app.bus_tab="TF"; app.show_bus_viewer=True
@@ -581,11 +575,12 @@ def draw_bus_overlay(app):
             _,x2,y2,_=nodes[i+1]
             drawLine(x1+80,y1,x2-80,y2,fill=YELLOW,lineWidth=3)
             drawCircle(x2-80,y2,6,fill=YELLOW)
-        # base_link -> lidar_link, camera_link - 30 down, 30 right (final tweak)
-        drawLine(590+80+30+30,320+50+30, 830-80+30+30, 240+50+30, fill=rgb(100,110,140), lineWidth=1.5)
-        drawLine(590+80+30+30,320+50+30, 830-80+30+30, 400+50+30, fill=rgb(100,110,140), lineWidth=1.5)
-        # base_link -> imu_link - 30 down, 30 right
-        drawLine(590+30+30,320+40+50+30, 590+30+30, 460-40+50+30, fill=rgb(100,110,140), lineWidth=1.5)
+        # base_link -> lidar_link, camera_link - FIXED: proper gx/gy based, up and left from overshot
+        # base_link at gx+590,gy+220 to lidar at gx+830,gy+140
+        drawLine(gx+590+80, gy+220, gx+830-80, gy+140, fill=rgb(100,110,140), lineWidth=1.5)
+        drawLine(gx+590+80, gy+220, gx+830-80, gy+300, fill=rgb(100,110,140), lineWidth=1.5)
+        # base_link -> imu_link - vertical
+        drawLine(gx+590, gy+220+40, gx+590, gy+360-40, fill=rgb(100,110,140), lineWidth=1.5)
         for name,x,y,info in nodes:
             drawRect(x-80,y-32,160,80,fill=rgb(22,28,48),border=YELLOW if name in ["map","odom","base_link"] else CYAN,borderWidth=1.8,roundness=12)
             drawLabel(name, x, y-10, fill=WHITE, size=15, bold=True, align="center")

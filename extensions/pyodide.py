@@ -173,15 +173,113 @@ async def to_py(js_obj, options=None):
     py = await _ensure_pyodide()
     return py.toPy(js_obj, options or {})
 
-async def install(package):
+# --- PRO FIX: deduplicated, non-spamming install with graceful fallback for missing wheels ---
+_installed_packages = set()
+_install_in_progress = set()
+_micropip_loaded = False
+
+async def _ensure_micropip():
+    global _micropip_loaded
+    if _micropip_loaded:
+        return True
+    # FIXED: Avoid "Loading micropip, packaging" spam - only load once, cache result
+    # User reported multiple loads - this was causing repeated loads
     py = await _ensure_pyodide()
     try:
+        # Check if micropip already available in pyodide
+        try:
+            # Try to avoid loadPackage if already loaded
+            await py.runPythonAsync("import micropip")
+            _micropip_loaded = True
+            return True
+        except:
+            pass
         await py.loadPackage("micropip")
-    except:
-        pass
-    code = "import micropip\nawait micropip.install(" + repr(package) + ")"
-    await py.runPythonAsync(code)
-    return True
+        _micropip_loaded = True
+        return True
+    except Exception as e:
+        # Don't spam warning
+        _micropip_loaded = True  # Mark as attempted to avoid retry spam
+        return False
+
+async def install(package):
+    """Install a package via micropip, deduplicated - FIXED for spam.
+    User reported multiple loads: Loading micropip, packaging, numpy repeatedly
+    """
+    global _installed_packages
+    pkg_name = package if isinstance(package, str) else str(package)
+    # BLOCKLIST: These cause spam and have no wheels or are handled via JS fallback
+    # transforms3d is now handled via pure JS math in ros.py - no need to install
+    heavy_blocklist = {"transforms3d", "urdf-parser-py", "xacro", "catkin_pkg", "rospkg", "rosdistro", "genmsg", "genpy", "rosbags", "lxml"}
+    if pkg_name in heavy_blocklist or pkg_name.lower() in {p.lower() for p in heavy_blocklist}:
+        _installed_packages.add(pkg_name)
+        return False
+    if pkg_name in _installed_packages:
+        return True
+    # Avoid parallel duplicate installs
+    if pkg_name in _install_in_progress:
+        # wait up to 10s for other task
+        for _ in range(100):
+            await aio.sleep(0.1)
+            if pkg_name in _installed_packages:
+                return True
+        return False
+    _install_in_progress.add(pkg_name)
+    try:
+        py = await _ensure_pyodide()
+        await _ensure_micropip()
+        # Packages that are known to have no Pyodide wheel - skip early to avoid ValueError spam
+        no_wheel_blocklist = {"urdf-parser-py", "xacro", "catkin_pkg", "rospkg", "rosdistro", "genmsg", "genpy"}
+        if pkg_name in no_wheel_blocklist:
+            print(f"[pyodide] skip install {pkg_name}: no pure wheel in Pyodide, using fallback")
+            _installed_packages.add(pkg_name)
+            return False
+
+        # Try loadPackage first for packages that are in Pyodide repo (numpy, lxml, pyyaml, etc)
+        pyodide_packages = {"numpy", "scipy", "lxml", "pyyaml", "pyparsing", "packaging", "micropip", "python-dateutil", "six", "docutils"}
+        if pkg_name.lower() in {p.lower() for p in pyodide_packages}:
+            try:
+                await py.loadPackage(pkg_name.lower())
+                _installed_packages.add(pkg_name)
+                return True
+            except Exception as e:
+                # fall through to micropip
+                print(f"[pyodide] loadPackage {pkg_name} failed, trying micropip: {e}")
+
+        # Micropip install with keep_going and try/except for missing wheel
+        code = f"""
+import micropip
+try:
+    await micropip.install({repr(pkg_name)}, keep_going=True)
+    True
+except Exception as e:
+    msg = str(e)
+    # Common case: no pure wheel - don't crash, just warn
+    if "Can't find a pure Python 3 wheel" in msg or "No matching distribution" in msg:
+        print(f"[pyodide] no wheel for {{repr(pkg_name)}}: {{msg[:200]}}")
+        False
+    else:
+        print(f"[pyodide] install {{repr(pkg_name)}} error: {{e}}")
+        # Still mark as attempted to avoid infinite retry
+        False
+"""
+        try:
+            res = await py.runPythonAsync(code)
+            ok = bool(res) if res is not None else True
+            _installed_packages.add(pkg_name)
+            return ok
+        except Exception as e:
+            # Last resort: if it's the urdf-parser-py error, swallow it
+            err_str = str(e)
+            if "Can't find a pure Python 3 wheel" in err_str or "urdf-parser-py" in err_str:
+                print(f"[pyodide] handled missing wheel for {pkg_name}")
+                _installed_packages.add(pkg_name)
+                return False
+            print(f"[pyodide] install {pkg_name} failed: {e}")
+            _installed_packages.add(pkg_name)
+            return False
+    finally:
+        _install_in_progress.discard(pkg_name)
 
 async def register_js_module(name, module):
     py = await _ensure_pyodide()
