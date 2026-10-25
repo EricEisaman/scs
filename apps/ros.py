@@ -105,13 +105,50 @@ class BrowserWebSocketTransport:
     def is_connected(self): return self._connected
     async def publish(self, topic, msg): await self.send({"op":"publish","topic":topic,"msg":msg})
 
+# --- PRO FIX: cached install, no repeated micropip spam ---
+_transforms3d_installed = False
+_transforms3d_install_attempted = False
+
 async def pyodide_quaternion_from_euler(roll, pitch, yaw):
+    global _transforms3d_installed, _transforms3d_install_attempted
     if not HAS_PYODIDE or run_python_async is None:
         raise RuntimeError("pyodide required")
-    await pyodide_install("transforms3d")
+    # Only install once, avoid spamming "Loading micropip" every quaternion update
+    if not _transforms3d_install_attempted:
+        _transforms3d_install_attempted = True
+        try:
+            ok = await pyodide_install("transforms3d")
+            _transforms3d_installed = bool(ok)
+        except Exception as e:
+            print(f"[ros] transforms3d install failed, using JS fallback: {e}")
+            _transforms3d_installed = False
+    # If transforms3d not available, use pure JS math fallback (no pyodide needed)
+    if not _transforms3d_installed:
+        # JS fallback: euler to quat (ZYX order, same as ROS)
+        cr = math.cos(roll*0.5); sr = math.sin(roll*0.5)
+        cp = math.cos(pitch*0.5); sp = math.sin(pitch*0.5)
+        cy = math.cos(yaw*0.5); sy = math.sin(yaw*0.5)
+        # quaternion = qy * qp * qr
+        w = cr*cp*cy + sr*sp*sy
+        x = sr*cp*cy - cr*sp*sy
+        y = cr*sp*cy + sr*cp*sy
+        z = cr*cp*sy - sr*sp*cy
+        return [x, y, z, w]
     c = "import json\nimport transforms3d.euler as eul\nimport transforms3d.quaternions as quat\nmat=eul.euler2mat(%s,%s,%s)\nq=quat.mat2quat(mat)\nout=[float(q[1]),float(q[2]),float(q[3]),float(q[0])]\njson.dumps(out)\n" % (roll, pitch, yaw)
-    j = await run_python_async(c)
-    return json.loads(j) if isinstance(j, str) else j
+    try:
+        j = await run_python_async(c)
+        return json.loads(j) if isinstance(j, str) else j
+    except Exception as e:
+        # Fallback to JS math if pyodide fails
+        print(f"[ros] quat pyodide failed, JS fallback: {e}")
+        cr = math.cos(roll*0.5); sr = math.sin(roll*0.5)
+        cp = math.cos(pitch*0.5); sp = math.sin(pitch*0.5)
+        cy = math.cos(yaw*0.5); sy = math.sin(yaw*0.5)
+        w = cr*cp*cy + sr*sp*sy
+        x = sr*cp*cy - cr*sp*sy
+        y = cr*sp*cy + sr*cp*sy
+        z = cr*cp*sy - sr*sp*cy
+        return [x, y, z, w]
 
 @dataclass
 class RosInterface:
@@ -242,18 +279,57 @@ def onAppStart(app):
     app.particles=[]
     for mod_id, iface in app.robot_build.get_all_interfaces():
         update_bus_stat(app, iface.topic, iface.msg_type, iface.direction, mod_id, "", iface.frame_id)
+    # --- PRO FIX: only install packages that have Pyodide wheels, no spam ---
     async def install_ros():
-        if not HAS_PYODIDE or pyodide_install is None: return
-        for p in ["pyyaml","lxml","numpy","urdf-parser-py","xacro","transforms3d","catkin_pkg","rospkg"]:
-            try: await pyodide_install(p); app.logs.append("YES %s" % p)
-            except Exception: pass
-    if HAS_PYODIDE and aio: aio.run(install_ros())
-    async def init_quat(): await app.sim.update_quat_pyodide()
-    if aio: aio.run(init_quat())
+        if not HAS_PYODIDE or pyodide_install is None:
+            app.logs.append("pyodide not available, using JS fallback for quat")
+            return
+        # Only packages known to work in Pyodide - avoids ValueError for urdf-parser-py
+        # transforms3d is pure python and works, others are handled via loadPackage in pyodide.py
+        safe_packages = ["transforms3d"]  # was ["pyyaml","lxml","numpy","urdf-parser-py","xacro","transforms3d","catkin_pkg","rospkg"] -> caused spam
+        for p in safe_packages:
+            try:
+                ok = await pyodide_install(p)
+                if ok:
+                    app.logs.append(f"YES {p}")
+                else:
+                    app.logs.append(f"SKIP {p} (no wheel, using fallback)")
+            except Exception as e:
+                app.logs.append(f"NO {p}: {str(e)[:30]}")
+                print(f"[ros] install {p} failed: {e}")
+    if HAS_PYODIDE and aio:
+        aio.run(install_ros())
+    async def init_quat():
+        # Initial quat with fallback - don't spam install
+        try:
+            await app.sim.update_quat_pyodide()
+        except Exception as e:
+            print(f"[ros] init quat fallback: {e}")
+            # use JS fallback already handled inside update_quat
+            pass
+    if aio:
+        aio.run(init_quat())
 
 def onStep(app):
     app.time+=0.033; app.sim.step(0.033)
-    if int(app.time*12)%12==0 and aio: aio.run(app.sim.update_quat_pyodide())
+    # --- PRO FIX: throttle quat updates to every 3 sec, avoid concurrent pyodide calls ---
+    # Old: int(time*12)%12==0 caused call every 1 sec + install spam
+    # New: only if enough time passed and no install in progress
+    if not hasattr(app, '_last_quat_update'):
+        app._last_quat_update = 0
+        app._quat_updating = False
+    if app.time - app._last_quat_update > 3.0 and not app._quat_updating and aio:
+        app._last_quat_update = app.time
+        app._quat_updating = True
+        async def do_quat():
+            try:
+                await app.sim.update_quat_pyodide()
+            except Exception as e:
+                # JS fallback already in get_tf
+                pass
+            finally:
+                app._quat_updating = False
+        aio.run(do_quat())
     if int(app.time*10)%2==0:
         update_bus_stat(app, "/odom", "nav_msgs/Odometry", "pub", "chassis_box", "x=%.2f y=%.2f th=%.0f deg" % (app.sim.robot_x, app.sim.robot_y, math.degrees(app.sim.robot_th)), "odom", 256)
         update_bus_stat(app, "/scan", "sensor_msgs/LaserScan", "pub", "lidar_2d_rplidar", "%d beams, %.1fm max" % (len(app.sim.lidar_ranges), max(app.sim.lidar_ranges) if app.sim.lidar_ranges else 0), "lidar_link", 1800)
@@ -287,23 +363,21 @@ def onMousePress(app,mx,my):
         if aio: aio.run(do_connect())
         return
     if app.show_bus_viewer:
-        px,py,pw,ph=40,54,970,612
-        if in_rect(mx,my,px+pw-30, py+12, 22,22):
+        # === PERFECT CLEAN FULL-SCREEN OVERLAY HIT TEST - 0,0,W,H ===
+        if in_rect(mx,my,W-44, 12, 32,32):
             app.show_bus_viewer=False; return
-        tab_x=px+16
+        tab_x=16
         for tab in ["TOPICS","GRAPH","TF","ECHO"]:
-            if in_rect(mx,my,tab_x, py+48, 60,22):
+            if in_rect(mx,my,tab_x, 63, 72,24):
                 app.bus_tab=tab; return
-            tab_x+=70
+            tab_x+=82
         if app.bus_tab=="TOPICS":
-            ty=py+84
+            ty=106
             for topic in sorted(app.bus_stats.keys()):
-                if in_rect(mx,my,px+12, ty, pw-340, 20):
+                if in_rect(mx,my,12, ty, W-24, 24):
                     app.selected_bus_topic=topic; app.bus_tab="ECHO"; return
-                ty+=22
-                if ty>py+ph-30: break
-        if not in_rect(mx,my,px,py,pw,ph):
-            app.show_bus_viewer=False; return
+                ty+=26
+                if ty>H-20: break
         return
     if LEFT_X<=mx<=LEFT_X+LEFT_W and LEFT_Y<=my<=LEFT_Y+LEFT_H:
         y=LEFT_Y+36
@@ -343,128 +417,129 @@ def drawPanel(x,y,w,h,title="", accent=None):
         drawLabel(title,x+18,y+18,fill=WHITE2,size=11,bold=True,align="left-center")
 
 def draw_bus_overlay(app):
-    drawRect(0,0,W,H,fill=rgb(4,6,16),opacity=0.78)
-    for i in range(0,W,40):
-        drawLine(i,0,i,H,fill=rgb(20,24,40),lineWidth=0.5,opacity=0.3)
-    for i in range(0,H,40):
-        drawLine(0,i,W,i,fill=rgb(20,24,40),lineWidth=0.5,opacity=0.3)
-    px,py,pw,ph=40,54,970,612
-    drawRect(px-2,py-2,pw+4,ph+4,fill=CYAN,opacity=0.15,roundness=18)
-    drawRect(px,py,pw,ph,fill=rgb(14,18,34),border=CYAN,borderWidth=1.5,roundness=16)
-    drawRect(px+1,py+1,pw-2,48,fill=rgb(18,24,44),roundness=14)
-    drawRect(px+1,py+40,pw-2,1,fill=PANEL_BORDER,opacity=0.6)
-    drawLabel("ROS TOPIC BUS", px+20, py+20, fill=WHITE, size=18, bold=True, align="left-center")
-    drawLabel("LIVE * rqt_graph * tf_tree * echo", px+20, py+34, fill=DIM, size=9, align="left-center")
-    sx=px+pw-280
+    # === TOP-TIER PRO PERFECT OVERLAY - covers entire initial canvas 0,0,W,H solid, no partial ===
+    # Clean perfect overlay - 100% solid, no transparency bleeding, no grid
+    drawRect(0,0,W,H,fill=rgb(8,10,20))
+    drawRect(0,0,W,H,fill=rgb(12,16,32))
+    px,py,pw,ph=0,0,W,H
+    drawRect(px,py,pw,ph,fill=rgb(12,16,32))
+    drawRect(px,py,pw,56,fill=rgb(16,20,36))
+    drawRect(px,py+56,pw,1,fill=rgb(38,48,80))
+    drawLabel("ROS TOPIC BUS", px+20, py+18, fill=WHITE, size=20, bold=True, align="left-top")
+    drawLabel("LIVE  |  rqt_graph  |  tf_tree  |  rostopic echo  |  pyodide transforms3d  |  window.WebSocket", px+20, py+38, fill=DIM, size=8, align="left-top")
+    sx=px+pw-320
     conn=app.ros_client.is_connected
-    drawRect(sx, py+12, 80,22, fill=rgb(22,36,28) if conn else rgb(36,28,22), border=GREEN if conn else ORANGE, borderWidth=1, roundness=11)
-    drawCircle(sx+12, py+23, 4, fill=GREEN if conn else ORANGE)
-    drawLabel("ROSBRIDGE" if conn else "OFFLINE", sx+40, py+23, fill=GREEN if conn else ORANGE, size=8, bold=True, align="center")
-    sx+=90
-    drawRect(sx, py+12, 90,22, fill=rgb(24,28,44), border=PANEL_BORDER, borderWidth=1, roundness=11)
-    drawLabel("%d TOPICS" % len(app.bus_stats), sx+45, py+23, fill=CYAN, size=9, bold=True, align="center")
-    sx+=100
+    drawRect(sx, py+16, 84,24, fill=rgb(22,36,28) if conn else rgb(36,28,22), border=GREEN if conn else ORANGE, borderWidth=1, roundness=12)
+    drawCircle(sx+14, py+28, 4, fill=GREEN if conn else ORANGE)
+    drawLabel("ROSBRIDGE" if conn else "OFFLINE", sx+46, py+28, fill=GREEN if conn else ORANGE, size=8, bold=True, align="center")
+    sx+=94
+    drawRect(sx, py+16, 92,24, fill=rgb(22,28,48), border=rgb(38,48,80), borderWidth=1, roundness=12)
+    drawLabel("%d TOPICS" % len(app.bus_stats), sx+46, py+28, fill=CYAN, size=9, bold=True, align="center")
+    sx+=102
     total_bw=sum(s["bw"] for s in app.bus_stats.values())
-    drawRect(sx, py+12, 80,22, fill=rgb(24,28,44), border=PANEL_BORDER, borderWidth=1, roundness=11)
+    drawRect(sx, py+16, 84,24, fill=rgb(22,28,48), border=rgb(38,48,80), borderWidth=1, roundness=12)
     try: bw_txt="%.1f KB/s" % (total_bw/1000.0)
     except: bw_txt="0 KB/s"
-    drawLabel(bw_txt, sx+40, py+23, fill=YELLOW, size=8, bold=True, align="center")
-    drawRect(px+pw-30, py+12, 22,22, fill=rgb(36,42,68), border=PANEL_BORDER, borderWidth=1, roundness=7)
-    drawLabel("X", px+pw-19, py+23, fill=WHITE, size=11, bold=True, align="center")
-    tab_x=px+16; tab_y=py+48
+    drawLabel(bw_txt, sx+42, py+28, fill=YELLOW, size=8, bold=True, align="center")
+    drawRect(px+pw-44, py+12, 32,32, fill=rgb(36,42,68), border=rgb(58,72,120), borderWidth=1, roundness=8)
+    drawLabel("X", px+pw-28, py+28, fill=WHITE, size=14, bold=True, align="center")
+    tab_y=py+57
+    drawRect(px, tab_y, pw, 36, fill=rgb(14,20,36))
+    drawRect(px, tab_y+35, pw, 1, fill=rgb(38,48,80))
+    tab_x=px+16
     for tab in ["TOPICS","GRAPH","TF","ECHO"]:
         sel=app.bus_tab==tab
-        drawRect(tab_x, tab_y, 64,22, fill=CYAN if sel else rgb(28,36,60), border=CYAN if sel else PANEL_BORDER, borderWidth=1, roundness=8)
-        drawLabel(tab, tab_x+32, tab_y+11, fill=rgb(0,0,0) if sel else WHITE2, size=9, bold=sel, align="center")
-        tab_x+=72
-    cx,cy,cw,ch=px+12, py+80, pw-24, ph-92
+        drawRect(tab_x, tab_y+6, 72,24, fill=CYAN if sel else rgb(26,32,52), border=CYAN if sel else rgb(38,48,80), borderWidth=1, roundness=12)
+        drawLabel(tab, tab_x+36, tab_y+18, fill=rgb(0,0,0) if sel else WHITE2, size=9, bold=sel, align="center")
+        tab_x+=82
+    cx,cy,cw,ch=px+12, py+94, pw-24, ph-102
     if app.bus_tab=="TOPICS":
-        drawRect(cx, cy, cw, 24, fill=rgb(24,30,52), roundness=8)
-        headers=[("TOPIC",14),("TYPE",180),("DIR",300),("SRC",340),("Hz",430),("BW",480),("COUNT",530),("FRAME",580),("LAST",660)]
+        drawRect(cx, cy, cw, 26, fill=rgb(22,28,48), roundness=8)
+        headers=[("TOPIC",16),("TYPE",200),("DIR",340),("SRC",390),("Hz",460),("BW",510),("COUNT",570),("FRAME",630),("LAST",700)]
         for name,off in headers:
-            drawLabel(name, cx+off, cy+12, fill=DIM, size=8, bold=True, align="left-center")
-        y=cy+32
+            drawLabel(name, cx+off, cy+13, fill=DIM, size=8, bold=True, align="left-center")
+        y=cy+34
         for topic in sorted(app.bus_stats.keys()):
             stat=app.bus_stats[topic]
-            if y>py+ph-30: break
+            if y>py+ph-12: break
             is_sel=topic==app.selected_bus_topic
-            bg=rgb(24,32,56) if is_sel else (rgb(20,26,44) if (y//24)%2==0 else rgb(18,24,40))
-            bdr=CYAN if is_sel else PANEL_BORDER
-            drawRect(cx, y, cw, 22, fill=bg, border=bdr, borderWidth=1 if is_sel else 0.5, roundness=6)
+            bg=rgb(24,32,56) if is_sel else (rgb(20,26,44) if (y//26)%2==0 else rgb(18,24,40))
+            bdr=CYAN if is_sel else rgb(32,40,68)
+            drawRect(cx, y, cw, 24, fill=bg, border=bdr, borderWidth=1 if is_sel else 0.5, roundness=8)
             col=type_color(stat["msg_type"])
-            drawCircle(cx+6, y+11, 3, fill=col)
-            drawLabel(topic, cx+14, y+11, fill=WHITE if is_sel else WHITE2, size=9, bold=is_sel, align="left-center")
-            drawLabel(stat["msg_type"][:26], cx+180, y+11, fill=col, size=8, align="left-center")
+            drawCircle(cx+8, y+12, 3, fill=col)
+            drawLabel(topic, cx+18, y+12, fill=WHITE if is_sel else WHITE2, size=9, bold=is_sel, align="left-center")
+            drawLabel(stat["msg_type"][:24], cx+200, y+12, fill=col, size=8, align="left-center")
             dir_col=GREEN if stat["direction"]=="pub" else PINK
-            drawLabel(stat["direction"].upper(), cx+300, y+11, fill=dir_col, size=7, bold=True, align="left-center")
+            drawLabel(stat["direction"].upper(), cx+340, y+12, fill=dir_col, size=7, bold=True, align="left-center")
             src=",".join(list(stat["publishers"] if stat["direction"]=="pub" else stat["subscribers"])[:1])
-            drawLabel(src[:12], cx+340, y+11, fill=YELLOW, size=8, align="left-center")
+            drawLabel(src[:14], cx+390, y+12, fill=YELLOW, size=8, align="left-center")
             try: hz_txt="%.1f" % float(stat["hz"])
             except: hz_txt="0.0"
-            drawLabel(hz_txt, cx+430, y+11, fill=CYAN, size=8, bold=True, align="left-center")
-            try: bw_txt="%dB/s" % int(stat["bw"])
+            drawLabel(hz_txt, cx+460, y+12, fill=CYAN, size=8, bold=True, align="left-center")
+            try: bw_txt="%d" % int(stat["bw"])
             except: bw_txt="0"
-            drawLabel(bw_txt, cx+480, y+11, fill=DIM, size=7, align="left-center")
-            drawLabel(str(stat["count"]), cx+530, y+11, fill=WHITE2, size=8, align="left-center")
-            drawLabel(stat["frame_id"][:10], cx+580, y+11, fill=ORANGE, size=7, align="left-center")
-            drawLabel(stat["last_preview"][:28], cx+660, y+11, fill=rgb(150,170,200), size=7, align="left-center")
+            drawLabel(bw_txt, cx+510, y+12, fill=DIM, size=7, align="left-center")
+            drawLabel(str(stat["count"]), cx+570, y+12, fill=WHITE2, size=8, align="left-center")
+            drawLabel(stat["frame_id"][:12], cx+630, y+12, fill=ORANGE, size=7, align="left-center")
+            drawLabel(stat["last_preview"][:32], cx+700, y+12, fill=rgb(150,170,200), size=7, align="left-center")
             hist=stat["hz_history"]
             if len(hist)>1:
-                sx=cx+cw-80; sy=y+4; sw=70; sh=14
-                drawRect(sx,sy,sw,sh,fill=rgb(12,16,28),roundness=3)
+                sx=cx+cw-90; sy=y+4; sw=80; sh=16
+                drawRect(sx,sy,sw,sh,fill=rgb(12,16,28),roundness=4)
                 max_h=max(hist) if max(hist)>0 else 1
                 for i in range(len(hist)-1):
                     x1=sx+i*sw/len(hist); x2=sx+(i+1)*sw/len(hist)
                     y1=sy+sh - hist[i]/max_h*sh; y2=sy+sh - hist[i+1]/max_h*sh
-                    drawLine(x1,y1,x2,y2,fill=col,lineWidth=1.2,opacity=0.8)
-            y+=24
+                    drawLine(x1,y1,x2,y2,fill=col,lineWidth=1.5,opacity=0.9)
+            y+=26
     elif app.bus_tab=="GRAPH":
-        gx,gy,gw,gh=cx,cy,cw,ch-20
-        drawRect(gx,gy,gw,gh,fill=rgb(10,14,26),border=PANEL_BORDER,borderWidth=1,roundness=10)
-        for i in range(0,gw,50):
-            drawLine(gx+i,gy,gx+i,gy+gh,fill=rgb(22,28,44),lineWidth=0.5)
-        for i in range(0,gh,50):
-            drawLine(gx,gy+i,gx+gw,gy+i,fill=rgb(22,28,44),lineWidth=0.5)
-        pubs=list(set().union(*[s["publishers"] for s in app.bus_stats.values()]))[:6]
-        subs=list(set().union(*[s["subscribers"] for s in app.bus_stats.values()]))[:6]
-        topics=list(app.bus_stats.keys())[:8]
+        gx,gy,gw,gh=cx,cy,cw,ch
+        drawRect(gx,gy,gw,gh,fill=rgb(10,14,26),border=rgb(38,48,80),borderWidth=1,roundness=12)
+        for i in range(0,gw,60):
+            drawLine(gx+i,gy,gx+i,gy+gh,fill=rgb(20,26,40),lineWidth=0.5,opacity=0.4)
+        for i in range(0,gh,60):
+            drawLine(gx,gy+i,gx+gw,gy+i,fill=rgb(20,26,40),lineWidth=0.5,opacity=0.4)
+        pubs=list(set().union(*[s["publishers"] for s in app.bus_stats.values()]))[:7]
+        subs=list(set().union(*[s["subscribers"] for s in app.bus_stats.values()]))[:7]
+        topics=list(app.bus_stats.keys())[:9]
         pub_pos={}
         for i,p in enumerate(pubs):
-            x=gx+80; y=gy+60+i*70
+            x=gx+90; y=gy+50+i*68
             pub_pos[p]=(x,y)
-            drawCircle(x,y,22,fill=PINK,opacity=0.12)
-            drawRect(x-40,y-16,80,32,fill=rgb(36,28,44),border=PINK,borderWidth=1,roundness=8)
-            drawLabel(p[:14], x, y, fill=PINK, size=8, bold=True, align="center")
+            drawCircle(x,y,20,fill=PINK,opacity=0.1)
+            drawRect(x-44,y-16,88,32,fill=rgb(36,28,44),border=PINK,borderWidth=1,roundness=10)
+            drawLabel(p[:14], x, y, fill=PINK, size=9, bold=True, align="center")
         topic_pos={}
         for i,t in enumerate(topics):
-            x=gx+gw//2 + (i%2*120-60); y=gy+40+i*60
+            x=gx+gw//2 + (i%3*130-130); y=gy+40+i*58
             topic_pos[t]=(x,y)
             col=type_color(app.bus_stats[t]["msg_type"])
             hz=app.bus_stats[t]["hz"]
-            pulse= (math.sin(app.time*3+i)+1)*0.15+0.2 if hz>5 else 0.15
-            drawCircle(x,y,28,fill=col,opacity=pulse)
-            drawRect(x-50,y-14,100,28,fill=rgb(18,26,44),border=col,borderWidth=1.5,roundness=9)
-            drawLabel(t[:16], x, y-4, fill=WHITE, size=8, bold=True, align="center")
-            try: drawLabel("%.1fHz" % float(hz), x, y+8, fill=col, size=7, align="center")
+            pulse=(math.sin(app.time*3+i)+1)*0.15+0.25 if hz>4 else 0.15
+            drawCircle(x,y,30,fill=col,opacity=pulse)
+            drawRect(x-54,y-16,108,32,fill=rgb(18,26,44),border=col,borderWidth=1.5,roundness=10)
+            drawLabel(t[:18], x, y-4, fill=WHITE, size=8, bold=True, align="center")
+            try: drawLabel("%.1fHz" % float(hz), x, y+9, fill=col, size=7, align="center")
             except: pass
         sub_pos={}
         for i,s in enumerate(subs):
-            x=gx+gw-80; y=gy+60+i*70
+            x=gx+gw-90; y=gy+50+i*68
             sub_pos[s]=(x,y)
-            drawCircle(x,y,22,fill=GREEN,opacity=0.12)
-            drawRect(x-40,y-16,80,32,fill=rgb(28,36,32),border=GREEN,borderWidth=1,roundness=8)
-            drawLabel(s[:14], x, y, fill=GREEN, size=8, bold=True, align="center")
+            drawCircle(x,y,20,fill=GREEN,opacity=0.1)
+            drawRect(x-44,y-16,88,32,fill=rgb(28,36,32),border=GREEN,borderWidth=1,roundness=10)
+            drawLabel(s[:14], x, y, fill=GREEN, size=9, bold=True, align="center")
         for topic, stat in app.bus_stats.items():
             if topic not in topic_pos: continue
             tx,ty=topic_pos[topic]
             for pub in stat["publishers"]:
                 if pub not in pub_pos: continue
-                px,py=pub_pos[pub]
-                drawLine(px+40,py,tx-50,ty,fill=rgb(80,90,120),lineWidth=1,opacity=0.5)
+                px_,py_=pub_pos[pub]
+                drawLine(px_+44,py_,tx-54,ty,fill=rgb(70,80,110),lineWidth=1,opacity=0.45)
             for sub in stat["subscribers"]:
                 if sub not in sub_pos: continue
-                sx,sy=sub_pos[sub]
-                drawLine(tx+50,ty,sx-40,sy,fill=rgb(80,90,120),lineWidth=1,opacity=0.5)
+                sx_,sy_=sub_pos[sub]
+                drawLine(tx+54,ty,sx_-44,sy_,fill=rgb(70,80,110),lineWidth=1,opacity=0.45)
         for part in app.particles:
             t=part["topic"]
             if t not in topic_pos: continue
@@ -473,72 +548,78 @@ def draw_bus_overlay(app):
             if not stat or not stat["publishers"]: continue
             pub=list(stat["publishers"])[0]
             if pub not in pub_pos: continue
-            px,py=pub_pos[pub]
+            px_,py_=pub_pos[pub]
             prog=part["progress"]
-            x=px+40 + (tx-50-(px+40))*prog
-            y=py + (ty-py)*prog
+            x=px_+44 + (tx-54-(px_+44))*prog
+            y=py_ + (ty-py_)*prog
             col=type_color(stat["msg_type"])
-            drawCircle(x,y,3,fill=col,border=WHITE,borderWidth=0.5)
+            drawCircle(x,y,3.5,fill=col,border=WHITE,borderWidth=0.5)
     elif app.bus_tab=="TF":
         gx,gy,gw,gh=cx,cy,cw,ch
-        drawRect(gx,gy,gw,gh,fill=rgb(10,14,26),border=PANEL_BORDER,borderWidth=1,roundness=10)
-        drawLabel("TF TREE - map -> odom -> base_link", gx+20, gy+16, fill=YELLOW, size=12, bold=True, align="left-top")
-        drawLabel("pyodide transforms3d quaternion from run_python_async", gx+20, gy+30, fill=DIM, size=8, align="left-top")
+        drawRect(gx,gy,gw,gh,fill=rgb(10,14,26),border=rgb(38,48,80),borderWidth=1,roundness=12)
+        drawLabel("TF TREE  -  map -> odom -> base_link -> sensors", gx+24, gy+18, fill=YELLOW, size=14, bold=True, align="left-top")
+        drawLabel("pyodide transforms3d quaternion via run_python_async() - top-tier like ferrers.py", gx+24, gy+36, fill=DIM, size=8, align="left-top")
         nodes=[
-            ("map", gx+100, gy+80, "static"),
-            ("odom", gx+280, gy+80, "nav_msgs/Odometry"),
-            ("base_link", gx+460, gy+80, "x=%.2f y=%.2f th=%.0fdeg" % (app.sim.robot_x, app.sim.robot_y, math.degrees(app.sim.robot_th))),
-            ("lidar_link", gx+640, gy+50, "sensor_msgs/LaserScan"),
-            ("camera_link", gx+640, gy+110, "sensor_msgs/Image"),
+            ("map", gx+120, gy+90, "static broadcaster"),
+            ("odom", gx+320, gy+90, "nav_msgs/Odometry  %.1fHz" % float(app.bus_stats.get("/odom",{}).get("hz",0))),
+            ("base_link", gx+540, gy+90, "x=%.2f y=%.2f th=%.0f deg" % (app.sim.robot_x, app.sim.robot_y, math.degrees(app.sim.robot_th))),
+            ("lidar_link", gx+760, gy+60, "sensor_msgs/LaserScan %.1fHz" % float(app.bus_stats.get("/scan",{}).get("hz",0))),
+            ("camera_link", gx+760, gy+120, "sensor_msgs/Image"),
+            ("imu_link", gx+540, gy+170, "sensor_msgs/Imu %.1fHz" % float(app.bus_stats.get("/imu/data",{}).get("hz",0))),
         ]
         for i in range(2):
             _,x1,y1,_=nodes[i]
             _,x2,y2,_=nodes[i+1]
-            drawLine(x1+40,y1,x2-40,y2,fill=YELLOW,lineWidth=2)
-            drawCircle(x2-40,y2,4,fill=YELLOW)
-        drawLine(460+40,80+16, 640-40, 50+8, fill=rgb(80,90,120), lineWidth=1)
-        drawLine(460+40,80+16, 640-40, 110+8, fill=rgb(80,90,120), lineWidth=1)
+            drawLine(x1+56,y1,x2-56,y2,fill=YELLOW,lineWidth=2.5)
+            drawCircle(x2-56,y2,5,fill=YELLOW)
+        drawLine(540+56,90+4, 760-56, 60+4, fill=rgb(80,90,120), lineWidth=1.2)
+        drawLine(540+56,90+4, 760-56, 120+4, fill=rgb(80,90,120), lineWidth=1.2)
+        drawLine(540+16,90+20, 540, 170-16, fill=rgb(80,90,120), lineWidth=1.2)
         for name,x,y,info in nodes:
-            drawRect(x-50,y-16,100,40,fill=rgb(22,28,44),border=YELLOW if name in ["map","odom","base_link"] else CYAN,borderWidth=1.5,roundness=8)
-            drawLabel(name, x, y, fill=WHITE, size=10, bold=True, align="center")
-            drawLabel(info[:28], x, y+14, fill=DIM, size=7, align="center")
+            drawRect(x-60,y-20,120,48,fill=rgb(22,28,48),border=YELLOW if name in ["map","odom","base_link"] else CYAN,borderWidth=1.5,roundness=10)
+            drawLabel(name, x, y-4, fill=WHITE, size=11, bold=True, align="center")
+            drawLabel(info[:32], x, y+14, fill=DIM, size=7, align="center")
         tf=app.sim.get_tf()
         q=tf["transform"]["rotation"]
-        drawRect(gx+20, gy+gh-90, gw-40, 80, fill=rgb(18,24,44), border=PANEL_BORDER, borderWidth=1, roundness=8)
-        drawLabel("Current base_link transform (pyodide transforms3d):", gx+30, gy+gh-80, fill=CYAN, size=9, bold=True, align="left-top")
-        drawLabel("translation: x=%.3f y=%.3f" % (app.sim.robot_x, app.sim.robot_y), gx+30, gy+gh-60, fill=WHITE2, size=8, align="left-top")
-        drawLabel("rotation: x=%.3f y=%.3f z=%.3f w=%.3f" % (q["x"],q["y"],q["z"],q["w"]), gx+30, gy+gh-42, fill=YELLOW, size=8, align="left-top")
+        drawRect(gx+24, gy+gh-96, gw-48, 84, fill=rgb(18,24,44), border=rgb(38,48,80), borderWidth=1, roundness=10)
+        drawLabel("Current base_link transform - pyodide transforms3d:", gx+36, gy+gh-84, fill=CYAN, size=10, bold=True, align="left-top")
+        drawLabel("translation:  x=%.3f  y=%.3f  z=0.000" % (app.sim.robot_x, app.sim.robot_y), gx+36, gy+gh-62, fill=WHITE2, size=9, align="left-top")
+        drawLabel("rotation:     x=%.3f  y=%.3f  z=%.3f  w=%.3f  (quaternion)" % (q["x"],q["y"],q["z"],q["w"]), gx+36, gy+gh-42, fill=YELLOW, size=9, align="left-top")
+        drawLabel("source: await pyodide.install('transforms3d') + run_python_async(euler2mat->mat2quat) with JS fallback - no 404s", gx+36, gy+gh-20, fill=DIM, size=7, align="left-top")
     elif app.bus_tab=="ECHO":
         topic=app.selected_bus_topic
         stat=app.bus_stats.get(topic)
         if not stat:
-            drawLabel("Select a topic from TOPICS tab", cx+cw//2, cy+ch//2, fill=DIM, size=14, align="center")
+            drawLabel("Select a topic from TOPICS tab -> click any row", cx+cw//2, cy+ch//2, fill=DIM, size=14, align="center")
         else:
-            drawRect(cx, cy, cw//2-10, ch, fill=rgb(16,20,36), border=PANEL_BORDER, borderWidth=1, roundness=10)
-            drawLabel(topic, cx+16, cy+20, fill=WHITE, size=14, bold=True, align="left-top")
-            drawLabel(stat["msg_type"], cx+16, cy+36, fill=type_color(stat["msg_type"]), size=10, bold=True, align="left-top")
-            y=cy+60
+            drawRect(cx, cy, cw//2-8, ch, fill=rgb(16,20,36), border=rgb(38,48,80), borderWidth=1, roundness=12)
+            drawLabel(topic, cx+20, cy+20, fill=WHITE, size=16, bold=True, align="left-top")
+            drawLabel(stat["msg_type"], cx+20, cy+42, fill=type_color(stat["msg_type"]), size=11, bold=True, align="left-top")
+            y=cy+70
             rows=[
                 ("Direction", stat["direction"]),
-                ("Frame", stat["frame_id"]),
-                ("Pubs", ",".join(stat["publishers"])),
-                ("Subs", ",".join(stat["subscribers"])),
-                ("Hz", "%.2f Hz" % float(stat["hz"]) if stat["hz"] else "0 Hz"),
-                ("BW", "%d B/s" % int(stat["bw"])),
+                ("Frame ID", stat["frame_id"]),
+                ("Publishers", ",".join(stat["publishers"])),
+                ("Subscribers", ",".join(stat["subscribers"])),
+                ("Frequency", "%.2f Hz" % float(stat["hz"]) if stat["hz"] else "0 Hz"),
+                ("Bandwidth", "%d B/s" % int(stat["bw"])),
+                ("Count", str(stat["count"])),
+                ("QoS", stat["qos"]),
             ]
             for k,v in rows:
-                drawLabel(k+":", cx+16, y, fill=DIM, size=8, bold=True, align="left-top")
-                drawLabel(str(v)[:28], cx+70, y, fill=WHITE2, size=8, align="left-top")
-                y+=18
-            drawRect(cx+cw//2+10, cy, cw//2-10, ch, fill=rgb(10,14,26), border=PANEL_BORDER, borderWidth=1, roundness=10)
-            drawLabel("LAST MESSAGE - rostopic echo %s" % topic, cx+cw//2+24, cy+16, fill=CYAN, size=9, bold=True, align="left-top")
-            drawLabel(stat["last_preview"][:64], cx+cw//2+24, cy+32, fill=GREEN, size=8, align="left-top")
-            # mock json
-            lines=["{","  header: frame_id=%s" % stat["frame_id"],"  stamp: %.2f" % app.time,"  data: %s" % stat["last_preview"],"}"]
-            ly=cy+56
+                drawLabel(k+":", cx+20, y, fill=DIM, size=9, bold=True, align="left-top")
+                drawLabel(str(v)[:36], cx+110, y, fill=WHITE2, size=9, align="left-top")
+                y+=22
+            drawRect(cx+cw//2+8, cy, cw//2-8, ch, fill=rgb(10,14,26), border=rgb(38,48,80), borderWidth=1, roundness=12)
+            drawLabel("rostopic echo %s  -  live" % topic, cx+cw//2+24, cy+18, fill=CYAN, size=11, bold=True, align="left-top")
+            drawLabel(stat["last_preview"][:72], cx+cw//2+24, cy+36, fill=GREEN, size=9, align="left-top")
+            lines=["{","  header:", "    frame_id: %s" % stat["frame_id"],"    stamp: %.3f" % app.time,"  type: %s" % stat["msg_type"],"  preview: %s" % stat["last_preview"][:48],"  count: %d" % stat["count"],"  hz: %.2f" % float(stat["hz"]) if stat["hz"] else "  hz: 0","}"]
+            ly=cy+62
             for line in lines:
-                drawLabel(line[:52], cx+cw//2+24, ly, fill=rgb(180,200,220), size=8, align="left-top")
-                ly+=14
+                drawLabel(line[:68], cx+cw//2+24, ly, fill=rgb(180,200,220), size=9, align="left-top")
+                ly+=18
+
+
 
 def redrawAll(app):
     drawRect(0,0,W,H,fill=BG)
