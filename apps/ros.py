@@ -28,9 +28,9 @@ except Exception:
     run_python_async = None
 
 W,H=1050,700
-LEFT_X,LEFT_Y,LEFT_W,LEFT_H=10,56,210,634
-CENTER_X,CENTER_Y,CENTER_W,CENTER_H=230,56,430,634
-RIGHT_X,RIGHT_Y,RIGHT_W,RIGHT_H=670,56,370,634
+LEFT_X,LEFT_Y,LEFT_W,LEFT_H=10,56,230,634
+CENTER_X,CENTER_Y,CENTER_W,CENTER_H=250,56,400,634
+RIGHT_X,RIGHT_Y,RIGHT_W,RIGHT_H=660,56,380,634
 BG=rgb(8,10,20)
 PANEL_BG=rgb(16,20,36)
 PANEL_BG2=rgb(22,28,48)
@@ -349,13 +349,13 @@ def onStep(app):
 
 def onMousePress(app,mx,my):
     def in_rect(px,py,rx,ry,rw,rh): return rx<=px<=rx+rw and ry<=py<=ry+rh
-    # Top bar pills - accurate hit zones matching 80x36, 90x36 visuals
-    if in_rect(mx,my,16,10,80,36): app.mode="builder"; return
-    if in_rect(mx,my,96,10,80,36): app.mode="sim"; return
-    if in_rect(mx,my,176,10,90,36):
+    # Top bar pills - accurate hit zones matching new layout x=190, 96 spacing, 80-96x36 visuals
+    if in_rect(mx,my,190,10,80,36): app.mode="builder"; return
+    if in_rect(mx,my,286,10,80,36): app.mode="sim"; return
+    if in_rect(mx,my,382,10,96,36):
         app.show_bus_viewer=not app.show_bus_viewer
         return
-    if in_rect(mx,my,266,10,80,36):
+    if in_rect(mx,my,488,10,80,36):
         app.bus_tab="TF"
         app.show_bus_viewer=True
         return
@@ -648,23 +648,23 @@ def redrawAll(app):
         drawRect(x,10,80 if len(label)<5 else 90,36,fill=bg,border=bdr,borderWidth=1.5 if active else 1,roundness=14)
         drawLabel(label, x+(40 if len(label)<5 else 45), 28, fill=txt, size=15, bold=True, align="center")
         return x+(70 if len(label)>=5 else 68)
-    x=180
-    pill(x,"BUILD",app.mode=="builder",CYAN); x+=68
-    pill(x,"SIM",app.mode=="sim",GREEN); x+=58
+    x=190
+    pill(x,"BUILD",app.mode=="builder",CYAN); x+=96
+    pill(x,"SIM",app.mode=="sim",GREEN); x+=96
     bx=x
     sel=app.show_bus_viewer
-    drawRect(bx,10,90,36,fill=YELLOW if sel else rgb(38,36,24),border=YELLOW,borderWidth=2 if sel else 1,roundness=14)
+    drawRect(bx,10,96,36,fill=YELLOW if sel else rgb(38,36,24),border=YELLOW,borderWidth=2 if sel else 1,roundness=16)
     pulse=(math.sin(app.time*4)+1)*0.5
-    drawCircle(bx+14,28,5+int(pulse*2),fill=YELLOW,opacity=0.2+pulse*0.5)
-    drawCircle(bx+14,28,5,fill=YELLOW)
-    drawLabel("BUS", bx+48, 28, fill=rgb(0,0,0) if sel else YELLOW, size=15, bold=True, align="center")
-    x+=78
-    pill(x,"TF",app.bus_tab=="TF" and app.show_bus_viewer,YELLOW); x+=68
+    drawCircle(bx+16,28,5+int(pulse*2),fill=YELLOW,opacity=0.2+pulse*0.5)
+    drawCircle(bx+16,28,5,fill=YELLOW)
+    drawLabel("BUS", bx+52, 28, fill=rgb(0,0,0) if sel else YELLOW, size=15, bold=True, align="center")
+    x+=106
+    pill(x,"TF",app.bus_tab=="TF" and app.show_bus_viewer,YELLOW); x+=96
     conn=app.ros_client.is_connected
     drawRect(W-120,10,108,36,fill=rgb(22,36,28) if conn else rgb(36,28,24),border=GREEN if conn else ORANGE,borderWidth=1.5,roundness=14)
     drawCircle(W-104,28,6,fill=GREEN if conn else ORANGE)
     drawLabel("LIVE" if conn else "CONNECT", W-66,28,fill=GREEN if conn else ORANGE,size=15,bold=True,align="center")
-    drawPanel(LEFT_X,LEFT_Y,LEFT_W,LEFT_H, "ROBOT MODULES  %.1fkg  $%d" % (app.robot_build.total_mass(), app.robot_build.total_cost()), accent=CYAN)
+    drawPanel(LEFT_X,LEFT_Y,LEFT_W,LEFT_H, "ROBOT • %.1fkg • $%d" % (app.robot_build.total_mass(), app.robot_build.total_cost()), accent=CYAN)
     y=LEFT_Y+42
     for mod_id, mod in MODULE_LIBRARY.items():
         sel=app.selected_module==mod_id
@@ -673,7 +673,7 @@ def redrawAll(app):
         drawLabel(mod.label, LEFT_X+44, y+14, fill=WHITE if sel else WHITE2, size=15, bold=sel, align="left-top")
         drawLabel("%d topics" % len(mod.interfaces), LEFT_X+44, y+30, fill=DIM, size=15, align="left-top")
         y+=58
-    drawPanel(CENTER_X,CENTER_Y,CENTER_W,CENTER_H, "SIM  x=%.2f y=%.2f th=%.0f deg  quat via pyodide" % (app.sim.robot_x, app.sim.robot_y, math.degrees(app.sim.robot_th)), accent=GREEN)
+    drawPanel(CENTER_X,CENTER_Y,CENTER_W,CENTER_H, "SIM • x=%.1f y=%.1f th=%d°" % (app.sim.robot_x, app.sim.robot_y, int(math.degrees(app.sim.robot_th))), accent=GREEN)
     gx,gy,gw,gh=CENTER_X+14, CENTER_Y+32, CENTER_W-28, 300
     drawRect(gx,gy,gw,gh,fill=rgb(10,14,26),border=PANEL_BORDER,borderWidth=1,roundness=10)
     cx,cy=gx+gw/2, gy+gh/2; scale=26
@@ -696,30 +696,30 @@ def redrawAll(app):
         drawLine(rx,ry,ex,ey,fill=CYAN,lineWidth=1,opacity=0.18)
         if r<7.5:
             drawCircle(ex,ey,2,fill=YELLOW,opacity=0.6)
-    sX,sY,sW=CENTER_X+16, CENTER_Y+390, CENTER_W-32
-    drawRect(sX,sY,sW,20,fill=rgb(22,28,44),border=PANEL_BORDER,borderWidth=1,roundness=6)
+    sX,sY,sW=CENTER_X+16, CENTER_Y+380, CENTER_W-32
+    drawRect(sX,sY,sW,22,fill=rgb(22,28,44),border=PANEL_BORDER,borderWidth=1,roundness=8)
     t=(app.sim.v+1)/2
-    drawRect(sX,sY,t*sW,12,fill=CYAN,roundness=6)
-    drawCircle(sX+t*sW, sY+6, 10, fill=rgb(18,22,36), border=CYAN, borderWidth=2)
-    drawCircle(sX+t*sW, sY+6, 4, fill=CYAN)
-    drawLabel("linear  %.2f m/s" % app.sim.v, sX, sY+26, fill=DIM, size=15, align="left-top")
+    drawRect(sX,sY,t*sW,22,fill=CYAN,roundness=8)
+    drawCircle(sX+t*sW, sY+11, 12, fill=rgb(18,22,36), border=CYAN, borderWidth=2.5)
+    drawCircle(sX+t*sW, sY+11, 5, fill=CYAN)
+    drawLabel("lin %.2f m/s" % app.sim.v, sX, sY+30, fill=DIM, size=15, align="left-top")
     sY2=CENTER_Y+420
-    drawRect(sX,sY2,sW,20,fill=rgb(22,28,44),border=PANEL_BORDER,borderWidth=1,roundness=6)
+    drawRect(sX,sY2,sW,22,fill=rgb(22,28,44),border=PANEL_BORDER,borderWidth=1,roundness=8)
     t2=(app.sim.w+2)/4
-    drawRect(sX,sY2,t2*sW,12,fill=ORANGE,roundness=6)
-    drawCircle(sX+t2*sW, sY2+6, 10, fill=rgb(18,22,36), border=ORANGE, borderWidth=2)
-    drawCircle(sX+t2*sW, sY2+6, 4, fill=ORANGE)
-    drawLabel("angular  %.2f rad/s" % app.sim.w, sX, sY2+26, fill=DIM, size=15, align="left-top")
-    drawRect(CENTER_X+16, CENTER_Y+452, CENTER_W-32, 48, fill=rgb(14,20,36), border=PANEL_BORDER, borderWidth=1, roundness=8)
+    drawRect(sX,sY2,t2*sW,22,fill=ORANGE,roundness=8)
+    drawCircle(sX+t2*sW, sY2+11, 12, fill=rgb(18,22,36), border=ORANGE, borderWidth=2.5)
+    drawCircle(sX+t2*sW, sY2+11, 5, fill=ORANGE)
+    drawLabel("ang %.2f rad/s" % app.sim.w, sX, sY2+30, fill=DIM, size=15, align="left-top")
+    drawRect(CENTER_X+16, CENTER_Y+462, CENTER_W-32, 64, fill=rgb(14,20,36), border=PANEL_BORDER, borderWidth=1, roundness=10)
     try:
         odom_hz=app.bus_stats.get("/odom",{}).get("hz",0)
         scan_hz=app.bus_stats.get("/scan",{}).get("hz",0)
         tf_hz=app.bus_stats.get("/tf",{}).get("hz",0)
-        drawLabel("/odom %.1fHz  /scan %.1fHz  /tf %.1fHz" % (float(odom_hz), float(scan_hz), float(tf_hz)), CENTER_X+24, CENTER_Y+468, fill=WHITE2, size=15, align="left-top")
+        drawLabel("/odom %.1fHz  /scan %.1fHz  /tf %.1fHz" % (float(odom_hz), float(scan_hz), float(tf_hz)), CENTER_X+24, CENTER_Y+472, fill=WHITE2, size=15, align="left-top")
     except:
-        drawLabel("/odom /scan /tf live", CENTER_X+24, CENTER_Y+468, fill=WHITE2, size=15, align="left-top")
-    drawLabel("transforms3d via pyodide.run_python_async() - window.WebSocket", CENTER_X+24, CENTER_Y+482, fill=DIM, size=15, align="left-top")
-    drawPanel(RIGHT_X,RIGHT_Y,RIGHT_W,RIGHT_H, "LIVE BUS  %d topics" % len(app.bus_stats), accent=YELLOW)
+        drawLabel("/odom /scan /tf live", CENTER_X+24, CENTER_Y+472, fill=WHITE2, size=15, align="left-top")
+    drawLabel("pyodide transforms3d + WebSocket", CENTER_X+24, CENTER_Y+492, fill=DIM, size=15, align="left-top")
+    drawPanel(RIGHT_X,RIGHT_Y,RIGHT_W,RIGHT_H, "LIVE BUS • %d topics" % len(app.bus_stats), accent=YELLOW)
     y=RIGHT_Y+44
     for topic, stat in list(sorted(app.bus_stats.items(), key=lambda kv: -kv[1]["hz"]))[:7]:
         col=type_color(stat["msg_type"])
