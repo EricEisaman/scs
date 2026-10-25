@@ -86,7 +86,6 @@ except ImportError:
 import math
 import json
 import time
-import asyncio
 import traceback
 import textwrap
 from dataclasses import dataclass, field
@@ -109,13 +108,15 @@ except Exception:
     HAS_PROC_AUDIO = False
     AudioEngine = None
 
-# Try micropip for pyodide
+# Try pyodide install via extension (not direct micropip import - that 404s in Brython)
 try:
-    import micropip
-    HAS_MICROPIP = True
+    from extensions.pyodide import install as pyodide_install
+    HAS_PYODIDE_INSTALL = True
 except Exception:
-    HAS_MICROPIP = False
-    micropip = None
+    HAS_PYODIDE_INSTALL = False
+    pyodide_install = None
+HAS_MICROPIP = HAS_PYODIDE_INSTALL
+micropip = None
 
 # Layout constants - 1050x700 strict like example
 W,H=1050,700
@@ -166,13 +167,12 @@ class BrowserWebSocketTransport:
         self._ws = window.WebSocket.new(self.url)
         loop_ok = False
 
-        # SCS uses aio? Use Future via asyncio
-        fut = asyncio.get_event_loop().create_future()
-
+        # SCS uses browser.aio, not asyncio Future (asyncio is stub in Brython)
+        # Use aio.sleep loop to wait for open, compatible with ferrers.py pattern
+        self._open_done = False
         def on_open(evt):
             self._connected = True
-            if not fut.done():
-                fut.set_result(True)
+            self._open_done = True
             self.log("ws open")
 
         def on_close(evt):
@@ -215,7 +215,13 @@ class BrowserWebSocketTransport:
             self._ws.bind("error", on_error)
             self._ws.bind("message", on_message)
 
-        await fut
+        for _ in range(100):
+            if getattr(self, '_open_done', False):
+                break
+            if aio is not None:
+                await aio.sleep(0.05)
+            else:
+                import time as _t; _t.sleep(0.05)
         return self
 
     async def send(self, obj: Dict):
@@ -268,7 +274,7 @@ class RosClient:
 
     def subscribe(self, topic: str, msg_type: str, callback: Callable):
         self._topics[topic] = {"type": msg_type, "callback": callback}
-        asyncio.ensure_future(self.transport.send({"op": "subscribe", "topic": topic, "type": msg_type}))
+        aio.run(self.transport.send({"op": "subscribe", "topic": topic, "type": msg_type}))
 
     async def close(self):
         await self.transport.close()
@@ -539,7 +545,7 @@ class RosShimPublisher:
         self.topic=topic; self.msg_type=msg_type; self.ros_client=ros_client
     def publish(self, msg):
         if self.ros_client and self.ros_client.is_connected:
-            asyncio.ensure_future(self.ros_client.publish(self.topic, msg))
+            aio.run(self.ros_client.publish(self.topic, msg))
         else:
             print(f"[mock publish] {self.topic}: {msg}")
 
@@ -609,7 +615,7 @@ def onAppStart(app):
             if aio:
                 aio.run(install_ros())
             else:
-                asyncio.ensure_future(install_ros())
+                aio.run(install_ros())
         except Exception:
             pass
 
@@ -641,7 +647,7 @@ def onStep(app):
             except Exception as e:
                 log(app, f"pub err {e}")
         try:
-            asyncio.ensure_future(pub())
+            aio.run(pub())
         except Exception:
             pass
     if app.insightTimer>0:
@@ -676,7 +682,7 @@ def onMousePress(app,mx,my):
                 app.ros_status=f"fail: {e}"
                 log(app, f"✗ Connect fail {e}\n{traceback.format_exc()}")
         try:
-            asyncio.ensure_future(do_connect())
+            aio.run(do_connect())
         except Exception:
             # SCS aio.run
             if aio:
@@ -685,7 +691,7 @@ def onMousePress(app,mx,my):
 
     if pointInRect(mx,my,*btns["run"]):
         # Run editor code
-        asyncio.ensure_future(run_editor_code(app))
+        aio.run(run_editor_code(app))
         return
 
     if pointInRect(mx,my,*btns["mode_builder"]):
@@ -790,7 +796,7 @@ def onKeyPress(app,key):
     # Little editor key handling
     if not app.editor_focus:
         if key.lower()=="r":
-            asyncio.ensure_future(run_editor_code(app))
+            aio.run(run_editor_code(app))
         elif key.lower()=="c":
             # connect
             onMousePress(app, W-260+10, 12)
@@ -815,7 +821,7 @@ async def run_editor_code(app):
     log(app, "▶ Running editor...")
     sandbox={
         "print": lambda *a,**k: log(app, " ".join(map(str,a))),
-        "math": math, "json": json, "time": time, "asyncio": asyncio,
+        "math": math, "json": json, "time": time, "aio": aio,
         "RosClient": RosClient, "ros_client": app.ros_client,
         "robot_build": app.robot_build, "sim": app.sim,
         "get_current_build": get_current_build,
