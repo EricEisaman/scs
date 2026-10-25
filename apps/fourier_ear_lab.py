@@ -424,13 +424,19 @@ def drawHeader(app):
 
 
 def drawEarOverlay(app):
-    # fully opaque background - covers everything
-    drawRect(0,0,W,H,fill=rgb(5,8,18))
-    drawRect(0,0,W,H,fill=rgb(8,12,26),opacity=0.96)
-    drawRect(0,0,W,H,fill=None,border=rgb(80,90,140),borderWidth=2,roundness=12)
-    drawRect(0,0,W,HEADER_H,fill=rgb(8,12,26))
+    # fully opaque background - EXACT same as initial view - covers everything perfectly
+    drawRect(0,0,W,H,fill=BG)
+    # header same as main header
+    drawRect(0,0,W,HEADER_H,fill=rgb(18,22,38))
     drawLabel("EAR -> COCHLEA: THE PHYSICAL FOURIER TRANSFORMER",W*0.5,16,fill=rgb(240,250,255),size=18,bold=True,align="center-top")
     drawLabel("How 3500 hair cells turn vibration into spectrum",W*0.5,38,fill=rgb(160,180,210),size=12,align="center-top")
+    # EAR VIEW button visible IN overlay itself - same spot as main view, orange active
+    bx,by,bw,bh=W-132,10,118,36
+    hover=getattr(app,'hoverEar',False)
+    fillCol=rgb(255,180,120) if not hover else rgb(255,200,140)
+    drawRect(bx,by,bw,bh,fill=fillCol,border=rgb(255,255,255),borderWidth=1.5,roundness=18)
+    drawLabel("EAR VIEW",bx+bw/2,by+bh/2,fill=rgb(0,0,0),size=12,bold=True,align="center")
+    # also X close button below header for redundancy
     closeBx,closeBy,closeBw,closeBh=W-52,HEADER_H+8,36,26
     drawRect(closeBx,closeBy,closeBw,closeBh,fill=rgb(60,70,90),border=rgb(200,210,230),borderWidth=1,roundness=7)
     drawLabel("X",closeBx+closeBw/2,closeBy+closeBh/2,fill=rgb(230,240,255),size=13,bold=True,align="center")
