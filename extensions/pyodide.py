@@ -57,8 +57,17 @@ async def _load_script(src):
 
 async def _ensure_pyodide(config=None):
     global _pyodide, _loading, _ready, _load_error
+    # Top-tier: check module cache first
     if _ready and _pyodide is not None:
         return _pyodide
+    # Top-tier: check window cache to survive Brython re-imports / SCS hot-reload
+    try:
+        if hasattr(window, "_scs_pyodide") and window._scs_pyodide:
+            _pyodide = window._scs_pyodide
+            _ready = True
+            return _pyodide
+    except:
+        pass
     if _loading:
         for _ in range(300):
             if not _loading:
@@ -66,6 +75,14 @@ async def _ensure_pyodide(config=None):
             await aio.sleep(0.1)
         if _ready and _pyodide is not None:
             return _pyodide
+        # Also re-check window cache while waiting
+        try:
+            if hasattr(window, "_scs_pyodide") and window._scs_pyodide:
+                _pyodide = window._scs_pyodide
+                _ready = True
+                return _pyodide
+        except:
+            pass
         if _load_error:
             raise _load_error
 
@@ -83,12 +100,15 @@ async def _ensure_pyodide(config=None):
         else:
             _pyodide = await window.loadPyodide()
 
-        try:
-            await _pyodide.loadPackage(["numpy", "scipy"])
-        except Exception as e:
-            print("pyodide preload warning: " + str(e))
+        # Top-tier: DO NOT preload heavy packages here.
+        # Packages are lazy-loaded on demand (root() needs scipy, partition_stats needs none).
+        # This eliminates the "Loading numpy, scipy, openblas" log for apps like Ferrers.
 
         _ready = True
+        try:
+            window._scs_pyodide = _pyodide
+        except:
+            pass
         return _pyodide
     except Exception as e:
         _load_error = e
@@ -400,6 +420,11 @@ async def run_via_worker(code, action="runAsync"):
 
 async def root(residual_expressions, initial_values, variables=None):
     py = await _ensure_pyodide()
+    # Lazy-load scipy only when root() is actually used (top-tier pattern)
+    try:
+        await py.loadPackage(["numpy", "scipy"])
+    except Exception as e:
+        print("root: loadPackage warning " + str(e))
     variables = variables or []
     exprs_json = json.dumps(residual_expressions)
     x0_json = json.dumps(initial_values)
