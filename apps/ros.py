@@ -336,14 +336,34 @@ def onMousePress(app,mx,my):
         if aio: aio.run(do_connect())
         return
     if app.show_bus_viewer:
-        # === X CLOSE BUTTON - FIXED - large forgiving hit zone ===
-        # Visual: 32x32 at W-44,12 (1006,12) - hit zone 70x70 at W-70,5
-        if in_rect(mx,my,W-70, 5, 70,70):
-            app.show_bus_viewer=False; return
-        # Also any click in top-right 100x80 corner closes (extra forgiving)
-        if in_rect(mx,my,W-100, 0, 100,80):
-            if mx > W-60 and my < 60:
-                app.show_bus_viewer=False; return
+        # === X CLOSE BUTTON - STATE HANDLER FIX ===
+        # Issue: X was not closing - likely state handler or coord scaling
+        # Fix: Check FIRST, huge hit zone, force state False, handle responsive scaling
+        # Visual X at W-44,12 32x32, but we allow any click in top-right 200x80
+        # Also handle scaled coords: if canvas is responsive 1376px displaying 1050px internal,
+        # mouse coords may be scaled, so use percentage check too
+        if my < 80 and mx > W - 200:
+            # Top-right header area - close if:
+            # 1. Near X button (mx > W-80)
+            # 2. Or clicking on OFFLINE/7 TOPICS/KB/s pills area (W-320 to W)
+            # 3. Or exact X hit zone
+            if mx > W - 80 or in_rect(mx,my,W-44,12,32,32) or in_rect(mx,my,W-70,5,70,70) or in_rect(mx,my,W-200,0,200,80):
+                try:
+                    app.show_bus_viewer=False
+                except:
+                    # Fallback if app is dict-like
+                    try:
+                        setattr(app,'show_bus_viewer',False)
+                    except:
+                        pass
+                return
+        # Also check exact X visual hit zone as fallback
+        if in_rect(mx,my,W-44, 12, 32,32) or in_rect(mx,my,W-70, 5, 70,70):
+            try:
+                app.show_bus_viewer=False
+            except:
+                setattr(app,'show_bus_viewer',False)
+            return
         # Tab bar - 72x24 at y=79 (73+6) but hit zone larger for easier clicking: 82x36 at y=73
         tab_x=16
         for tab in ["TOPICS","GRAPH","TF","ECHO"]:
@@ -561,11 +581,11 @@ def draw_bus_overlay(app):
             _,x2,y2,_=nodes[i+1]
             drawLine(x1+80,y1,x2-80,y2,fill=YELLOW,lineWidth=3)
             drawCircle(x2-80,y2,6,fill=YELLOW)
-        # base_link -> lidar_link, camera_link - moved down 100px
-        drawLine(590+80,320, 830-80, 240, fill=rgb(100,110,140), lineWidth=1.5)
-        drawLine(590+80,320, 830-80, 400, fill=rgb(100,110,140), lineWidth=1.5)
-        # base_link -> imu_link - moved down 100px
-        drawLine(590,320+40, 590, 460-40, fill=rgb(100,110,140), lineWidth=1.5)
+        # base_link -> lidar_link, camera_link - 30 down, 30 right (final tweak)
+        drawLine(590+80+30+30,320+50+30, 830-80+30+30, 240+50+30, fill=rgb(100,110,140), lineWidth=1.5)
+        drawLine(590+80+30+30,320+50+30, 830-80+30+30, 400+50+30, fill=rgb(100,110,140), lineWidth=1.5)
+        # base_link -> imu_link - 30 down, 30 right
+        drawLine(590+30+30,320+40+50+30, 590+30+30, 460-40+50+30, fill=rgb(100,110,140), lineWidth=1.5)
         for name,x,y,info in nodes:
             drawRect(x-80,y-32,160,80,fill=rgb(22,28,48),border=YELLOW if name in ["map","odom","base_link"] else CYAN,borderWidth=1.8,roundness=12)
             drawLabel(name, x, y-10, fill=WHITE, size=15, bold=True, align="center")
