@@ -110,45 +110,17 @@ _transforms3d_installed = False
 _transforms3d_install_attempted = False
 
 async def pyodide_quaternion_from_euler(roll, pitch, yaw):
-    global _transforms3d_installed, _transforms3d_install_attempted
-    if not HAS_PYODIDE or run_python_async is None:
-        raise RuntimeError("pyodide required")
-    # Only install once, avoid spamming "Loading micropip" every quaternion update
-    if not _transforms3d_install_attempted:
-        _transforms3d_install_attempted = True
-        try:
-            ok = await pyodide_install("transforms3d")
-            _transforms3d_installed = bool(ok)
-        except Exception as e:
-            print(f"[ros] transforms3d install failed, using JS fallback: {e}")
-            _transforms3d_installed = False
-    # If transforms3d not available, use pure JS math fallback (no pyodide needed)
-    if not _transforms3d_installed:
-        # JS fallback: euler to quat (ZYX order, same as ROS)
-        cr = math.cos(roll*0.5); sr = math.sin(roll*0.5)
-        cp = math.cos(pitch*0.5); sp = math.sin(pitch*0.5)
-        cy = math.cos(yaw*0.5); sy = math.sin(yaw*0.5)
-        # quaternion = qy * qp * qr
-        w = cr*cp*cy + sr*sp*sy
-        x = sr*cp*cy - cr*sp*sy
-        y = cr*sp*cy + sr*cp*sy
-        z = cr*cp*sy - sr*sp*cy
-        return [x, y, z, w]
-    c = "import json\nimport transforms3d.euler as eul\nimport transforms3d.quaternions as quat\nmat=eul.euler2mat(%s,%s,%s)\nq=quat.mat2quat(mat)\nout=[float(q[1]),float(q[2]),float(q[3]),float(q[0])]\njson.dumps(out)\n" % (roll, pitch, yaw)
-    try:
-        j = await run_python_async(c)
-        return json.loads(j) if isinstance(j, str) else j
-    except Exception as e:
-        # Fallback to JS math if pyodide fails
-        print(f"[ros] quat pyodide failed, JS fallback: {e}")
-        cr = math.cos(roll*0.5); sr = math.sin(roll*0.5)
-        cp = math.cos(pitch*0.5); sp = math.sin(pitch*0.5)
-        cy = math.cos(yaw*0.5); sy = math.sin(yaw*0.5)
-        w = cr*cp*cy + sr*sp*sy
-        x = sr*cp*cy - cr*sp*sy
-        y = cr*sp*cy + sr*cp*sy
-        z = cr*cp*sy - sr*sp*cy
-        return [x, y, z, w]
+    # FIXED: Use pure JS math fallback by default to avoid extra loading spam
+    # Loading micropip/packaging/numpy was happening repeatedly - now disabled
+    # JS math is identical to transforms3d for ZYX Euler -> quat
+    cr = math.cos(roll*0.5); sr = math.sin(roll*0.5)
+    cp = math.cos(pitch*0.5); sp = math.sin(pitch*0.5)
+    cy = math.cos(yaw*0.5); sy = math.sin(yaw*0.5)
+    w = cr*cp*cy + sr*sp*sy
+    x = sr*cp*cy - cr*sp*sy
+    y = cr*sp*cy + sr*cp*sy
+    z = cr*cp*sy - sr*sp*cy
+    return [x, y, z, w]
 
 @dataclass
 class RosInterface:
@@ -349,13 +321,13 @@ def onStep(app):
 
 def onMousePress(app,mx,my):
     def in_rect(px,py,rx,ry,rw,rh): return rx<=px<=rx+rw and ry<=py<=ry+rh
-    # Top bar pills - moved further right to x=300, accurate hit zones
-    if in_rect(mx,my,300,10,80,36): app.mode="builder"; return
-    if in_rect(mx,my,400,10,80,36): app.mode="sim"; return
-    if in_rect(mx,my,500,10,96,36):
+    # Top bar pills - moved 100px more right to x=400
+    if in_rect(mx,my,400,10,80,36): app.mode="builder"; return
+    if in_rect(mx,my,500,10,80,36): app.mode="sim"; return
+    if in_rect(mx,my,600,10,96,36):
         app.show_bus_viewer=not app.show_bus_viewer
         return
-    if in_rect(mx,my,610,10,80,36):
+    if in_rect(mx,my,710,10,80,36):
         app.bus_tab="TF"
         app.show_bus_viewer=True
         return
@@ -364,14 +336,13 @@ def onMousePress(app,mx,my):
         if aio: aio.run(do_connect())
         return
     if app.show_bus_viewer:
-        # === PERFECT CLEAN FULL-SCREEN OVERLAY HIT TEST - X close button fixed ===
-        # Close button - larger hit zone 48x48 at W-56,8 for easy clicking, visual is 32x32 at W-44,12
-        if in_rect(mx,my,W-56, 8, 48,48):
+        # === X CLOSE BUTTON - FIXED - large forgiving hit zone ===
+        # Visual: 32x32 at W-44,12 (1006,12) - hit zone 70x70 at W-70,5
+        if in_rect(mx,my,W-70, 5, 70,70):
             app.show_bus_viewer=False; return
-        # Also allow ESC area - top-right corner 80x60
-        if in_rect(mx,my,W-80, 0, 80,60):
-            # Check if close to X (if clicked in top-right corner but not exactly on button, still close if very top-right)
-            if mx > W-50 and my < 50:
+        # Also any click in top-right 100x80 corner closes (extra forgiving)
+        if in_rect(mx,my,W-100, 0, 100,80):
+            if mx > W-60 and my < 60:
                 app.show_bus_viewer=False; return
         # Tab bar - 72x24 at y=79 (73+6) but hit zone larger for easier clicking: 82x36 at y=73
         tab_x=16
@@ -423,6 +394,8 @@ def onMousePress(app,mx,my):
 def onKeyPress(app,key):
     if key.lower()=="b":
         app.show_bus_viewer=not app.show_bus_viewer
+    elif key.lower()=="escape" or key=="Escape" or key=="Esc":
+        app.show_bus_viewer=False
     elif key.lower()=="t":
         app.bus_tab="TF"; app.show_bus_viewer=True
     elif key.lower()=="g":
@@ -448,8 +421,8 @@ def draw_bus_overlay(app):
     drawRect(px,py,pw,ph,fill=rgb(12,16,32))
     drawRect(px,py,pw,72,fill=rgb(16,20,36))
     drawRect(px,py+72,pw,1,fill=rgb(38,48,80))
-    drawLabel("ROS TOPIC BUS", px+20, py+18, fill=WHITE, size=20, bold=True, align="left-top")
-    drawLabel("LIVE  |  rqt_graph  |  tf_tree  |  rostopic echo  |  pyodide transforms3d  |  window.WebSocket", px+20, py+38, fill=DIM, size=15, align="left-top")
+    drawLabel("ROS TOPIC BUS", px+20, py+8, fill=WHITE, size=20, bold=True, align="left-top")
+    drawLabel("LIVE  |  rqt_graph  |  tf_tree  |  rostopic echo  |  pyodide transforms3d  |  window.WebSocket", px+20, py+28, fill=DIM, size=15, align="left-top")
     sx=px+pw-320
     conn=app.ros_client.is_connected
     drawRect(sx, py+16, 84,24, fill=rgb(22,36,28) if conn else rgb(36,28,22), border=GREEN if conn else ORANGE, borderWidth=1, roundness=12)
@@ -588,11 +561,11 @@ def draw_bus_overlay(app):
             _,x2,y2,_=nodes[i+1]
             drawLine(x1+80,y1,x2-80,y2,fill=YELLOW,lineWidth=3)
             drawCircle(x2-80,y2,6,fill=YELLOW)
-        # base_link -> lidar_link, camera_link
-        drawLine(590+80,220, 830-80, 140, fill=rgb(100,110,140), lineWidth=1.5)
-        drawLine(590+80,220, 830-80, 300, fill=rgb(100,110,140), lineWidth=1.5)
-        # base_link -> imu_link
-        drawLine(590,220+40, 590, 360-40, fill=rgb(100,110,140), lineWidth=1.5)
+        # base_link -> lidar_link, camera_link - moved down 100px
+        drawLine(590+80,320, 830-80, 240, fill=rgb(100,110,140), lineWidth=1.5)
+        drawLine(590+80,320, 830-80, 400, fill=rgb(100,110,140), lineWidth=1.5)
+        # base_link -> imu_link - moved down 100px
+        drawLine(590,320+40, 590, 460-40, fill=rgb(100,110,140), lineWidth=1.5)
         for name,x,y,info in nodes:
             drawRect(x-80,y-32,160,80,fill=rgb(22,28,48),border=YELLOW if name in ["map","odom","base_link"] else CYAN,borderWidth=1.8,roundness=12)
             drawLabel(name, x, y-10, fill=WHITE, size=15, bold=True, align="center")
@@ -644,8 +617,8 @@ def redrawAll(app):
     drawRect(0,0,W,H,fill=rgb(0,0,0),opacity=0.15)
     drawRect(0,0,W,48,fill=rgb(14,18,32),border=PANEL_BORDER,borderWidth=1)
     drawRect(0,47,W,1,fill=CYAN,opacity=0.3)
-    drawLabel("ROS PLAYGROUND", 18, 16, fill=WHITE, size=16, bold=True, align="left-top")
-    drawLabel("PRO * rqt_bus * tf_tree * pyodide * window.WebSocket", 18, 32, fill=DIM, size=15, align="left-top")
+    drawLabel("ROS PLAYGROUND", 18, 10, fill=WHITE, size=16, bold=True, align="left-top")
+    drawLabel("PRO * rqt_bus * tf_tree * pyodide * window.WebSocket", 18, 26, fill=DIM, size=15, align="left-top")
     def pill(x,label,active,accent):
         bg=accent if active else rgb(26,32,52)
         txt=rgb(0,0,0) if active else (accent if label=="BUS" else WHITE2)
@@ -653,7 +626,7 @@ def redrawAll(app):
         drawRect(x,10,80 if len(label)<5 else 90,36,fill=bg,border=bdr,borderWidth=1.5 if active else 1,roundness=14)
         drawLabel(label, x+(40 if len(label)<5 else 45), 28, fill=txt, size=15, bold=True, align="center")
         return x+(70 if len(label)>=5 else 68)
-    x=300
+    x=400
     pill(x,"BUILD",app.mode=="builder",CYAN); x+=100
     pill(x,"SIM",app.mode=="sim",GREEN); x+=100
     bx=x
