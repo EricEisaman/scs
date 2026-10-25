@@ -1,7 +1,6 @@
 
 """
-Fourier Ear Lab - SCS App FIXED v3 - layout no overlap
-1050x700
+Fourier Ear Lab - SCS App v4 - slider fixed, fetch fixed
 """
 from scs import *
 from browser import window, aio
@@ -14,20 +13,12 @@ except:
     HAS_PROC_AUDIO=False
     AudioEngine=None
 try:
-    from extensions.fetch import fetch_json
+    from extensions.fetch import fetch_json, fetch_text
     HAS_FETCH=True
 except:
     HAS_FETCH=False
-try:
-    from extensions.file_loader import load_image
-    HAS_FILE_LOADER=True
-except:
-    HAS_FILE_LOADER=False
-try:
-    from extensions.pyodide import runner
-    HAS_PYODIDE=True
-except:
-    HAS_PYODIDE=False
+    fetch_text=None
+    fetch_json=None
 
 W,H=1050,700
 HEADER_H=70
@@ -53,12 +44,7 @@ def preset_amp_phase(preset,n):
         if n%2==0: return (0.0,0)
         amp=1.0/(n*n); ph=0 if ((n-1)//2)%2==0 else math.pi
         return (amp,ph)
-    table={
-        "violin":[1,0.85,0.7,0.6,0.45,0.35,0.5,0.3,0.25,0.2,0.18,0.15],
-        "piano":[1,0.6,0.4,0.25,0.15,0.18,0.08,0.05,0.03,0.02,0.01,0.005],
-        "sax":[1,0.8,0.55,0.7,0.5,0.4,0.3,0.6,0.25,0.2,0.15,0.1],
-        "voice":[1,0.9,0.4,0.2,0.6,0.5,0.15,0.1,0.3,0.25,0.08,0.05]
-    }
+    table={"violin":[1,0.85,0.7,0.6,0.45,0.35,0.5,0.3,0.25,0.2,0.18,0.15],"piano":[1,0.6,0.4,0.25,0.15,0.18,0.08,0.05,0.03,0.02,0.01,0.005],"sax":[1,0.8,0.55,0.7,0.5,0.4,0.3,0.6,0.25,0.2,0.15,0.1],"voice":[1,0.9,0.4,0.2,0.6,0.5,0.15,0.1,0.3,0.25,0.08,0.05]}
     arr=table.get(preset,[])
     if n<=len(arr): return (arr[n-1],0)
     return (0.08/n,0)
@@ -157,15 +143,19 @@ def onAppStart(app):
     app.presetNames=["pure","square","saw","triangle","violin","piano","sax","voice"]
     app.selectedPreset="violin"; app.fundamental=110; app.playing=False
     app.showComponents=True; app.showCochleaWave=True
-    app.draggingIdx=None; app.hoverIdx=None; app.time=0; app.cochleaRot=0
+    app.draggingIdx=None; app.draggingSlider=False; app.hoverIdx=None; app.time=0; app.cochleaRot=0
     app.audioCtx=None; app.oscNodes=[]; app.gainNodes=[]; app.masterGain=None; app.analyser=None
     app.procAudio=AudioEngine(quality="high",seed=90210) if HAS_PROC_AUDIO else None
     app.samples=computeSamples(app.harmonics); app.fftMags=dft_magnitudes(app.samples,len(app.harmonics))
     app.insight="Drag spectrum bars -> waveform + cochlea update. Frequencies independent!"; app.insightTimer=0
-    if HAS_FETCH:
+    # FIXED: use fetch_text for markdown, not fetch_json
+    if HAS_FETCH and fetch_text:
         async def tryFetch():
-            try: await fetch_json("https://raw.githubusercontent.com/EricEisaman/scs/main/README.md")
-            except: pass
+            try:
+                txt = await fetch_text("https://raw.githubusercontent.com/EricEisaman/scs/main/README.md")
+                app.fetchedLen = len(txt)
+            except Exception as e:
+                app.fetchedLen = 0
         try: aio.run(tryFetch())
         except: pass
 
@@ -190,8 +180,12 @@ def onStep(app):
 
 def pointInRect(px,py,rx,ry,rw,rh): return rx<=px<=rx+rw and ry<=py<=ry+rh
 
+def updateFundamentalFromX(app,mx):
+    sX=CTRL_X+14; sW=CTRL_W-28
+    t=max(0,min(1,(mx-sX)/sW)); app.fundamental=int(55+t*165)
+    if app.playing: rebuildAudio(app)
+
 def onMousePress(app,mx,my):
-    # PLAY button is now at y=32 to avoid title overlap
     playBx,playBy,playBw,playBh=CTRL_X+14,CTRL_Y+32,110,36
     if pointInRect(mx,my,playBx,playBy,playBw,playBh):
         if app.playing: stopAudio(app)
@@ -219,17 +213,19 @@ def onMousePress(app,mx,my):
     togY=addBy+34
     if pointInRect(mx,my,CTRL_X+14,togY,110,22): app.showComponents=not app.showComponents; return
     if pointInRect(mx,my,CTRL_X+140,togY,110,22): app.showCochleaWave=not app.showCochleaWave; return
-    sX,sY,sW=CTRL_X+14,CTRL_Y+CTRL_H-52,CTRL_W-28
-    if pointInRect(mx,my,sX,sY-10,sW,28):
-        t=max(0,min(1,(mx-sX)/sW)); app.fundamental=int(55+t*165)
-        if app.playing: rebuildAudio(app)
+    # slider - moved down to y=308
+    sX,sY,sW=CTRL_X+14,CTRL_Y+308,CTRL_W-28
+    if pointInRect(mx,my,sX,sY-12,sW,32):
+        app.draggingSlider=True
+        updateFundamentalFromX(app,mx)
         return
     if pointInRect(mx,my,SPEC_X,SPEC_Y,SPEC_W,SPEC_H):
         n=len(app.harmonics); maxBarW=42; barW=min(maxBarW,(SPEC_W-40)/n); totalW=barW*n; offsetX=SPEC_X+18+(SPEC_W-36-totalW)/2
         for i in range(n):
             bx=offsetX+i*barW
             if bx<=mx<=bx+barW*0.85:
-                app.draggingIdx=i; rel=(SPEC_Y+SPEC_H-30-my)/(SPEC_H-60)
+                app.draggingIdx=i
+                rel=(SPEC_Y+SPEC_H-30-my)/(SPEC_H-60)
                 app.harmonics[i]["amp"]=max(0,min(1,rel)); app.harmonics[i]["muted"]=False
                 app.samples=computeSamples(app.harmonics); app.fftMags=dft_magnitudes(app.samples,len(app.harmonics))
                 updateGains(app)
@@ -246,6 +242,9 @@ def onMousePress(app,mx,my):
         rebuildAudio(app); return
 
 def onMouseDrag(app,mx,my):
+    if app.draggingSlider:
+        updateFundamentalFromX(app,mx)
+        return
     if app.draggingIdx is not None:
         rel=(SPEC_Y+SPEC_H-30-my)/(SPEC_H-60)
         app.harmonics[app.draggingIdx]["amp"]=max(0,min(1,rel))
@@ -254,7 +253,10 @@ def onMouseDrag(app,mx,my):
             if len([h for h in app.harmonics if not h["muted"] and h["amp"]>=0.005])!=len(app.gainNodes):
                 rebuildAudio(app)
 
-def onMouseRelease(app,mx,my): app.draggingIdx=None
+def onMouseRelease(app,mx,my):
+    app.draggingIdx=None
+    app.draggingSlider=False
+
 def onMouseMove(app,mx,my):
     app.hoverIdx=None
     if pointInRect(mx,my,SPEC_X,SPEC_Y,SPEC_W,SPEC_H):
@@ -281,7 +283,6 @@ def onKeyPress(app,key):
 def drawPanel(x,y,w,h,title=""):
     drawRect(x,y,w,h,fill=PANEL_BG,border=PANEL_BORDER,borderWidth=1,roundness=10)
     if title:
-        # title background to avoid overlap with buttons
         drawRect(x+8,y+6,w-16,16,fill=rgb(28,32,52),roundness=5)
         drawLabel(title,x+14,y+14,fill=rgb(180,190,220),size=11,bold=True,align="left-top")
 
@@ -340,36 +341,25 @@ def drawCochlea(app):
     for i in range(320):
         t=i/319*maxTheta; r=175*math.exp(-0.29*t); ang=t+app.cochleaRot*0.08
         pts.append((cx+r*math.cos(ang)*1.08,cy+r*math.sin(ang)*0.9,r,t))
-    # spiral track
     for i in range(len(pts)-1):
         norm=pts[i][3]/maxTheta; col=rgb(int(lerp(255,80,norm)),int(lerp(160,220,norm)),int(lerp(60,255,norm)))
         drawLine(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1],fill=col,lineWidth=lerp(11,3.5,norm),opacity=0.88)
-    # faint outline
     for i in range(0,len(pts)-1,4):
         drawLine(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1],fill=rgb(255,255,255),lineWidth=1,opacity=0.08)
-    # freq markers with offset labels to avoid overlap on map
-    markers=[(0.02,"20kHz BASE"),(0.38,"1kHz"),(0.68,"250Hz APEX area"),(0.90,"20Hz APEX")]
+    markers=[(0.02,"20kHz BASE"),(0.38,"1kHz"),(0.68,"250Hz"),(0.90,"20Hz APEX")]
     for frac,lbl in markers:
         idx=int(frac*(len(pts)-1)); x,y,r,t=pts[idx]
-        # draw marker
         drawCircle(x,y,5,fill=rgb(255,255,255),border=PANEL_BORDER,borderWidth=1)
-        # compute outward direction
-        ang=t+app.cochleaRot*0.08
-        ox=math.cos(ang)*22; oy=math.sin(ang)*22
+        ang=t+app.cochleaRot*0.08; ox=math.cos(ang)*22; oy=math.sin(ang)*22
         lx=x+ox; ly=y+oy
-        # label background
         drawRect(lx-2,ly-12, len(lbl)*5.5+6,14, fill=rgb(18,22,38), border=rgb(80,90,120), borderWidth=0.8, roundness=4, opacity=0.9)
         drawLabel(lbl,lx+2,ly-2,fill=rgb(200,210,230),size=8,align="left-top")
         drawLine(x,y,lx,ly,fill=rgb(120,130,160),lineWidth=0.8,opacity=0.6)
-    # harmonic dots spread linearly along spiral length to avoid clustering
     maxN=len(app.harmonics)
     for h in app.harmonics:
         if h["muted"] or h["amp"]<0.008: continue
-        # linear spread: n=1 at apex (0.92), n=max at base (0.08)
-        if maxN>1:
-            frac=0.92 - (h["n"]-1)/(maxN-1)*0.84
-        else:
-            frac=0.92
+        if maxN>1: frac=0.92 - (h["n"]-1)/(maxN-1)*0.84
+        else: frac=0.92
         frac=max(0.05,min(0.95,frac))
         x,y,r,t=pts[int(frac*(len(pts)-1))]
         pulse=1+0.5*math.sin(app.time*5+h["n"])*h["amp"] if app.playing else 1
@@ -379,9 +369,7 @@ def drawCochlea(app):
     drawLabel("Base=high -> Apex=low. 3500 hair cells. Click map to solo.",gx+8,gy+gh-8,fill=rgb(130,150,180),size=9,align="left-bottom")
 
 def drawControls(app):
-    # title already drawn by panel, but we avoid overlap by drawing play lower
     drawPanel(CTRL_X,CTRL_Y,CTRL_W,CTRL_H,"TIMBRE LAB - click preset")
-    # play at 32, not 14
     bx,by,bw,bh=CTRL_X+14,CTRL_Y+32,110,36
     if app.playing: drawRect(bx,by,bw,bh,fill=rgb(255,90,90),border=rgb(255,255,255),borderWidth=1.5,roundness=18); drawLabel("STOP",bx+bw/2,by+bh/2,fill=rgb(255,255,255),size=13,bold=True,align="center")
     else: drawRect(bx,by,bw,bh,fill=rgb(90,255,160),border=rgb(255,255,255),borderWidth=1.5,roundness=18); drawLabel("PLAY",bx+bw/2,by+bh/2,fill=rgb(0,0,0),size=13,bold=True,align="center")
@@ -398,9 +386,12 @@ def drawControls(app):
     togY=addBy+34
     drawRect(CTRL_X+14,togY,110,22,fill=CYAN if app.showComponents else rgb(60,70,90),border=PANEL_BORDER,borderWidth=1,roundness=6); drawLabel("Show Comp",CTRL_X+69,togY+11,fill=rgb(0,0,0) if app.showComponents else rgb(180,190,210),size=9,bold=app.showComponents,align="center")
     drawRect(CTRL_X+140,togY,110,22,fill=PINK if app.showCochleaWave else rgb(60,70,90),border=PANEL_BORDER,borderWidth=1,roundness=6); drawLabel("Wave",CTRL_X+195,togY+11,fill=rgb(0,0,0) if app.showCochleaWave else rgb(180,190,210),size=9,bold=app.showCochleaWave,align="center")
-    sX,sY,sW=CTRL_X+14,CTRL_Y+CTRL_H-52,CTRL_W-28
+    # slider moved down to 308
+    sX,sY,sW=CTRL_X+14,CTRL_Y+308,CTRL_W-28
     drawRect(sX,sY,sW,10,fill=rgb(30,35,55),border=PANEL_BORDER,borderWidth=1,roundness=5)
-    t=(app.fundamental-55)/165; drawRect(sX,sY,t*sW,10,fill=ORANGE,roundness=5); drawCircle(sX+t*sW,sY+5,9,fill=rgb(255,255,255),border=ORANGE,borderWidth=2)
+    t=(app.fundamental-55)/165; drawRect(sX,sY,t*sW,10,fill=ORANGE,roundness=5); drawCircle(sX+t*sW,sY+5,10,fill=rgb(255,255,255),border=ORANGE,borderWidth=2)
+    drawLabel("55Hz",sX,sY+14,fill=rgb(130,140,170),size=8,align="left-top")
+    drawLabel("220Hz",sX+sW,sY+14,fill=rgb(130,140,170),size=8,align="right-top")
 
 def drawHeader(app):
     drawRect(0,0,W,HEADER_H,fill=rgb(18,22,38))
