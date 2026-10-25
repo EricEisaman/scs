@@ -349,13 +349,13 @@ def onStep(app):
 
 def onMousePress(app,mx,my):
     def in_rect(px,py,rx,ry,rw,rh): return rx<=px<=rx+rw and ry<=py<=ry+rh
-    # Top bar pills - accurate hit zones matching new layout x=190, 96 spacing, 80-96x36 visuals
-    if in_rect(mx,my,190,10,80,36): app.mode="builder"; return
-    if in_rect(mx,my,286,10,80,36): app.mode="sim"; return
-    if in_rect(mx,my,382,10,96,36):
+    # Top bar pills - moved further right to x=300, accurate hit zones
+    if in_rect(mx,my,300,10,80,36): app.mode="builder"; return
+    if in_rect(mx,my,400,10,80,36): app.mode="sim"; return
+    if in_rect(mx,my,500,10,96,36):
         app.show_bus_viewer=not app.show_bus_viewer
         return
-    if in_rect(mx,my,488,10,80,36):
+    if in_rect(mx,my,610,10,80,36):
         app.bus_tab="TF"
         app.show_bus_viewer=True
         return
@@ -364,10 +364,15 @@ def onMousePress(app,mx,my):
         if aio: aio.run(do_connect())
         return
     if app.show_bus_viewer:
-        # === PERFECT CLEAN FULL-SCREEN OVERLAY HIT TEST - accurate ===
-        # Close button - 32x32 at W-44,12
-        if in_rect(mx,my,W-44, 12, 32,32):
+        # === PERFECT CLEAN FULL-SCREEN OVERLAY HIT TEST - X close button fixed ===
+        # Close button - larger hit zone 48x48 at W-56,8 for easy clicking, visual is 32x32 at W-44,12
+        if in_rect(mx,my,W-56, 8, 48,48):
             app.show_bus_viewer=False; return
+        # Also allow ESC area - top-right corner 80x60
+        if in_rect(mx,my,W-80, 0, 80,60):
+            # Check if close to X (if clicked in top-right corner but not exactly on button, still close if very top-right)
+            if mx > W-50 and my < 50:
+                app.show_bus_viewer=False; return
         # Tab bar - 72x24 at y=79 (73+6) but hit zone larger for easier clicking: 82x36 at y=73
         tab_x=16
         for tab in ["TOPICS","GRAPH","TF","ECHO"]:
@@ -408,11 +413,11 @@ def onMousePress(app,mx,my):
             y+=58
     if CENTER_X<=mx<=CENTER_X+CENTER_W and CENTER_Y<=my<=CENTER_Y+CENTER_H:
         sX=CENTER_X+16; sW=CENTER_W-32
-        # Linear slider - 20px height at CENTER_Y+390, hit zone 30px for easier grab
-        if CENTER_Y+385<=my<=CENTER_Y+415:
+        # Linear slider - moved down to 400, 24px height, 40px hit zone for breathing room
+        if CENTER_Y+395<=my<=CENTER_Y+435:
             t=max(0,min(1,(mx-sX)/sW)); app.sim.set_cmd_vel(t*2-1, app.sim.w)
-        # Angular slider - 20px height at CENTER_Y+420
-        if CENTER_Y+415<=my<=CENTER_Y+445:
+        # Angular slider - moved down to 450, 24px height
+        if CENTER_Y+445<=my<=CENTER_Y+485:
             t=max(0,min(1,(mx-sX)/sW)); app.sim.set_cmd_vel(app.sim.v, t*4-2)
 
 def onKeyPress(app,key):
@@ -648,9 +653,9 @@ def redrawAll(app):
         drawRect(x,10,80 if len(label)<5 else 90,36,fill=bg,border=bdr,borderWidth=1.5 if active else 1,roundness=14)
         drawLabel(label, x+(40 if len(label)<5 else 45), 28, fill=txt, size=15, bold=True, align="center")
         return x+(70 if len(label)>=5 else 68)
-    x=190
-    pill(x,"BUILD",app.mode=="builder",CYAN); x+=96
-    pill(x,"SIM",app.mode=="sim",GREEN); x+=96
+    x=300
+    pill(x,"BUILD",app.mode=="builder",CYAN); x+=100
+    pill(x,"SIM",app.mode=="sim",GREEN); x+=100
     bx=x
     sel=app.show_bus_viewer
     drawRect(bx,10,96,36,fill=YELLOW if sel else rgb(38,36,24),border=YELLOW,borderWidth=2 if sel else 1,roundness=16)
@@ -658,8 +663,8 @@ def redrawAll(app):
     drawCircle(bx+16,28,5+int(pulse*2),fill=YELLOW,opacity=0.2+pulse*0.5)
     drawCircle(bx+16,28,5,fill=YELLOW)
     drawLabel("BUS", bx+52, 28, fill=rgb(0,0,0) if sel else YELLOW, size=15, bold=True, align="center")
-    x+=106
-    pill(x,"TF",app.bus_tab=="TF" and app.show_bus_viewer,YELLOW); x+=96
+    x+=110
+    pill(x,"TF",app.bus_tab=="TF" and app.show_bus_viewer,YELLOW); x+=100
     conn=app.ros_client.is_connected
     drawRect(W-120,10,108,36,fill=rgb(22,36,28) if conn else rgb(36,28,24),border=GREEN if conn else ORANGE,borderWidth=1.5,roundness=14)
     drawCircle(W-104,28,6,fill=GREEN if conn else ORANGE)
@@ -696,29 +701,31 @@ def redrawAll(app):
         drawLine(rx,ry,ex,ey,fill=CYAN,lineWidth=1,opacity=0.18)
         if r<7.5:
             drawCircle(ex,ey,2,fill=YELLOW,opacity=0.6)
-    sX,sY,sW=CENTER_X+16, CENTER_Y+380, CENTER_W-32
-    drawRect(sX,sY,sW,22,fill=rgb(22,28,44),border=PANEL_BORDER,borderWidth=1,roundness=8)
+    # Bottom middle - moved down and given room to breathe
+    sX,sY,sW=CENTER_X+16, CENTER_Y+400, CENTER_W-32
+    drawRect(sX,sY,sW,24,fill=rgb(22,28,44),border=PANEL_BORDER,borderWidth=1,roundness=10)
     t=(app.sim.v+1)/2
-    drawRect(sX,sY,t*sW,22,fill=CYAN,roundness=8)
-    drawCircle(sX+t*sW, sY+11, 12, fill=rgb(18,22,36), border=CYAN, borderWidth=2.5)
-    drawCircle(sX+t*sW, sY+11, 5, fill=CYAN)
-    drawLabel("lin %.2f m/s" % app.sim.v, sX, sY+30, fill=DIM, size=15, align="left-top")
-    sY2=CENTER_Y+420
-    drawRect(sX,sY2,sW,22,fill=rgb(22,28,44),border=PANEL_BORDER,borderWidth=1,roundness=8)
+    drawRect(sX,sY,t*sW,24,fill=CYAN,roundness=10)
+    drawCircle(sX+t*sW, sY+12, 14, fill=rgb(18,22,36), border=CYAN, borderWidth=2.5)
+    drawCircle(sX+t*sW, sY+12, 6, fill=CYAN)
+    drawLabel("lin %.2f m/s" % app.sim.v, sX, sY+34, fill=DIM, size=15, align="left-top")
+    sY2=CENTER_Y+450
+    drawRect(sX,sY2,sW,24,fill=rgb(22,28,44),border=PANEL_BORDER,borderWidth=1,roundness=10)
     t2=(app.sim.w+2)/4
-    drawRect(sX,sY2,t2*sW,22,fill=ORANGE,roundness=8)
-    drawCircle(sX+t2*sW, sY2+11, 12, fill=rgb(18,22,36), border=ORANGE, borderWidth=2.5)
-    drawCircle(sX+t2*sW, sY2+11, 5, fill=ORANGE)
-    drawLabel("ang %.2f rad/s" % app.sim.w, sX, sY2+30, fill=DIM, size=15, align="left-top")
-    drawRect(CENTER_X+16, CENTER_Y+462, CENTER_W-32, 64, fill=rgb(14,20,36), border=PANEL_BORDER, borderWidth=1, roundness=10)
+    drawRect(sX,sY2,t2*sW,24,fill=ORANGE,roundness=10)
+    drawCircle(sX+t2*sW, sY2+12, 14, fill=rgb(18,22,36), border=ORANGE, borderWidth=2.5)
+    drawCircle(sX+t2*sW, sY2+12, 6, fill=ORANGE)
+    drawLabel("ang %.2f rad/s" % app.sim.w, sX, sY2+34, fill=DIM, size=15, align="left-top")
+    # Output element - moved down, more breathing room
+    drawRect(CENTER_X+16, CENTER_Y+500, CENTER_W-32, 72, fill=rgb(14,20,36), border=PANEL_BORDER, borderWidth=1, roundness=12)
     try:
         odom_hz=app.bus_stats.get("/odom",{}).get("hz",0)
         scan_hz=app.bus_stats.get("/scan",{}).get("hz",0)
         tf_hz=app.bus_stats.get("/tf",{}).get("hz",0)
-        drawLabel("/odom %.1fHz  /scan %.1fHz  /tf %.1fHz" % (float(odom_hz), float(scan_hz), float(tf_hz)), CENTER_X+24, CENTER_Y+472, fill=WHITE2, size=15, align="left-top")
+        drawLabel("/odom %.1fHz  /scan %.1fHz  /tf %.1fHz" % (float(odom_hz), float(scan_hz), float(tf_hz)), CENTER_X+24, CENTER_Y+512, fill=WHITE2, size=15, align="left-top")
     except:
-        drawLabel("/odom /scan /tf live", CENTER_X+24, CENTER_Y+472, fill=WHITE2, size=15, align="left-top")
-    drawLabel("pyodide transforms3d + WebSocket", CENTER_X+24, CENTER_Y+492, fill=DIM, size=15, align="left-top")
+        drawLabel("/odom /scan /tf live", CENTER_X+24, CENTER_Y+512, fill=WHITE2, size=15, align="left-top")
+    drawLabel("pyodide transforms3d + WebSocket", CENTER_X+24, CENTER_Y+534, fill=DIM, size=15, align="left-top")
     drawPanel(RIGHT_X,RIGHT_Y,RIGHT_W,RIGHT_H, "LIVE BUS • %d topics" % len(app.bus_stats), accent=YELLOW)
     y=RIGHT_Y+44
     for topic, stat in list(sorted(app.bus_stats.items(), key=lambda kv: -kv[1]["hz"]))[:7]:
