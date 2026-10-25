@@ -1,662 +1,600 @@
 
+"""
+apps/ferrers.py — Ferrers Diagram Explorer
+SCS app 1050x700
+
+Heavy combinatorics (p(n) Euler recurrence, hook-length formula, f^lambda)
+runs in Pyodide WASM worker, canvas stays 60fps.
+
+Controls are injected via browser.document into #canvas-container parent.
+"""
+
 from scs import *
-import re, math
-try:
-    from browser import aio
-    HAS_AIO = True
-except:
-    HAS_AIO = False
-    aio = None
+from browser import document, aio
+from extensions.pyodide import partition_stats
 
-PYODIDE_AVAILABLE = False
-pyodide_run = None
-pyodide_load = None
+import re
+import math
 
-try:
-    import extensions.pyodide as pyodide_mod
-    PYODIDE_AVAILABLE = True
-    for cand in ['run','run_python','run_code','exec','execute','eval']:
-        if hasattr(pyodide_mod, cand):
-            pyodide_run = getattr(pyodide_mod, cand)
-            break
-    for cand in ['load','load_pyodide','ensure_pyodide','init','start']:
-        if hasattr(pyodide_mod, cand):
-            pyodide_load = getattr(pyodide_mod, cand)
-            break
-except:
-    try:
-        from extensions.pyodide import run as pyodide_run
-        from extensions.pyodide import load as pyodide_load
-        PYODIDE_AVAILABLE = True
-    except:
-        try:
-            from extensions.pyodide import run_python as pyodide_run
-            PYODIDE_AVAILABLE = True
-        except:
-            PYODIDE_AVAILABLE = False
+BG = rgb(15, 20, 23)
+INK = rgb(229, 238, 232)
+MUTED = rgb(137, 157, 151)
+MINT = rgb(102, 224, 177)
+GOLD = rgb(244, 190, 92)
+RED = rgb(244, 111, 104)
+BLUE = rgb(110, 180, 255)
 
-def partition_number_pure(n):
-    if n < 0: return 0
-    if n == 0: return 1
-    p = [0]*(n+1)
-    p[0] = 1
-    for k in range(1, n+1):
-        tot = 0
-        j = 1
-        while True:
-            pent1 = j*(3*j-1)//2
-            if pent1 > k: break
-            s = 1 if j % 2 == 1 else -1
-            tot += s * p[k-pent1]
-            pent2 = j*(3*j+1)//2
-            if pent2 <= k:
-                tot += s * p[k-pent2]
-            j += 1
-        p[k] = tot
-    return p[n]
+_PANEL_ID = "ferrers-controls"
 
-def parse_partition(text):
-    if not text: return None
-    s = text.strip().replace('$','')
-    parts = re.split(r'=|⊢|\\vdash', s)
+_EXAMPLES = {
+    "classic17": ("1. Classic 17 — 6+4+4+2+1", "6+4+4+2+1", "MathWorld classic, Durfee 3, conj (5,4,3,3,1,1)"),
+    "staircase15": ("2. Staircase 15 — 5+4+3+2+1 (self-conj)", "5+4+3+2+1", "self-conjugate, λ=λ', Durfee 3"),
+    "square16": ("3. Square 16 — 4+4+4+4 (in 4×4 box)", "4+4+4+4", "1 of C(8,4)=70 diagrams in 4×4 box"),
+    "hook12": ("4. Hook 12 — 7+1+1+1+1+1", "7+1+1+1+1+1", "hook shape, Durfee 1"),
+    "irregular21": ("5. Irregular 21 — 8+5+3+2+2+1", "8+5+3+2+2+1", "conj (6,5,3,2,2,1,1,1), Durfee 3"),
+}
+
+def _parse_partition(text):
+    if not text or not text.strip():
+        return None
+    s = text.strip().replace("$", "")
+    parts = re.split(r"=|⊢|\\vdash", s)
     cand = s
     best = -1
     for seg in parts:
-        score = seg.count('+')*2 + seg.count(',') + seg.count('(')
-        if len(re.findall(r'\d+', seg)) >= 2:
-            score += len(re.findall(r'\d+', seg))
+        score = seg.count("+")*2 + seg.count(",") + seg.count("(")
+        if len(re.findall(r"\d+", seg)) >= 2:
+            score += len(re.findall(r"\d+", seg))
         if score > best:
             best = score
             cand = seg
-    cand = cand.replace('(',' ').replace(')',' ').replace('[',' ').replace(']',' ').replace('{',' ').replace('}',' ')
-    if '+' in cand:
-        toks = cand.split('+')
-    elif ',' in cand:
-        toks = cand.split(',')
+    cand = cand.replace("(", " ").replace(")", " ").replace("[", " ").replace("]", " ").replace("{", " ").replace("}", " ")
+    if "+" in cand:
+        toks = cand.split("+")
+    elif "," in cand:
+        toks = cand.split(",")
     else:
-        toks = re.split(r'\s+', cand)
+        toks = re.split(r"\s+", cand)
     nums = []
     for t in toks:
-        m = re.search(r'\d+', t)
+        m = re.search(r"\d+", t)
         if m:
             v = int(m.group(0))
-            if v>0: nums.append(v)
+            if v > 0:
+                nums.append(v)
     if not nums:
-        all_nums = [int(x) for x in re.findall(r'\d+', s)]
-        if len(all_nums)>=2 and all_nums[0]==sum(all_nums[1:]):
+        all_nums = [int(x) for x in re.findall(r"\d+", s)]
+        if len(all_nums) >= 2 and all_nums[0] == sum(all_nums[1:]):
             nums = all_nums[1:]
         elif all_nums:
             nums = all_nums
-    if not nums: return None
-    nums = sorted([x for x in nums if x>0], reverse=True)
-    if len(nums)>30: nums = nums[:30]
-    nums = [min(x,50) for x in nums]
+    if not nums:
+        return None
+    nums = sorted([x for x in nums if x > 0], reverse=True)
+    if len(nums) > 30:
+        nums = nums[:30]
+    nums = [min(x, 50) for x in nums]
     return nums or None
 
-def conjugate_partition(part):
-    if not part: return []
-    return [sum(1 for r in part if r>i) for i in range(max(part)) if sum(1 for r in part if r>i)>0]
+def _get_cell_pos(app, r, c):
+    max_len = max(app.partition) if app.partition else 1
+    cell = app.cellSize
+    gap = app.cellGap
+    tw = max_len * (cell + gap) - gap
+    th = len(app.partition) * (cell + gap) - gap
+    sx = app.diagramCenterX - tw // 2
+    sy = app.diagramCenterY - th // 2
+    return (sx + c * (cell + gap), sy + r * (cell + gap))
 
-def durfee_square(part):
-    k=0
-    for i, rl in enumerate(part):
-        if rl>=i+1: k=i+1
-        else: break
-    return k
-
-def is_self_conjugate(part):
-    return part==conjugate_partition(part)
-
-def hook_lengths(part):
-    conj = conjugate_partition(part)
-    hooks=[]
-    for i, rl in enumerate(part):
-        row=[]
-        for j in range(rl):
-            right=rl-(j+1)
-            down=conj[j]-(i+1) if j<len(conj) else 0
-            row.append(right+down+1)
-        hooks.append(row)
-    return hooks
-
-def latex_format(part):
-    if not part: return "∅"
-    n=sum(part)
-    inner=",".join(map(str,part))
-    plus="+".join(map(str,part))
-    return f"λ=({inner})={plus}⊢{n}"
-
-EXAMPLES=[
-    {"label":"1. Classic 17 — 6+4+4+2+1","value":"6+4+4+2+1","latex":"$\\lambda=(6,4,4,2,1)\\vdash17$","desc":"MathWorld classic. Durfee 3, conj (5,4,3,3,1,1)"},
-    {"label":"2. Staircase 15 — 5+4+3+2+1 self-conj","value":"5+4+3+2+1","latex":"$\\lambda=(5,4,3,2,1)\\vdash15$ self-conj","desc":"Staircase, λ=λ'. Hook formula demo"},
-    {"label":"3. Square 16 — 4+4+4+4","value":"4+4+4+4","latex":"$\\lambda=(4^4)\\vdash16$ in 4x4 box","desc":"1 of C(8,4)=70 diagrams in 4x4 box"},
-    {"label":"4. Hook 12 — 7+1+1+1+1+1","value":"7+1+1+1+1+1","latex":"$\\lambda=(7,1^5)\\vdash12$ hook","desc":"Hook shape, Durfee 1, Sn irrep"},
-    {"label":"5. Irregular 21 — 8+5+3+2+2+1","value":"8+5+3+2+2+1","latex":"$\\lambda=(8,5,3,2,2,1)\\vdash21$","desc":"Conj (6,5,3,2,2,1,1,1), Durfee 3"},
-]
-
-def get_cell_pos(app,r,c):
-    max_len=max(app.partition) if app.partition else 1
-    cell=app.cellSize; gap=app.cellGap
-    tw=max_len*(cell+gap)-gap
-    th=len(app.partition)*(cell+gap)-gap
-    sx=app.diagramCenterX - tw//2
-    sy=app.diagramCenterY - th//2
-    return (sx + c*(cell+gap), sy + r*(cell+gap))
-
-def hit_test(app,mx,my):
-    if not app.partition: return None
-    for r,rl in enumerate(app.partition):
+def _hit_test(app, mx, my):
+    if not app.partition:
+        return None
+    for r, rl in enumerate(app.partition):
         for c in range(rl):
-            x,y=get_cell_pos(app,r,c)
-            if x<=mx<=x+app.cellSize and y<=my<=y+app.cellSize:
-                return (r,c,'cell')
-        x,y=get_cell_pos(app,r,rl)
-        if x<=mx<=x+app.cellSize and y<=my<=y+app.cellSize and rl<50:
-            return (r,rl,'add_right')
-    max_len=max(app.partition) if app.partition else 1
-    cell=app.cellSize; gap=app.cellGap
-    tw=max_len*(cell+gap)-gap
-    th=len(app.partition)*(cell+gap)-gap
-    sx=app.diagramCenterX - tw//2
-    sy=app.diagramCenterY - th//2
-    ny=sy+len(app.partition)*(cell+gap)
-    if sx<=mx<=sx+cell and ny<=my<=ny+cell and len(app.partition)<30:
-        return (len(app.partition),0,'add_new_row')
+            x, y = _get_cell_pos(app, r, c)
+            if x <= mx <= x + app.cellSize and y <= my <= y + app.cellSize:
+                return (r, c, "cell")
+        x, y = _get_cell_pos(app, r, rl)
+        if x <= mx <= x + app.cellSize and y <= my <= y + app.cellSize and rl < 50:
+            return (r, rl, "add_right")
+    max_len = max(app.partition) if app.partition else 1
+    cell = app.cellSize
+    gap = app.cellGap
+    tw = max_len * (cell + gap) - gap
+    th = len(app.partition) * (cell + gap) - gap
+    sx = app.diagramCenterX - tw // 2
+    sy = app.diagramCenterY - th // 2
+    ny = sy + len(app.partition) * (cell + gap)
+    if sx <= mx <= sx + cell and ny <= my <= ny + cell and len(app.partition) < 30:
+        return (len(app.partition), 0, "add_new_row")
     return None
 
-def in_rect(px,py,rx,ry,rw,rh):
-    return rx<=px<=rx+rw and ry<=py<=ry+rh
+def _install_controls(app):
+    existing = document.getElementById(_PANEL_ID)
+    if existing:
+        existing.parentNode.removeChild(existing)
+    panel = document.createElement("section")
+    panel.id = _PANEL_ID
+    panel.style.cssText = "box-sizing:border-box;width:1050px;max-width:95vw;padding:20px 24px 16px;margin:0 0 14px;background:#191f22;border:1px solid #34413e;color:#e5eee8;font:15px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;border-radius:10px;"
+    options_html = ""
+    for key, (label, val, desc) in _EXAMPLES.items():
+        sel = " selected" if key == "classic17" else ""
+        options_html += f'<option value="{key}"{sel}>{label}</option>'
+    panel.innerHTML = f"""
+<div style="display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:16px">
+  <div>
+    <strong style="font-size:22px;color:#66e0b1;letter-spacing:0.5px">FERRERS DIAGRAMS — PARTITION GEOMETRY</strong>
+    <div style="margin-top:4px;color:#899d97;font-size:15px">Pyodide WASM · Euler recurrence · Hook-length · Durfee square</div>
+  </div>
+  <span style="color:#f4be5c;font-size:15px" id="ferrers-status">Ready</span>
+</div>
+<div style="display:grid;grid-template-columns:320px 1fr;gap:18px;align-items:start;margin-bottom:14px">
+  <label style="display:grid;gap:8px;color:#b6c6bf">
+    <span style="font-size:15px;font-weight:600;color:#e5eee8">EXAMPLES</span>
+    <select id="ferrers-example" style="box-sizing:border-box;width:100%;background:#0f1417;color:#e5eee8;border:1px solid #43524d;padding:12px;font:15px ui-monospace,SFMono-Regular,Consolas,monospace;border-radius:8px">
+      {options_html}
+    </select>
+    <span style="color:#899d97;font-size:14px" id="ferrers-example-desc">MathWorld classic, Durfee 3</span>
+  </label>
+  <label style="display:grid;gap:8px;color:#b6c6bf">
+    <span style="font-size:15px;font-weight:600;color:#e5eee8">PARTITION — LaTeX or + notation</span>
+    <input id="ferrers-input" value="6+4+4+2+1" spellcheck="false" style="box-sizing:border-box;width:100%;background:#0f1417;color:#e5eee8;border:1px solid #43524d;padding:12px;font:15px ui-monospace,SFMono-Regular,Consolas,monospace;border-radius:8px" placeholder="e.g. 6+4+4+2+1 or (6,4,4,2,1)">
+    <span style="color:#899d97;font-size:14px">Supports 6+4+4+2+1, (6,4,4,2,1), λ=(6,4,4,2,1)⊢17 — Enter to parse, Space cycles</span>
+  </label>
+</div>
+<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+  <button id="ferrers-parse" style="height:42px;padding:0 18px;border:0;background:#66e0b1;color:#10201a;font-weight:800;font-size:15px;font-family:inherit;cursor:pointer;border-radius:8px">Parse</button>
+  <button id="ferrers-boxes" style="height:42px;padding:0 16px;border:1px solid #43524d;background:#232e2b;color:#e5eee8;font-weight:600;font-size:15px;font-family:inherit;cursor:pointer;border-radius:8px">Boxes</button>
+  <button id="ferrers-conj" style="height:42px;padding:0 16px;border:1px solid #43524d;background:#232e2b;color:#e5eee8;font-weight:600;font-size:15px;font-family:inherit;cursor:pointer;border-radius:8px">Conj OFF</button>
+  <button id="ferrers-durfee" style="height:42px;padding:0 16px;border:1px solid #43524d;background:#34413e;color:#f4be5c;font-weight:700;font-size:15px;font-family:inherit;cursor:pointer;border-radius:8px">Durfee ON</button>
+  <button id="ferrers-hooks" style="height:42px;padding:0 16px;border:1px solid #43524d;background:#232e2b;color:#e5eee8;font-weight:600;font-size:15px;font-family:inherit;cursor:pointer;border-radius:8px">Hooks OFF</button>
+  <span style="margin-left:8px;color:#899d97;font-size:14px">Click row end + to add, cell to remove • b/c/d/h • i info</span>
+</div>
+<div id="ferrers-latex" style="margin-top:8px;color:#f4be5c;font-size:16px;min-height:22px"></div>
+"""
+    container = document.getElementById("canvas-container")
+    container.parentNode.insertBefore(panel, container)
 
-async def ensure_pyodide_loaded(app):
-    if not PYODIDE_AVAILABLE or pyodide_load is None:
-        return False
-    try:
-        app.pyodideStatus="Loading Pyodide worker (like linear_solver.py)..."
-        await pyodide_load()
-        app.pyodideReady=True
-        app.pyodideStatus="Pyodide ready"
-        return True
-    except Exception as e:
-        app.pyodideStatus=f"Pyodide load fallback: {e}"
-        app.pyodideReady=True
-        return True
+    def submit_example(event):
+        key = document["ferrers-example"].value
+        label, val, desc = _EXAMPLES.get(key, _EXAMPLES["classic17"])
+        document["ferrers-input"].value = val
+        document["ferrers-example-desc"].innerText = desc[:110]
+        app.exampleKey = key
+        part = _parse_partition(val)
+        if part:
+            aio.run(_analyze(app, part))
 
-async def pyodide_compute_all(app, partition):
-    if not PYODIDE_AVAILABLE or pyodide_run is None:
-        app.pyodideStatus="Pyodide not available, fallback"
-        app.partitionNumber=partition_number_pure(app.n)
-        app.partitionNumberN=app.n
+    def submit_parse(event):
+        if event:
+            event.preventDefault()
+        txt = document["ferrers-input"].value
+        part = _parse_partition(txt)
+        if not part:
+            app.error = f"Could not parse '{txt[:30]}'"
+            app.status = "Parse error"
+            _update_status(app)
+            return
+        aio.run(_analyze(app, part))
+
+    def toggle_boxes(event):
+        app.modeBoxes = not app.modeBoxes
+        document["ferrers-boxes"].innerText = "Boxes" if app.modeBoxes else "Dots"
+    def toggle_conj(event):
+        app.showConjugate = not app.showConjugate
+        document["ferrers-conj"].innerText = "Conj ON" if app.showConjugate else "Conj OFF"
+        document["ferrers-conj"].style.background = "#66e0b1" if app.showConjugate else "#232e2b"
+        document["ferrers-conj"].style.color = "#10201a" if app.showConjugate else "#e5eee8"
+    def toggle_durfee(event):
+        app.showDurfee = not app.showDurfee
+        document["ferrers-durfee"].innerText = "Durfee ON" if app.showDurfee else "Durfee OFF"
+    def toggle_hooks(event):
+        app.showHooks = not app.showHooks
+        document["ferrers-hooks"].innerText = "Hooks ON" if app.showHooks else "Hooks OFF"
+        document["ferrers-hooks"].style.background = "#66e0b1" if app.showHooks else "#232e2b"
+        document["ferrers-hooks"].style.color = "#10201a" if app.showHooks else "#e5eee8"
+
+    document["ferrers-example"].bind("change", submit_example)
+    document["ferrers-parse"].bind("click", submit_parse)
+    document["ferrers-input"].bind("change", submit_parse)
+    document["ferrers-boxes"].bind("click", toggle_boxes)
+    document["ferrers-conj"].bind("click", toggle_conj)
+    document["ferrers-durfee"].bind("click", toggle_durfee)
+    document["ferrers-hooks"].bind("click", toggle_hooks)
+    def on_key(event):
+        if event.keyCode == 13:
+            submit_parse(event)
+    document["ferrers-input"].bind("keydown", on_key)
+
+def _update_status(app):
+    el = document.getElementById("ferrers-status")
+    if not el:
         return
-    if not app.pyodideReady:
-        await ensure_pyodide_loaded(app)
-    n=sum(partition)
-    app.pyodideComputing=True
-    app.pyodideStatus=f"Pyodide computing p({n}) in worker..."
-    # code executed inside pyodide worker
-    py_code = (
-        f"part = {partition}\n"
-        f"n = {n}\n"
-        "max_len = max(part) if part else 0\n"
-        "conj = [sum(1 for r in part if r>i) for i in range(max_len)]\n"
-        "conj = [c for c in conj if c>0]\n"
-        "d=0\n"
-        "for i, rl in enumerate(part):\n"
-        "    if rl>=i+1: d=i+1\n"
-        "    else: break\n"
-        "hooks=[]\n"
-        "for i, rl in enumerate(part):\n"
-        "    row=[]\n"
-        "    for j in range(rl):\n"
-        "        right=rl-(j+1)\n"
-        "        down=conj[j]-(i+1) if j < len(conj) else 0\n"
-        "        row.append(right+down+1)\n"
-        "    hooks.append(row)\n"
-        "def p_num(k):\n"
-        "    if k<0: return 0\n"
-        "    if k==0: return 1\n"
-        "    p=[0]*(k+1); p[0]=1\n"
-        "    for kk in range(1,k+1):\n"
-        "        tot=0; j=1\n"
-        "        while True:\n"
-        "            pent1=j*(3*j-1)//2\n"
-        "            if pent1>kk: break\n"
-        "            s=1 if j%2==1 else -1\n"
-        "            tot+=s*p[kk-pent1]\n"
-        "            pent2=j*(3*j+1)//2\n"
-        "            if pent2<=kk: tot+=s*p[kk-pent2]\n"
-        "            j+=1\n"
-        "        p[kk]=tot\n"
-        "    return p[k]\n"
-        "pn = p_num(n)\n"
-        "try:\n"
-        "    import math; prod=1\n"
-        "    for row in hooks:\n"
-        "        for h in row: prod*=h\n"
-        "    f_lambda = math.factorial(n)//prod if prod!=0 else 0\n"
-        "except: f_lambda = 0\n"
-        "{\"conj\": conj, \"durfee\": d, \"hooks\": hooks, \"p_n\": pn, \"f_lambda\": f_lambda, \"n\": n}\n"
-    )
-    try:
-        try:
-            result = await pyodide_run(py_code)
-        except TypeError:
-            result = await pyodide_run(py_code, {})
-        if isinstance(result, dict):
-            app.conjugate = result.get("conj", conjugate_partition(partition))
-            app.durfee = result.get("durfee", durfee_square(partition))
-            app.hooks = result.get("hooks", hook_lengths(partition))
-            app.partitionNumber = result.get("p_n", partition_number_pure(n))
-            app.partitionNumberN = n
-            app.f_lambda = result.get("f_lambda", 0)
-            app.pyodideStatus = f"Pyodide done: p({n})={app.partitionNumber}, f^λ={app.f_lambda}"
+    if app.busy:
+        el.innerText = "Computing in Pyodide…"
+        el.style.color = "#f4be5c"
+    elif app.error:
+        el.innerText = f"Error: {app.error[:60]}"
+        el.style.color = "#f46f68"
+    else:
+        if app.partitionNumber is not None:
+            pn = app.partitionNumber
+            pn_str = str(pn)
+            if len(pn_str) > 12:
+                pn_str = pn_str[:5] + "…" + pn_str[-4:] + f" ({len(str(pn))}d)"
+            fl = app.f_lambda
+            fl_str = str(fl)
+            if len(fl_str) > 12:
+                fl_str = fl_str[:5] + "…" + fl_str[-4:]
+            el.innerText = f"p({app.n})={pn_str} · f^λ={fl_str} · Pyodide ✓"
+            el.style.color = "#66e0b1"
         else:
-            app.partitionNumber = int(result) if result is not None else partition_number_pure(n)
-            app.partitionNumberN = n
-            app.pyodideStatus = f"Pyodide returned {app.partitionNumber}"
-    except Exception as e:
-        app.pyodideStatus = f"Pyodide error {e}, fallback"
-        app.partitionNumber = partition_number_pure(n)
-        app.partitionNumberN = n
-    app.pyodideComputing=False
+            el.innerText = app.status or "Ready"
+            el.style.color = "#66e0b1"
+    latex_el = document.getElementById("ferrers-latex")
+    if latex_el and app.partition:
+        inner = ",".join(map(str, app.partition))
+        plus = "+".join(map(str, app.partition))
+        conj = ",".join(map(str, app.conjugate)) if app.conjugate else ""
+        latex_el.innerText = f"λ=({inner})={plus}⊢{app.n}  λ'=({conj})  Durfee={app.durfee}  self={app.selfConj}  n={app.n} k={len(app.partition)}"
+
+async def _analyze(app, part):
+    app.busy = True
+    app.error = None
+    app.status = f"Computing p({sum(part)})…"
+    _update_status(app)
+    try:
+        result = await partition_stats(part)
+        app.partition = result.get("part", part)
+        app.conjugate = result.get("conj", [])
+        app.durfee = result.get("durfee", 0)
+        app.hooks = result.get("hooks", [])
+        app.partitionNumber = result.get("p_n", 0)
+        app.partitionNumberN = result.get("n", sum(part))
+        app.f_lambda = result.get("f_lambda", 0)
+        app.prodHooks = result.get("prod_hooks", 1)
+        app.n = result.get("n", sum(part))
+        app.selfConj = app.partition == app.conjugate
+        app.animT = 0
+        app.status = f"Ready — p({app.n})={app.partitionNumber}"
+        app.error = None
+        try:
+            document["ferrers-input"].value = "+".join(map(str, app.partition))
+        except:
+            pass
+    except Exception as err:
+        app.error = str(err)
+        app.status = "Computation failed"
+    finally:
+        app.busy = False
+        _update_status(app)
 
 def onAppStart(app):
-    app.width=1050
-    app.height=700
-    app.stepsPerSecond=60
-    try:
-        app.background=gradient(rgb(12,14,22), rgb(22,26,42), rgb(18,22,36), start='top')
-    except:
-        app.background=rgb(16,18,28)
-    app.inputText="6+4+4+2+1"
-    app.partition=parse_partition(app.inputText) or [6,4,4,2,1]
-    app.conjugate=conjugate_partition(app.partition)
-    app.durfee=durfee_square(app.partition)
-    app.hooks=hook_lengths(app.partition)
-    app.selfConj=is_self_conjugate(app.partition)
-    app.n=sum(app.partition)
-    app.cellSize=40
-    app.cellGap=7
-    app.diagramCenterX=app.width//2 - 10
-    app.diagramCenterY=app.height//2 + 40
-    app.modeBoxes=True
-    app.showConjugate=False
-    app.showDurfee=True
-    app.showHooks=False
-    app.showInfo=False
-    app.animT=0
-    app.hover=None
-    app.cursorBlink=0
-    app.inputError=""
-    app.dropdownOpen=False
-    app.dropdownSelected=0
-    app.dropdownRect=(20, 118, 320, 34)
-    app.pyodideReady=False
-    app.pyodideComputing=False
-    app.pyodideStatus="Pyodide: initializing (see linear_solver pattern)"
-    app.partitionNumber=None
-    app.partitionNumberN=None
-    app.f_lambda=0
-    if HAS_AIO and PYODIDE_AVAILABLE:
-        async def _init(app):
-            await ensure_pyodide_loaded(app)
-            await pyodide_compute_all(app, app.partition)
-        try:
-            aio.run(_init(app))
-        except Exception as e:
-            app.pyodideStatus=f"aio.run failed {e}"
-    else:
-        app.partitionNumber=partition_number_pure(app.n)
-        app.partitionNumberN=app.n
-        app.pyodideStatus="Pyodide extension not found — fallback"
-
-def recompute(app):
-    app.n=sum(app.partition)
-    app.selfConj=is_self_conjugate(app.partition)
-    app.animT=0
-    if HAS_AIO and PYODIDE_AVAILABLE and pyodide_run is not None:
-        try:
-            async def _re(app):
-                await pyodide_compute_all(app, app.partition)
-            aio.run(_re(app))
-        except:
-            app.conjugate=conjugate_partition(app.partition)
-            app.durfee=durfee_square(app.partition)
-            app.hooks=hook_lengths(app.partition)
-            app.partitionNumber=partition_number_pure(app.n)
-            app.partitionNumberN=app.n
-    else:
-        app.conjugate=conjugate_partition(app.partition)
-        app.durfee=durfee_square(app.partition)
-        app.hooks=hook_lengths(app.partition)
-        app.partitionNumber=partition_number_pure(app.n)
-        app.partitionNumberN=app.n
+    app.width = 1050
+    app.height = 700
+    app.stepsPerSecond = 60
+    app.background = BG
+    app.partition = [6, 4, 4, 2, 1]
+    app.conjugate = [5, 4, 3, 3, 1, 1]
+    app.durfee = 3
+    app.hooks = []
+    app.selfConj = False
+    app.n = 17
+    app.cellSize = 44
+    app.cellGap = 8
+    app.diagramCenterX = app.width // 2 - 10
+    app.diagramCenterY = app.height // 2 + 60
+    app.modeBoxes = True
+    app.showConjugate = False
+    app.showDurfee = True
+    app.showHooks = False
+    app.showInfo = False
+    app.animT = 0
+    app.hover = None
+    app.cursorBlink = 0
+    app.busy = False
+    app.error = None
+    app.status = "Ready"
+    app.exampleKey = "classic17"
+    app.partitionNumber = None
+    app.partitionNumberN = None
+    app.f_lambda = 0
+    app.prodHooks = 1
+    _install_controls(app)
+    aio.run(_analyze(app, app.partition))
 
 def onStep(app):
-    if app.animT<1.0:
-        app.animT=min(1.0, app.animT+0.09)
-    app.cursorBlink=(app.cursorBlink+1)%60
+    if app.animT < 1.0:
+        app.animT = min(1.0, app.animT + 0.10)
+    app.cursorBlink = (app.cursorBlink + 1) % 60
     if app.partition:
-        max_len=max(app.partition)
-        rows=len(app.partition)
-        scale=min(1.0, 480/max(1,max_len*50), 360/max(1,rows*50))
-        target=max(18, min(44, int(40*scale)))
-        app.cellSize=int(app.cellSize*0.9 + target*0.1)
+        max_len = max(app.partition)
+        rows = len(app.partition)
+        scale = min(1.0, 520 / max(1, max_len * 52), 380 / max(1, rows * 52))
+        target = max(28, min(48, int(44 * scale)))
+        app.cellSize = int(app.cellSize * 0.88 + target * 0.12)
 
-def onMouseMove(app,mx,my):
-    app.hover=hit_test(app,mx,my)
+def onMouseMove(app, mx, my):
+    app.hover = _hit_test(app, mx, my)
 
-def onMousePress(app,mx,my):
+def onMousePress(app, mx, my):
     if app.showInfo:
-        if in_rect(mx,my,app.width-60,20,40,40):
-            app.showInfo=False
-            return
-    dx,dy,dw,dh=app.dropdownRect
-    if app.dropdownOpen:
-        if in_rect(mx,my,dx,dy,dw,dh):
-            app.dropdownOpen=False
-            return
-        for i in range(len(EXAMPLES)):
-            if in_rect(mx,my,dx,dy+dh+i*34,dw,32):
-                app.dropdownSelected=i
-                ex=EXAMPLES[i]
-                app.inputText=ex["value"]
-                app.partition=parse_partition(ex["value"])
-                app.inputError=""
-                recompute(app)
-                app.dropdownOpen=False
-                return
-        if not in_rect(mx,my,dx,dy+dh,dw,len(EXAMPLES)*34):
-            app.dropdownOpen=False
-    else:
-        if in_rect(mx,my,dx,dy,dw,dh):
-            app.dropdownOpen=True
-            return
-    if in_rect(mx,my,20,20,560,50):
+        app.showInfo = False
         return
-    btns=[(400,78,70,30,'parse'),(480,78,70,30,'boxes'),(560,78,90,30,'conj'),(660,78,70,30,'durfee'),(740,78,60,30,'hooks'),(810,78,60,30,'info')]
-    for bx,by,bw,bh,act in btns:
-        if in_rect(mx,my,bx,by,bw,bh):
-            if act=='parse':
-                np=parse_partition(app.inputText)
-                if np:
-                    app.partition=np
-                    app.inputError=""
-                    recompute(app)
-                else:
-                    app.inputError="Try 6+4+4+2+1 or dropdown"
-            elif act=='boxes':
-                app.modeBoxes=not app.modeBoxes
-            elif act=='conj':
-                app.showConjugate=not app.showConjugate
-            elif act=='durfee':
-                app.showDurfee=not app.showDurfee
-            elif act=='hooks':
-                app.showHooks=not app.showHooks
-            elif act=='info':
-                app.showInfo=not app.showInfo
-            return
-    hit=hit_test(app,mx,my)
+    hit = _hit_test(app, mx, my)
     if hit:
-        r,c,typ=hit
-        if typ=='cell' and c==app.partition[r]-1:
-            app.partition[r]-=1
-            if app.partition[r]==0:
+        r, c, typ = hit
+        if typ == "cell" and c == app.partition[r] - 1:
+            app.partition[r] -= 1
+            if app.partition[r] == 0:
                 app.partition.pop(r)
-            app.partition=[x for x in app.partition if x>0]
-            app.partition=sorted(app.partition, reverse=True) or [1]
-            recompute(app)
-        elif typ=='add_right':
-            app.partition[r]+=1
-            if r>0 and app.partition[r]>app.partition[r-1]:
-                app.partition[r]=app.partition[r-1]
-            for j in range(r+1,len(app.partition)):
-                if app.partition[j]>app.partition[r]:
-                    app.partition[j]=app.partition[r]
-            recompute(app)
-        elif typ=='add_new_row':
+            app.partition = [x for x in app.partition if x > 0]
+            app.partition = sorted(app.partition, reverse=True) or [1]
+            aio.run(_analyze(app, app.partition))
+        elif typ == "add_right":
+            app.partition[r] += 1
+            if r > 0 and app.partition[r] > app.partition[r - 1]:
+                app.partition[r] = app.partition[r - 1]
+            for j in range(r + 1, len(app.partition)):
+                if app.partition[j] > app.partition[r]:
+                    app.partition[j] = app.partition[r]
+            aio.run(_analyze(app, app.partition))
+        elif typ == "add_new_row":
             app.partition.append(1)
-            recompute(app)
+            aio.run(_analyze(app, app.partition))
 
-def onKeyPress(app,key):
-    if key.lower()=='i':
-        app.showInfo=not app.showInfo
+def onKeyPress(app, key):
+    if key.lower() == "i":
+        app.showInfo = not app.showInfo
         return
-    if key.lower()=='h':
-        app.showHooks=not app.showHooks
+    if key.lower() == "h":
+        app.showHooks = not app.showHooks
+        try:
+            document["ferrers-hooks"].innerText = "Hooks ON" if app.showHooks else "Hooks OFF"
+        except:
+            pass
         return
-    if key.lower()=='c':
-        app.showConjugate=not app.showConjugate
+    if key.lower() == "c":
+        app.showConjugate = not app.showConjugate
+        try:
+            document["ferrers-conj"].innerText = "Conj ON" if app.showConjugate else "Conj OFF"
+        except:
+            pass
         return
-    if key.lower()=='b':
-        app.modeBoxes=not app.modeBoxes
+    if key.lower() == "b":
+        app.modeBoxes = not app.modeBoxes
+        try:
+            document["ferrers-boxes"].innerText = "Boxes" if app.modeBoxes else "Dots"
+        except:
+            pass
         return
-    if key.lower()=='d':
-        app.showDurfee=not app.showDurfee
+    if key.lower() == "d":
+        app.showDurfee = not app.showDurfee
         return
-    if key=='Escape':
-        if app.dropdownOpen:
-            app.dropdownOpen=False
-        else:
-            app.showInfo=False
+    if key == "Escape":
+        app.showInfo = False
         return
-    if key=='Enter':
-        np=parse_partition(app.inputText)
-        if np:
-            app.partition=np
-            app.inputError=""
-            recompute(app)
+    if key == "Enter":
+        try:
+            txt = document["ferrers-input"].value
+        except:
+            txt = ""
+        part = _parse_partition(txt)
+        if part:
+            aio.run(_analyze(app, part))
         return
-    if key=='Backspace':
-        if app.inputText:
-            app.inputText=app.inputText[:-1]
+    if key == " ":
+        keys = list(_EXAMPLES.keys())
+        try:
+            idx = keys.index(app.exampleKey)
+        except:
+            idx = 0
+        nxt = keys[(idx + 1) % len(keys)]
+        app.exampleKey = nxt
+        label, val, desc = _EXAMPLES[nxt]
+        try:
+            document["ferrers-example"].value = nxt
+            document["ferrers-input"].value = val
+            document["ferrers-example-desc"].innerText = desc[:110]
+        except:
+            pass
+        part = _parse_partition(val)
+        if part:
+            aio.run(_analyze(app, part))
         return
-    if key==' ':
-        app.dropdownSelected=(app.dropdownSelected+1)%len(EXAMPLES)
-        ex=EXAMPLES[app.dropdownSelected]
-        app.inputText=ex["value"]
-        app.partition=parse_partition(ex["value"])
-        recompute(app)
-        return
-    if len(key)==1 and len(app.inputText)<60:
-        if key in "0123456789+-,()[]{}=\\$ " or key.isalpha():
-            app.inputText+=key
 
-def draw_rounded_rect(x,y,w,h,r, fill=None, border=None, borderWidth=1, opacity=100):
+def _draw_rounded_rect(x, y, w, h, r, fill=None, border=None, borderWidth=1, opacity=100):
     try:
-        drawRect(x,y,w,h, fill=fill, border=border, borderWidth=borderWidth, roundness=r, opacity=opacity)
+        drawRect(x, y, w, h, fill=fill, border=border, borderWidth=borderWidth, roundness=r, opacity=opacity)
     except:
-        drawRect(x,y,w,h, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity)
+        drawRect(x, y, w, h, fill=fill, border=border, borderWidth=borderWidth, opacity=opacity)
 
-def draw_cell_box(app,x,y,size,r,c,is_hover,is_durfee,is_ghost=False):
+def _draw_cell_box(app, x, y, size, r, c, is_hover, is_durfee, is_ghost=False):
     if not is_ghost:
-        draw_rounded_rect(x+3,y+3,size,size,9, fill=rgb(0,0,0), opacity=16)
+        _draw_rounded_rect(x + 3, y + 3, size, size, 9, fill=rgb(0, 0, 0), opacity=14)
     if is_ghost:
-        draw_rounded_rect(x,y,size,size,10, fill=gradient(rgb(120,140,200), rgb(90,110,170), start='top-left'), opacity=28, border=rgb(140,160,220), borderWidth=1)
+        _draw_rounded_rect(x, y, size, size, 11, fill=gradient(rgb(70, 80, 110), rgb(50, 60, 90), start="top-left"), opacity=22, border=rgb(100, 110, 150), borderWidth=1)
         return
     if is_durfee and app.showDurfee:
-        fa=rgb(255,210,90)
-        fb=rgb(255,160,40)
+        fa = GOLD
+        fb = rgb(200, 140, 40)
     else:
-        pals=[(rgb(110,180,255), rgb(60,120,220)), (rgb(120,220,180), rgb(70,170,130)), (rgb(255,180,120), rgb(230,120,70)), (rgb(200,150,255), rgb(150,90,220)), (rgb(255,130,180), rgb(220,80,130))]
-        fa,fb=pals[r%len(pals)]
+        pals = [(rgb(110, 180, 255), rgb(60, 120, 220)), (rgb(120, 220, 180), rgb(70, 170, 130)), (rgb(255, 180, 120), rgb(230, 120, 70)), (rgb(200, 150, 255), rgb(150, 90, 220)), (rgb(255, 130, 180), rgb(220, 80, 130)), (BLUE, rgb(80, 140, 200))]
+        fa, fb = pals[r % len(pals)]
     if is_hover:
-        draw_rounded_rect(x,y,size,size,11, fill=rgb(255,255,220), opacity=90, border=rgb(255,255,255), borderWidth=2)
-        draw_rounded_rect(x+1,y+1,size-2,size-2,10, fill=gradient(fa,fb, start='top'), opacity=95)
+        _draw_rounded_rect(x, y, size, size, 12, fill=rgb(255, 255, 200), opacity=92, border=rgb(255, 255, 255), borderWidth=2)
+        _draw_rounded_rect(x + 1, y + 1, size - 2, size - 2, 11, fill=gradient(fa, fb, start="top"), opacity=98)
     else:
-        draw_rounded_rect(x,y,size,size,10, fill=gradient(fa,fb, start='top-left'), opacity=92, border=rgb(255,255,255), borderWidth=1)
-        draw_rounded_rect(x+4,y+4,size*0.35,size*0.22,4, fill=rgb(255,255,255), opacity=30)
+        _draw_rounded_rect(x, y, size, size, 11, fill=gradient(fa, fb, start="top-left"), opacity=94, border=rgb(255, 255, 255), borderWidth=1)
+        _draw_rounded_rect(x + 4, y + 4, size * 0.38, size * 0.24, 5, fill=rgb(255, 255, 255), opacity=32)
 
-def draw_cell_dot(app,x,y,size,r,c,is_hover,is_durfee):
-    cx=x+size//2
-    cy=y+size//2
-    rr=size//2-2
-    drawCircle(cx+2,cy+3,rr, fill=rgb(0,0,0), opacity=14)
-    cols=[rgb(120,190,255), rgb(140,230,190), rgb(255,190,130), rgb(210,160,255), rgb(255,140,190)]
-    c1=rgb(255,220,100) if (is_durfee and app.showDurfee) else cols[r%len(cols)]
-    drawCircle(cx,cy,rr, fill=c1, border=rgb(255,255,255), borderWidth=1, opacity=90)
-    drawCircle(cx-rr*0.25, cy-rr*0.25, rr*0.35, fill=rgb(255,255,255), opacity=40)
+def _draw_cell_dot(app, x, y, size, r, c, is_hover, is_durfee):
+    cx = x + size // 2
+    cy = y + size // 2
+    rr = size // 2 - 3
+    drawCircle(cx + 2, cy + 3, rr, fill=rgb(0, 0, 0), opacity=14)
+    cols = [rgb(120, 190, 255), rgb(140, 230, 190), rgb(255, 190, 130), rgb(210, 160, 255), rgb(255, 140, 190)]
+    c1 = GOLD if (is_durfee and app.showDurfee) else cols[r % len(cols)]
+    drawCircle(cx, cy, rr, fill=c1, border=rgb(255, 255, 255), borderWidth=1, opacity=92)
+    drawCircle(cx - rr * 0.28, cy - rr * 0.28, rr * 0.36, fill=rgb(255, 255, 255), opacity=42)
     if is_hover:
-        drawCircle(cx,cy,rr+4, fill=None, border=rgb(255,255,150), borderWidth=2, opacity=70)
+        drawCircle(cx, cy, rr + 5, fill=None, border=rgb(255, 255, 150), borderWidth=2, opacity=75)
 
-def draw_dropdown(app):
-    dx,dy,dw,dh=app.dropdownRect
-    draw_rounded_rect(dx,dy,dw,dh,10, fill=gradient(rgb(38,44,72), rgb(28,34,58), start='top'), border=rgb(90,100,140), borderWidth=1, opacity=96)
-    sel=EXAMPLES[app.dropdownSelected]
-    drawLabel(sel["label"], dx+12, dy+dh//2, size=12, fill=rgb(235,240,255), align='left', bold=True)
-    drawLabel("▼" if not app.dropdownOpen else "▲", dx+dw-16, dy+dh//2, size=12, fill=rgb(160,170,200), align='center')
-    if app.dropdownOpen:
-        draw_rounded_rect(dx, dy+dh+2, dw, len(EXAMPLES)*34+4, 10, fill=rgb(0,0,0), opacity=28)
-        draw_rounded_rect(dx, dy+dh, dw, len(EXAMPLES)*34, 10, fill=gradient(rgb(32,38,64), rgb(22,28,50), start='top'), border=rgb(90,100,140), borderWidth=1, opacity=98)
-        for i, ex in enumerate(EXAMPLES):
-            oy=dy+dh+i*34
-            is_sel=(i==app.dropdownSelected)
-            if is_sel:
-                draw_rounded_rect(dx+2, oy+2, dw-4, 30, 8, fill=rgb(70,90,150), opacity=90)
-            drawLabel(ex["label"], dx+10, oy+16, size=11, fill=rgb(255,240,180) if is_sel else rgb(200,210,230), align='left', bold=is_sel)
-
-def draw_info_overlay(app):
-    drawRect(0,0,app.width,app.height, fill=rgb(8,10,18), opacity=86)
-    px=40; py=20; pw=app.width-80; ph=app.height-40
-    draw_rounded_rect(px,py,pw,ph,18, fill=gradient(rgb(20,24,38), rgb(28,32,52), start='top'), opacity=98, border=rgb(80,90,130), borderWidth=1)
-    draw_rounded_rect(app.width-60,20,40,40,12, fill=rgb(60,70,100), border=rgb(120,130,170), borderWidth=1)
-    drawLabel("✕", app.width-40,40, size=22, fill=rgb(220,230,255), bold=True)
-    drawLabel("Ferrers — Pyodide leveraged like linear_solver.py", px+pw//2, py+38, size=22, fill=rgb(235,240,255), bold=True)
-    lines=[
-        "PYODIDE EXTENSION — REAL USAGE:",
-        "from browser import aio",
-        "from extensions.pyodide import run, load",
-        "async def pyodide_compute_all(app, partition):",
-        "    await load()",
-        "    py_code = ''' part=[6,4,4,2,1]; ... p(n) Euler ... '''",
-        "    result = await run(py_code)  # Web Worker, UI 60fps",
-        "    app.partitionNumber = result['p_n']",
-        "def onAppStart(app): aio.run(pyodide_compute_all(app, app.partition))",
+def _draw_info_overlay(app):
+    drawRect(0, 0, app.width, app.height, fill=rgb(8, 10, 18), opacity=88)
+    px = 60
+    py = 50
+    pw = app.width - 120
+    ph = app.height - 100
+    _draw_rounded_rect(px, py, pw, ph, 18, fill=gradient(rgb(20, 24, 38), rgb(28, 32, 52), start="top"), opacity=98, border=rgb(80, 90, 130), borderWidth=1)
+    drawLabel("Ferrers Diagrams — Partition Geometry", px + pw // 2, py + 36, size=26, fill=rgb(235, 240, 255), bold=True)
+    drawLabel("Pyodide WASM · Conjugate · Durfee · Hooks", px + pw // 2, py + 66, size=16, fill=MINT, bold=True)
+    lines = [
+        "USAGE:",
+        "  from browser import document, aio",
+        "  from extensions.pyodide import partition_stats",
         "",
-        "Computes inside worker: p(n), conj, Durfee, hooks, f^λ=n!/∏h",
+        "  async def _analyze(app, part):",
+        "      result = await partition_stats(part)",
+        "      app.conjugate = result['conj']",
+        "      app.partitionNumber = result['p_n']",
+        "      app.f_lambda = result['f_lambda']",
+        "",
+        "  def onAppStart(app):",
+        "      aio.run(_analyze(app, [6,4,4,2,1]))",
+        "",
+        "Heavy combinatorics runs in Pyodide worker, UI stays 60fps.",
+        "",
+        "MATHEMATICS:",
+        "• Ferrers diagram: left-justified rows, λ1 ≥ λ2 ≥ ... ⊢ n",
+        "• Conjugate λ': transpose, Durfee square d = max{i: λi ≥ i}",
+        "• Self-conjugate ⇔ λ = λ' — symmetric",
+        "• Hook length h(i,j) = λi - j + λ'j - i +1, f^λ = n! / ∏ h",
+        "• p(n): # partitions of n, Euler recurrence with pentagonal numbers",
+        "",
+        "INTERACTION: Click row end + to add, click cell to remove, Space cycles examples",
     ]
-    y=py+90
+    y = py + 100
     for line in lines:
-        drawLabel(line, px+28, y, size=11, fill=rgb(120,200,255) if "PYODIDE" in line or "from" in line or "await" in line else rgb(210,220,240), align='left-top')
-        y+=16
+        if y > py + ph - 30:
+            break
+        col = MINT if "from" in line or "await" in line or "def " in line or "import" in line else (GOLD if line.startswith("•") or "MATH" in line else rgb(210, 220, 240))
+        drawLabel(line, px + 28, y, size=15, fill=col, align="left-top")
+        y += 20
 
 def redrawAll(app):
-    for i in range(70):
-        sx=(i*137)%app.width
-        sy=(i*211)%app.height
-        if sy<110: continue
-        alpha=(math.sin(i*0.7+app.animT*0.1)*0.3+0.7)*35
-        drawCircle(sx,sy,1, fill=rgb(200,210,255), opacity=int(alpha))
-    draw_rounded_rect(18,18,560,50,14, fill=gradient(rgb(30,34,50), rgb(24,28,44), start='top'), border=rgb(70,80,110), borderWidth=1, opacity=96)
-    drawLabel("LaTeX:", 40,28, size=11, fill=rgb(130,140,170), align='left-top', bold=True)
-    cursor="|" if app.cursorBlink<30 else ""
-    dt=app.inputText+cursor
-    if len(dt)>48:
-        dt=dt[-48:]
-    drawLabel(dt, 40,46, size=16, fill=rgb(240,245,255), align='left-top')
-    if app.inputError:
-        drawLabel(app.inputError, 280,28, size=11, fill=rgb(255,180,120), align='left-top')
-    btns=[(400,78,70,30,"Parse"),(480,78,70,30,"Boxes" if app.modeBoxes else "Dots"),(560,78,90,30,"Conj ON" if app.showConjugate else "Conj OFF"),(660,78,70,30,"Durfee"),(740,78,60,30,"Hooks"),(810,78,60,30,"Info")]
-    for bx,by,bw,bh,txt in btns:
-        fill_c=rgb(70,90,150) if "ON" in txt or txt in ["Parse","Info","Durfee","Hooks"] else rgb(45,55,85)
-        draw_rounded_rect(bx,by,bw,bh,9, fill=fill_c, border=rgb(70,80,110), borderWidth=1, opacity=92)
-        drawLabel(txt, bx+bw//2, by+bh//2, size=11, fill=rgb(230,240,255), bold=True)
-    drawLabel("EXAMPLES ▼ 5 curated:", 20, 108, size=11, fill=rgb(140,150,190), align='left-top', bold=True)
-    draw_dropdown(app)
-    sel=EXAMPLES[app.dropdownSelected]
-    drawLabel(sel["latex"], 360, 126, size=11, fill=rgb(255,230,150), align='left-top')
-    drawLabel(sel["desc"], 360, 142, size=10, fill=rgb(160,170,200), align='left-top')
-    if app.partition:
-        drawLabel(latex_format(app.partition), app.diagramCenterX, 172, size=17, fill=rgb(240,240,255), bold=True)
-        drawLabel(f"n={app.n} k={len(app.partition)} d={app.durfee} self={app.selfConj}  {app.pyodideStatus[:70]}", app.diagramCenterX, 190, size=10, fill=rgb(160,170,200))
+    drawRect(0, 0, app.width, app.height, fill=BG)
+    for i in range(60):
+        sx = (i * 137) % app.width
+        sy = (i * 211) % app.height
+        if sy < 280:
+            continue
+        alpha = (math.sin(i * 0.7 + app.animT * 0.08) * 0.3 + 0.7) * 32
+        drawCircle(sx, sy, 1, fill=rgb(200, 210, 255), opacity=int(alpha))
+    drawLabel("FERRERS DIAGRAM — PARTITION GEOMETRY", app.width // 2, 28, size=18, fill=INK, bold=True)
+    if app.busy:
+        drawLabel("Computing p(n) in Pyodide…", app.width // 2, 52, size=15, fill=GOLD)
+    elif app.error:
+        drawLabel(f"Error: {app.error[:70]}", app.width // 2, 52, size=15, fill=RED)
+    else:
+        if app.partitionNumber is not None:
+            drawLabel(f"n={app.n}  λ=({','.join(map(str, app.partition))})  λ'=({','.join(map(str, app.conjugate))})  d={app.durfee}  p({app.n})={app.partitionNumber}  f^λ={app.f_lambda}", app.width // 2, 52, size=15, fill=MUTED)
     if app.showConjugate and app.conjugate:
-        max_c=max(app.conjugate) if app.conjugate else 0
-        cell=app.cellSize; gap=app.cellGap
-        twc=max_c*(cell+gap)-gap
-        thc=len(app.conjugate)*(cell+gap)-gap
-        sxc=app.diagramCenterX - twc//2
-        syc=app.diagramCenterY - thc//2
-        for r,rl in enumerate(app.conjugate):
+        max_c = max(app.conjugate) if app.conjugate else 0
+        cell = app.cellSize
+        gap = app.cellGap
+        twc = max_c * (cell + gap) - gap
+        thc = len(app.conjugate) * (cell + gap) - gap
+        sxc = app.diagramCenterX - twc // 2
+        syc = app.diagramCenterY - thc // 2
+        for r, rl in enumerate(app.conjugate):
             for c in range(rl):
-                x=sxc + c*(cell+gap)
-                y=syc + r*(cell+gap)
-                draw_cell_box(app,x,y,cell,r,c,False,False,is_ghost=True)
+                x = sxc + c * (cell + gap)
+                y = syc + r * (cell + gap)
+                _draw_cell_box(app, x, y, cell, r, c, False, False, is_ghost=True)
     if app.partition:
-        for r,rl in enumerate(app.partition):
+        for r, rl in enumerate(app.partition):
             for c in range(rl):
-                x,y=get_cell_pos(app,r,c)
-                prog=app.animT
-                delay=(r*0.05 + c*0.02)
-                local=max(0, min(1, (prog-delay)*3))
-                if local<=0:
+                x, y = _get_cell_pos(app, r, c)
+                prog = app.animT
+                delay = r * 0.05 + c * 0.02
+                local = max(0, min(1, (prog - delay) * 3))
+                if local <= 0:
                     continue
-                sz=int(app.cellSize*(0.2+0.8*local))
-                ox=x+(app.cellSize-sz)//2
-                oy=y+(app.cellSize-sz)//2
-                is_h=(app.hover and app.hover[0]==r and app.hover[1]==c and app.hover[2]=='cell')
-                is_d=(r<app.durfee and c<app.durfee)
+                sz = int(app.cellSize * (0.2 + 0.8 * local))
+                ox = x + (app.cellSize - sz) // 2
+                oy = y + (app.cellSize - sz) // 2
+                is_h = app.hover and app.hover[0] == r and app.hover[1] == c and app.hover[2] == "cell"
+                is_d = r < app.durfee and c < app.durfee
                 if app.modeBoxes:
-                    draw_cell_box(app,ox,oy,sz,r,c,is_h,is_d)
+                    _draw_cell_box(app, ox, oy, sz, r, c, is_h, is_d)
                     if app.showHooks:
-                        h=app.hooks[r][c] if r<len(app.hooks) and c<len(app.hooks[r]) else 0
-                        drawLabel(str(h), x+app.cellSize//2, y+app.cellSize//2, size=11, fill=rgb(20,20,30), bold=True)
+                        h = app.hooks[r][c] if r < len(app.hooks) and c < len(app.hooks[r]) else 0
+                        drawLabel(str(h), x + app.cellSize // 2, y + app.cellSize // 2, size=16, fill=rgb(15, 20, 23), bold=True)
                 else:
-                    draw_cell_dot(app,ox,oy,sz,r,c,is_h,is_d)
+                    _draw_cell_dot(app, ox, oy, sz, r, c, is_h, is_d)
                     if app.showHooks:
-                        h=app.hooks[r][c] if r<len(app.hooks) and c<len(app.hooks[r]) else 0
-                        drawLabel(str(h), x+app.cellSize//2, y+app.cellSize//2-10, size=9, fill=rgb(240,240,255), bold=True)
-                if app.hover and app.hover[2]=='add_right' and app.hover[0]==r:
-                    ax,ay=get_cell_pos(app,r,rl)
-                    draw_rounded_rect(ax,ay,app.cellSize,app.cellSize,10, fill=rgb(100,255,150), opacity=25, border=rgb(100,255,150), borderWidth=2)
-                    drawLabel("+", ax+app.cellSize//2, ay+app.cellSize//2, size=18, fill=rgb(100,255,150), bold=True)
-        if app.hover and app.hover[2]=='add_new_row':
-            max_len=max(app.partition) if app.partition else 1
-            cell=app.cellSize; gap=app.cellGap
-            tw=max_len*(cell+gap)-gap
-            th=len(app.partition)*(cell+gap)-gap
-            sx=app.diagramCenterX - tw//2
-            sy=app.diagramCenterY - th//2
-            ny=sy+len(app.partition)*(cell+gap)
-            draw_rounded_rect(sx,ny,cell,cell,10, fill=rgb(100,200,255), opacity=28, border=rgb(100,200,255), borderWidth=2)
-            drawLabel("+", sx+cell//2, ny+cell//2, size=18, fill=rgb(100,200,255), bold=True)
-    rx=app.width-220; ry=170; rw=200; rh=380
-    draw_rounded_rect(rx,ry,rw,rh,12, fill=gradient(rgb(28,32,52), rgb(22,26,42), start='top'), border=rgb(70,80,110), borderWidth=1, opacity=94)
-    drawLabel("Partition Data", rx+rw//2, ry+16, size=13, fill=rgb(220,230,255), bold=True)
-    y=ry+34
-    def sl(lab,val):
+                        h = app.hooks[r][c] if r < len(app.hooks) and c < len(app.hooks[r]) else 0
+                        drawLabel(str(h), x + app.cellSize // 2, y + app.cellSize // 2 - 12, size=15, fill=INK, bold=True)
+                if app.hover and app.hover[2] == "add_right" and app.hover[0] == r:
+                    ax, ay = _get_cell_pos(app, r, rl)
+                    _draw_rounded_rect(ax, ay, app.cellSize, app.cellSize, 11, fill=rgb(102, 224, 177), opacity=28, border=MINT, borderWidth=2)
+                    drawLabel("+", ax + app.cellSize // 2, ay + app.cellSize // 2, size=22, fill=MINT, bold=True)
+        if app.hover and app.hover[2] == "add_new_row":
+            max_len = max(app.partition) if app.partition else 1
+            cell = app.cellSize
+            gap = app.cellGap
+            tw = max_len * (cell + gap) - gap
+            th = len(app.partition) * (cell + gap) - gap
+            sx = app.diagramCenterX - tw // 2
+            sy = app.diagramCenterY - th // 2
+            ny = sy + len(app.partition) * (cell + gap)
+            _draw_rounded_rect(sx, ny, cell, cell, 11, fill=rgb(102, 224, 177), opacity=28, border=MINT, borderWidth=2)
+            drawLabel("+", sx + cell // 2, ny + cell // 2, size=22, fill=MINT, bold=True)
+    rx = app.width - 240
+    ry = 90
+    rw = 220
+    rh = 420
+    _draw_rounded_rect(rx, ry, rw, rh, 14, fill=gradient(rgb(28, 32, 52), rgb(22, 26, 42), start="top"), border=rgb(70, 80, 110), borderWidth=1, opacity=96)
+    drawLabel("Partition Data", rx + rw // 2, ry + 20, size=18, fill=INK, bold=True)
+    y = ry + 48
+    def stat_line(label, value):
         nonlocal y
-        drawLabel(f"{lab}:", rx+12, y, size=11, fill=rgb(150,160,190), align='left-top')
-        drawLabel(str(val), rx+rw-12, y, size=11, fill=rgb(235,245,255), align='right-top', bold=True)
-        y+=18
+        drawLabel(f"{label}:", rx + 14, y, size=15, fill=MUTED, align="left-top")
+        drawLabel(str(value), rx + rw - 14, y, size=15, fill=INK, align="right-top", bold=True)
+        y += 24
     if app.partition:
-        sl("λ", f"({','.join(map(str,app.partition))})")
-        sl("n", app.n)
-        sl("k", len(app.partition))
-        sl("λ'", f"({','.join(map(str,app.conjugate))})")
-        sl("Durfee", app.durfee)
-        sl("Self", "Yes" if app.selfConj else "No")
-        y+=4
-        drawLabel("Hooks:", rx+12, y, size=10, fill=rgb(130,140,170), align='left-top')
-        y+=12
-        for r,row in enumerate(app.hooks[:5]):
-            txt=" ".join(f"{h:2d}" for h in row[:8])
-            drawLabel(f"r{r+1}:{txt}", rx+12, y, size=9, fill=rgb(200,210,230), align='left-top')
-            y+=11
-        y+=6
-        drawLabel("Pyodide • p(n) in worker", rx+12, y, size=10, fill=rgb(120,180,255), bold=True, align='left-top')
-        y+=12
-        if app.pyodideComputing:
-            drawLabel("Computing...", rx+12, y, size=10, fill=rgb(255,220,120), align='left-top')
+        stat_line("λ", f"({','.join(map(str, app.partition))})")
+        stat_line("n", app.n)
+        stat_line("k", len(app.partition))
+        stat_line("λ'", f"({','.join(map(str, app.conjugate))})")
+        stat_line("Durfee d", app.durfee)
+        stat_line("Self", "Yes" if app.selfConj else "No")
+        y += 8
+        drawLabel("Hook lengths:", rx + 14, y, size=15, fill=MUTED, align="left-top")
+        y += 22
+        for r, row in enumerate(app.hooks[:5]):
+            txt = " ".join(f"{h:2d}" for h in row[:7])
+            drawLabel(f"r{r+1}: {txt}", rx + 14, y, size=15, fill=rgb(200, 210, 230), align="left-top")
+            y += 20
+        y += 8
+        drawLabel("Pyodide", rx + 14, y, size=15, fill=MINT, bold=True, align="left-top")
+        y += 22
+        if app.busy:
+            drawLabel("Computing…", rx + 14, y, size=15, fill=GOLD, align="left-top")
         else:
             if app.partitionNumber is not None:
-                vs=str(app.partitionNumber)
-                if len(vs)>16:
-                    vs=vs[:6]+"..."+vs[-4:]+f" ({len(str(app.partitionNumber))}d)"
-                drawLabel(f"p({app.n})={vs}", rx+12, y, size=10, fill=rgb(200,230,255), align='left-top')
-                y+=11
-                if app.f_lambda:
-                    drawLabel(f"f^λ={app.f_lambda} SYT", rx+12, y, size=9, fill=rgb(160,200,255), align='left-top')
-    drawLabel("Click end add/remove • Dropdown 5 examples • b/c/d/h/i toggle • Enter parse", app.width//2, app.height-10, size=10, fill=rgb(120,130,160), align='center')
+                vs = str(app.partitionNumber)
+                if len(vs) > 14:
+                    vs = vs[:5] + "…" + vs[-4:] + f" ({len(str(app.partitionNumber))}d)"
+                drawLabel(f"p({app.n})={vs}", rx + 14, y, size=15, fill=rgb(200, 230, 255), align="left-top")
+                y += 22
+                fl = str(app.f_lambda)
+                if len(fl) > 14:
+                    fl = fl[:5] + "…" + fl[-4:]
+                drawLabel(f"f^λ={fl}", rx + 14, y, size=15, fill=rgb(160, 200, 255), align="left-top")
+                y += 22
+                drawLabel(f"∏h={app.prodHooks}", rx + 14, y, size=15, fill=MUTED, align="left-top")
+    drawLabel("Click end + to add/remove • Space cycles • Enter parses • b/c/d/h/i", app.width // 2, app.height - 16, size=15, fill=rgb(120, 130, 160), align="center")
     if app.showInfo:
-        draw_info_overlay(app)
-    draw_rounded_rect(app.width-280, 18, 180, 26, 8, fill=rgb(30,50,90) if app.pyodideReady else rgb(60,30,30), border=rgb(80,120,200), borderWidth=1, opacity=88)
-    drawLabel(app.pyodideStatus[:36], app.width-190, 31, size=10, fill=rgb(170,200,255), align='center')
+        _draw_info_overlay(app)
