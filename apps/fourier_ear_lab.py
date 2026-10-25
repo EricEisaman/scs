@@ -178,7 +178,7 @@ def onStep(app):
             except: pass
     else: app.cochleaRot+=0.004
     if app.insightTimer>0: app.insightTimer-=1
-    if getattr(app,"showEarOverlay",False): app.earOverlayTime+=0.02
+    if app.showEarOverlay: app.earOverlayTime+=0.02
 
 def pointInRect(px,py,rx,ry,rw,rh): return rx<=px<=rx+rw and ry<=py<=ry+rh
 
@@ -188,21 +188,16 @@ def updateFundamentalFromX(app,mx):
     if app.playing: rebuildAudio(app)
 
 def onMousePress(app,mx,my):
-    # ear button top right - check first, works even in overlay
     earBx,earBy,earBw,earBh=W-132,10,118,36
     if pointInRect(mx,my,earBx,earBy,earBw,earBh):
         app.showEarOverlay = not app.showEarOverlay
         app.earOverlayTime=0
         return
-    # if overlay shown, check close button inside overlay
-    if getattr(app,'showEarOverlay',False):
+    if app.showEarOverlay:
         closeBx,closeBy,closeBw,closeBh=W-52,HEADER_H+8,36,26
         if pointInRect(mx,my,closeBx,closeBy,closeBw,closeBh):
             app.showEarOverlay=False
             return
-        # click elsewhere in overlay does not close, only ear button or X
-        # let overlay handle its own clicks? for now just return to avoid underlying
-        # but allow cochlea-like interaction? We'll block underlying
         return
     playBx,playBy,playBw,playBh=CTRL_X+14,CTRL_Y+32,110,36
     if pointInRect(mx,my,playBx,playBy,playBw,playBh):
@@ -276,7 +271,6 @@ def onMouseRelease(app,mx,my):
     app.draggingSlider=False
 
 def onMouseMove(app,mx,my):
-    # ear button hover
     bx,by,bw,bh=W-132,10,118,36
     app.hoverEar = pointInRect(mx,my,bx,by,bw,bh)
     app.hoverIdx=None
@@ -414,23 +408,133 @@ def drawControls(app):
     drawLabel("55Hz",sX,sY+14,fill=rgb(130,140,170),size=8,align="left-top")
     drawLabel("220Hz",sX+sW,sY+14,fill=rgb(130,140,170),size=8,align="right-top")
 
-def drawEarButton(app):
-    # top right ear toggle
-    bx,by,bw,bh=W-132,10,118,36
-    hover = getattr(app,'hoverEar',False)
-    fillCol = rgb(160,120,255) if not hover else rgb(190,150,255)
-    if getattr(app,'showEarOverlay',False):
-        fillCol = rgb(255,180,120)
-    drawRect(bx,by,bw,bh,fill=fillCol,border=rgb(255,255,255),borderWidth=1.5,roundness=18)
-    drawLabel("👂 EAR VIEW",bx+bw/2,by+bh/2,fill=rgb(0,0,0) if not getattr(app,'showEarOverlay',False) else rgb(0,0,0),size=12,bold=True,align="center")
-    return (bx,by,bw,bh)
-
 def drawHeader(app):
     drawRect(0,0,W,HEADER_H,fill=rgb(18,22,38))
     drawLabel("YOUR EARDRUM IS A FOURIER TRANSFORM MACHINE",W*0.5,12,fill=rgb(240,250,255),size=16,bold=True,align="center-top")
     drawLabel("Any function = sum of sines. Independent frequencies -> spectrum. Cochlea separates them realtime.",W*0.5,30,fill=rgb(160,180,210),size=10.5,align="center-top")
-    drawRect(12,50,W-24,16,fill=rgb(35,60,85),border=CYAN,borderWidth=1,roundness=6,opacity=0.9)
-    drawLabel(app.insight,W*0.5,58,fill=rgb(200,240,255),size=10,bold=True,align="center")
+    drawRect(12,50,W-140,16,fill=rgb(35,60,85),border=CYAN,borderWidth=1,roundness=6,opacity=0.9)
+    drawLabel(app.insight,W*0.5-60,58,fill=rgb(200,240,255),size=10,bold=True,align="center")
+    bx,by,bw,bh=W-132,10,118,36
+    hover=getattr(app,'hoverEar',False)
+    fillCol=rgb(160,120,255) if not hover else rgb(190,150,255)
+    if getattr(app,'showEarOverlay',False):
+        fillCol=rgb(255,180,120)
+    drawRect(bx,by,bw,bh,fill=fillCol,border=rgb(255,255,255),borderWidth=1.5,roundness=18)
+    drawLabel("EAR VIEW",bx+bw/2,by+bh/2,fill=rgb(0,0,0),size=12,bold=True,align="center")
+
+
+def drawEarOverlay(app):
+    drawRect(0,0,W,H,fill=rgb(6,9,20),opacity=0.97)
+    drawRect(0,0,W,H,fill=None,border=rgb(80,90,140),borderWidth=2,roundness=12)
+    drawLabel("EAR -> COCHLEA: THE PHYSICAL FOURIER TRANSFORMER",W*0.5,18,fill=rgb(240,250,255),size=18,bold=True,align="center-top")
+    drawLabel("How 3500 hair cells turn vibration into spectrum",W*0.5,40,fill=rgb(160,180,210),size=11,align="center-top")
+    closeBx,closeBy,closeBw,closeBh=W-52,HEADER_H+8,36,26
+    drawRect(closeBx,closeBy,closeBw,closeBh,fill=rgb(60,70,90),border=rgb(200,210,230),borderWidth=1,roundness=7)
+    drawLabel("X",closeBx+closeBw/2,closeBy+closeBh/2,fill=rgb(230,240,255),size=13,bold=True,align="center")
+    leftX,leftY,leftW,leftH=16,72,300,250
+    drawRect(leftX,leftY,leftW,leftH,fill=rgb(18,22,38),border=PANEL_BORDER,borderWidth=1,roundness=10)
+    drawLabel("OUTER & MIDDLE EAR",leftX+14,leftY+10,fill=rgb(180,190,220),size=10,bold=True,align="left-top")
+    canalX,canalY=leftX+20,leftY+40; canalW,canalH=180,44
+    drawRect(canalX,canalY,canalW,canalH,fill=rgb(40,35,55),border=rgb(90,80,110),borderWidth=1,roundness=22)
+    drumX=canalX+canalW; drumY=canalY+canalH/2
+    drawLine(drumX,canalY+4,drumX,canalY+canalH-4,fill=rgb(255,220,180),lineWidth=3)
+    drawLabel("eardrum",drumX+6,canalY-2,fill=rgb(255,220,180),size=9,bold=True,align="left-top")
+    malX,malY=drumX+8,drumY-6
+    drawCircle(malX,malY,7,fill=rgb(220,200,180),border=rgb(255,255,255),borderWidth=0.8)
+    drawLabel("malleus",malX+10,malY-6,fill=rgb(220,200,180),size=8,align="left-center")
+    incX,incY=malX+22,malY+2
+    drawCircle(incX,incY,6,fill=rgb(220,200,180),border=rgb(255,255,255),borderWidth=0.8)
+    drawLabel("incus",incX+8,incY,fill=rgb(220,200,180),size=8,align="left-center")
+    stapX,stapY=incX+22,incY+6
+    drawOval(stapX,stapY,18,8,fill=rgb(220,200,180),border=rgb(255,255,255),borderWidth=0.8)
+    drawLabel("stapes",stapX+12,stapY+2,fill=rgb(220,200,180),size=8,align="left-center")
+    ovalX,ovalY=stapX+20,incY+10
+    drawRect(ovalX,ovalY-10,4,20,fill=rgb(140,200,255),border=rgb(200,230,255),borderWidth=1,roundness=3)
+    drawLabel("oval window",ovalX+8,ovalY+8,fill=rgb(140,200,255),size=8,align="left-center")
+    waveT=app.earOverlayTime*3 % 1.0
+    waveX=canalX + waveT*(ovalX - canalX)
+    drawCircle(waveX,canalY+canalH/2 + math.sin(waveT*12)*6,4,fill=YELLOW,opacity=0.8)
+    drawLabel("temporal bone (2.5-2.75 turns)",leftX+14,leftY+leftH-40,fill=rgb(110,120,150),size=8,align="left-bottom")
+    cochX,cochY,cochW,cochH=340,72,380,250
+    drawRect(cochX,cochY,cochW,cochH,fill=rgb(18,22,38),border=PANEL_BORDER,borderWidth=1,roundness=10)
+    drawLabel("COCHLEA UNROLLED - 3 CHAMBERS",cochX+14,cochY+10,fill=rgb(180,190,220),size=10,bold=True,align="left-top")
+    chX,chY=cochX+20,cochY+40; chW,chH=cochW-40,160
+    drawRect(chX,chY,chW,chH*0.33,fill=rgb(50,80,120),border=rgb(90,130,180),borderWidth=1,roundness=6)
+    drawLabel("Scala Vestibuli - perilymph (upper)",chX+8,chY+8,fill=rgb(160,200,240),size=9,align="left-top")
+    drawRect(chX,chY+chH*0.33,chW,chH*0.34,fill=rgb(90,80,30),border=rgb(180,160,60),borderWidth=1,roundness=6)
+    drawLabel("Scala Media - endolymph - Organ of Corti",chX+8,chY+chH*0.33+6,fill=rgb(255,230,120),size=9,bold=True,align="left-top")
+    drawRect(chX,chY+chH*0.67,chW,chH*0.33,fill=rgb(50,80,120),border=rgb(90,130,180),borderWidth=1,roundness=6)
+    drawLabel("Scala Tympani - perilymph (lower)",chX+8,chY+chH*0.67+8,fill=rgb(160,200,240),size=9,align="left-top")
+    baseY=chY+chH*0.67
+    freqNorm=(app.fundamental-55)/165
+    peakX=chX + (1-freqNorm)*0.7*chW + 0.15*chW + math.sin(app.earOverlayTime*0.8)*10
+    prevX=prevY=None
+    for px in range(int(chW)):
+        x=chX+px
+        dist=abs(x-peakX)/(chW*0.18)
+        env=math.exp(-dist*dist*2)*18*(0.8+0.4*math.sin(app.earOverlayTime*6 + px*0.08))
+        y=baseY - env
+        if prevX is not None:
+            drawLine(prevX,prevY,x,y,fill=CYAN,lineWidth=2.5)
+        prevX,prevY=x,y
+    drawLabel(f"wave peak -> {app.fundamental}Hz",peakX,baseY-28,fill=CYAN,size=8,bold=True,align="center-bottom")
+    drawLabel("base=20kHz high",chX,chY+chH+8,fill=ORANGE,size=8,align="left-top")
+    drawLabel("apex=20Hz low",chX+chW-60,chY+chH+8,fill=CYAN,size=8,align="right-top")
+    spirX,spirY,spirW,spirH=740,72,294,250
+    drawRect(spirX,spirY,spirW,spirH,fill=rgb(18,22,38),border=PANEL_BORDER,borderWidth=1,roundness=10)
+    drawLabel("SPIRAL - 2.5 TURNS",spirX+14,spirY+10,fill=rgb(180,190,220),size=10,bold=True,align="left-top")
+    cx,cy=spirX+spirW*0.5,spirY+spirH*0.6; maxTheta=2.5*2*math.pi; pts=[]
+    for i in range(200):
+        t=i/199*maxTheta; r=85*math.exp(-0.32*t); ang=t+app.earOverlayTime*0.3
+        pts.append((cx+r*math.cos(ang),cy+r*math.sin(ang)*0.9,r,t))
+    for i in range(len(pts)-1):
+        norm=pts[i][3]/maxTheta; col=rgb(int(lerp(255,80,norm)),int(lerp(160,220,norm)),int(lerp(60,255,norm)))
+        drawLine(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1],fill=col,lineWidth=lerp(6,2,norm),opacity=0.9)
+    botX,botY,botW,botH=16,340,1018,340
+    drawRect(botX,botY,botW,botH,fill=rgb(18,22,38),border=rgb(90,110,160),borderWidth=1.2,roundness=12)
+    drawLabel("ORGAN OF CORTI - HAIR CELLS = TRANSDUCERS (PHYSICAL FOURIER)",botX+14,botY+12,fill=rgb(200,220,255),size=12,bold=True,align="left-top")
+    crossX,crossY=botX+20,botY+40; crossW,crossH=320,260
+    drawRect(crossX,crossY,crossW,crossH,fill=rgb(12,16,30),border=rgb(60,70,100),borderWidth=1,roundness=8)
+    drawRect(crossX+20,crossY+30,crossW-40,18,fill=rgb(120,110,90),border=rgb(180,170,130),borderWidth=1,roundness=6)
+    drawLabel("tectorial membrane",crossX+24,crossY+34,fill=rgb(230,220,180),size=8,align="left-top")
+    cellY=crossY+90
+    for i in range(7):
+        hx=crossX+40+i*38
+        drawRect(hx,cellY,18,90,fill=rgb(60,90,60) if i%2==0 else rgb(90,60,90),border=rgb(120,160,120),borderWidth=1,roundness=4)
+        tilt=math.sin(app.earOverlayTime*4 + i*0.9)*12
+        sx=hx+9; sy=cellY; topX=sx+tilt; topY=sy-22
+        drawLine(sx,sy,topX,topY,fill=rgb(220,240,200),lineWidth=2.2)
+        drawLine(sx-3,sy,topX-2,topY,fill=rgb(200,220,180),lineWidth=1.5)
+        drawLine(sx+3,sy,topX+2,topY,fill=rgb(200,220,180),lineWidth=1.5)
+        if abs(tilt)>6:
+            drawCircle(topX,topY-4,5,fill=YELLOW,opacity=0.6)
+            drawLabel("K+ in",topX+8,topY-8,fill=YELLOW,size=7,bold=True,align="left-center")
+        drawLine(hx+9,cellY+90,hx+9,cellY+130,fill=rgb(100,150,255),lineWidth=1.5)
+        if abs(tilt)>5 and i%2==0:
+            drawCircle(hx+9,cellY+135,4,fill=rgb(100,200,255))
+    drawLabel("stereocilia shear -> tip links",crossX+10,crossY+crossH-22,fill=rgb(180,200,160),size=8,align="left-bottom")
+    midX,midY=botX+360,botY+40
+    drawLabel("MECHANO-ELECTRICAL:",midX,midY,fill=YELLOW,size=10,bold=True,align="left-top")
+    steps=["1. Eardrum = sum of sines","2. Ossicles amplify -> oval window","3. Perilymph wave in Vestibuli","4. Basilar membrane peaks at freq place","   Base=stiff=20kHz, Apex=floppy=20Hz","5. Organ of Corti rides, stereocilia shear","6. Tip links -> K+ channels open","7. Hair cell depolarizes -> glutamate","8. Nerve fires! = LIVE FFT","Result: Place=frequency, rate=amplitude"]
+    for i,txt in enumerate(steps):
+        col=CYAN if txt.startswith("Result") else rgb(200,220,255)
+        drawLabel(txt,midX,midY+16+i*15,fill=col,size=9,bold=txt.startswith("Result"),align="left-top")
+    nerveX,nerveY=botX+botW-280,botY+40; nerveW,nerveH=260,260
+    drawRect(nerveX,nerveY,nerveW,nerveH,fill=rgb(12,16,30),border=rgb(60,70,100),borderWidth=1,roundness=8)
+    drawLabel("auditory nerve",nerveX+10,nerveY+8,fill=rgb(180,190,220),size=9,bold=True,align="left-top")
+    for i in range(8):
+        fx=nerveX+30; fy=nerveY+40+i*26
+        drawRect(fx,fy,nerveW-60,12,fill=rgb(30,40,70),border=rgb(60,80,120),borderWidth=0.8,roundness=6)
+        if i < len(app.harmonics) and not app.harmonics[i]["muted"] and app.harmonics[i]["amp"]>0.1:
+            spikeX=fx + app.harmonics[i]["amp"]*(nerveW-70)
+            drawRect(fx,fy+2,spikeX-fx,8,fill=app.harmonics[i]["color"],roundness=4)
+            animX=(app.earOverlayTime*80 + i*20) % (nerveW-60)
+            drawCircle(fx+animX,fy+6,3,fill=YELLOW)
+    drawLabel("Press EAR VIEW or X to close",W*0.5,botY+botH-10,fill=rgb(130,150,180),size=9,align="center-bottom")
+
+
 
 def redrawAll(app):
     drawRect(0,0,W,H,fill=BG); drawHeader(app); drawTimeDomain(app); drawSpectrum(app); drawCochlea(app); drawControls(app)
+    if getattr(app,"showEarOverlay",False):
+        drawEarOverlay(app)
