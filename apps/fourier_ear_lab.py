@@ -148,6 +148,7 @@ def onAppStart(app):
     app.procAudio=AudioEngine(quality="high",seed=90210) if HAS_PROC_AUDIO else None
     app.samples=computeSamples(app.harmonics); app.fftMags=dft_magnitudes(app.samples,len(app.harmonics))
     app.insight="Drag spectrum bars -> waveform + cochlea update. Frequencies independent!"; app.insightTimer=0
+    app.showEarOverlay=False; app.hoverEar=False; app.earOverlayTime=0
     # FIXED: use fetch_text for markdown, not fetch_json
     if HAS_FETCH and fetch_text:
         async def tryFetch():
@@ -177,6 +178,7 @@ def onStep(app):
             except: pass
     else: app.cochleaRot+=0.004
     if app.insightTimer>0: app.insightTimer-=1
+    if getattr(app,"showEarOverlay",False): app.earOverlayTime+=0.02
 
 def pointInRect(px,py,rx,ry,rw,rh): return rx<=px<=rx+rw and ry<=py<=ry+rh
 
@@ -186,6 +188,22 @@ def updateFundamentalFromX(app,mx):
     if app.playing: rebuildAudio(app)
 
 def onMousePress(app,mx,my):
+    # ear button top right - check first, works even in overlay
+    earBx,earBy,earBw,earBh=W-132,10,118,36
+    if pointInRect(mx,my,earBx,earBy,earBw,earBh):
+        app.showEarOverlay = not app.showEarOverlay
+        app.earOverlayTime=0
+        return
+    # if overlay shown, check close button inside overlay
+    if getattr(app,'showEarOverlay',False):
+        closeBx,closeBy,closeBw,closeBh=W-52,HEADER_H+8,36,26
+        if pointInRect(mx,my,closeBx,closeBy,closeBw,closeBh):
+            app.showEarOverlay=False
+            return
+        # click elsewhere in overlay does not close, only ear button or X
+        # let overlay handle its own clicks? for now just return to avoid underlying
+        # but allow cochlea-like interaction? We'll block underlying
+        return
     playBx,playBy,playBw,playBh=CTRL_X+14,CTRL_Y+32,110,36
     if pointInRect(mx,my,playBx,playBy,playBw,playBh):
         if app.playing: stopAudio(app)
@@ -258,6 +276,9 @@ def onMouseRelease(app,mx,my):
     app.draggingSlider=False
 
 def onMouseMove(app,mx,my):
+    # ear button hover
+    bx,by,bw,bh=W-132,10,118,36
+    app.hoverEar = pointInRect(mx,my,bx,by,bw,bh)
     app.hoverIdx=None
     if pointInRect(mx,my,SPEC_X,SPEC_Y,SPEC_W,SPEC_H):
         n=len(app.harmonics); maxBarW=42; barW=min(maxBarW,(SPEC_W-40)/n); totalW=barW*n; offsetX=SPEC_X+18+(SPEC_W-36-totalW)/2
@@ -392,6 +413,17 @@ def drawControls(app):
     t=(app.fundamental-55)/165; drawRect(sX,sY,t*sW,10,fill=ORANGE,roundness=5); drawCircle(sX+t*sW,sY+5,10,fill=rgb(255,255,255),border=ORANGE,borderWidth=2)
     drawLabel("55Hz",sX,sY+14,fill=rgb(130,140,170),size=8,align="left-top")
     drawLabel("220Hz",sX+sW,sY+14,fill=rgb(130,140,170),size=8,align="right-top")
+
+def drawEarButton(app):
+    # top right ear toggle
+    bx,by,bw,bh=W-132,10,118,36
+    hover = getattr(app,'hoverEar',False)
+    fillCol = rgb(160,120,255) if not hover else rgb(190,150,255)
+    if getattr(app,'showEarOverlay',False):
+        fillCol = rgb(255,180,120)
+    drawRect(bx,by,bw,bh,fill=fillCol,border=rgb(255,255,255),borderWidth=1.5,roundness=18)
+    drawLabel("👂 EAR VIEW",bx+bw/2,by+bh/2,fill=rgb(0,0,0) if not getattr(app,'showEarOverlay',False) else rgb(0,0,0),size=12,bold=True,align="center")
+    return (bx,by,bw,bh)
 
 def drawHeader(app):
     drawRect(0,0,W,HEADER_H,fill=rgb(18,22,38))
