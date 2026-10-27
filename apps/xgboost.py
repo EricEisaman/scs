@@ -50,7 +50,7 @@ def accuracy_multiclass(y_true, probs):
             correct+=1
     return correct / len(y_true) if y_true else 0.0
 
-def find_best_stump_fast(X, target, n_feat_sample=28, min_leaf=6):
+def find_best_stump_fast(X, target, n_feat_sample=36, min_leaf=5):
     n = len(X)
     if n==0:
         return 0,0.5,0.0,0.0,0.0
@@ -64,8 +64,13 @@ def find_best_stump_fast(X, target, n_feat_sample=28, min_leaf=6):
     for f in feat_pool:
         vals = [X[i][f] for i in range(n)]
         svals = sorted(vals)
-        # try median and mean thresholds for a bit more power
-        thr_candidates = [svals[n//2], sum(vals)/n]
+        # Try 4 quantiles for better split
+        thr_candidates = [
+            svals[n//4],
+            svals[n//2],
+            svals[3*n//4],
+            sum(vals)/n
+        ]
         for thr in thr_candidates:
             left_sum=0.0; left_cnt=0; right_sum=0.0; right_cnt=0
             for i in range(n):
@@ -77,6 +82,7 @@ def find_best_stump_fast(X, target, n_feat_sample=28, min_leaf=6):
                 continue
             left_mean = left_sum / left_cnt if left_cnt else 0.0
             right_mean = right_sum / right_cnt if right_cnt else 0.0
+            # Gain weighted by variance reduction
             gain = left_cnt*left_mean*left_mean + right_cnt*right_mean*right_mean
             if gain > best_gain:
                 best_gain=gain; best_f=f; best_thr=thr; best_left=left_mean; best_right=right_mean
@@ -170,20 +176,59 @@ def train_val_split(X,y,ratio=0.78):
     return X[:n_train],y[:n_train],X[n_train:],y[n_train:]
 
 async def resilient_pyodide_run(code_str):
-    async def unwrap(res, max_depth=6):
+    async def unwrap(res, max_depth=8):
         for _ in range(max_depth):
-            if res is None: break
+            if res is None:
+                break
+            # Convert JS proxy
             if hasattr(res, 'to_py'):
-                try: res=res.to_py()
-                except Exception: pass
+                try:
+                    res=res.to_py()
+                except Exception:
+                    pass
+            # Check if repr is coroutine - catches both str and coroutine objects
+            try:
+                rstr=str(res)
+                if '<coroutine' in rstr or 'coroutine' in rstr.lower() and 'run_python' in rstr:
+                    # Need to await it
+                    if hasattr(res, '__await__'):
+                        try:
+                            res=await res
+                            continue
+                        except Exception:
+                            return None
+                    # If it's already a string repr, fail this candidate
+                    if isinstance(res, str):
+                        return None
+            except Exception:
+                pass
             if hasattr(res, '__await__'):
-                try: res=await res; continue
-                except Exception: break
+                try:
+                    res=await res
+                    continue
+                except Exception:
+                    break
             if hasattr(res, 'then'):
-                try: res=await res; continue
-                except Exception: break
-            if isinstance(res, str) and '<coroutine' in res:
-                return None
+                try:
+                    res=await res
+                    continue
+                except Exception:
+                    break
+            # Final check for coroutine string after unwrapping
+            try:
+                if isinstance(res, str) and '<coroutine' in res:
+                    return None
+                if '<coroutine' in str(res):
+                    # If it's still a coroutine object, try one more await
+                    if hasattr(res, '__await__'):
+                        try:
+                            res=await res
+                            continue
+                        except Exception:
+                            return None
+                    return None
+            except Exception:
+                pass
             break
         return res
     if PYODIDE_EXT_OK and _py_ext is not None:
@@ -192,8 +237,14 @@ async def resilient_pyodide_run(code_str):
                 fn=getattr(_py_ext, name)
                 res=fn(code_str)
                 res=await unwrap(res)
-                if res is None: continue
-                if isinstance(res, str) and '<coroutine' in res: continue
+                if res is None:
+                    continue
+                # Double-check final result is not coroutine repr
+                try:
+                    if '<coroutine' in str(res):
+                        continue
+                except Exception:
+                    pass
                 return res
             except Exception:
                 continue
@@ -257,7 +308,11 @@ async def fetch_mnist_samples(app):
         "https://raw.githubusercontent.com/Eventual-Inc/mnist-json/master/mnist_handwritten_test.json.gz",
     ]
     csv_candidates=[
+        "https://cdn.jsdelivr.net/gh/makeyourownneuralnetwork/makeyourownneuralnetwork@master/mnist_dataset/mnist_train_100.csv",
+        "https://cdn.jsdelivr.net/gh/makeyourownneuralnetwork/makeyourownneuralnetwork@master/mnist_dataset/mnist_test_100.csv",
         "https://cdn.jsdelivr.net/gh/makeyourownneuralnetwork/makeyourownneuralnetwork@master/mnist_dataset/mnist_test_10.csv",
+        "https://raw.githubusercontent.com/makeyourownneuralnetwork/makeyourownneuralnetwork/master/mnist_dataset/mnist_train_100.csv",
+        "https://raw.githubusercontent.com/makeyourownneuralnetwork/makeyourownneuralnetwork/master/mnist_dataset/mnist_test_100.csv",
         "https://raw.githubusercontent.com/makeyourownneuralnetwork/makeyourownneuralnetwork/master/mnist_dataset/mnist_test_10.csv",
     ]
     data_ok=False
@@ -302,13 +357,15 @@ async def fetch_mnist_samples(app):
         except Exception as e:
             app.fetch_status=f"JSON fail {url.split('/')[-1][:20]}: {str(e)[:40]}"
             continue
+    # Accumulate from CSVs if JSON gz failed - combine multiple CSVs for more data
     if not data_ok and FETCH_OK and fetch_text is not None:
+        combined_samples=[]
         for url in csv_candidates:
             try:
                 txt=await fetch_text(url)
                 lines=txt.strip().split("\n")
                 samples=[]
-                for line in lines[:200]:
+                for line in lines[:1200]:
                     if not line.strip(): continue
                     low=line.lower()
                     if low.startswith("label") or "pixel" in low: continue
@@ -319,19 +376,25 @@ async def fetch_mnist_samples(app):
                             samples.append((pix[:784],lab))
                     except Exception:
                         continue
-                if len(samples)>=10:
-                    app.all_samples=samples
-                    Xb=[p for p,_ in samples]; yb=[l for _,l in samples]
-                    # pad to have at least some per class
-                    if len(set(yb))<10:
-                        sx,sy=synth_mnist_full(30)
-                        Xb.extend(sx); yb.extend(sy)
-                    app.X_train_full, app.y_train_full=Xb,yb
-                    app.fetch_status=f"Loaded {len(samples)} via CSV ✓ 10-way"
-                    data_ok=True
-                    break
+                if samples:
+                    combined_samples.extend(samples)
+                    app.fetch_status=f"CSV {url.split('/')[-1]} +{len(samples)}"
             except Exception:
                 continue
+        if len(combined_samples)>=20:
+            app.all_samples=combined_samples
+            Xb=[p for p,_ in combined_samples]; yb=[l for _,l in combined_samples]
+            # Pad if missing classes
+            present=set(yb)
+            if len(present)<10:
+                sx,sy=synth_mnist_full(40)
+                # Only add missing classes
+                for pix,lab in zip(sx,sy):
+                    if lab not in present or yb.count(lab)<15:
+                        Xb.append(pix); yb.append(lab)
+            app.X_train_full, app.y_train_full=Xb,yb
+            app.fetch_status=f"Loaded {len(combined_samples)} via CSVs ✓ 10-way {len(set(yb))} classes"
+            data_ok=True
     if not data_ok:
         app.fetch_status="Fetch unavailable - synthetic 10-way fallback"
         sx,sy=synth_mnist_full(120)
@@ -606,17 +669,33 @@ def onMousePress(app,mx,my):
         app.drawing=[0.0]*784; app.prediction=None; return
     if 30<=mx<=254 and 110<=my<=334:
         app.is_drawing=True; paint_at(app,mx,my); return
-    if 20<=mx<=280 and 360<=my<=460:
+    if 20<=mx<=280 and 440<=my<=560:
         if app.all_samples:
-            # grid 5x2 for 10 digits
+            # grid 5x2 - match draw coords x0=20+(i%5)*50, y0=446+(i//5)*50
             cols=5
-            idx_x=int((mx-20)/260 * cols)
-            idx_y=int((my-360)/100 * 2)
+            idx_x=int((mx-20)//50)
+            idx_y=int((my-440)//50)
+            # Clamp
+            idx_x=max(0,min(idx_x,4))
+            idx_y=max(0,min(idx_y,1))
             idx=idx_y*cols + idx_x
-            idx=max(0,min(idx,len(app.all_samples)-1))
-            app.selected_sample_idx=idx
-            pix,lab=app.all_samples[idx]
-            app.drawing=pix[:]; predict_drawing(app)
+            # Map to balanced shown list (one per class)
+            # Build same shown list as in redraw
+            shown=[]
+            seen=set()
+            for pix,lab in app.all_samples:
+                if lab not in seen and len(shown)<10:
+                    shown.append((pix,lab)); seen.add(lab)
+            if len(shown)<10:
+                shown=app.all_samples[:10]
+            if idx < len(shown):
+                pix,lab=shown[idx]
+                app.selected_sample_idx=idx
+                app.drawing=pix[:]; predict_drawing(app)
+            elif idx < len(app.all_samples):
+                pix,lab=app.all_samples[idx]
+                app.selected_sample_idx=idx
+                app.drawing=pix[:]; predict_drawing(app)
         return
     if 720<=mx<=944 and 120<=my<=344:
         col=int((mx-720)//8); row=int((my-120)//8)
