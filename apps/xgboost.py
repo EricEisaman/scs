@@ -3,18 +3,13 @@ from scs import *
 from browser import aio, window
 import math, random, json, traceback
 
-try:
-    from extensions.fetch import fetch_json as ext_fetch_json, fetch_text as ext_fetch_text
-    FETCH_OK = True
-except Exception:
-    FETCH_OK = False
-    ext_fetch_json = None
-    ext_fetch_text = None
+# NO extension fetch - causes double fetch and JS proxy hell
+# Use window.fetch directly
 
 try:
     import extensions.pyodide as _py_ext
     PYODIDE_EXT_OK = True
-    _py_candidates = ['run_python_async','run_python','run','exec','evaluate','run_code','execute','runPythonAsync','runPython']
+    _py_candidates = ['run_python_async','run_python','run','exec','evaluate','run_code','execute','runPythonAsync']
 except Exception:
     PYODIDE_EXT_OK = False
     _py_ext = None
@@ -75,10 +70,7 @@ def train_val_split(X,y,ratio=0.78):
         random.shuffle(lst)
         n=len(lst)
         if n==0: continue
-        if n==1:
-            n_tr=1
-        else:
-            n_tr=max(1, min(n-1, int(n*ratio)))
+        n_tr=1 if n==1 else max(1, min(n-1, int(n*ratio)))
         for xi,yi in lst[:n_tr]:
             Xtr.append(xi); ytr.append(yi)
         for xi,yi in lst[n_tr:]:
@@ -176,130 +168,69 @@ async def fetch_mnist_via_pyodide_npz(app):
     if isinstance(py_res,dict) and py_res.get('status')=='ok':
         samples=py_res.get('samples',[])
         if samples: return samples
-    raise Exception(f"npz fail {str(py_res)[:150]}")
+    raise Exception(f"npz fail {str(py_res)[:120]}")
 
 async def fetch_mnist_via_jsdelivr(app):
-    # Direct window.fetch - bulletproof real parsing
-    urls = [
-        "https://cdn.jsdelivr.net/npm/mnist@1.1.0/src/digits/{}.json",
-        "https://raw.githack.com/cazala/mnist/master/src/digits/{}.json",
-    ]
+    # REAL ONLY - use window.fetch + response.json() -> native JS array -> to_py
+    # This avoids 220kB string + json.loads overhead
+    base_url = "https://cdn.jsdelivr.net/npm/mnist@1.1.0/src/digits/{}.json"
     all_samples=[]
     for d in range(10):
-        data=None
-        last_err=""
-        for tmpl in urls:
-            url=tmpl.format(d)
-            try:
-                # Try extension fetch_json first (may have proxy bug, but try)
-                if FETCH_OK and ext_fetch_json is not None:
-                    try:
-                        raw = await ext_fetch_json(url)
-                        if hasattr(raw,'to_py'):
-                            try: raw=raw.to_py()
-                            except Exception: pass
-                        if raw is not None:
-                            data=raw
-                            # If data is list, good
-                            if isinstance(data,list) and len(data)>0:
-                                break
-                    except Exception as e:
-                        last_err=f"ext {str(e)[:20]}"
-                        # fall through to window.fetch
-                        pass
-                # window.fetch path - this is what shows 200 in your Network tab
-                resp = await window.fetch(url, {"mode":"cors"})
-                if not resp.ok:
-                    last_err=f"HTTP {resp.status}"
-                    continue
-                txt = await resp.text()
-                if hasattr(txt,'to_py'):
-                    try: txt=txt.to_py()
-                    except Exception: pass
-                txt = str(txt)
-                # Fast path: JSON parse
+        url = base_url.format(d)
+        try:
+            app.fetch_status=f"REAL fetching digit {d}..."
+            resp = await window.fetch(url, {"mode":"cors"})
+            if not resp.ok:
+                raise Exception(f"HTTP {resp.status}")
+            # Use .json() not .text() - native parse, much faster
+            js_data = await resp.json()
+            # Convert JS array to Python
+            if hasattr(js_data,'to_py'):
+                try: js_data=js_data.to_py()
+                except Exception: pass
+            # js_data should be list
+            if not isinstance(js_data, list):
+                # Try to unwrap if it's a JS proxy that didn't convert
                 try:
-                    parsed = json.loads(txt)
-                except Exception as je:
-                    # Try JS JSON.parse via window
-                    try:
-                        parsed = window.JSON.parse(txt)
-                        if hasattr(parsed,'to_py'):
-                            parsed=parsed.to_py()
-                    except Exception:
-                        last_err=f"json err {str(je)[:20]}"
-                        continue
-                data=parsed
-                if data is not None:
-                    break
-            except Exception as e:
-                last_err=str(e)[:40]
-                continue
-
-        if data is None:
-            app.fetch_status=f"REAL Digit {d} FAIL {last_err} total {len(all_samples)}"
-            continue
-
-        # Unwrap if still JS proxy
-        if hasattr(data,'to_py'):
-            try: data=data.to_py()
-            except Exception: pass
-
-        # Normalize to list
-        data_list=[]
-        if isinstance(data,list):
-            data_list=data
-        elif isinstance(data,dict):
-            # Could be dict of index->item or have data key
-            if 'data' in data and isinstance(data['data'],list):
-                data_list=data['data']
-            else:
-                try:
-                    # values
-                    data_list=list(data.values())
+                    if hasattr(js_data, 'length'):
+                        # JS array length
+                        tmp=[]
+                        for i in range(int(js_data.length)):
+                            item=js_data[i]
+                            if hasattr(item,'to_py'):
+                                try: item=item.to_py()
+                                except Exception: pass
+                            tmp.append(item)
+                        js_data=tmp
                 except Exception:
-                    data_list=[]
-
-        cnt=0
-        if data_list:
-            # Each item should be dict with input/output
-            for item in data_list[:150]:
+                    pass
+            if not isinstance(js_data, list) or len(js_data)==0:
+                app.fetch_status=f"Digit {d}: empty or not list {type(js_data)}"
+                continue
+            cnt=0
+            # Take first 120 per digit max to keep memory low
+            for item in js_data[:120]:
                 try:
                     if hasattr(item,'to_py'):
                         try: item=item.to_py()
                         except Exception: pass
-                    img=None; lab=d
-                    if isinstance(item,dict):
-                        if 'input' in item:
-                            img=item['input']
-                            out=item.get('output')
-                            if isinstance(out,(list,tuple)):
-                                # find argmax
-                                try:
-                                    if hasattr(out,'to_py'): out=out.to_py()
-                                    lab=int(max(range(len(out)), key=lambda i: float(out[i])))
-                                except Exception:
-                                    lab=d
-                            elif isinstance(out,(int,float)):
-                                lab=int(out)
-                        elif 'image' in item:
-                            img=item['image']; lab=int(item.get('label',d))
-                        elif 'data' in item:
-                            img=item['data']
-                        elif 'pixels' in item:
-                            img=item['pixels']
-                        # Sometimes input is nested
-                        if img is not None and hasattr(img,'to_py'):
-                            try: img=img.to_py()
-                            except Exception: pass
-                    elif isinstance(item,(list,tuple)):
-                        # raw pixels list
-                        img=item
-                    if img is None: continue
+                    # item is dict with input/output
+                    if not isinstance(item, dict):
+                        continue
+                    inp = item.get('input')
+                    out = item.get('output')
+                    if inp is None or out is None:
+                        continue
+                    if hasattr(inp,'to_py'):
+                        try: inp=inp.to_py()
+                        except Exception: pass
+                    if hasattr(out,'to_py'):
+                        try: out=out.to_py()
+                        except Exception: pass
+                    # Normalize input
                     flat=[]
-                    # Handle nested 28x28
-                    if isinstance(img,(list,tuple)) and len(img)>0 and isinstance(img[0],(list,tuple)):
-                        for row in img:
+                    if isinstance(inp, (list,tuple)) and len(inp)>0 and isinstance(inp[0], (list,tuple)):
+                        for row in inp:
                             if hasattr(row,'to_py'):
                                 try: row=row.to_py()
                                 except Exception: pass
@@ -308,9 +239,9 @@ async def fetch_mnist_via_jsdelivr(app):
                             else:
                                 flat.append(row)
                     else:
-                        flat=list(img) if isinstance(img,(list,tuple)) else []
-
-                    if len(flat)<784: continue
+                        flat=list(inp) if isinstance(inp,(list,tuple)) else []
+                    if len(flat)<784:
+                        continue
                     pix=[]
                     for v in flat[:784]:
                         try:
@@ -319,25 +250,43 @@ async def fetch_mnist_via_jsdelivr(app):
                             pix.append(max(0.0,min(1.0,fv)))
                         except Exception:
                             pix.append(0.0)
+                    # label from one-hot
+                    lab=d
+                    try:
+                        if isinstance(out,(list,tuple)) and len(out)==10:
+                            # argmax
+                            max_v=-1; max_i=d
+                            for i,val in enumerate(out):
+                                try:
+                                    fv=float(val)
+                                    if fv>max_v:
+                                        max_v=fv; max_i=i
+                                except Exception:
+                                    pass
+                            lab=max_i
+                    except Exception:
+                        lab=d
                     all_samples.append((pix,int(lab)))
                     cnt+=1
                 except Exception as ie:
                     continue
-        app.fetch_status=f"REAL Digit {d}: +{cnt} total {len(all_samples)} - parsing {type(data_list).__name__} len {len(data_list)}"
-        # Yield to event loop
-        try:
-            await aio.sleep(0.01)
-        except Exception:
-            pass
+            app.fetch_status=f"REAL Digit {d}: +{cnt} total {len(all_samples)}"
+            try:
+                await aio.sleep(0.01)
+            except Exception:
+                pass
+        except Exception as e:
+            app.fetch_status=f"Digit {d} FAIL {str(e)[:40]} total {len(all_samples)}"
+            continue
 
     if len(all_samples)<20:
-        raise Exception(f"Only {len(all_samples)} REAL samples parsed - need 20+, check console")
+        raise Exception(f"Only {len(all_samples)} REAL samples - parsing failed")
     return all_samples
 
 async def fetch_mnist_samples(app):
     app.fetch_status="Fetching REAL..."
     app.mnist_loaded=False
-    # Try npz first (60k)
+    # Try npz
     try:
         app.fetch_status="REAL: pyfetch npz..."
         samples = await fetch_mnist_via_pyodide_npz(app)
@@ -350,7 +299,7 @@ async def fetch_mnist_samples(app):
         random.shuffle(balanced)
         Xb=[p for p,_ in balanced]; yb=[l for _,l in balanced]
         app.X_train_full, app.y_train_full=Xb,yb
-        app.fetch_status=f"REAL {len(samples)} via npz ✓"
+        app.fetch_status=f"REAL {len(samples)} via npz"
         X,y=Xb,yb
         if len(X)>1500: X=X[:1500]; y=y[:1500]
         Xtr,ytr,Xva,yva=train_val_split(X,y,0.78)
@@ -362,11 +311,10 @@ async def fetch_mnist_samples(app):
         app.fetch_status+=f" | Train {len(Xtr)} Val {len(Xva)} REAL npz"
         return
     except Exception as e:
-        tb=traceback.format_exc()
-        app.fetch_status=f"npz fail {str(e)[:60]} -> JSON"
+        app.fetch_status=f"npz fail {str(e)[:50]} -> JSON"
         app.pyodide_status=f"Pyodide: {str(e)[:80]}"
 
-    # Try JSON (real)
+    # JSON
     try:
         samples = await fetch_mnist_via_jsdelivr(app)
         app.all_samples=samples
@@ -378,7 +326,7 @@ async def fetch_mnist_samples(app):
         random.shuffle(balanced)
         Xb=[p for p,_ in balanced]; yb=[l for _,l in balanced]
         app.X_train_full, app.y_train_full=Xb,yb
-        app.fetch_status=f"REAL {len(samples)} via JSON ✓"
+        app.fetch_status=f"REAL {len(samples)} via JSON"
         X,y=Xb,yb
         if len(X)>1500: X=X[:1500]; y=y[:1500]
         Xtr,ytr,Xva,yva=train_val_split(X,y,0.78)
@@ -390,8 +338,8 @@ async def fetch_mnist_samples(app):
         app.fetch_status+=f" | Train {len(Xtr)} Val {len(Xva)} REAL JSON"
         return
     except Exception as e:
-        tb=traceback.format_exc()[:300]
-        app.fetch_status=f"REAL FAILED: {str(e)[:80]} - NO FAKE | {tb[:60]}"
+        tb=traceback.format_exc()
+        app.fetch_status=f"REAL FAILED: {str(e)[:70]} | {tb[:120]}"
         app.mnist_loaded=False
         app.all_samples=[]
         app.X_train=[]; app.y_train=[]
@@ -633,7 +581,7 @@ def paint_at(app,mx,my):
 def onMousePress(app,mx,my):
     if 360<=mx<=430 and 12<=my<=36:
         app.is_playing=not app.is_playing
-        app.fetch_status=f"Play {app.is_playing} m={app.current_m} X={len(app.X_train)} REAL={app.mnist_loaded}"
+        app.fetch_status=f"Play {app.is_playing} X={len(app.X_train)} REAL={app.mnist_loaded}"
         return
     if 440<=mx<=485 and 12<=my<=36:
         step_one_tree(app)
