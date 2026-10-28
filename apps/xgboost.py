@@ -3,8 +3,7 @@ from scs import *
 from browser import aio, window
 import math, random, json, traceback
 
-# NO extension fetch - causes double fetch and JS proxy hell
-# Use window.fetch directly
+# REAL ONLY - NO EXTENSION FETCH (causes double fetch)
 
 try:
     import extensions.pyodide as _py_ext
@@ -171,8 +170,8 @@ async def fetch_mnist_via_pyodide_npz(app):
     raise Exception(f"npz fail {str(py_res)[:120]}")
 
 async def fetch_mnist_via_jsdelivr(app):
-    # REAL ONLY - use window.fetch + response.json() -> native JS array -> to_py
-    # This avoids 220kB string + json.loads overhead
+    # THIS IS THE FIX FOR YOUR SCREENSHOT:
+    # File is {"data": [0,0,0,0.149,0.871,0.882,0,0,0,...]} FLAT, not [{input,output}]
     base_url = "https://cdn.jsdelivr.net/npm/mnist@1.1.0/src/digits/{}.json"
     all_samples=[]
     for d in range(10):
@@ -182,100 +181,93 @@ async def fetch_mnist_via_jsdelivr(app):
             resp = await window.fetch(url, {"mode":"cors"})
             if not resp.ok:
                 raise Exception(f"HTTP {resp.status}")
-            # Use .json() not .text() - native parse, much faster
             js_data = await resp.json()
-            # Convert JS array to Python
             if hasattr(js_data,'to_py'):
                 try: js_data=js_data.to_py()
                 except Exception: pass
-            # js_data should be list
-            if not isinstance(js_data, list):
-                # Try to unwrap if it's a JS proxy that didn't convert
-                try:
-                    if hasattr(js_data, 'length'):
-                        # JS array length
-                        tmp=[]
-                        for i in range(int(js_data.length)):
-                            item=js_data[i]
-                            if hasattr(item,'to_py'):
-                                try: item=item.to_py()
-                                except Exception: pass
-                            tmp.append(item)
-                        js_data=tmp
-                except Exception:
-                    pass
-            if not isinstance(js_data, list) or len(js_data)==0:
-                app.fetch_status=f"Digit {d}: empty or not list {type(js_data)}"
-                continue
+
+            raw = js_data
+            if isinstance(raw, dict) and 'data' in raw:
+                raw = raw['data']
+                if hasattr(raw,'to_py'):
+                    try: raw=raw.to_py()
+                    except Exception: pass
+
             cnt=0
-            # Take first 120 per digit max to keep memory low
-            for item in js_data[:120]:
-                try:
-                    if hasattr(item,'to_py'):
-                        try: item=item.to_py()
-                        except Exception: pass
-                    # item is dict with input/output
-                    if not isinstance(item, dict):
-                        continue
-                    inp = item.get('input')
-                    out = item.get('output')
-                    if inp is None or out is None:
-                        continue
-                    if hasattr(inp,'to_py'):
-                        try: inp=inp.to_py()
-                        except Exception: pass
-                    if hasattr(out,'to_py'):
-                        try: out=out.to_py()
-                        except Exception: pass
-                    # Normalize input
-                    flat=[]
-                    if isinstance(inp, (list,tuple)) and len(inp)>0 and isinstance(inp[0], (list,tuple)):
-                        for row in inp:
-                            if hasattr(row,'to_py'):
-                                try: row=row.to_py()
-                                except Exception: pass
-                            if isinstance(row,(list,tuple)):
-                                flat.extend(list(row))
-                            else:
-                                flat.append(row)
-                    else:
-                        flat=list(inp) if isinstance(inp,(list,tuple)) else []
-                    if len(flat)<784:
-                        continue
-                    pix=[]
-                    for v in flat[:784]:
-                        try:
-                            fv=float(v)
-                            if fv>1.0: fv/=255.0
-                            pix.append(max(0.0,min(1.0,fv)))
-                        except Exception:
-                            pix.append(0.0)
-                    # label from one-hot
-                    lab=d
+            # Format A: [{input,output}]
+            if isinstance(raw, list) and len(raw)>0 and isinstance(raw[0], dict):
+                for item in raw[:200]:
                     try:
-                        if isinstance(out,(list,tuple)) and len(out)==10:
-                            # argmax
-                            max_v=-1; max_i=d
-                            for i,val in enumerate(out):
-                                try:
-                                    fv=float(val)
-                                    if fv>max_v:
-                                        max_v=fv; max_i=i
-                                except Exception:
-                                    pass
-                            lab=max_i
-                    except Exception:
+                        if hasattr(item,'to_py'):
+                            try: item=item.to_py()
+                            except Exception: pass
+                        if not isinstance(item, dict): continue
+                        inp=item.get('input')
+                        out=item.get('output')
+                        if inp is None: continue
+                        if hasattr(inp,'to_py'):
+                            try: inp=inp.to_py()
+                            except Exception: pass
+                        if hasattr(out,'to_py'):
+                            try: out=out.to_py()
+                            except Exception: pass
+                        flat=[]
+                        if isinstance(inp,(list,tuple)) and len(inp)>0 and isinstance(inp[0],(list,tuple)):
+                            for row in inp:
+                                if hasattr(row,'to_py'):
+                                    try: row=row.to_py()
+                                    except Exception: pass
+                                if isinstance(row,(list,tuple)):
+                                    flat.extend(list(row))
+                                else:
+                                    flat.append(row)
+                        else:
+                            flat=list(inp) if isinstance(inp,(list,tuple)) else []
+                        if len(flat)<784: continue
+                        pix=[max(0.0,min(1.0,float(v) if float(v)<=1.0 else float(v)/255.0)) for v in flat[:784]]
                         lab=d
-                    all_samples.append((pix,int(lab)))
-                    cnt+=1
-                except Exception as ie:
-                    continue
-            app.fetch_status=f"REAL Digit {d}: +{cnt} total {len(all_samples)}"
-            try:
-                await aio.sleep(0.01)
-            except Exception:
-                pass
+                        if isinstance(out,(list,tuple)) and len(out)==10:
+                            try: lab=int(max(range(10), key=lambda i: float(out[i])))
+                            except Exception: lab=d
+                        all_samples.append((pix,lab)); cnt+=1
+                    except Exception: continue
+            # Format B: [[784],[784]] - list of images
+            elif isinstance(raw, list) and len(raw)>0 and isinstance(raw[0], (list,tuple)) and isinstance(raw[0][0], (int,float)):
+                # Check if inner is 784 numbers vs nested
+                # Could be list of 784-length images
+                if len(raw[0])==784:
+                    for img in raw[:200]:
+                        try:
+                            if hasattr(img,'to_py'):
+                                try: img=img.to_py()
+                                except Exception: pass
+                            flat=list(img) if isinstance(img,(list,tuple)) else []
+                            if len(flat)<784: continue
+                            pix=[max(0.0,min(1.0,float(v) if float(v)<=1.0 else float(v)/255.0)) for v in flat[:784]]
+                            all_samples.append((pix,d)); cnt+=1
+                        except Exception: continue
+                else:
+                    # Might be flat already? Fall through to flat handling
+                    pass
+            # Format C: FLAT [0,0,0,0.149,0.871,0.882,0,...] -> YOUR SCREENSHOT SHOWS THIS!
+            if isinstance(raw, list) and len(raw)>0 and isinstance(raw[0], (int,float)):
+                total=len(raw)
+                n_images=total//784
+                n_take=min(n_images, 200)
+                for i in range(n_take):
+                    try:
+                        chunk=raw[i*784:(i+1)*784]
+                        if len(chunk)<784: break
+                        pix=[max(0.0,min(1.0,float(v) if float(v)<=1.0 else float(v)/255.0)) for v in chunk]
+                        all_samples.append((pix,d))
+                        cnt+=1
+                    except Exception: continue
+
+            app.fetch_status=f"REAL Digit {d}: +{cnt} total {len(all_samples)} flat_len={len(raw) if isinstance(raw,list) else 0}"
+            try: await aio.sleep(0.01)
+            except Exception: pass
         except Exception as e:
+            import traceback as _tb
             app.fetch_status=f"Digit {d} FAIL {str(e)[:40]} total {len(all_samples)}"
             continue
 
@@ -286,7 +278,6 @@ async def fetch_mnist_via_jsdelivr(app):
 async def fetch_mnist_samples(app):
     app.fetch_status="Fetching REAL..."
     app.mnist_loaded=False
-    # Try npz
     try:
         app.fetch_status="REAL: pyfetch npz..."
         samples = await fetch_mnist_via_pyodide_npz(app)
@@ -314,7 +305,6 @@ async def fetch_mnist_samples(app):
         app.fetch_status=f"npz fail {str(e)[:50]} -> JSON"
         app.pyodide_status=f"Pyodide: {str(e)[:80]}"
 
-    # JSON
     try:
         samples = await fetch_mnist_via_jsdelivr(app)
         app.all_samples=samples
@@ -650,8 +640,8 @@ def onKeyPress(app,key):
 def redrawAll(app):
     drawRect(0,0,app.width,app.height, fill=gradient(rgb(14,16,22), rgb(24,27,35), start='top'))
     drawRect(0,0,app.width,50, fill=rgb(18,20,28), border=rgb(40,45,60), borderWidth=1)
-    drawLabel("XGBoost Lab - REAL MNIST ONLY", 14, 14, size=14, bold=True, fill=rgb(220,230,255), align='left-top')
-    drawLabel("F_m=F_{m-1}+eta*h_m | REAL 60k/10k 784-d | NO FAKES", 14, 32, size=9, fill=rgb(130,255,130), align='left-top')
+    drawLabel("XGBoost Lab - REAL MNIST ONLY - FLAT DATA FIX", 14, 14, size=14, bold=True, fill=rgb(220,230,255), align='left-top')
+    drawLabel("F_m=F_{m-1}+eta*h_m | REAL 60k/10k 784-d | data:[0,0,0.149,...] chunk 784", 14, 32, size=8, fill=rgb(130,255,130), align='left-top')
     play_col=rgb(0,212,255) if app.is_playing else rgb(55,65,85)
     drawRect(360,12,70,26, fill=play_col, border=rgb(90,110,140), borderWidth=1, roundness=7)
     drawLabel("Play" if not app.is_playing else "Pause", 395, 25, size=11, bold=True, fill=rgb(10,15,25) if app.is_playing else rgb(200,220,255))
@@ -764,7 +754,7 @@ def redrawAll(app):
                 drawLabel(str(app.y_val[i]), x+17, y+40, size=9, bold=True, fill=rgb(0,212,255))
         else:
             drawLabel(f"No trees yet - X={len(app.X_train)} REAL={app.mnist_loaded}", 312,120, size=10, fill=rgb(120,255,120), align='left-top')
-            drawLabel("Press Play - REAL DATA ONLY - NO FAKES", 312,138, size=9, fill=rgb(100,255,100), align='left-top')
+            drawLabel("Press Play - REAL DATA ONLY - FLAT FIX", 312,138, size=9, fill=rgb(100,255,100), align='left-top')
     drawRect(312,220,368,130, fill=rgb(14,18,26), border=rgb(35,40,55), borderWidth=1, roundness=8)
     drawLabel("Loss vs #trees - cyan train / gold val", 320,228, size=9, bold=True, fill=rgb(180,200,220), align='left-top')
     drawLine(338,246,338,332, lineWidth=1, fill=rgb(60,70,90))
