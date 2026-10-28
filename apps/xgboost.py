@@ -3,8 +3,6 @@ from scs import *
 from browser import aio, window
 import math, random, json, traceback
 
-# REAL ONLY - NO EXTENSION FETCH (causes double fetch)
-
 try:
     import extensions.pyodide as _py_ext
     PYODIDE_EXT_OK = True
@@ -170,109 +168,124 @@ async def fetch_mnist_via_pyodide_npz(app):
     raise Exception(f"npz fail {str(py_res)[:120]}")
 
 async def fetch_mnist_via_jsdelivr(app):
-    # THIS IS THE FIX FOR YOUR SCREENSHOT:
-    # File is {"data": [0,0,0,0.149,0.871,0.882,0,0,0,...]} FLAT, not [{input,output}]
+    # CRITICAL FIX: Your screenshot shows {"data":[0,0,0,0.149,0.871,0.882,0,0,...]} FLAT
+    # Old code used resp.json() which returns JS proxy where isinstance(float) fails -> 0 samples
+    # New code uses resp.text() + json.loads() -> pure Python, no proxy hell
     base_url = "https://cdn.jsdelivr.net/npm/mnist@1.1.0/src/digits/{}.json"
     all_samples=[]
     for d in range(10):
         url = base_url.format(d)
         try:
-            app.fetch_status=f"REAL fetching digit {d}..."
-            resp = await window.fetch(url, {"mode":"cors"})
+            app.fetch_status=f"REAL {d}/9 fetching... total {len(all_samples)}"
+            # NO mode option - was causing Brython dict->JS conversion issues
+            resp = await window.fetch(url)
             if not resp.ok:
                 raise Exception(f"HTTP {resp.status}")
-            js_data = await resp.json()
-            if hasattr(js_data,'to_py'):
-                try: js_data=js_data.to_py()
-                except Exception: pass
 
-            raw = js_data
+            # FORCE pure Python via text + json.loads (not resp.json() which is JS proxy)
+            txt = await resp.text()
+            if hasattr(txt,'to_py'):
+                try: txt=txt.to_py()
+                except Exception: pass
+            txt = str(txt)
+
+            # Parse - this gives pure Python
+            parsed = json.loads(txt)
+
+            raw = parsed
             if isinstance(raw, dict) and 'data' in raw:
                 raw = raw['data']
-                if hasattr(raw,'to_py'):
-                    try: raw=raw.to_py()
-                    except Exception: pass
 
             cnt=0
-            # Format A: [{input,output}]
-            if isinstance(raw, list) and len(raw)>0 and isinstance(raw[0], dict):
-                for item in raw[:200]:
-                    try:
-                        if hasattr(item,'to_py'):
-                            try: item=item.to_py()
-                            except Exception: pass
-                        if not isinstance(item, dict): continue
-                        inp=item.get('input')
-                        out=item.get('output')
-                        if inp is None: continue
-                        if hasattr(inp,'to_py'):
-                            try: inp=inp.to_py()
-                            except Exception: pass
-                        if hasattr(out,'to_py'):
-                            try: out=out.to_py()
-                            except Exception: pass
-                        flat=[]
-                        if isinstance(inp,(list,tuple)) and len(inp)>0 and isinstance(inp[0],(list,tuple)):
-                            for row in inp:
-                                if hasattr(row,'to_py'):
-                                    try: row=row.to_py()
-                                    except Exception: pass
-                                if isinstance(row,(list,tuple)):
-                                    flat.extend(list(row))
-                                else:
-                                    flat.append(row)
-                        else:
-                            flat=list(inp) if isinstance(inp,(list,tuple)) else []
-                        if len(flat)<784: continue
-                        pix=[max(0.0,min(1.0,float(v) if float(v)<=1.0 else float(v)/255.0)) for v in flat[:784]]
-                        lab=d
-                        if isinstance(out,(list,tuple)) and len(out)==10:
-                            try: lab=int(max(range(10), key=lambda i: float(out[i])))
-                            except Exception: lab=d
-                        all_samples.append((pix,lab)); cnt+=1
-                    except Exception: continue
-            # Format B: [[784],[784]] - list of images
-            elif isinstance(raw, list) and len(raw)>0 and isinstance(raw[0], (list,tuple)) and isinstance(raw[0][0], (int,float)):
-                # Check if inner is 784 numbers vs nested
-                # Could be list of 784-length images
-                if len(raw[0])==784:
-                    for img in raw[:200]:
-                        try:
-                            if hasattr(img,'to_py'):
-                                try: img=img.to_py()
-                                except Exception: pass
-                            flat=list(img) if isinstance(img,(list,tuple)) else []
-                            if len(flat)<784: continue
-                            pix=[max(0.0,min(1.0,float(v) if float(v)<=1.0 else float(v)/255.0)) for v in flat[:784]]
-                            all_samples.append((pix,d)); cnt+=1
-                        except Exception: continue
-                else:
-                    # Might be flat already? Fall through to flat handling
-                    pass
-            # Format C: FLAT [0,0,0,0.149,0.871,0.882,0,...] -> YOUR SCREENSHOT SHOWS THIS!
-            if isinstance(raw, list) and len(raw)>0 and isinstance(raw[0], (int,float)):
-                total=len(raw)
-                n_images=total//784
-                n_take=min(n_images, 200)
-                for i in range(n_take):
-                    try:
+            # DEBUG: log raw type info for first digit
+            if d==0:
+                tname = type(raw).__name__
+                flen = len(raw) if hasattr(raw,'__len__') else -1
+                first_type = type(raw[0]).__name__ if flen>0 else 'empty'
+                app.fetch_status=f"REAL raw type {tname} len {flen} first {first_type}"
+
+            # Case flat list of floats -> YOUR SCREENSHOT FORMAT
+            if isinstance(raw, list) and len(raw)>0:
+                # Try to detect flat float list
+                # Check first element can be cast to float and not list/dict
+                first = raw[0]
+                if isinstance(first, (int,float)):
+                    total=len(raw)
+                    n_images=total//784
+                    n_take=min(n_images, 200)
+                    for i in range(n_take):
                         chunk=raw[i*784:(i+1)*784]
                         if len(chunk)<784: break
-                        pix=[max(0.0,min(1.0,float(v) if float(v)<=1.0 else float(v)/255.0)) for v in chunk]
+                        pix=[]
+                        for v in chunk:
+                            try:
+                                fv=float(v)
+                                if fv>1.0: fv/=255.0
+                                pix.append(max(0.0,min(1.0,fv)))
+                            except Exception:
+                                pix.append(0.0)
                         all_samples.append((pix,d))
                         cnt+=1
-                    except Exception: continue
+                elif isinstance(first, dict):
+                    # [{input,output}]
+                    for item in raw[:200]:
+                        try:
+                            inp=item.get('input')
+                            out=item.get('output')
+                            if inp is None: continue
+                            flat=[]
+                            if isinstance(inp,(list,tuple)) and len(inp)>0 and isinstance(inp[0],(list,tuple)):
+                                for row in inp:
+                                    if isinstance(row,(list,tuple)):
+                                        flat.extend(list(row))
+                                    else:
+                                        flat.append(row)
+                            else:
+                                flat=list(inp) if isinstance(inp,(list,tuple)) else []
+                            if len(flat)<784: continue
+                            pix=[max(0.0,min(1.0,float(v) if float(v)<=1.0 else float(v)/255.0)) for v in flat[:784]]
+                            lab=d
+                            if isinstance(out,(list,tuple)) and len(out)==10:
+                                try: lab=int(max(range(10), key=lambda i: float(out[i])))
+                                except Exception: lab=d
+                            all_samples.append((pix,lab)); cnt+=1
+                        except Exception: continue
+                elif isinstance(first, (list,tuple)):
+                    # [[784],[784]] or nested
+                    if len(first)==784 and isinstance(first[0], (int,float)):
+                        for img in raw[:200]:
+                            try:
+                                flat=list(img)
+                                if len(flat)<784: continue
+                                pix=[max(0.0,min(1.0,float(v) if float(v)<=1.0 else float(v)/255.0)) for v in flat[:784]]
+                                all_samples.append((pix,d)); cnt+=1
+                            except Exception: continue
+                    else:
+                        # Maybe flat nested? Try to flatten first element
+                        # Fallback: try to flatten all
+                        flat_all=[]
+                        for elem in raw:
+                            if isinstance(elem,(list,tuple)):
+                                flat_all.extend(list(elem))
+                            else:
+                                try: flat_all.append(float(elem))
+                                except Exception: pass
+                        total=len(flat_all)
+                        n_images=total//784
+                        n_take=min(n_images,200)
+                        for i in range(n_take):
+                            chunk=flat_all[i*784:(i+1)*784]
+                            pix=[max(0.0,min(1.0,float(v) if float(v)<=1.0 else float(v)/255.0)) for v in chunk]
+                            all_samples.append((pix,d)); cnt+=1
 
-            app.fetch_status=f"REAL Digit {d}: +{cnt} total {len(all_samples)} flat_len={len(raw) if isinstance(raw,list) else 0}"
-            try: await aio.sleep(0.01)
-            except Exception: pass
+            app.fetch_status=f"REAL Digit {d}: +{cnt} total {len(all_samples)}"
         except Exception as e:
-            import traceback as _tb
-            app.fetch_status=f"Digit {d} FAIL {str(e)[:40]} total {len(all_samples)}"
+            tb=traceback.format_exc()
+            app.fetch_status=f"Digit {d} FAIL {str(e)[:50]} | {tb[:100]} total {len(all_samples)}"
             continue
 
     if len(all_samples)<20:
-        raise Exception(f"Only {len(all_samples)} REAL samples - parsing failed")
+        raise Exception(f"Only {len(all_samples)} samples - still failing")
     return all_samples
 
 async def fetch_mnist_samples(app):
@@ -316,7 +329,7 @@ async def fetch_mnist_samples(app):
         random.shuffle(balanced)
         Xb=[p for p,_ in balanced]; yb=[l for _,l in balanced]
         app.X_train_full, app.y_train_full=Xb,yb
-        app.fetch_status=f"REAL {len(samples)} via JSON"
+        app.fetch_status=f"REAL {len(samples)} via JSON flat fix"
         X,y=Xb,yb
         if len(X)>1500: X=X[:1500]; y=y[:1500]
         Xtr,ytr,Xva,yva=train_val_split(X,y,0.78)
@@ -329,7 +342,7 @@ async def fetch_mnist_samples(app):
         return
     except Exception as e:
         tb=traceback.format_exc()
-        app.fetch_status=f"REAL FAILED: {str(e)[:70]} | {tb[:120]}"
+        app.fetch_status=f"REAL FAILED: {str(e)[:70]} | {tb[:150]}"
         app.mnist_loaded=False
         app.all_samples=[]
         app.X_train=[]; app.y_train=[]
@@ -477,7 +490,8 @@ def onStep(app):
     try:
         if app.is_playing:
             if not app.mnist_loaded:
-                app.fetch_status="Waiting REAL - "+app.fetch_status[:40]
+                # DON'T overwrite fetch_status - let fetch report
+                pass
             elif not app.X_train:
                 app.fetch_status="No X_train REAL failed"
                 app.is_playing=False
@@ -640,8 +654,8 @@ def onKeyPress(app,key):
 def redrawAll(app):
     drawRect(0,0,app.width,app.height, fill=gradient(rgb(14,16,22), rgb(24,27,35), start='top'))
     drawRect(0,0,app.width,50, fill=rgb(18,20,28), border=rgb(40,45,60), borderWidth=1)
-    drawLabel("XGBoost Lab - REAL MNIST ONLY - FLAT DATA FIX", 14, 14, size=14, bold=True, fill=rgb(220,230,255), align='left-top')
-    drawLabel("F_m=F_{m-1}+eta*h_m | REAL 60k/10k 784-d | data:[0,0,0.149,...] chunk 784", 14, 32, size=8, fill=rgb(130,255,130), align='left-top')
+    drawLabel("XGBoost Lab - REAL MNIST ONLY - FLAT FIX v2", 14, 14, size=14, bold=True, fill=rgb(220,230,255), align='left-top')
+    drawLabel("F_m=F_{m-1}+eta*h_m | REAL 60k/10k 784-d | resp.text()+json.loads() pure py", 14, 32, size=8, fill=rgb(130,255,130), align='left-top')
     play_col=rgb(0,212,255) if app.is_playing else rgb(55,65,85)
     drawRect(360,12,70,26, fill=play_col, border=rgb(90,110,140), borderWidth=1, roundness=7)
     drawLabel("Play" if not app.is_playing else "Pause", 395, 25, size=11, bold=True, fill=rgb(10,15,25) if app.is_playing else rgb(200,220,255))
@@ -754,7 +768,7 @@ def redrawAll(app):
                 drawLabel(str(app.y_val[i]), x+17, y+40, size=9, bold=True, fill=rgb(0,212,255))
         else:
             drawLabel(f"No trees yet - X={len(app.X_train)} REAL={app.mnist_loaded}", 312,120, size=10, fill=rgb(120,255,120), align='left-top')
-            drawLabel("Press Play - REAL DATA ONLY - FLAT FIX", 312,138, size=9, fill=rgb(100,255,100), align='left-top')
+            drawLabel("Press Play - REAL DATA ONLY - FLAT FIX v2", 312,138, size=9, fill=rgb(100,255,100), align='left-top')
     drawRect(312,220,368,130, fill=rgb(14,18,26), border=rgb(35,40,55), borderWidth=1, roundness=8)
     drawLabel("Loss vs #trees - cyan train / gold val", 320,228, size=9, bold=True, fill=rgb(180,200,220), align='left-top')
     drawLine(338,246,338,332, lineWidth=1, fill=rgb(60,70,90))
