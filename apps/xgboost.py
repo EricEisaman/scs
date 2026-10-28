@@ -226,15 +226,25 @@ async def resilient_pyodide_run(code_str):
         pass
     return None
 
-async def fetch_hf_rows(dataset="mnist", split="train", offset=0, length=200):
-    urls=[
-        f"https://datasets-server.huggingface.co/rows?dataset={dataset}&config=default&split={split}&offset={offset}&length={length}",
-        f"https://datasets-server.huggingface.co/rows?dataset=ylecun%2Fmnist&config=default&split={split}&offset={offset}&length={length}",
+async def fetch_hf_rows(dataset="mnist", split="train", offset=0, length=100):
+    # HF datasets-server: length max 100, config is 'mnist' not 'default' for ylecun/mnist
+    # Try several dataset/config combos
+    length=min(length,100)
+    combos=[
+        (dataset, "mnist", split),
+        (dataset, "default", split),
+        ("ylecun/mnist", "mnist", split),
+        ("ylecun/mnist", "default", split),
+        ("mnist", "mnist", split),
+        ("mnist", "default", split),
     ]
-    for url in urls:
+    for ds, cfg, sp in combos:
+        ds_enc=ds.replace("/", "%2F")
+        url=f"https://datasets-server.huggingface.co/rows?dataset={ds_enc}&config={cfg}&split={sp}&offset={offset}&length={length}"
         try:
             resp = await window.fetch(url, {"mode": "cors"})
-            if not resp.ok: continue
+            if not resp.ok:
+                continue
             js_data = await resp.json()
             if hasattr(js_data,'to_py'):
                 try: js_data=js_data.to_py()
@@ -242,7 +252,8 @@ async def fetch_hf_rows(dataset="mnist", split="train", offset=0, length=200):
             rows=None
             if isinstance(js_data, dict):
                 rows=js_data.get('rows') or js_data.get('data')
-            if not rows: continue
+            if not rows:
+                continue
             samples=[]
             for r in rows[:length]:
                 try:
@@ -252,7 +263,11 @@ async def fetch_hf_rows(dataset="mnist", split="train", offset=0, length=200):
                     img=row.get('image')
                     if isinstance(img,dict):
                         if 'data' in img: img=img['data']
-                        else: continue
+                        elif 'bytes' in img and img['bytes'] is not None:
+                            # bytes case not handled
+                            continue
+                        else:
+                            continue
                     flat=[]
                     if isinstance(img,list):
                         if len(img)>0 and isinstance(img[0],list):
@@ -293,24 +308,31 @@ async def fetch_mnist_samples(app):
         app.fetch_status="Fetching per-digit JSON via jsDelivr 0-9..."
         for d in range(10):
             data=None
+            last_err=""
             for u in [digit_json_base.format(d), digit_json_fb.format(d)]:
                 try:
                     if FETCH_OK and fetch_json is not None:
                         data=await fetch_json(u)
                     else:
                         resp=await window.fetch(u, {"mode":"cors"})
-                        if not resp.ok: continue
+                        if not resp.ok:
+                            last_err=f"HTTP {resp.status}"
+                            continue
                         txt=await resp.text()
                         if hasattr(txt,'to_py'): txt=txt.to_py()
                         import json as _js
                         data=_js.loads(str(txt))
                     if data is not None: break
-                except Exception:
+                except Exception as e:
+                    last_err=str(e)[:30]
                     continue
-            if data is None: continue
+            if data is None:
+                app.fetch_status=f"Digit {d} miss {last_err} total {len(all_samples)}"
+                continue
             parsed=0
             if isinstance(data,list):
-                for item in data[:600]:
+                # Take 150 per digit to stay fast
+                for item in data[:150]:
                     try:
                         img=None; lab=d
                         if isinstance(item,dict):
@@ -323,12 +345,16 @@ async def fetch_mnist_samples(app):
                                 img=item['image']; lab=item.get('label',d)
                             elif 'data' in item:
                                 img=item['data']
+                            elif 'pixels' in item:
+                                img=item['pixels']
                         elif isinstance(item,list):
                             img=item
                         if img is None: continue
                         flat=[]
                         if isinstance(img,list) and len(img)>0 and isinstance(img[0],list):
-                            for row in img: flat.extend(row)
+                            for row in img:
+                                if isinstance(row,list): flat.extend(row)
+                                else: flat.append(row)
                         else:
                             flat=img
                         if len(flat)<784: continue
@@ -373,9 +399,9 @@ async def fetch_mnist_samples(app):
     try:
         app.fetch_status="Trying Hugging Face..."
         samples=[]
-        for off in [0,200,400,600,800,1000]:
+        for off in [0,100,200,300,400,500,600,700,800,900,1000,1100]:
             try:
-                batch=await fetch_hf_rows("mnist","train",off,200)
+                batch=await fetch_hf_rows("mnist","train",off,100)
                 samples.extend(batch)
                 app.fetch_status=f"HF +{len(batch)} total {len(samples)}"
                 if len(samples)>=1200: break
@@ -383,7 +409,7 @@ async def fetch_mnist_samples(app):
                 continue
         if len(samples)<300:
             try:
-                batch=await fetch_hf_rows("mnist","test",0,300)
+                batch=await fetch_hf_rows("mnist","test",0,100)
                 samples.extend(batch)
             except Exception:
                 pass
