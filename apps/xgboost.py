@@ -1,8 +1,9 @@
 
 from scs import *
 from browser import aio, window
-import math, random
+import math, random, json
 
+# Extensions - we will use window.fetch for JSON to avoid JS proxy bugs
 try:
     from extensions.fetch import fetch_json, fetch_text, fetch, FetchError
     FETCH_OK = True
@@ -16,10 +17,7 @@ except Exception:
 try:
     import extensions.pyodide as _py_ext
     PYODIDE_EXT_OK = True
-    _py_candidates = []
-    for _name in ['run_python_async','run_python','run','exec','evaluate','run_code','execute','runPythonAsync','runPython']:
-        if hasattr(_py_ext, _name):
-            _py_candidates.append(_name)
+    _py_candidates = ['run_python_async','run_python','run','exec','evaluate','run_code','execute','runPythonAsync','runPython']
 except Exception:
     PYODIDE_EXT_OK = False
     _py_ext = None
@@ -47,14 +45,11 @@ def accuracy_multiclass(y_true, probs):
     return c/len(y_true) if y_true else 0.0
 
 def find_best_stump_fast(X, target, n_feat_sample=16, min_leaf=8):
-    # Optimized for Brython speed: fewer features, fewer thresholds
     n=len(X)
     if n==0: return 0,0.5,0.0,0.0,0.0
     d=len(X[0])
-    # sample 16 features instead of 32 for speed
     feat_pool=random.sample(range(d), min(n_feat_sample,d))
     best_gain=-1e100; best_f=feat_pool[0]; best_thr=0.5; best_left=0.0; best_right=0.0
-    # Only 3 thresholds for speed
     for f in feat_pool:
         vals=[X[i][f] for i in range(n)]
         svals=sorted(vals)
@@ -72,76 +67,6 @@ def find_best_stump_fast(X, target, n_feat_sample=16, min_leaf=8):
             if gain>best_gain:
                 best_gain=gain; best_f=f; best_thr=thr; best_left=lm; best_right=rm
     return best_f,best_thr,best_left,best_right,best_gain
-
-def generate_prototype_10():
-    def blank(): return [0.0]*784
-    def idx(r,c): return r*28+c
-    protos=[blank() for _ in range(10)]
-    for r in range(28):
-        for c in range(28):
-            dr=r-14; dc=c-14; d=math.hypot(dr*1.2, dc)
-            if 9<d<13: protos[0][idx(r,c)]=0.9
-    for r in range(6,22):
-        for c in range(13,16): protos[1][idx(r,c)]=0.9
-    for r in range(28):
-        for c in range(28):
-            if 6<=r<=8 and 8<=c<=20: protos[2][idx(r,c)]=0.9
-            if 9<=r<=13 and 16<=c<=20: protos[2][idx(r,c)]=0.9
-            if 14<=r<=16 and 8<=c<=20: protos[2][idx(r,c)]=0.9
-            if 17<=r<=21 and 8<=c<=12: protos[2][idx(r,c)]=0.9
-            if 22<=r<=24 and 8<=c<=20: protos[2][idx(r,c)]=0.9
-    for r in range(28):
-        for c in range(28):
-            dr1=r-8; dc1=c-18
-            if 12<math.hypot(dr1*1.2, dc1)<16 and c>12 and r<14: protos[3][idx(r,c)]=0.9
-            dr2=r-19; dc2=c-18
-            if 12<math.hypot(dr2*1.2, dc2)<16 and c>12 and r>=10: protos[3][idx(r,c)]=0.9
-            if 14<=c<=16 and 6<=r<=22: protos[3][idx(r,c)]=max(protos[3][idx(r,c)],0.3)
-    for r in range(6,22):
-        for c in range(8,20):
-            if abs(c-14)<1 and r<16: protos[4][idx(r,c)]=0.9
-            if r==16 and 8<=c<=20: protos[4][idx(r,c)]=0.9
-            if c>14 and r>10 and abs((c-14)-(r-10)*0.6)<1: protos[4][idx(r,c)]=0.9
-    for r in range(28):
-        for c in range(28):
-            if 6<=r<=8 and 8<=c<=20: protos[5][idx(r,c)]=0.9
-            if 9<=r<=13 and 8<=c<=12: protos[5][idx(r,c)]=0.9
-            if 14<=r<=16 and 8<=c<=20: protos[5][idx(r,c)]=0.9
-            if 17<=r<=21 and 16<=c<=20: protos[5][idx(r,c)]=0.9
-            if 22<=r<=24 and 8<=c<=20: protos[5][idx(r,c)]=0.9
-    for r in range(28):
-        for c in range(28):
-            dr=r-18; dc=c-14
-            if 8<math.hypot(dr,dc)<12: protos[6][idx(r,c)]=0.9
-            if 8<=r<=14 and 8<=c<=12: protos[6][idx(r,c)]=0.9
-    for r in range(28):
-        for c in range(28):
-            if 6<=r<=8 and 8<=c<=20: protos[7][idx(r,c)]=0.9
-            if 9<=r<=20 and abs(c-(20-(r-8)*0.8))<1: protos[7][idx(r,c)]=0.9
-    for r in range(28):
-        for c in range(28):
-            drt=r-9; dct=c-14; drb=r-19; dcb=c-14
-            if 9<math.hypot(drt*1.1,dct)<13: protos[8][idx(r,c)]=0.9
-            if 9<math.hypot(drb*1.1,dcb)<13: protos[8][idx(r,c)]=0.9
-            if abs(c-14)<2 and 9<r<19: protos[8][idx(r,c)]=max(protos[8][idx(r,c)],0.4)
-    for r in range(28):
-        for c in range(28):
-            dr=r-10; dc=c-14
-            if 8<math.hypot(dr,dc)<12: protos[9][idx(r,c)]=0.9
-            if 14<=r<=22 and 16<=c<=20: protos[9][idx(r,c)]=0.9
-    return protos
-
-def synth_mnist_full(n_per_class=80):
-    protos=generate_prototype_10()
-    X=[]; y=[]
-    for digit in range(10):
-        base=protos[digit]
-        for _ in range(n_per_class):
-            img=[min(1.0,max(0.0,v+random.gauss(0,0.22)+(random.uniform(-0.3,0.3) if random.random()<0.05 else 0))) for v in base]
-            X.append(img); y.append(digit)
-    combined=list(zip(X,y)); random.shuffle(combined)
-    X[:],y[:]=zip(*combined)
-    return list(X),list(y)
 
 def train_val_split(X,y,ratio=0.78):
     by_class={}
@@ -174,7 +99,7 @@ def train_val_split(X,y,ratio=0.78):
     return Xtr,ytr,Xva,yva
 
 async def resilient_pyodide_run(code_str):
-    async def unwrap(res, max_depth=10):
+    async def unwrap(res, max_depth=12):
         for _ in range(max_depth):
             if res is None: break
             if hasattr(res,'to_py'):
@@ -184,33 +109,31 @@ async def resilient_pyodide_run(code_str):
                 except Exception: pass
             try:
                 if hasattr(res,'__await__'):
-                    try: res=await res; continue
-                    except Exception: break
+                    res=await res; continue
                 if hasattr(res,'then') and callable(getattr(res,'then')):
-                    try: res=await res; continue
-                    except Exception: break
+                    res=await res; continue
                 s=str(res)
-                if '<coroutine' in s or 'coroutine' in s.lower():
+                if '<coroutine' in s.lower():
                     if isinstance(res,str): return None
-                    try:
-                        if hasattr(res,'__await__'): res=await res; continue
-                    except Exception: return None
+                    if hasattr(res,'__await__'):
+                        try: res=await res; continue
+                        except Exception: return None
+                    return None
             except Exception: pass
             break
-        try:
-            if isinstance(res,str) and '<coroutine' in res: return None
-        except Exception: pass
+        if isinstance(res,str) and '<coroutine' in res.lower():
+            return None
         return res
+
     if PYODIDE_EXT_OK and _py_ext is not None:
         for name in _py_candidates:
             try:
-                fn=getattr(_py_ext, name)
+                fn=getattr(_py_ext, name, None)
+                if fn is None: continue
                 raw=fn(code_str)
                 res=await unwrap(raw)
                 if res is None: continue
-                try:
-                    if isinstance(res,str) and '<coroutine' in res: continue
-                except Exception: pass
+                if isinstance(res,str) and '<coroutine' in res.lower(): continue
                 return res
             except Exception: continue
     try:
@@ -222,17 +145,18 @@ async def resilient_pyodide_run(code_str):
     return None
 
 async def fetch_mnist_via_pyodide_npz(app):
+    # REAL DATA ONLY - tf bucket has CORS
     code_lines=[
-        "import io, json, traceback",
+        "import io, traceback",
         "try:",
         "    import numpy as np",
         "    from pyodide.http import pyfetch",
         "    url='https://storage.googleapis.com/tensorflow/tf-keras-datasets/mnist.npz'",
-        "    response = await pyfetch(url)",
-        "    if not response.ok:",
-        "        result={'status':'error','msg':f'HTTP {response.status}'}",
+        "    resp = await pyfetch(url)",
+        "    if not resp.ok:",
+        "        result={'status':'error','msg':f'HTTP {resp.status}'}",
         "    else:",
-        "        data = await response.bytes()",
+        "        data = await resp.bytes()",
         "        with np.load(io.BytesIO(data), allow_pickle=False) as mnist:",
         "            x_train = mnist['x_train']",
         "            y_train = mnist['y_train']",
@@ -245,7 +169,7 @@ async def fetch_mnist_via_pyodide_npz(app):
         "        samples=[]",
         "        for c in range(10): samples.extend(by_class[c][:150])",
         "        import random as _rnd; _rnd.shuffle(samples)",
-        "        result={'status':'ok','samples':samples}",
+        "        result={'status':'ok','samples':samples,'total':int(len(y_train))}",
         "except Exception as e:",
         "    result={'status':'error','msg':str(e),'trace':traceback.format_exc()}",
         "result",
@@ -257,223 +181,150 @@ async def fetch_mnist_via_pyodide_npz(app):
         try: py_res=py_res.to_py()
         except Exception: pass
     if isinstance(py_res,str):
-        try:
-            import json as _js
-            py_res=_js.loads(py_res)
+        try: py_res=json.loads(py_res)
         except Exception: pass
     if isinstance(py_res,dict) and py_res.get('status')=='ok':
         samples=py_res.get('samples',[])
         if samples: return samples
-    raise Exception(f"pyfetch npz fail {str(py_res)[:120]}")
+    raise Exception(f"pyfetch npz fail {str(py_res)[:150]}")
 
-async def fetch_mnist_samples(app):
-    app.fetch_status="Fetching 10-way..."
-    app.mnist_loaded=False
-    try:
-        app.fetch_status="Fetching mnist.npz via Pyodide..."
-        samples = await fetch_mnist_via_pyodide_npz(app)
-        if len(samples)>=50:
-            app.all_samples=samples
-            by_class={i:[] for i in range(10)}
-            for pix,lab in samples:
-                if len(by_class[lab])<300: by_class[lab].append((pix,lab))
-            balanced=[]
-            for c in range(10): balanced.extend(by_class[c])
-            random.shuffle(balanced)
-            Xb=[p for p,_ in balanced]; yb=[l for _,l in balanced]
-            app.X_train_full, app.y_train_full=Xb,yb
-            app.fetch_status=f"Loaded {len(samples)} via npz ✓"
-            X,y=Xb,yb
-            if len(X)>1500: X=X[:1500]; y=y[:1500]
-            Xtr,ytr,Xva,yva=train_val_split(X,y,0.78)
-            if len(Xtr)==0 and len(Xva)>0: Xtr,Xva=Xva,[]; ytr,yva=yva,[]
-            if len(Xva)==0 and len(Xtr)>10:
-                cut=int(len(Xtr)*0.2)
-                if cut>0: Xva=Xtr[:cut]; yva=ytr[:cut]; Xtr=Xtr[cut:]; ytr=ytr[cut:]
-            app.X_train,app.y_train=Xtr,ytr
-            app.X_val,app.y_val=Xva,yva
-            app.F_train=[[0.0]*10 for _ in range(len(Xtr))]
-            app.F_val=[[0.0]*10 for _ in range(len(Xva))]
-            app.mnist_loaded=True
-            app.fetch_status+=f" | Train {len(Xtr)} Val {len(Xva)}"
-            return
-    except Exception as e:
-        app.fetch_status=f"npz fail {str(e)[:30]} -> jsDelivr"
-
-    digit_json_base="https://cdn.jsdelivr.net/npm/mnist@1.1.0/src/digits/{}.json"
-    digit_json_fb="https://raw.githack.com/cazala/mnist/master/src/digits/{}.json"
+async def fetch_mnist_via_jsdelivr(app):
+    # REAL DATA ONLY - per-digit JSON, use window.fetch directly to avoid proxy bug
+    base="https://cdn.jsdelivr.net/npm/mnist@1.1.0/src/digits/{}.json"
+    fallback="https://raw.githack.com/cazala/mnist/master/src/digits/{}.json"
     all_samples=[]
-    try:
-        app.fetch_status="Fetching per-digit JSON 0-9..."
-        for d in range(10):
-            data=None; last_err=""
-            for u in [digit_json_base.format(d), digit_json_fb.format(d)]:
-                try:
-                    if FETCH_OK and fetch_json is not None:
-                        raw=await fetch_json(u)
-                        if hasattr(raw,'to_py'):
-                            try: raw=raw.to_py()
-                            except Exception: pass
-                        data=raw
-                    else:
-                        resp=await window.fetch(u, {"mode":"cors"})
-                        if not resp.ok: last_err=f"HTTP {resp.status}"; continue
-                        txt=await resp.text()
-                        if hasattr(txt,'to_py'): txt=txt.to_py()
-                        import json as _js
-                        data=_js.loads(str(txt))
-                    if data is not None: break
-                except Exception as e:
-                    last_err=str(e)[:30]; continue
-            if data is None:
-                app.fetch_status=f"Digit {d} miss {last_err} total {len(all_samples)}"
-                continue
-            if hasattr(data,'to_py'):
-                try: data=data.to_py()
-                except Exception: pass
-            data_list=data if isinstance(data,list) else []
-            if not data_list and isinstance(data,dict):
-                try: data_list=list(data.values())
-                except Exception: data_list=[]
-            parsed=0
-            if data_list:
-                for item in data_list[:150]:
-                    try:
-                        img=None; lab=d
-                        if isinstance(item,dict):
-                            if 'input' in item:
-                                img=item['input']
-                                out=item.get('output')
-                                if isinstance(out,list): lab=max(range(len(out)), key=lambda i: out[i]) if out else d
-                            elif 'image' in item: img=item['image']; lab=item.get('label',d)
-                            elif 'data' in item: img=item['data']
-                            elif 'pixels' in item: img=item['pixels']
-                        elif isinstance(item,list): img=item
-                        if img is None: continue
-                        flat=[]
-                        if isinstance(img,list) and len(img)>0 and isinstance(img[0],list):
-                            for row in img:
-                                if isinstance(row,list): flat.extend(row)
-                                else: flat.append(row)
-                        else: flat=img
-                        if len(flat)<784: continue
-                        pix=[]
-                        for v in flat[:784]:
-                            try:
-                                fv=float(v)
-                                if fv>1.0: fv/=255.0
-                                pix.append(max(0.0,min(1.0,fv)))
-                            except Exception: pix.append(0.0)
-                        all_samples.append((pix,int(lab))); parsed+=1
-                    except Exception: continue
-            app.fetch_status=f"Digit {d}: +{parsed} total {len(all_samples)}"
-        if len(all_samples)>=50:
-            app.all_samples=all_samples
-            by_class={i:[] for i in range(10)}
-            for pix,lab in all_samples:
-                if len(by_class[lab])<300: by_class[lab].append((pix,lab))
-            balanced=[]
-            for c in range(10): balanced.extend(by_class[c])
-            random.shuffle(balanced)
-            Xb=[p for p,_ in balanced]; yb=[l for _,l in balanced]
-            app.X_train_full, app.y_train_full=Xb,yb
-            app.fetch_status=f"Loaded {len(all_samples)} via JSON ✓"
-            X,y=Xb,yb
-            if len(X)>1500: X=X[:1500]; y=y[:1500]
-            Xtr,ytr,Xva,yva=train_val_split(X,y,0.78)
-            if len(Xtr)==0 and len(Xva)>0: Xtr,Xva=Xva,[]; ytr,yva=yva,[]
-            if len(Xva)==0 and len(Xtr)>10:
-                cut=int(len(Xtr)*0.2)
-                if cut>0: Xva=Xtr[:cut]; yva=ytr[:cut]; Xtr=Xtr[cut:]; ytr=ytr[cut:]
-            app.X_train,app.y_train=Xtr,ytr
-            app.X_val,app.y_val=Xva,yva
-            app.F_train=[[0.0]*10 for _ in range(len(Xtr))]
-            app.F_val=[[0.0]*10 for _ in range(len(Xva))]
-            app.mnist_loaded=True
-            app.fetch_status+=f" | Train {len(Xtr)} Val {len(Xva)}"
-            return
-    except Exception as e:
-        app.fetch_status=f"JSON fail {str(e)[:30]}"
-
-    csv_candidates=[
-        "https://cdn.jsdelivr.net/gh/makeyourownneuralnetwork/makeyourownneuralnetwork@master/mnist_dataset/mnist_train_100.csv",
-        "https://raw.githack.com/makeyourownneuralnetwork/makeyourownneuralnetwork/master/mnist_dataset/mnist_train_100.csv",
-        "https://cdn.jsdelivr.net/gh/makeyourownneuralnetwork/makeyourownneuralnetwork@master/mnist_dataset/mnist_test_10.csv",
-        "https://raw.githack.com/makeyourownneuralnetwork/makeyourownneuralnetwork/master/mnist_dataset/mnist_test_10.csv",
-    ]
-    combined=[]
-    for url in csv_candidates:
-        try:
-            if FETCH_OK and fetch_text is not None: txt=await fetch_text(url)
-            else:
+    for d in range(10):
+        data=None
+        last_err=""
+        for url in [base.format(d), fallback.format(d)]:
+            try:
                 resp=await window.fetch(url, {"mode":"cors"})
-                if not resp.ok: continue
+                if not resp.ok:
+                    last_err=f"HTTP {resp.status}"
+                    continue
                 txt=await resp.text()
                 if hasattr(txt,'to_py'): txt=txt.to_py()
                 txt=str(txt)
-            lines=txt.strip().split("\n")
-            for line in lines[:1200]:
-                if not line.strip(): continue
-                low=line.lower()
-                if low.startswith("label") or "pixel" in low: continue
-                parts=line.split(",")
+                # json loads
+                parsed=json.loads(txt)
+                data=parsed
+                if data is not None: break
+            except Exception as e:
+                last_err=str(e)[:40]
+                continue
+        if data is None:
+            raise Exception(f"Digit {d} failed {last_err} - real data required, no fallback")
+        # data is list of dicts
+        cnt=0
+        if isinstance(data,list):
+            for item in data[:150]:
                 try:
-                    if len(parts)>=785:
-                        lab=int(float(parts[0])); pix=[float(p)/255.0 for p in parts[1:785]]
-                        combined.append((pix[:784],lab))
-                except Exception: continue
-        except Exception: continue
-    if len(combined)>=20:
-        app.all_samples=combined
-        Xb=[p for p,_ in combined]; yb=[l for _,l in combined]
-        present=set(yb)
-        if len(present)<10:
-            sx,sy=synth_mnist_full(40)
-            for pix,lab in zip(sx,sy):
-                if lab not in present or yb.count(lab)<15:
-                    Xb.append(pix); yb.append(lab)
+                    img=None; lab=d
+                    if isinstance(item,dict):
+                        if 'input' in item:
+                            img=item['input']
+                            out=item.get('output')
+                            if isinstance(out,list):
+                                lab=max(range(len(out)), key=lambda i: out[i]) if out else d
+                        elif 'image' in item:
+                            img=item['image']; lab=item.get('label',d)
+                    elif isinstance(item,list):
+                        img=item
+                    if img is None: continue
+                    # flatten if nested
+                    flat=[]
+                    if isinstance(img,list) and len(img)>0 and isinstance(img[0],list):
+                        for row in img:
+                            if isinstance(row,list): flat.extend(row)
+                            else: flat.append(row)
+                    else:
+                        flat=img
+                    if len(flat)<784: continue
+                    pix=[]
+                    for v in flat[:784]:
+                        try:
+                            fv=float(v)
+                            if fv>1.0: fv/=255.0
+                            pix.append(max(0.0,min(1.0,fv)))
+                        except Exception:
+                            pix.append(0.0)
+                    all_samples.append((pix,int(lab)))
+                    cnt+=1
+                except Exception:
+                    continue
+        app.fetch_status=f"Digit {d}: +{cnt} total {len(all_samples)} real"
+        # Small delay to let UI breathe
+    if len(all_samples)<500:
+        raise Exception(f"Only {len(all_samples)} real samples - need 500+, no fake allowed")
+    return all_samples
+
+async def fetch_mnist_samples(app):
+    app.fetch_status="Fetching REAL MNIST..."
+    app.mnist_loaded=False
+    # 1) Try Pyodide npz (60k real)
+    try:
+        app.fetch_status="REAL: pyfetch mnist.npz..."
+        samples = await fetch_mnist_via_pyodide_npz(app)
+        app.all_samples=samples
+        by_class={i:[] for i in range(10)}
+        for pix,lab in samples:
+            if len(by_class[lab])<300: by_class[lab].append((pix,lab))
+        balanced=[]
+        for c in range(10): balanced.extend(by_class[c])
+        random.shuffle(balanced)
+        Xb=[p for p,_ in balanced]; yb=[l for _,l in balanced]
         app.X_train_full, app.y_train_full=Xb,yb
-        app.fetch_status=f"Loaded {len(combined)} via CSVs ✓"
+        app.fetch_status=f"REAL {len(samples)} via npz ✓"
         X,y=Xb,yb
-        if len(X)>1400: X=X[:1400]; y=y[:1400]
+        if len(X)>1500: X=X[:1500]; y=y[:1500]
         Xtr,ytr,Xva,yva=train_val_split(X,y,0.78)
-        if len(Xtr)==0 and len(Xva)>0: Xtr,Xva=Xva,[]; ytr,yva=yva,[]
-        if len(Xva)==0 and len(Xtr)>10:
-            cut=int(len(Xtr)*0.2)
-            if cut>0: Xva=Xtr[:cut]; yva=ytr[:cut]; Xtr=Xtr[cut:]; ytr=ytr[cut:]
         app.X_train,app.y_train=Xtr,ytr
         app.X_val,app.y_val=Xva,yva
         app.F_train=[[0.0]*10 for _ in range(len(Xtr))]
         app.F_val=[[0.0]*10 for _ in range(len(Xva))]
         app.mnist_loaded=True
-        app.fetch_status+=f" | Train {len(Xtr)} Val {len(Xva)}"
+        app.fetch_status+=f" | Train {len(Xtr)} Val {len(Xva)} REAL"
         return
+    except Exception as e:
+        app.fetch_status=f"npz fail {str(e)[:50]} -> trying JSON"
 
-    app.fetch_status="Synthetic fallback"
-    sx,sy=synth_mnist_full(120)
-    app.all_samples=[(pix,lab) for pix,lab in zip(sx,sy)]
-    app.X_train_full, app.y_train_full=sx,sy
-    X,y=sx,sy
-    Xtr,ytr,Xva,yva=train_val_split(X,y,0.78)
-    if len(Xtr)==0 and len(Xva)>0: Xtr,Xva=Xva,[]; ytr,yva=yva,[]
-    if len(Xva)==0 and len(Xtr)>10:
-        cut=int(len(Xtr)*0.2)
-        if cut>0: Xva=Xtr[:cut]; yva=ytr[:cut]; Xtr=Xtr[cut:]; ytr=ytr[cut:]
-    app.X_train,app.y_train=Xtr,ytr
-    app.X_val,app.y_val=Xva,yva
-    app.F_train=[[0.0]*10 for _ in range(len(Xtr))]
-    app.F_val=[[0.0]*10 for _ in range(len(Xva))]
-    app.mnist_loaded=True
-    app.fetch_status+=f" | Train {len(Xtr)} Val {len(Xva)} synth"
+    # 2) Try jsDelivr JSON (real, no fake)
+    try:
+        samples = await fetch_mnist_via_jsdelivr(app)
+        app.all_samples=samples
+        by_class={i:[] for i in range(10)}
+        for pix,lab in samples:
+            if len(by_class[lab])<300: by_class[lab].append((pix,lab))
+        balanced=[]
+        for c in range(10): balanced.extend(by_class[c])
+        random.shuffle(balanced)
+        Xb=[p for p,_ in balanced]; yb=[l for _,l in balanced]
+        app.X_train_full, app.y_train_full=Xb,yb
+        app.fetch_status=f"REAL {len(samples)} via JSON ✓"
+        X,y=Xb,yb
+        if len(X)>1500: X=X[:1500]; y=y[:1500]
+        Xtr,ytr,Xva,yva=train_val_split(X,y,0.78)
+        app.X_train,app.y_train=Xtr,ytr
+        app.X_val,app.y_val=Xva,yva
+        app.F_train=[[0.0]*10 for _ in range(len(Xtr))]
+        app.F_val=[[0.0]*10 for _ in range(len(Xva))]
+        app.mnist_loaded=True
+        app.fetch_status+=f" | Train {len(Xtr)} Val {len(Xva)} REAL"
+        return
+    except Exception as e:
+        app.fetch_status=f"REAL DATA FAILED: {str(e)[:80]} - NO FAKE"
+        app.mnist_loaded=False
+        # Do NOT fallback to synthetic - we stand for real
+        return
 
 async def pyodide_train_reference(app):
     app.pyodide_status="Pyodide: probing..."
     if not PYODIDE_EXT_OK:
-        app.pyodide_status="Pyodide ext not found - Brython fallback"
+        app.pyodide_status="Pyodide ext not found"
         app.pyodide_ready=False
         return
     lines=[
-        "import math, random, traceback, json",
+        "import traceback, json, math",
         "try:",
         "    import numpy as np",
         "    from sklearn.ensemble import GradientBoostingClassifier",
@@ -553,23 +404,21 @@ async def pyodide_train_reference(app):
         "        loss=-np.mean([math.log(prob[i, yte[i]]) for i in range(len(yte))])",
         "        val_losses.append(float(loss))",
         "    acc=float(clf.score(Xte,yte))",
-        "    fi=clf.feature_importances_.tolist() if hasattr(clf,'feature_importances_') else [0]*784",
-        "    result={\"status\":\"ok\",\"train_losses\":train_losses,\"val_losses\":val_losses,\"accuracy\":acc,\"feature_importance\":fi}",
+        "    fi=clf.feature_importances_.tolist()",
+        "    result={'status':'ok','train_losses':train_losses,'val_losses':val_losses,'accuracy':acc,'feature_importance':fi}",
         "except Exception as e:",
-        "    result={\"status\":\"error\",\"msg\":str(e),\"trace\":traceback.format_exc()}",
+        "    result={'status':'error','msg':str(e),'trace':traceback.format_exc()}",
         "result",
     ]
     code="\n".join(lines)
     try:
         res=await resilient_pyodide_run(code)
         py_res=res
-        try:
-            if hasattr(py_res,'to_py'): py_res=py_res.to_py()
-        except Exception: pass
+        if hasattr(py_res,'to_py'):
+            try: py_res=py_res.to_py()
+            except Exception: pass
         if isinstance(py_res,str):
-            try:
-                import json as _js
-                py_res=_js.loads(py_res)
+            try: py_res=json.loads(py_res)
             except Exception: pass
         if isinstance(py_res,dict) and py_res.get("status")=="ok":
             app.pyodide_status=f"Pyodide OK acc {py_res.get('accuracy',0):.3f}"
@@ -594,21 +443,13 @@ def onAppStart(app):
     app.feature_importance=[0.0]*784; app.is_playing=False
     app.mnist_loaded=False; app.all_samples=[]; app.X_train=[]; app.y_train=[]
     app.X_val=[]; app.y_val=[]; app.F_train=[]; app.F_val=[]
-    app.fetch_status="Init fetch..."; app.pyodide_status="Init pyodide..."
+    app.fetch_status="Fetching REAL MNIST..."; app.pyodide_status="Init pyodide..."
     app.pyodide_ready=False; app.pyodide_reference=None
     app.ref_train_losses=[]; app.ref_val_losses=[]
     app.drawing=[0.0]*784; app.is_drawing=False
     app.prediction=None; app.prediction_probs=None
     app.show_rf=False; app.show_overfit=True
     app.selected_sample_idx=0; app.hover_feat=None; app.t=0
-    sx,sy=synth_mnist_full(40)
-    Xtr,ytr,Xva,yva=train_val_split(sx,sy,0.78)
-    app.X_train,app.y_train=Xtr,ytr
-    app.X_val,app.y_val=Xva,yva
-    app.F_train=[[0.0]*10 for _ in range(len(Xtr))]
-    app.F_val=[[0.0]*10 for _ in range(len(Xva))]
-    app.mnist_loaded=True
-    app.fetch_status=f"Synth {len(Xtr)}/{len(Xva)} - fetching real..."
     aio.run(fetch_mnist_samples(app))
     aio.run(pyodide_train_reference(app))
 
@@ -617,9 +458,9 @@ def onStep(app):
     try:
         if app.is_playing:
             if not app.mnist_loaded:
-                app.fetch_status="Waiting for data..."
+                app.fetch_status="Waiting for REAL data - no fake!"
             elif not app.X_train:
-                app.fetch_status=f"No X_train! len {len(app.X_train)}"
+                app.fetch_status=f"No X_train! REAL failed"
                 app.is_playing=False
             else:
                 if app.current_m < app.max_trees:
@@ -632,9 +473,7 @@ def onStep(app):
 
 def step_one_tree(app):
     try:
-        if not app.X_train:
-            app.fetch_status="step: empty X_train"
-            return
+        if not app.X_train: return
         probs_train=[softmax(f) for f in app.F_train]
         trees_this_iter=[]
         for c in range(10):
@@ -713,15 +552,15 @@ def paint_at(app,mx,my):
 def onMousePress(app,mx,my):
     if 360<=mx<=430 and 12<=my<=36:
         app.is_playing=not app.is_playing
-        app.fetch_status=f"Play toggled {app.is_playing} m={app.current_m} loaded={app.mnist_loaded} X={len(app.X_train)}"
+        app.fetch_status=f"Play {app.is_playing} m={app.current_m} X={len(app.X_train)} REAL={app.mnist_loaded}"
         return
     if 440<=mx<=485 and 12<=my<=36:
         step_one_tree(app)
-        app.fetch_status=f"Step 1 tree -> m={app.current_m}"
+        app.fetch_status=f"Step -> m={app.current_m}"
         return
     if 495<=mx<=555 and 12<=my<=36:
         reset_ensemble(app)
-        app.fetch_status="Reset"
+        app.fetch_status="Reset REAL"
         return
     if 570<=mx<=590 and 12<=my<=22:
         app.eta=min(0.5,app.eta+0.02); return
@@ -766,7 +605,7 @@ def onMouseRelease(app,mx,my):
 def onKeyPress(app,key):
     if key=='space':
         app.is_playing=not app.is_playing
-        app.fetch_status=f"Space toggled {app.is_playing}"
+        app.fetch_status=f"Space {app.is_playing}"
     elif key.lower()=='r': reset_ensemble(app)
     elif key=='Right': step_one_tree(app)
     elif key=='Left':
@@ -782,8 +621,8 @@ def onKeyPress(app,key):
 def redrawAll(app):
     drawRect(0,0,app.width,app.height, fill=gradient(rgb(14,16,22), rgb(24,27,35), start='top'))
     drawRect(0,0,app.width,50, fill=rgb(18,20,28), border=rgb(40,45,60), borderWidth=1)
-    drawLabel("XGBoost Lab - Full MNIST 10-way Softmax", 14, 14, size=14, bold=True, fill=rgb(220,230,255), align='left-top')
-    drawLabel("F_m = F_{m-1}+eta*h_m | L=-sum p log softmax(F) | 60k/10k 784-d", 14, 32, size=9, fill=rgb(130,145,165), align='left-top')
+    drawLabel("XGBoost Lab - REAL MNIST ONLY - NO FAKES", 14, 14, size=14, bold=True, fill=rgb(220,230,255), align='left-top')
+    drawLabel("F_m=F_{m-1}+eta*h_m | L=-sum p log softmax | REAL 60k/10k 784-d", 14, 32, size=9, fill=rgb(130,255,130), align='left-top')
     play_col=rgb(0,212,255) if app.is_playing else rgb(55,65,85)
     drawRect(360,12,70,26, fill=play_col, border=rgb(90,110,140), borderWidth=1, roundness=7)
     drawLabel("Play" if not app.is_playing else "Pause", 395, 25, size=11, bold=True, fill=rgb(10,15,25) if app.is_playing else rgb(200,220,255))
@@ -801,8 +640,8 @@ def redrawAll(app):
     drawRect(860,12,160,26, fill=rf_fill, border=rgb(90,60,80), borderWidth=1, roundness=7)
     drawLabel("RF vs Boosting", 940, 25, size=11, bold=True, fill=rgb(255,220,230) if app.show_rf else rgb(180,190,210))
     drawRect(12,60,276,620, fill=rgb(20,23,31), border=rgb(35,40,55), borderWidth=1, roundness=12)
-    drawLabel("INPUT: Draw 0-9 - MNIST 28x28", 24, 72, size=11, bold=True, fill=rgb(180,200,230), align='left-top')
-    drawLabel("Each pixel = feature (784-d) 10 classes", 24, 88, size=9, fill=rgb(110,125,145), align='left-top')
+    drawLabel("INPUT: Draw 0-9 - REAL MNIST 28x28", 24, 72, size=11, bold=True, fill=rgb(180,200,230), align='left-top')
+    drawLabel("Each pixel = feature (784-d) 10 classes REAL", 24, 88, size=9, fill=rgb(110,255,110), align='left-top')
     drawRect(28,100,228,228, fill=rgb(8,10,15), border=rgb(60,70,90), borderWidth=1, roundness=8)
     for r in range(28):
         for c in range(28):
@@ -815,13 +654,13 @@ def redrawAll(app):
         drawLine(30,102+i*8,254,102+i*8, lineWidth=0.4, fill=rgb(30,35,50))
     drawRect(30,338,90,20, fill=rgb(45,50,65), border=rgb(70,80,100), borderWidth=1, roundness=6)
     drawLabel("Clear C", 75, 348, size=10, bold=True, fill=rgb(200,220,255))
-    drawLabel("10-way", 140, 348, size=9, bold=True, fill=rgb(130,145,165), align='left-top')
+    drawLabel("10-way REAL", 140, 348, size=9, bold=True, fill=rgb(130,255,130), align='left-top')
     if app.prediction is not None and app.prediction_probs is not None:
         col=rgb(0,212,255)
         prob=app.prediction_probs[app.prediction]
         drawRect(30,364,224,36, fill=rgb(30,35,50), border=col, borderWidth=1, roundness=8)
         drawLabel(f"Pred: {app.prediction}  {prob*100:.1f}%", 142, 376, size=14, bold=True, fill=col)
-        drawLabel("softmax 10 logits", 142, 390, size=8, fill=rgb(120,135,155))
+        drawLabel("softmax 10 logits REAL", 142, 390, size=8, fill=rgb(120,135,155))
         for c in range(10):
             p=app.prediction_probs[c] if c < len(app.prediction_probs) else 0
             x0=30 + c*22; y0=406; h=p*36
@@ -831,8 +670,8 @@ def redrawAll(app):
     else:
         drawRect(30,364,224,60, fill=rgb(20,23,31), border=rgb(35,40,55), borderWidth=1, roundness=6)
         drawLabel("Draw any digit 0-9", 142, 384, size=11, fill=rgb(100,115,135))
-        drawLabel("10-way softmax model", 142, 400, size=9, fill=rgb(90,105,125))
-    drawLabel("Samples via fetch - click (10-way):", 24, 432, size=9, fill=rgb(120,135,155), align='left-top')
+        drawLabel("REAL 10-way softmax model", 142, 400, size=9, fill=rgb(90,255,90))
+    drawLabel("Samples REAL - click (10-way):", 24, 432, size=9, fill=rgb(120,255,120), align='left-top')
     if app.all_samples:
         shown=[]; seen=set()
         for pix,lab in app.all_samples:
@@ -850,10 +689,10 @@ def redrawAll(app):
             if i==app.selected_sample_idx % 10:
                 drawRect(x0-1,y0-1,25,25, fill=None, border=rgb(0,212,255), borderWidth=1.2, roundness=2)
             drawLabel(str(lab), x0+12, y0+28, size=8, bold=True, fill=rgb(160,175,190))
-    drawLabel(app.fetch_status[:70], 24, 556, size=7, fill=rgb(90,105,125), align='left-top')
+    drawLabel(app.fetch_status[:70], 24, 556, size=7, fill=rgb(110,255,110), align='left-top')
     drawRect(300,60,388,620, fill=rgb(22,25,34), border=rgb(35,40,55), borderWidth=1, roundness=12)
-    drawLabel("BOOSTING: Multinomial 10-way", 312, 72, size=12, bold=True, fill=rgb(200,220,255), align='left-top')
-    drawLabel(f"Trees {app.current_m}/{app.max_trees} (x10 stumps) eta={app.eta:.2f} target 330->89%", 312, 88, size=8, fill=rgb(130,145,165), align='left-top')
+    drawLabel("BOOSTING: Multinomial 10-way REAL", 312, 72, size=12, bold=True, fill=rgb(200,220,255), align='left-top')
+    drawLabel(f"Trees {app.current_m}/{app.max_trees} (x10 stumps) eta={app.eta:.2f}", 312, 88, size=8, fill=rgb(130,145,165), align='left-top')
     if app.show_rf:
         drawRect(312,108,180,90, fill=rgb(30,20,30), border=rgb(80,40,60), borderWidth=1, roundness=8)
         drawLabel("Random Forest (parallel)", 320,116, size=9, bold=True, fill=rgb(255,150,180), align='left-top')
@@ -883,7 +722,7 @@ def redrawAll(app):
                     if r==fr and c==fc:
                         drawRect(312+c*2,142+r*2,2.5,2.5, fill=rgb(255,183,3))
             drawLabel(f"Best pixel ({fc},{fr}) cls {best_stump['class']} thr {best_stump['threshold']:.2f} gain {best_stump['gain']:.1f}", 380,148, size=7, fill=rgb(140,160,185), align='left-top')
-            drawLabel("Val samples - residuals y - softmax(F) drives next:", 380,162, size=7, fill=rgb(140,160,185), align='left-top')
+            drawLabel("Val samples - residuals drives next:", 380,162, size=7, fill=rgb(140,160,185), align='left-top')
             for i in range(min(5, len(app.X_val))):
                 x=380+i*52; y=174
                 pix=app.X_val[i]
@@ -895,8 +734,8 @@ def redrawAll(app):
                             drawRect(x + c*1.2, y + r*1.2, 1.3,1.3, fill=rgb(gray,gray,gray))
                 drawLabel(str(app.y_val[i]), x+17, y+40, size=9, bold=True, fill=rgb(0,212,255))
         else:
-            drawLabel(f"No trees yet - X={len(app.X_train)} F={len(app.F_train)} loaded={app.mnist_loaded}", 312,120, size=9, fill=rgb(120,135,155), align='left-top')
-            drawLabel("Press Play/Space/Step - F0=0 p=0.1 per class", 312,138, size=9, fill=rgb(100,120,145), align='left-top')
+            drawLabel(f"No trees yet - X={len(app.X_train)} REAL={app.mnist_loaded}", 312,120, size=10, fill=rgb(120,255,120), align='left-top')
+            drawLabel("Press Play/Space/Step - REAL DATA ONLY", 312,138, size=9, fill=rgb(100,255,100), align='left-top')
     drawRect(312,220,368,130, fill=rgb(14,18,26), border=rgb(35,40,55), borderWidth=1, roundness=8)
     drawLabel("Loss vs #trees - cyan train / gold val", 320,228, size=9, bold=True, fill=rgb(180,200,220), align='left-top')
     drawLine(338,246,338,332, lineWidth=1, fill=rgb(60,70,90))
@@ -922,11 +761,11 @@ def redrawAll(app):
             drawLine(x_cur,246,x_cur,332, lineWidth=1, fill=rgb(200,220,255), dashes=(2,2))
     if app.acc_history:
         acc=app.acc_history[-1]
-        drawLabel(f"Val Acc {acc*100:.1f}% target 89% @330 (10-way)", 320,320, size=9, bold=True, fill=rgb(180,220,255), align='left-top')
+        drawLabel(f"Val Acc {acc*100:.1f}% REAL", 320,320, size=9, bold=True, fill=rgb(180,220,255), align='left-top')
     drawRect(312,358,368,50, fill=rgb(18,22,32), border=rgb(35,40,55), borderWidth=1, roundness=8)
     drawLabel("F_m = F_{m-1} + eta*h_m  h_m approx y - softmax(F)", 320,366, size=9, fill=rgb(200,220,255), align='left-top')
-    drawLabel("10 stumps per round, one per class, softmax gradient", 320,382, size=8, fill=rgb(120,140,165), align='left-top')
-    drawLabel(f"Ensemble timeline - {app.current_m*10} stumps (x10 per iter):", 312,418, size=9, bold=True, fill=rgb(180,200,220), align='left-top')
+    drawLabel("10 stumps per round, one per class, softmax", 320,382, size=8, fill=rgb(120,140,165), align='left-top')
+    drawLabel(f"Ensemble timeline - {app.current_m*10} stumps:", 312,418, size=9, bold=True, fill=rgb(180,200,220), align='left-top')
     for i in range(min(app.current_m, 80)):
         trees_iter=app.trees[i] if i < len(app.trees) else []
         max_gain=max([s['gain'] for s in trees_iter]) if trees_iter else 0
@@ -935,8 +774,8 @@ def redrawAll(app):
         col_int=min(255,col_int)
         drawRect(x,y,7,8, fill=rgb(col_int,col_int//2,30), border=rgb(80,60,30), borderWidth=0.4, roundness=1)
     drawRect(700,60,338,620, fill=rgb(20,23,31), border=rgb(35,40,55), borderWidth=1, roundness=12)
-    drawLabel("RESEARCH VIEW - Softmax, Capacity", 712,72, size=11, bold=True, fill=rgb(220,230,255), align='left-top')
-    drawLabel("Why boosting has high capacity", 712,88, size=9, fill=rgb(130,145,165), align='left-top')
+    drawLabel("RESEARCH VIEW - REAL ONLY", 712,72, size=11, bold=True, fill=rgb(220,255,130), align='left-top')
+    drawLabel("No synthetic, no CSV fallback", 712,88, size=9, fill=rgb(130,255,130), align='left-top')
     drawRect(718,100,228,228, fill=rgb(10,12,18), border=rgb(50,60,80), borderWidth=1, roundness=8)
     max_imp=max(app.feature_importance) if max(app.feature_importance)>0 else 1
     for r in range(28):
@@ -955,14 +794,14 @@ def redrawAll(app):
         hr=app.hover_feat//28; hc=app.hover_feat%28
         drawRect(720+hc*8,102+hr*8,8,8, fill=None, border=rgb(255,255,255), borderWidth=1.5)
         drawLabel(f"pixel ({hc},{hr}) imp {app.feature_importance[app.hover_feat]:.1f}", 720,332, size=8, fill=rgb(200,220,255), align='left-top')
-    drawLabel("Feature importance: 10-way (28x28)", 712,340, size=9, fill=rgb(140,160,185), align='left-top')
+    drawLabel("Feature importance: 10-way REAL", 712,340, size=9, fill=rgb(140,255,140), align='left-top')
     drawRect(712,352,316,86, fill=rgb(16,20,28), border=rgb(40,50,70), borderWidth=1, roundness=8)
     drawLabel("Softmax cross-entropy:", 720,360, size=9, bold=True, fill=rgb(180,200,220), align='left-top')
     drawLabel("L = -sum_i sum_c p_{i,c} log q_{i,c}", 720,374, size=9, fill=rgb(200,220,255), align='left-top')
     drawLabel("q = softmax(F) = exp(F_c)/sum_k exp(F_k)", 720,386, size=8, fill=rgb(150,170,200), align='left-top')
-    drawLabel("grad = q - p -> h_m ~ p - q (pseudo-residual)", 720,400, size=9, bold=True, fill=rgb(0,212,255), align='left-top')
+    drawLabel("grad = q - p -> h_m ~ p - q", 720,400, size=9, bold=True, fill=rgb(0,212,255), align='left-top')
     drawLabel("F_m = F_{m-1}+eta*h_m  10 logits", 720,412, size=8, fill=rgb(160,180,210), align='left-top')
-    drawLabel("330 trees x10 = 3300 stumps -> 89% acc", 720,424, size=8, fill=rgb(130,150,175), align='left-top')
+    drawLabel("330 trees x10 = 3300 stumps REAL", 720,424, size=8, fill=rgb(130,255,130), align='left-top')
     drawRect(712,444,316,84, fill=rgb(18,22,32), border=rgb(35,45,65), borderWidth=1, roundness=8)
     drawLabel("Pyodide worker:", 720,452, size=9, bold=True, fill=rgb(180,200,220), align='left-top')
     status=app.pyodide_status
@@ -971,12 +810,12 @@ def redrawAll(app):
         drawLabel(status[58:116], 720,478, size=8, fill=rgb(120,200,150) if app.pyodide_ready else rgb(200,150,120), align='left-top')
     if app.pyodide_ready and app.pyodide_reference:
         acc=app.pyodide_reference.get("accuracy",0)
-        drawLabel(f"sklearn GBM 330: {acc*100:.1f}%", 720,492, size=8, fill=rgb(160,200,180), align='left-top')
+        drawLabel(f"sklearn GBM 330: {acc*100:.1f}% REAL", 720,492, size=8, fill=rgb(160,200,180), align='left-top')
     else:
-        drawLabel("Brython GBM fallback - browser", 720,492, size=8, fill=rgb(140,160,185), align='left-top')
+        drawLabel("Brython GBM - REAL data only", 720,492, size=8, fill=rgb(140,255,140), align='left-top')
     drawRect(712,534,316,110, fill=rgb(14,18,26), border=rgb(35,40,55), borderWidth=1, roundness=8)
-    drawLabel("Research insights:", 720,542, size=9, bold=True, fill=rgb(220,230,255), align='left-top')
-    notes=["* 10 logits, softmax -> cross-entropy","* stumps depth1 high bias low var","* boosting reduces bias seq (vs RF var)","* eta 0.01-0.3 slows improves gen","* 330 trees high cap overfits w/o early stop","* MNIST 784-d, 10 classes, 60k/10k"]
+    drawLabel("Research insights REAL:", 720,542, size=9, bold=True, fill=rgb(220,255,130), align='left-top')
+    notes=["* 10 logits, softmax -> cross-entropy REAL","* stumps depth1 high bias low var","* boosting reduces bias seq","* eta 0.01-0.3 slows improves gen","* 330 trees high cap","* MNIST 784-d, 10 classes, 60k/10k REAL"]
     for i,line in enumerate(notes):
-        drawLabel(line, 720,556+i*12, size=8, fill=rgb(130,145,165), align='left-top')
-    drawLabel(f"SCS 1050x700 - pyfetch npz | {app.fetch_status[:30]}", 14, 686, size=8, fill=rgb(80,95,115), align='left-top')
+        drawLabel(line, 720,556+i*12, size=8, fill=rgb(130,255,130), align='left-top')
+    drawLabel(f"REAL ONLY - {app.fetch_status[:40]}", 14, 686, size=8, fill=rgb(80,255,80), align='left-top')
