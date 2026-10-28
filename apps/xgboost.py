@@ -226,83 +226,92 @@ async def resilient_pyodide_run(code_str):
         pass
     return None
 
-async def fetch_hf_rows(dataset="mnist", split="train", offset=0, length=100):
-    # HF datasets-server: length max 100, config is 'mnist' not 'default' for ylecun/mnist
-    # Try several dataset/config combos
-    length=min(length,100)
-    combos=[
-        (dataset, "mnist", split),
-        (dataset, "default", split),
-        ("ylecun/mnist", "mnist", split),
-        ("ylecun/mnist", "default", split),
-        ("mnist", "mnist", split),
-        ("mnist", "default", split),
+async def fetch_mnist_via_pyodide_npz(app):
+    # Uses pyfetch to download mnist.npz from TF bucket (has CORS, unlike cvdf)
+    # Working example from user prompt
+    code_lines=[
+        "import io, json, traceback",
+        "try:",
+        "    import numpy as np",
+        "    from pyodide.http import pyfetch",
+        "    url='https://storage.googleapis.com/tensorflow/tf-keras-datasets/mnist.npz'",
+        "    response = await pyfetch(url)",
+        "    if not response.ok:",
+        "        result={'status':'error','msg':f'HTTP {response.status}'}",
+        "    else:",
+        "        data = await response.bytes()",
+        "        with np.load(io.BytesIO(data), allow_pickle=False) as mnist:",
+        "            x_train = mnist['x_train']",
+        "            y_train = mnist['y_train']",
+        "        by_class={i:[] for i in range(10)}",
+        "        for i in range(len(y_train)):",
+        "            lab=int(y_train[i])",
+        "            if len(by_class[lab])<200:",
+        "                img=(x_train[i].astype(float)/255.0).flatten().tolist()",
+        "                by_class[lab].append((img, lab))",
+        "        samples=[]",
+        "        for c in range(10):",
+        "            samples.extend(by_class[c][:150])",
+        "        import random as _rnd; _rnd.shuffle(samples)",
+        "        result={'status':'ok','samples':samples, 'total':int(len(y_train))}",
+        "except Exception as e:",
+        "    result={'status':'error','msg':str(e),'trace':traceback.format_exc()}",
+        "result",
     ]
-    for ds, cfg, sp in combos:
-        ds_enc=ds.replace("/", "%2F")
-        url=f"https://datasets-server.huggingface.co/rows?dataset={ds_enc}&config={cfg}&split={sp}&offset={offset}&length={length}"
+    code="\n".join(code_lines)
+    res=await resilient_pyodide_run(code)
+    py_res=res
+    if hasattr(py_res,'to_py'):
+        try: py_res=py_res.to_py()
+        except Exception: pass
+    if isinstance(py_res,str):
         try:
-            resp = await window.fetch(url, {"mode": "cors"})
-            if not resp.ok:
-                continue
-            js_data = await resp.json()
-            if hasattr(js_data,'to_py'):
-                try: js_data=js_data.to_py()
-                except Exception: pass
-            rows=None
-            if isinstance(js_data, dict):
-                rows=js_data.get('rows') or js_data.get('data')
-            if not rows:
-                continue
-            samples=[]
-            for r in rows[:length]:
-                try:
-                    row=r.get('row') if isinstance(r,dict) and 'row' in r else r
-                    if not isinstance(row,dict): continue
-                    lab=row.get('label')
-                    img=row.get('image')
-                    if isinstance(img,dict):
-                        if 'data' in img: img=img['data']
-                        elif 'bytes' in img and img['bytes'] is not None:
-                            # bytes case not handled
-                            continue
-                        else:
-                            continue
-                    flat=[]
-                    if isinstance(img,list):
-                        if len(img)>0 and isinstance(img[0],list):
-                            for rr in img:
-                                if isinstance(rr,list): flat.extend(rr)
-                                else: flat.append(rr)
-                        else:
-                            flat=img
-                    if len(flat)<784: continue
-                    pix=[]
-                    for v in flat[:784]:
-                        try:
-                            fv=float(v)
-                            if fv>1.0: fv/=255.0
-                            pix.append(max(0.0,min(1.0,fv)))
-                        except Exception:
-                            pix.append(0.0)
-                    if lab is None: continue
-                    samples.append((pix,int(lab)))
-                except Exception:
-                    continue
-            if samples:
-                return samples
+            import json as _js
+            py_res=_js.loads(py_res)
         except Exception:
-            continue
-    raise Exception("HF rows failed")
+            pass
+    if isinstance(py_res,dict) and py_res.get('status')=='ok':
+        samples=py_res.get('samples',[])
+        if samples:
+            return samples
+    raise Exception(f"pyfetch npz fail {str(py_res)[:120]}")
 
 async def fetch_mnist_samples(app):
     app.fetch_status="Fetching full MNIST 10-way..."
     app.mnist_loaded=False
 
-    # RECOMMENDED: jsDelivr per-digit JSON (CORS OK, no Google GCS)
+    # 1) Pyodide pyfetch npz (recommended by user, CORS OK)
+    try:
+        app.fetch_status="Fetching mnist.npz via Pyodide pyfetch..."
+        samples = await fetch_mnist_via_pyodide_npz(app)
+        if len(samples)>=100:
+            app.all_samples=samples
+            by_class={i:[] for i in range(10)}
+            for pix,lab in samples:
+                if len(by_class[lab])<300:
+                    by_class[lab].append((pix,lab))
+            balanced=[]
+            for c in range(10): balanced.extend(by_class[c])
+            random.shuffle(balanced)
+            Xb=[p for p,_ in balanced]; yb=[l for _,l in balanced]
+            app.X_train_full, app.y_train_full=Xb,yb
+            app.fetch_status=f"Loaded {len(samples)} via pyfetch npz ✓ 60k/10k"
+            X,y=Xb,yb
+            if len(X)>1500: X=X[:1500]; y=y[:1500]
+            Xtr,ytr,Xva,yva=train_val_split(X,y,0.78)
+            app.X_train,app.y_train=Xtr,ytr
+            app.X_val,app.y_val=Xva,yva
+            app.F_train=[[0.0]*10 for _ in range(len(Xtr))]
+            app.F_val=[[0.0]*10 for _ in range(len(Xva))]
+            app.mnist_loaded=True
+            app.fetch_status+=f" | Train {len(Xtr)} Val {len(Xva)}"
+            return
+    except Exception as e:
+        app.fetch_status=f"pyfetch npz fail {str(e)[:30]} trying jsDelivr..."
+
+    # 2) jsDelivr per-digit JSON
     digit_json_base = "https://cdn.jsdelivr.net/npm/mnist@1.1.0/src/digits/{}.json"
     digit_json_fb = "https://raw.githack.com/cazala/mnist/master/src/digits/{}.json"
-
     all_samples=[]
     try:
         app.fetch_status="Fetching per-digit JSON via jsDelivr 0-9..."
@@ -331,7 +340,6 @@ async def fetch_mnist_samples(app):
                 continue
             parsed=0
             if isinstance(data,list):
-                # Take 150 per digit to stay fast
                 for item in data[:150]:
                     try:
                         img=None; lab=d
@@ -395,50 +403,7 @@ async def fetch_mnist_samples(app):
     except Exception as e:
         app.fetch_status=f"Per-digit JSON fail {str(e)[:30]}"
 
-    # Try Hugging Face (CORS enabled) - no Google GCS
-    try:
-        app.fetch_status="Trying Hugging Face..."
-        samples=[]
-        for off in [0,100,200,300,400,500,600,700,800,900,1000,1100]:
-            try:
-                batch=await fetch_hf_rows("mnist","train",off,100)
-                samples.extend(batch)
-                app.fetch_status=f"HF +{len(batch)} total {len(samples)}"
-                if len(samples)>=1200: break
-            except Exception:
-                continue
-        if len(samples)<300:
-            try:
-                batch=await fetch_hf_rows("mnist","test",0,100)
-                samples.extend(batch)
-            except Exception:
-                pass
-        if len(samples)>=100:
-            app.all_samples=samples
-            by_class={i:[] for i in range(10)}
-            for pix,lab in samples:
-                if len(by_class[lab])<300:
-                    by_class[lab].append((pix,lab))
-            balanced=[]
-            for c in range(10): balanced.extend(by_class[c])
-            random.shuffle(balanced)
-            Xb=[p for p,_ in balanced]; yb=[l for _,l in balanced]
-            app.X_train_full, app.y_train_full=Xb,yb
-            app.fetch_status=f"Loaded {len(samples)} via HF ✓"
-            X,y=Xb,yb
-            if len(X)>1500: X=X[:1500]; y=y[:1500]
-            Xtr,ytr,Xva,yva=train_val_split(X,y,0.78)
-            app.X_train,app.y_train=Xtr,ytr
-            app.X_val,app.y_val=Xva,yva
-            app.F_train=[[0.0]*10 for _ in range(len(Xtr))]
-            app.F_val=[[0.0]*10 for _ in range(len(Xva))]
-            app.mnist_loaded=True
-            app.fetch_status+=f" | Train {len(Xtr)} Val {len(Xva)}"
-            return
-    except Exception as e:
-        app.fetch_status=f"HF fail {str(e)[:30]}"
-
-    # Fallback CSVs (CORS via jsDelivr/githack)
+    # 3) CSV fallback
     csv_candidates=[
         "https://cdn.jsdelivr.net/gh/makeyourownneuralnetwork/makeyourownneuralnetwork@master/mnist_dataset/mnist_train_100.csv",
         "https://raw.githack.com/makeyourownneuralnetwork/makeyourownneuralnetwork/master/mnist_dataset/mnist_train_100.csv",
@@ -613,7 +578,7 @@ async def pyodide_train_reference(app):
             except Exception:
                 pass
         if isinstance(py_res,dict) and py_res.get("status")=="ok":
-            app.pyodide_status=f"Pyodide OK 330 trees acc {py_res.get('accuracy',0):.3f}"
+            app.pyodide_status=f"Pyodide OK acc {py_res.get('accuracy',0):.3f}"
             app.pyodide_reference=py_res
             app.pyodide_ready=True
             app.ref_train_losses=py_res.get("train_losses",[])
@@ -995,4 +960,4 @@ def redrawAll(app):
     notes=["* 10 logits, softmax -> cross-entropy","* stumps depth1 high bias low var","* boosting reduces bias seq (vs RF var)","* eta 0.01-0.3 slows improves gen","* 330 trees high cap overfits w/o early stop","* MNIST 784-d, 10 classes, 60k/10k"]
     for i,line in enumerate(notes):
         drawLabel(line, 720,556+i*12, size=8, fill=rgb(130,145,165), align='left-top')
-    drawLabel("SCS 1050x700 - fetch + pyodide - 10-way softmax", 14, 686, size=8, fill=rgb(80,95,115), align='left-top')
+    drawLabel("SCS 1050x700 - pyfetch npz - 10-way softmax", 14, 686, size=8, fill=rgb(80,95,115), align='left-top')
