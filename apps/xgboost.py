@@ -61,36 +61,55 @@ def find_best_stump_fast(X, target, n_feat_sample=16, min_leaf=8):
     return best_f,best_thr,best_left,best_right,best_gain
 
 def train_val_split_10way(X,y,ratio=0.78):
-    # Stratified split - ENSURE non-empty even with small data
-    by_class={}
+    # Brython-safe: list buckets, no dict.get, no zip(*)
+    buckets=[[] for _ in range(10)]
     for xi,yi in zip(X,y):
-        by_class.setdefault(yi, []).append((xi,yi))
+        try:
+            c=int(float(yi)) if isinstance(yi,str) else int(yi)
+            if 0 <= c <= 9:
+                buckets[c].append((xi,c))
+        except Exception:
+            continue
     Xtr=[]; ytr=[]; Xva=[]; yva=[]
     for c in range(10):
-        lst=by_class.get(c, [])
-        if not lst: continue
+        lst=buckets[c]
+        if not lst:
+            continue
         random.shuffle(lst)
         n=len(lst)
-        n_tr = max(1, int(n*ratio)) if n>1 else 1
+        n_tr=int(n*ratio)
+        if n_tr<1: n_tr=1
         if n_tr>=n: n_tr=n-1 if n>1 else 1
-        for xi,yi in lst[:n_tr]:
+        # manual slice without zip(*)
+        for k in range(n_tr):
+            xi,yi=lst[k]
             Xtr.append(xi); ytr.append(yi)
-        for xi,yi in lst[n_tr:]:
+        for k in range(n_tr,n):
+            xi,yi=lst[k]
             Xva.append(xi); yva.append(yi)
-    # Fallback if val empty
-    if not Xva and Xtr:
-        # move 22% to val
-        cut=int(len(Xtr)*0.78)
-        Xva=Xtr[cut:]; yva=ytr[cut:]
-        Xtr=Xtr[:cut]; ytr=ytr[:cut]
-    # Shuffle
+    # Absolute fallback if still empty (Brython dict bug)
+    if not Xtr:
+        # simple unstratified split
+        n=len(X)
+        n_tr=int(n*ratio)
+        if n_tr<1: n_tr=1
+        if n_tr>=n: n_tr=n-1
+        Xtr=list(X[:n_tr]); ytr=list(y[:n_tr])
+        Xva=list(X[n_tr:]); yva=list(y[n_tr:])
+    # Shuffle Xtr/ytr together via indices, no zip(*)
     if Xtr:
-        combined=list(zip(Xtr,ytr)); random.shuffle(combined)
-        Xtr,ytr=zip(*combined); Xtr,ytr=list(Xtr),list(ytr)
+        idx=list(range(len(Xtr)))
+        random.shuffle(idx)
+        Xtr_s=[Xtr[i] for i in idx]
+        ytr_s=[ytr[i] for i in idx]
+        Xtr,ytr=Xtr_s,ytr_s
     if Xva:
-        combined=list(zip(Xva,yva)); random.shuffle(combined)
-        Xva,yva=zip(*combined); Xva,yva=list(Xva),list(yva)
-    return list(Xtr),list(ytr),list(Xva),list(yva)
+        idx=list(range(len(Xva)))
+        random.shuffle(idx)
+        Xva_s=[Xva[i] for i in idx]
+        yva_s=[yva[i] for i in idx]
+        Xva,yva=Xva_s,yva_s
+    return Xtr,ytr,Xva,yva
 
 async def resilient_pyodide_run(code_str):
     async def unwrap(res, max_depth=12):
