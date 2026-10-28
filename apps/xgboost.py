@@ -3,7 +3,6 @@ from scs import *
 from browser import aio, window
 import math, random
 
-# ── Extensions ──
 try:
     from extensions.fetch import fetch_json, fetch_text, fetch, FetchError
     FETCH_OK = True
@@ -158,9 +157,10 @@ def train_val_split(X,y,ratio=0.78):
         random.shuffle(lst)
         n=len(lst)
         if n==0: continue
-        n_tr=int(n*ratio)
-        if n_tr==0: n_tr=1
-        if n_tr>=n: n_tr=n-1
+        if n==1:
+            n_tr=1
+        else:
+            n_tr=max(1, min(n-1, int(n*ratio)))
         for xi,yi in lst[:n_tr]:
             Xtr.append(xi); ytr.append(yi)
         for xi,yi in lst[n_tr:]:
@@ -178,57 +178,76 @@ def train_val_split(X,y,ratio=0.78):
     return Xtr,ytr,Xva,yva
 
 async def resilient_pyodide_run(code_str):
-    async def unwrap(res, max_depth=8):
+    async def unwrap(res, max_depth=10):
         for _ in range(max_depth):
-            if res is None: break
+            if res is None:
+                break
             if hasattr(res,'to_py'):
-                try: res=res.to_py()
-                except Exception: pass
+                try:
+                    tmp=res.to_py()
+                    if tmp is not None:
+                        res=tmp
+                except Exception:
+                    pass
             try:
-                rstr=str(res)
-                if '<coroutine' in rstr:
-                    if hasattr(res,'__await__'):
-                        try: res=await res; continue
-                        except Exception: return None
-                    if isinstance(res,str): return None
-            except Exception: pass
-            if hasattr(res,'__await__'):
-                try: res=await res; continue
-                except Exception: break
-            if hasattr(res,'then'):
-                try: res=await res; continue
-                except Exception: break
-            try:
-                if isinstance(res,str) and '<coroutine' in res: return None
-                if '<coroutine' in str(res): return None
-            except Exception: pass
+                if hasattr(res,'__await__'):
+                    try:
+                        res=await res
+                        continue
+                    except Exception:
+                        break
+                if hasattr(res,'then') and callable(getattr(res,'then')):
+                    try:
+                        res=await res
+                        continue
+                    except Exception:
+                        break
+                s=str(res)
+                if '<coroutine' in s or 'coroutine' in s.lower():
+                    if isinstance(res,str):
+                        return None
+                    try:
+                        if hasattr(res,'__await__'):
+                            res=await res
+                            continue
+                    except Exception:
+                        return None
+            except Exception:
+                pass
             break
+        try:
+            if isinstance(res,str) and '<coroutine' in res:
+                return None
+        except Exception:
+            pass
         return res
+
     if PYODIDE_EXT_OK and _py_ext is not None:
         for name in _py_candidates:
             try:
                 fn=getattr(_py_ext, name)
-                res=fn(code_str)
-                res=await unwrap(res)
-                if res is None: continue
+                raw=fn(code_str)
+                res=await unwrap(raw)
+                if res is None:
+                    continue
                 try:
-                    if '<coroutine' in str(res): continue
-                except Exception: pass
+                    if isinstance(res,str) and '<coroutine' in res:
+                        continue
+                except Exception:
+                    pass
                 return res
             except Exception:
                 continue
     try:
         if hasattr(window,'pyodide') and window.pyodide is not None:
-            res=await window.pyodide.runPythonAsync(code_str)
-            res=await unwrap(res)
+            raw=await window.pyodide.runPythonAsync(code_str)
+            res=await unwrap(raw)
             return res
     except Exception:
         pass
     return None
 
 async def fetch_mnist_via_pyodide_npz(app):
-    # Uses pyfetch to download mnist.npz from TF bucket (has CORS, unlike cvdf)
-    # Working example from user prompt
     code_lines=[
         "import io, json, traceback",
         "try:",
@@ -253,7 +272,7 @@ async def fetch_mnist_via_pyodide_npz(app):
         "        for c in range(10):",
         "            samples.extend(by_class[c][:150])",
         "        import random as _rnd; _rnd.shuffle(samples)",
-        "        result={'status':'ok','samples':samples, 'total':int(len(y_train))}",
+        "        result={'status':'ok','samples':samples}",
         "except Exception as e:",
         "    result={'status':'error','msg':str(e),'trace':traceback.format_exc()}",
         "result",
@@ -280,11 +299,11 @@ async def fetch_mnist_samples(app):
     app.fetch_status="Fetching full MNIST 10-way..."
     app.mnist_loaded=False
 
-    # 1) Pyodide pyfetch npz (recommended by user, CORS OK)
+    # 1) Pyodide pyfetch npz
     try:
         app.fetch_status="Fetching mnist.npz via Pyodide pyfetch..."
         samples = await fetch_mnist_via_pyodide_npz(app)
-        if len(samples)>=100:
+        if len(samples)>=50:
             app.all_samples=samples
             by_class={i:[] for i in range(10)}
             for pix,lab in samples:
@@ -295,10 +314,16 @@ async def fetch_mnist_samples(app):
             random.shuffle(balanced)
             Xb=[p for p,_ in balanced]; yb=[l for _,l in balanced]
             app.X_train_full, app.y_train_full=Xb,yb
-            app.fetch_status=f"Loaded {len(samples)} via pyfetch npz ✓ 60k/10k"
+            app.fetch_status=f"Loaded {len(samples)} via pyfetch npz ✓"
             X,y=Xb,yb
             if len(X)>1500: X=X[:1500]; y=y[:1500]
             Xtr,ytr,Xva,yva=train_val_split(X,y,0.78)
+            if len(Xtr)==0 and len(Xva)>0:
+                Xtr,Xva = Xva,[]; ytr,yva = yva,[]
+            if len(Xva)==0 and len(Xtr)>10:
+                cut=int(len(Xtr)*0.2)
+                if cut>0:
+                    Xva=Xtr[:cut]; yva=ytr[:cut]; Xtr=Xtr[cut:]; ytr=ytr[cut:]
             app.X_train,app.y_train=Xtr,ytr
             app.X_val,app.y_val=Xva,yva
             app.F_train=[[0.0]*10 for _ in range(len(Xtr))]
@@ -321,7 +346,11 @@ async def fetch_mnist_samples(app):
             for u in [digit_json_base.format(d), digit_json_fb.format(d)]:
                 try:
                     if FETCH_OK and fetch_json is not None:
-                        data=await fetch_json(u)
+                        raw=await fetch_json(u)
+                        if hasattr(raw,'to_py'):
+                            try: raw=raw.to_py()
+                            except Exception: pass
+                        data=raw
                     else:
                         resp=await window.fetch(u, {"mode":"cors"})
                         if not resp.ok:
@@ -338,9 +367,16 @@ async def fetch_mnist_samples(app):
             if data is None:
                 app.fetch_status=f"Digit {d} miss {last_err} total {len(all_samples)}"
                 continue
+            if hasattr(data,'to_py'):
+                try: data=data.to_py()
+                except Exception: pass
             parsed=0
-            if isinstance(data,list):
-                for item in data[:150]:
+            data_list = data if isinstance(data,list) else []
+            if not data_list and isinstance(data, dict):
+                try: data_list=list(data.values())
+                except Exception: data_list=[]
+            if data_list:
+                for item in data_list[:150]:
                     try:
                         img=None; lab=d
                         if isinstance(item,dict):
@@ -378,7 +414,7 @@ async def fetch_mnist_samples(app):
                     except Exception:
                         continue
             app.fetch_status=f"Digit {d}: +{parsed} total {len(all_samples)}"
-        if len(all_samples)>=100:
+        if len(all_samples)>=50:
             app.all_samples=all_samples
             by_class={i:[] for i in range(10)}
             for pix,lab in all_samples:
@@ -393,6 +429,12 @@ async def fetch_mnist_samples(app):
             X,y=Xb,yb
             if len(X)>1500: X=X[:1500]; y=y[:1500]
             Xtr,ytr,Xva,yva=train_val_split(X,y,0.78)
+            if len(Xtr)==0 and len(Xva)>0:
+                Xtr,Xva = Xva,[]; ytr,yva = yva,[]
+            if len(Xva)==0 and len(Xtr)>10:
+                cut=int(len(Xtr)*0.2)
+                if cut>0:
+                    Xva=Xtr[:cut]; yva=ytr[:cut]; Xtr=Xtr[cut:]; ytr=ytr[cut:]
             app.X_train,app.y_train=Xtr,ytr
             app.X_val,app.y_val=Xva,yva
             app.F_train=[[0.0]*10 for _ in range(len(Xtr))]
@@ -449,6 +491,12 @@ async def fetch_mnist_samples(app):
         X,y=Xb,yb
         if len(X)>1400: X=X[:1400]; y=y[:1400]
         Xtr,ytr,Xva,yva=train_val_split(X,y,0.78)
+        if len(Xtr)==0 and len(Xva)>0:
+            Xtr,Xva = Xva,[]; ytr,yva = yva,[]
+        if len(Xva)==0 and len(Xtr)>10:
+            cut=int(len(Xtr)*0.2)
+            if cut>0:
+                Xva=Xtr[:cut]; yva=ytr[:cut]; Xtr=Xtr[cut:]; ytr=ytr[cut:]
         app.X_train,app.y_train=Xtr,ytr
         app.X_val,app.y_val=Xva,yva
         app.F_train=[[0.0]*10 for _ in range(len(Xtr))]
@@ -463,6 +511,12 @@ async def fetch_mnist_samples(app):
     app.X_train_full, app.y_train_full=sx,sy
     X,y=sx,sy
     Xtr,ytr,Xva,yva=train_val_split(X,y,0.78)
+    if len(Xtr)==0 and len(Xva)>0:
+        Xtr,Xva = Xva,[]; ytr,yva = yva,[]
+    if len(Xva)==0 and len(Xtr)>10:
+        cut=int(len(Xtr)*0.2)
+        if cut>0:
+            Xva=Xtr[:cut]; yva=ytr[:cut]; Xtr=Xtr[cut:]; ytr=ytr[cut:]
     app.X_train,app.y_train=Xtr,ytr
     app.X_val,app.y_val=Xva,yva
     app.F_train=[[0.0]*10 for _ in range(len(Xtr))]
