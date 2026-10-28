@@ -3,7 +3,7 @@ from scs import *
 from browser import aio, window
 import math, random
 
-# ── Extensions — Model only, strict MVC ──
+# ── Extensions — Model only ──
 try:
     from extensions.fetch import fetch_json, fetch_text, fetch, FetchError
     FETCH_OK = True
@@ -33,11 +33,10 @@ def softmax(logits):
     return [e / s for e in exps]
 
 def cross_entropy_loss(y_true, probs):
-    # y_true: list int, probs: list of list
     total = 0.0
     eps = 1e-12
     for yt, pr in zip(y_true, probs):
-        p = pr[yt]
+        p = pr[yt] if yt < len(pr) else eps
         p = min(max(p, eps), 1-eps)
         total += -math.log(p)
     return total / len(y_true) if y_true else 0.0
@@ -61,24 +60,16 @@ def find_best_stump_fast(X, target, n_feat_sample=32, min_leaf=5):
     best_thr = 0.5
     best_left = 0.0
     best_right = 0.0
-    # For small n (our case 171 train), do more thorough search
     exhaustive = n <= 250
     for f in feat_pool:
         vals = [X[i][f] for i in range(n)]
         svals = sorted(vals)
         if exhaustive:
-            # Try every 5th sorted value as threshold for better split
-            step = max(1, n//20)
+            step = max(1, n//18)
             thr_candidates = [svals[i] for i in range(step, n-step, step)]
-            # Add mean
             thr_candidates.append(sum(vals)/n)
         else:
-            thr_candidates = [
-                svals[n//4],
-                svals[n//2],
-                svals[3*n//4],
-                sum(vals)/n
-            ]
+            thr_candidates = [svals[n//4], svals[n//2], svals[3*n//4], sum(vals)/n]
         for thr in thr_candidates:
             left_sum=0.0; left_cnt=0; right_sum=0.0; right_cnt=0
             for i in range(n):
@@ -91,29 +82,23 @@ def find_best_stump_fast(X, target, n_feat_sample=32, min_leaf=5):
             left_mean = left_sum / left_cnt if left_cnt else 0.0
             right_mean = right_sum / right_cnt if right_cnt else 0.0
             gain = left_cnt*left_mean*left_mean + right_cnt*right_mean*right_mean
-            # Bonus for balanced split
-            balance = 1.0 - abs(left_cnt - right_cnt)/n * 0.2
+            balance = 1.0 - abs(left_cnt - right_cnt)/n * 0.15
             gain = gain * balance
             if gain > best_gain:
                 best_gain=gain; best_f=f; best_thr=thr; best_left=left_mean; best_right=right_mean
     return best_f,best_thr,best_left,best_right,best_gain
 
 def generate_prototype_10():
-    # 10 prototypes 28x28 simple shapes for synthetic fallback
     def blank(): return [0.0]*784
     def idx(r,c): return r*28+c
     protos = [blank() for _ in range(10)]
-    # 0 - oval
     for r in range(28):
         for c in range(28):
-            dr=r-14; dc=c-14
-            d=math.hypot(dr*1.2, dc)
+            dr=r-14; dc=c-14; d=math.hypot(dr*1.2, dc)
             if 9<d<13: protos[0][idx(r,c)]=0.9
-    # 1 - vertical line
     for r in range(6,22):
         for c in range(13,16):
             protos[1][idx(r,c)]=0.9
-    # 2 - like in screenshot
     for r in range(28):
         for c in range(28):
             if 6<=r<=8 and 8<=c<=20: protos[2][idx(r,c)]=0.9
@@ -121,7 +106,6 @@ def generate_prototype_10():
             if 14<=r<=16 and 8<=c<=20: protos[2][idx(r,c)]=0.9
             if 17<=r<=21 and 8<=c<=12: protos[2][idx(r,c)]=0.9
             if 22<=r<=24 and 8<=c<=20: protos[2][idx(r,c)]=0.9
-    # 3 - two arcs
     for r in range(28):
         for c in range(28):
             dr1=r-8; dc1=c-18
@@ -129,13 +113,11 @@ def generate_prototype_10():
             dr2=r-19; dc2=c-18
             if 12<math.hypot(dr2*1.2, dc2)<16 and c>12 and r>=10: protos[3][idx(r,c)]=0.9
             if 14<=c<=16 and 6<=r<=22: protos[3][idx(r,c)]=max(protos[3][idx(r,c)],0.3)
-    # 4 - triangle shape
     for r in range(6,22):
         for c in range(8,20):
             if abs(c-14)<1 and r<16: protos[4][idx(r,c)]=0.9
             if r==16 and 8<=c<=20: protos[4][idx(r,c)]=0.9
             if c>14 and r>10 and abs((c-14)-(r-10)*0.6)<1: protos[4][idx(r,c)]=0.9
-    # 5
     for r in range(28):
         for c in range(28):
             if 6<=r<=8 and 8<=c<=20: protos[5][idx(r,c)]=0.9
@@ -143,25 +125,21 @@ def generate_prototype_10():
             if 14<=r<=16 and 8<=c<=20: protos[5][idx(r,c)]=0.9
             if 17<=r<=21 and 16<=c<=20: protos[5][idx(r,c)]=0.9
             if 22<=r<=24 and 8<=c<=20: protos[5][idx(r,c)]=0.9
-    # 6 - loop bottom
     for r in range(28):
         for c in range(28):
             dr=r-18; dc=c-14
             if 8<math.hypot(dr,dc)<12: protos[6][idx(r,c)]=0.9
             if 8<=r<=14 and 8<=c<=12: protos[6][idx(r,c)]=0.9
-    # 7
     for r in range(28):
         for c in range(28):
             if 6<=r<=8 and 8<=c<=20: protos[7][idx(r,c)]=0.9
             if 9<=r<=20 and abs(c-(20-(r-8)*0.8))<1: protos[7][idx(r,c)]=0.9
-    # 8 - two loops
     for r in range(28):
         for c in range(28):
             drt=r-9; dct=c-14; drb=r-19; dcb=c-14
             if 9<math.hypot(drt*1.1,dct)<13: protos[8][idx(r,c)]=0.9
             if 9<math.hypot(drb*1.1,dcb)<13: protos[8][idx(r,c)]=0.9
             if abs(c-14)<2 and 9<r<19: protos[8][idx(r,c)]=max(protos[8][idx(r,c)],0.4)
-    # 9
     for r in range(28):
         for c in range(28):
             dr=r-10; dc=c-14
@@ -175,14 +153,13 @@ def synth_mnist_full(n_per_class=80):
     for digit in range(10):
         base = protos[digit]
         for _ in range(n_per_class):
-            img=[min(1.0,max(0.0,v+random.gauss(0,0.2)+(random.uniform(-0.3,0.3) if random.random()<0.05 else 0))) for v in base]
+            img=[min(1.0,max(0.0,v+random.gauss(0,0.22)+(random.uniform(-0.3,0.3) if random.random()<0.05 else 0))) for v in base]
             X.append(img); y.append(digit)
     combined=list(zip(X,y)); random.shuffle(combined)
     X[:],y[:]=zip(*combined)
     return list(X),list(y)
 
 def train_val_split(X,y,ratio=0.78):
-    # Stratified split to keep all 10 classes in train/val
     by_class={}
     for xi,yi in zip(X,y):
         by_class.setdefault(yi, []).append((xi,yi))
@@ -191,18 +168,29 @@ def train_val_split(X,y,ratio=0.78):
         lst=by_class.get(c, [])
         random.shuffle(lst)
         n=len(lst)
+        if n==0: continue
         n_tr=int(n*ratio)
+        if n_tr==0: n_tr=1
+        if n_tr>=n: n_tr=n-1
         for xi,yi in lst[:n_tr]:
             Xtr.append(xi); ytr.append(yi)
         for xi,yi in lst[n_tr:]:
             Xva.append(xi); yva.append(yi)
-    # Shuffle combined
-    combined=list(zip(Xtr,ytr)); random.shuffle(combined)
+    # Shuffle
+    combined=list(zip(Xtr,ytr))
+    random.shuffle(combined)
     if combined:
-        Xtr,ytr=zip(*combined); Xtr,ytr=list(Xtr),list(ytr)
-    combined=list(zip(Xva,yva)); random.shuffle(combined)
+        Xtr,ytr=zip(*combined)
+        Xtr,ytr=list(Xtr),list(ytr)
+    else:
+        Xtr,ytr=[],[]
+    combined=list(zip(Xva,yva))
+    random.shuffle(combined)
     if combined:
-        Xva,yva=zip(*combined); Xva,yva=list(Xva),list(yva)
+        Xva,yva=zip(*combined)
+        Xva,yva=list(Xva),list(yva)
+    else:
+        Xva,yva=[],[]
     return Xtr,ytr,Xva,yva
 
 async def resilient_pyodide_run(code_str):
@@ -210,24 +198,20 @@ async def resilient_pyodide_run(code_str):
         for _ in range(max_depth):
             if res is None:
                 break
-            # Convert JS proxy
             if hasattr(res, 'to_py'):
                 try:
                     res=res.to_py()
                 except Exception:
                     pass
-            # Check if repr is coroutine - catches both str and coroutine objects
             try:
                 rstr=str(res)
-                if '<coroutine' in rstr or 'coroutine' in rstr.lower() and 'run_python' in rstr:
-                    # Need to await it
+                if '<coroutine' in rstr:
                     if hasattr(res, '__await__'):
                         try:
                             res=await res
                             continue
                         except Exception:
                             return None
-                    # If it's already a string repr, fail this candidate
                     if isinstance(res, str):
                         return None
             except Exception:
@@ -244,18 +228,10 @@ async def resilient_pyodide_run(code_str):
                     continue
                 except Exception:
                     break
-            # Final check for coroutine string after unwrapping
             try:
                 if isinstance(res, str) and '<coroutine' in res:
                     return None
                 if '<coroutine' in str(res):
-                    # If it's still a coroutine object, try one more await
-                    if hasattr(res, '__await__'):
-                        try:
-                            res=await res
-                            continue
-                        except Exception:
-                            return None
                     return None
             except Exception:
                 pass
@@ -269,7 +245,6 @@ async def resilient_pyodide_run(code_str):
                 res=await unwrap(res)
                 if res is None:
                     continue
-                # Double-check final result is not coroutine repr
                 try:
                     if '<coroutine' in str(res):
                         continue
@@ -299,8 +274,10 @@ async def fetch_mnist_via_decompression(url):
         r2 = window.Response.new(stream)
         txt = await r2.text()
         if hasattr(txt, 'to_py'):
-            try: txt=txt.to_py()
-            except Exception: pass
+            try:
+                txt=txt.to_py()
+            except Exception:
+                pass
         txt=str(txt)
         try:
             import json as _json
@@ -328,126 +305,291 @@ async def fetch_mnist_via_decompression(url):
     except Exception as e:
         raise e
 
+async def fetch_idx_gz(url):
+    # Fetch official IDX .gz and parse via JS Uint8Array
+    try:
+        resp = await window.fetch(url, {"mode": "cors"})
+        if not resp.ok:
+            raise Exception(f"HTTP {resp.status}")
+        if not hasattr(window, 'DecompressionStream'):
+            raise Exception("No DecompressionStream")
+        ds = window.DecompressionStream.new("gzip")
+        stream = resp.body.pipeThrough(ds)
+        r2 = window.Response.new(stream)
+        buf = await r2.arrayBuffer()
+        # Convert ArrayBuffer to list of bytes via Uint8Array
+        u8 = window.Uint8Array.new(buf)
+        # to_py may convert to Python list
+        if hasattr(u8, 'to_py'):
+            try:
+                py_list = u8.to_py()
+                return list(py_list)
+            except Exception:
+                pass
+        # Fallback iterate via JS
+        length = int(u8.length) if hasattr(u8, 'length') else 0
+        out=[]
+        # For performance, only take first 5000 if huge
+        # Use window loop? We'll try Python loop with JS access
+        # Access via u8[i] may be slow but okay for 50k*784
+        # We will return the typed array itself and let caller handle via JS
+        return u8
+    except Exception as e:
+        raise e
+
 async def fetch_mnist_samples(app):
-    app.fetch_status="Fetching full MNIST 10-way via DecompressionStream..."
+    app.fetch_status="Fetching full MNIST 10-way..."
     app.mnist_loaded=False
-    json_gz_candidates=[
-        "https://cdn.jsdelivr.net/gh/lorenmh/mnist_handwritten_json@master/mnist_handwritten_test.json.gz",
-        "https://raw.githack.com/lorenmh/mnist_handwritten_json/master/mnist_handwritten_test.json.gz",
-        "https://cdn.jsdelivr.net/gh/Eventual-Inc/mnist-json@master/mnist_handwritten_test.json.gz",
-        "https://raw.githack.com/Eventual-Inc/mnist-json/master/mnist_handwritten_test.json.gz",
-        "https://cdn.jsdelivr.net/gh/lorenmh/mnist_handwritten_json@main/mnist_handwritten_test.json.gz",
-    ]
+
+    # RECOMMENDED sources from prompt: jsDelivr per-digit JSON + Google IDX
+    digit_json_base = "https://cdn.jsdelivr.net/npm/mnist@1.1.0/src/digits/{}.json"
+    digit_json_fallback = "https://raw.githack.com/cazala/mnist/master/src/digits/{}.json"
+
+    all_samples=[]
+
+    # Try digit-by-digit JSON (most reliable per prompt)
+    try:
+        app.fetch_status="Fetching per-digit JSON via jsDelivr (0-9)..."
+        for d in range(10):
+            url = digit_json_base.format(d)
+            url_fb = digit_json_fallback.format(d)
+            data=None
+            for u in [url, url_fb]:
+                try:
+                    if FETCH_OK and fetch_json is not None:
+                        data = await fetch_json(u)
+                    else:
+                        resp = await window.fetch(u, {"mode":"cors"})
+                        if not resp.ok: continue
+                        txt = await resp.text()
+                        if hasattr(txt,'to_py'): txt=txt.to_py()
+                        import json as _js
+                        data = _js.loads(str(txt))
+                    if data is not None:
+                        break
+                except Exception:
+                    continue
+            if data is None:
+                continue
+            # Parse: data may be list of images (28x28 or 784) or list of {input, output}
+            # mnist npm: each file contains array of images, each image is 784 numbers 0-1?
+            # Let's handle generically
+            parsed=0
+            if isinstance(data, list):
+                for item in data[:600]:  # limit per digit for speed
+                    try:
+                        img=None; lab=d
+                        if isinstance(item, dict):
+                            # check keys
+                            if 'input' in item:
+                                img=item['input']
+                                out=item.get('output')
+                                if isinstance(out, list):
+                                    lab = max(range(len(out)), key=lambda i: out[i]) if out else d
+                            elif 'image' in item:
+                                img=item['image']
+                                lab=item.get('label', d)
+                            elif 'data' in item:
+                                img=item['data']
+                            else:
+                                # maybe dict of pixel indices?
+                                continue
+                        elif isinstance(item, list):
+                            img=item
+                        if img is None: continue
+                        # Flatten if nested 28x28
+                        flat=[]
+                        if isinstance(img, list) and len(img)>0 and isinstance(img[0], list):
+                            for row in img:
+                                flat.extend(row)
+                        else:
+                            flat=img
+                        if len(flat)<784: continue
+                        # Normalize: if values 0-255 -> /255, if 0-1 keep
+                        pix=[]
+                        for v in flat[:784]:
+                            try:
+                                fv=float(v)
+                                if fv>1.0: fv=fv/255.0
+                                pix.append(max(0.0,min(1.0,fv)))
+                            except Exception:
+                                pix.append(0.0)
+                        all_samples.append((pix, int(lab)))
+                        parsed+=1
+                    except Exception:
+                        continue
+            app.fetch_status=f"Digit {d}: +{parsed} total {len(all_samples)}"
+        if len(all_samples)>=100:
+            app.all_samples=all_samples
+            by_class={i:[] for i in range(10)}
+            for pix,lab in all_samples:
+                if len(by_class[lab])<250:
+                    by_class[lab].append((pix,lab))
+            balanced=[]
+            for c in range(10):
+                balanced.extend(by_class[c])
+            random.shuffle(balanced)
+            Xb=[p for p,_ in balanced]; yb=[l for _,l in balanced]
+            app.X_train_full, app.y_train_full = Xb, yb
+            app.fetch_status=f"Loaded {len(all_samples)} via per-digit JSON ✓ 10-way"
+            X,y=Xb,yb
+            if len(X)>1400:
+                X=X[:1400]; y=y[:1400]
+            Xtr,ytr,Xva,yva=train_val_split(X,y,0.78)
+            app.X_train,app.y_train=Xtr,ytr
+            app.X_val,app.y_val=Xva,yva
+            app.F_train=[[0.0]*10 for _ in range(len(Xtr))]
+            app.F_val=[[0.0]*10 for _ in range(len(Xva))]
+            app.mnist_loaded=True
+            app.fetch_status+=f" | Train {len(Xtr)} Val {len(Xva)}"
+            return
+    except Exception as e:
+        app.fetch_status=f"Per-digit JSON fail: {str(e)[:40]}"
+
+    # Try official IDX gz from Google mirror (recommended)
+    try:
+        app.fetch_status="Trying Google IDX gz..."
+        # For simplicity, we will try to fetch train images and labels via IDX
+        # If DecompressionStream works, parse first 2000 samples
+        img_url = "https://storage.googleapis.com/cvdf-datasets/mnist/train-images-idx3-ubyte.gz"
+        lbl_url = "https://storage.googleapis.com/cvdf-datasets/mnist/train-labels-idx1-ubyte.gz"
+        # Fetch both
+        img_bytes = await fetch_idx_gz(img_url)
+        lbl_bytes = await fetch_idx_gz(lbl_url)
+        # img_bytes is Uint8Array or list
+        # Parse IDX: need to interpret big-endian ints
+        # If we got Uint8Array, we need to read header
+        # Let's try to convert to Python list if not already
+        def to_list(b):
+            if isinstance(b, list):
+                return b
+            try:
+                if hasattr(b, 'to_py'):
+                    return list(b.to_py())
+            except Exception:
+                pass
+            # Try length and indexing
+            try:
+                l=int(b.length)
+                return [int(b[i]) for i in range(min(l, 2000000))]
+            except Exception:
+                return []
+        img_list = to_list(img_bytes)
+        lbl_list = to_list(lbl_bytes)
+        if len(img_list)>16 and len(lbl_list)>8:
+            # Parse header big-endian
+            # Images: 0-3 magic 0x00 00 08 03, 4-7 num images, 8-11 rows, 12-15 cols
+            def be_int(lst, off):
+                return (lst[off]<<24)|(lst[off+1]<<16)|(lst[off+2]<<8)|lst[off+3]
+            n_img = be_int(img_list, 4)
+            rows = be_int(img_list, 8)
+            cols = be_int(img_list, 12)
+            n_lbl = be_int(lbl_list, 4)
+            # Take first 1500
+            n_take = min(1500, n_img, n_lbl)
+            samples=[]
+            img_off=16
+            lbl_off=8
+            for i in range(n_take):
+                pix=[]
+                base=img_off + i*rows*cols
+                for j in range(rows*cols):
+                    if base+j < len(img_list):
+                        pix.append(img_list[base+j]/255.0)
+                    else:
+                        pix.append(0.0)
+                lab = lbl_list[lbl_off + i] if lbl_off+i < len(lbl_list) else 0
+                samples.append((pix, int(lab)))
+            if len(samples)>=100:
+                app.all_samples=samples
+                Xb=[p for p,_ in samples]; yb=[l for _,l in samples]
+                app.X_train_full, app.y_train_full=Xb,yb
+                app.fetch_status=f"Loaded {len(samples)} via IDX gz ✓"
+                X,y=Xb,yb
+                Xtr,ytr,Xva,yva=train_val_split(X,y,0.78)
+                app.X_train,app.y_train=Xtr,ytr
+                app.X_val,app.y_val=Xva,yva
+                app.F_train=[[0.0]*10 for _ in range(len(Xtr))]
+                app.F_val=[[0.0]*10 for _ in range(len(Xva))]
+                app.mnist_loaded=True
+                app.fetch_status+=f" | Train {len(Xtr)} Val {len(Xva)}"
+                return
+    except Exception as e:
+        app.fetch_status=f"IDX gz fail: {str(e)[:40]}"
+
+    # Fallback: small CSVs via jsDelivr/raw.githack
     csv_candidates=[
         "https://cdn.jsdelivr.net/gh/makeyourownneuralnetwork/makeyourownneuralnetwork@master/mnist_dataset/mnist_train_100.csv",
         "https://raw.githack.com/makeyourownneuralnetwork/makeyourownneuralnetwork/master/mnist_dataset/mnist_train_100.csv",
         "https://cdn.jsdelivr.net/gh/makeyourownneuralnetwork/makeyourownneuralnetwork@master/mnist_dataset/mnist_test_10.csv",
         "https://raw.githack.com/makeyourownneuralnetwork/makeyourownneuralnetwork/master/mnist_dataset/mnist_test_10.csv",
     ]
-    data_ok=False
-    for url in json_gz_candidates:
+    combined=[]
+    for url in csv_candidates:
         try:
-            app.fetch_status=f"Fetching {url.split('/')[-1]}..."
-            data=await fetch_mnist_via_decompression(url)
-            samples=[]
-            if isinstance(data, list):
-                for obj in data[:3000]:
-                    try:
-                        if hasattr(obj,'to_py'): obj=obj.to_py()
-                        if isinstance(obj, dict):
-                            img=obj.get('image') or obj.get('pixels')
-                            lab=obj.get('label')
-                        else:
-                            img=getattr(obj,'image',None)
-                            lab=getattr(obj,'label',None)
-                            if img is None: continue
-                            if hasattr(img,'to_py'): img=img.to_py()
-                        if img is not None and lab is not None:
-                            pix=[float(v)/255.0 for v in img[:784]]
-                            samples.append((pix,int(lab)))
-                    except Exception:
-                        continue
-            if len(samples)>=50:
-                app.all_samples=samples
-                # Keep balanced subset for training for speed: 200 per class max
-                by_class={i:[] for i in range(10)}
-                for pix,lab in samples:
-                    if len(by_class[lab])<250:
-                        by_class[lab].append((pix,lab))
-                balanced=[]
-                for c in range(10):
-                    balanced.extend(by_class[c])
-                random.shuffle(balanced)
-                Xb=[p for p,_ in balanced]; yb=[l for _,l in balanced]
-                app.X_train_full, app.y_train_full = Xb, yb
-                app.fetch_status=f"Loaded {len(samples)} via {url.split('/')[-1]} - 10-way ✓"
-                data_ok=True
-                break
-        except Exception as e:
-            app.fetch_status=f"JSON fail {url.split('/')[-1][:20]}: {str(e)[:40]}"
-            continue
-    # Accumulate from CSVs if JSON gz failed - combine multiple CSVs for more data
-    if not data_ok and FETCH_OK and fetch_text is not None:
-        combined_samples=[]
-        for url in csv_candidates:
-            try:
+            if FETCH_OK and fetch_text is not None:
                 txt=await fetch_text(url)
-                lines=txt.strip().split("\n")
-                samples=[]
-                for line in lines[:1200]:
-                    if not line.strip(): continue
-                    low=line.lower()
-                    if low.startswith("label") or "pixel" in low: continue
-                    parts=line.split(",")
-                    try:
-                        if len(parts)>=785:
-                            lab=int(float(parts[0])); pix=[float(p)/255.0 for p in parts[1:785]]
-                            samples.append((pix[:784],lab))
-                    except Exception:
-                        continue
-                if samples:
-                    combined_samples.extend(samples)
-                    app.fetch_status=f"CSV {url.split('/')[-1]} +{len(samples)}"
-            except Exception:
-                continue
-        if len(combined_samples)>=20:
-            app.all_samples=combined_samples
-            Xb=[p for p,_ in combined_samples]; yb=[l for _,l in combined_samples]
-            # Pad if missing classes
-            present=set(yb)
-            if len(present)<10:
-                sx,sy=synth_mnist_full(40)
-                # Only add missing classes
-                for pix,lab in zip(sx,sy):
-                    if lab not in present or yb.count(lab)<15:
-                        Xb.append(pix); yb.append(lab)
-            app.X_train_full, app.y_train_full=Xb,yb
-            app.fetch_status=f"Loaded {len(combined_samples)} via CSVs ✓ 10-way {len(set(yb))} classes"
-            data_ok=True
-    if not data_ok:
-        app.fetch_status="Fetch unavailable - synthetic 10-way fallback"
-        sx,sy=synth_mnist_full(120)
-        app.all_samples=[(pix,lab) for pix,lab in zip(sx,sy)]
-        app.X_train_full, app.y_train_full=sx,sy
-    X,y=app.X_train_full, app.y_train_full
-    combined=list(zip(X,y)); random.shuffle(combined)
-    if combined:
-        X,y=zip(*combined); X,y=list(X),list(y)
-    # Limit train to 1200 for interactive speed
-    if len(X)>1400:
-        X=X[:1400]; y=y[:1400]
+            else:
+                resp=await window.fetch(url, {"mode":"cors"})
+                if not resp.ok: continue
+                txt=await resp.text()
+                if hasattr(txt,'to_py'): txt=txt.to_py()
+                txt=str(txt)
+            lines=txt.strip().split("\n")
+            for line in lines[:1200]:
+                if not line.strip(): continue
+                low=line.lower()
+                if low.startswith("label") or "pixel" in low: continue
+                parts=line.split(",")
+                try:
+                    if len(parts)>=785:
+                        lab=int(float(parts[0])); pix=[float(p)/255.0 for p in parts[1:785]]
+                        combined.append((pix[:784],lab))
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    if len(combined)>=20:
+        app.all_samples=combined
+        Xb=[p for p,_ in combined]; yb=[l for _,l in combined]
+        present=set(yb)
+        if len(present)<10:
+            sx,sy=synth_mnist_full(40)
+            for pix,lab in zip(sx,sy):
+                if lab not in present or yb.count(lab)<15:
+                    Xb.append(pix); yb.append(lab)
+        app.X_train_full, app.y_train_full=Xb,yb
+        app.fetch_status=f"Loaded {len(combined)} via CSVs ✓"
+        X,y=Xb,yb
+        if len(X)>1400:
+            X=X[:1400]; y=y[:1400]
+        Xtr,ytr,Xva,yva=train_val_split(X,y,0.78)
+        app.X_train,app.y_train=Xtr,ytr
+        app.X_val,app.y_val=Xva,yva
+        app.F_train=[[0.0]*10 for _ in range(len(Xtr))]
+        app.F_val=[[0.0]*10 for _ in range(len(Xva))]
+        app.mnist_loaded=True
+        app.fetch_status+=f" | Train {len(Xtr)} Val {len(Xva)}"
+        return
+
+    # Final synthetic fallback
+    app.fetch_status="Fetch unavailable - synthetic 10-way fallback"
+    sx,sy=synth_mnist_full(120)
+    app.all_samples=[(pix,lab) for pix,lab in zip(sx,sy)]
+    app.X_train_full, app.y_train_full=sx,sy
+    X,y=sx,sy
     Xtr,ytr,Xva,yva=train_val_split(X,y,0.78)
     app.X_train,app.y_train=Xtr,ytr
     app.X_val,app.y_val=Xva,yva
     app.F_train=[[0.0]*10 for _ in range(len(Xtr))]
     app.F_val=[[0.0]*10 for _ in range(len(Xva))]
     app.mnist_loaded=True
-    app.fetch_status+=f" | Train {len(Xtr)} Val {len(Xva)} 10 classes"
+    app.fetch_status+=f" | Train {len(Xtr)} Val {len(Xva)} synthetic"
 
 async def pyodide_train_reference(app):
     app.pyodide_status="Pyodide: probing..."
     if not PYODIDE_EXT_OK:
-        app.pyodide_status="Pyodide ext not found - Brython GBM 10-way fallback"
+        app.pyodide_status="Pyodide ext not found - Brython GBM fallback"
         app.pyodide_ready=False
         return
     lines=[
@@ -457,7 +599,6 @@ async def pyodide_train_reference(app):
         "    from sklearn.ensemble import GradientBoostingClassifier",
         "    def blank(): return np.zeros(784)",
         "    def idx(r,c): return r*28+c",
-        "    # 10 prototypes simple",
         "    import math as _math",
         "    protos=[blank() for _ in range(10)]",
         "    for r in range(28):",
@@ -523,7 +664,6 @@ async def pyodide_train_reference(app):
         "    split=int(0.8*len(y)); Xtr,Xte=X[:split],X[split:]; ytr,yte=y[:split],y[split:]",
         "    clf=GradientBoostingClassifier(n_estimators=330, learning_rate=0.1, max_depth=1, subsample=0.9, random_state=42)",
         "    clf.fit(Xtr,ytr)",
-        "    # staged loss",
         "    train_losses=[]; val_losses=[]",
         "    for prob in clf.staged_predict_proba(Xtr):",
         "        prob=np.clip(prob,1e-12,1-1e-12)",
@@ -597,7 +737,6 @@ def onAppStart(app):
 def onStep(app):
     app.t+=1
     if app.is_playing and app.mnist_loaded:
-        # 1 boosting round per step (10 stumps)
         if app.current_m < app.max_trees:
             step_one_tree(app)
         else:
@@ -606,14 +745,13 @@ def onStep(app):
 def step_one_tree(app):
     if not app.X_train: return
     probs_train=[softmax(f) for f in app.F_train]
-    # probs_val computed after update for speed
     trees_this_iter=[]
     for c in range(10):
         target=[]
         for i in range(len(app.X_train)):
             y_onehot=1.0 if app.y_train[i]==c else 0.0
             target.append(y_onehot - probs_train[i][c])
-        f_idx,thr,left_val,right_val,gain=find_best_stump_fast(app.X_train, target, n_feat_sample=28, min_leaf=6)
+        f_idx,thr,left_val,right_val,gain=find_best_stump_fast(app.X_train, target, n_feat_sample=32, min_leaf=5)
         for i,x in enumerate(app.X_train):
             app.F_train[i][c]+=app.eta*(left_val if x[f_idx]<thr else right_val)
         for i,x in enumerate(app.X_val):
@@ -644,7 +782,6 @@ def predict_drawing(app):
                 f[c]+=app.eta*stump["left"]
             else:
                 f[c]+=app.eta*stump["right"]
-    # No extra normalization - f are logits directly
     probs=softmax(f)
     pred=max(range(10), key=lambda c: probs[c])
     app.prediction=pred
@@ -674,14 +811,12 @@ def recompute_F(app):
 
 def paint_at(app,mx,my):
     gx=int((mx-30)//8); gy=int((my-110)//8)
-    # MNIST-like thin brush, centered
     for dy in range(-1,2):
         for dx in range(-1,2):
             ny=gy+dy; nx=gx+dx
             if 0<=ny<28 and 0<=nx<28:
                 dist=math.hypot(dx,dy)
                 if dist>1.2: continue
-                # thin stroke like real MNIST
                 intensity=0.95 if dist<0.5 else 0.25
                 idx=ny*28+nx
                 app.drawing[idx]=min(1.0, app.drawing[idx]+intensity)
@@ -705,16 +840,12 @@ def onMousePress(app,mx,my):
         app.is_drawing=True; paint_at(app,mx,my); return
     if 20<=mx<=280 and 440<=my<=560:
         if app.all_samples:
-            # grid 5x2 - match draw coords x0=20+(i%5)*50, y0=446+(i//5)*50
             cols=5
             idx_x=int((mx-20)//50)
             idx_y=int((my-440)//50)
-            # Clamp
             idx_x=max(0,min(idx_x,4))
             idx_y=max(0,min(idx_y,1))
             idx=idx_y*cols + idx_x
-            # Map to balanced shown list (one per class)
-            # Build same shown list as in redraw
             shown=[]
             seen=set()
             for pix,lab in app.all_samples:
@@ -811,7 +942,6 @@ def redrawAll(app):
         drawRect(30,364,224,36, fill=rgb(30,35,50), border=col, borderWidth=1, roundness=8)
         drawLabel(f"Pred: {app.prediction}  {prob*100:.1f}%", 142, 376, size=14, bold=True, fill=col)
         drawLabel("softmax 10 logits", 142, 390, size=8, fill=rgb(120,135,155))
-        # Prob bars for 10 classes
         for c in range(10):
             p=app.prediction_probs[c] if c < len(app.prediction_probs) else 0
             x0=30 + c*22; y0=406; h=p*36
@@ -824,7 +954,6 @@ def redrawAll(app):
         drawLabel("10-way softmax model", 142, 400, size=9, fill=rgb(90,105,125))
     drawLabel("Samples via fetch - click (10-way):", 24, 432, size=9, fill=rgb(120,135,155), align='left-top')
     if app.all_samples:
-        # Show up to 10, one per class if possible
         shown=[]
         seen=set()
         for pix,lab in app.all_samples:
@@ -866,12 +995,10 @@ def redrawAll(app):
     else:
         if app.trees:
             last_iter=app.trees[-1]
-            # Show stumps for this iter
             txt=", ".join([f"{s['class']}:({s['feature']%28},{s['feature']//28})" for s in last_iter[:3]])
             drawLabel(f"Weak learners h_{app.current_m} x10: {txt}...", 312,114, size=8, bold=True, fill=rgb(180,220,255), align='left-top')
             drawLabel(f"Each stump fits residual y_c - softmax(F)_c", 312,128, size=8, fill=rgb(130,150,175), align='left-top')
             drawRect(312,142,56,56, fill=rgb(10,15,25), border=rgb(0,212,255), borderWidth=1, roundness=6)
-            # Draw feature of class with max gain
             best_stump=max(last_iter, key=lambda s: s['gain'])
             fr=best_stump['feature']//28; fc=best_stump['feature']%28
             for r in range(28):
