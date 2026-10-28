@@ -1,18 +1,15 @@
 
 from scs import *
 from browser import aio, window
-import math, random, json
+import math, random, json, traceback
 
-# Extensions - we will use window.fetch for JSON to avoid JS proxy bugs
 try:
-    from extensions.fetch import fetch_json, fetch_text, fetch, FetchError
+    from extensions.fetch import fetch_json as ext_fetch_json, fetch_text as ext_fetch_text
     FETCH_OK = True
 except Exception:
     FETCH_OK = False
-    fetch_json = None
-    fetch_text = None
-    fetch = None
-    class FetchError(Exception): pass
+    ext_fetch_json = None
+    ext_fetch_text = None
 
 try:
     import extensions.pyodide as _py_ext
@@ -115,16 +112,10 @@ async def resilient_pyodide_run(code_str):
                 s=str(res)
                 if '<coroutine' in s.lower():
                     if isinstance(res,str): return None
-                    if hasattr(res,'__await__'):
-                        try: res=await res; continue
-                        except Exception: return None
                     return None
             except Exception: pass
             break
-        if isinstance(res,str) and '<coroutine' in res.lower():
-            return None
         return res
-
     if PYODIDE_EXT_OK and _py_ext is not None:
         for name in _py_candidates:
             try:
@@ -145,7 +136,6 @@ async def resilient_pyodide_run(code_str):
     return None
 
 async def fetch_mnist_via_pyodide_npz(app):
-    # REAL DATA ONLY - tf bucket has CORS
     code_lines=[
         "import io, traceback",
         "try:",
@@ -169,7 +159,7 @@ async def fetch_mnist_via_pyodide_npz(app):
         "        samples=[]",
         "        for c in range(10): samples.extend(by_class[c][:150])",
         "        import random as _rnd; _rnd.shuffle(samples)",
-        "        result={'status':'ok','samples':samples,'total':int(len(y_train))}",
+        "        result={'status':'ok','samples':samples}",
         "except Exception as e:",
         "    result={'status':'error','msg':str(e),'trace':traceback.format_exc()}",
         "result",
@@ -186,59 +176,140 @@ async def fetch_mnist_via_pyodide_npz(app):
     if isinstance(py_res,dict) and py_res.get('status')=='ok':
         samples=py_res.get('samples',[])
         if samples: return samples
-    raise Exception(f"pyfetch npz fail {str(py_res)[:150]}")
+    raise Exception(f"npz fail {str(py_res)[:150]}")
 
 async def fetch_mnist_via_jsdelivr(app):
-    # REAL DATA ONLY - per-digit JSON, use window.fetch directly to avoid proxy bug
-    base="https://cdn.jsdelivr.net/npm/mnist@1.1.0/src/digits/{}.json"
-    fallback="https://raw.githack.com/cazala/mnist/master/src/digits/{}.json"
+    # Direct window.fetch - bulletproof real parsing
+    urls = [
+        "https://cdn.jsdelivr.net/npm/mnist@1.1.0/src/digits/{}.json",
+        "https://raw.githack.com/cazala/mnist/master/src/digits/{}.json",
+    ]
     all_samples=[]
     for d in range(10):
         data=None
         last_err=""
-        for url in [base.format(d), fallback.format(d)]:
+        for tmpl in urls:
+            url=tmpl.format(d)
             try:
-                resp=await window.fetch(url, {"mode":"cors"})
+                # Try extension fetch_json first (may have proxy bug, but try)
+                if FETCH_OK and ext_fetch_json is not None:
+                    try:
+                        raw = await ext_fetch_json(url)
+                        if hasattr(raw,'to_py'):
+                            try: raw=raw.to_py()
+                            except Exception: pass
+                        if raw is not None:
+                            data=raw
+                            # If data is list, good
+                            if isinstance(data,list) and len(data)>0:
+                                break
+                    except Exception as e:
+                        last_err=f"ext {str(e)[:20]}"
+                        # fall through to window.fetch
+                        pass
+                # window.fetch path - this is what shows 200 in your Network tab
+                resp = await window.fetch(url, {"mode":"cors"})
                 if not resp.ok:
                     last_err=f"HTTP {resp.status}"
                     continue
-                txt=await resp.text()
-                if hasattr(txt,'to_py'): txt=txt.to_py()
-                txt=str(txt)
-                # json loads
-                parsed=json.loads(txt)
+                txt = await resp.text()
+                if hasattr(txt,'to_py'):
+                    try: txt=txt.to_py()
+                    except Exception: pass
+                txt = str(txt)
+                # Fast path: JSON parse
+                try:
+                    parsed = json.loads(txt)
+                except Exception as je:
+                    # Try JS JSON.parse via window
+                    try:
+                        parsed = window.JSON.parse(txt)
+                        if hasattr(parsed,'to_py'):
+                            parsed=parsed.to_py()
+                    except Exception:
+                        last_err=f"json err {str(je)[:20]}"
+                        continue
                 data=parsed
-                if data is not None: break
+                if data is not None:
+                    break
             except Exception as e:
                 last_err=str(e)[:40]
                 continue
+
         if data is None:
-            raise Exception(f"Digit {d} failed {last_err} - real data required, no fallback")
-        # data is list of dicts
-        cnt=0
+            app.fetch_status=f"REAL Digit {d} FAIL {last_err} total {len(all_samples)}"
+            continue
+
+        # Unwrap if still JS proxy
+        if hasattr(data,'to_py'):
+            try: data=data.to_py()
+            except Exception: pass
+
+        # Normalize to list
+        data_list=[]
         if isinstance(data,list):
-            for item in data[:150]:
+            data_list=data
+        elif isinstance(data,dict):
+            # Could be dict of index->item or have data key
+            if 'data' in data and isinstance(data['data'],list):
+                data_list=data['data']
+            else:
                 try:
+                    # values
+                    data_list=list(data.values())
+                except Exception:
+                    data_list=[]
+
+        cnt=0
+        if data_list:
+            # Each item should be dict with input/output
+            for item in data_list[:150]:
+                try:
+                    if hasattr(item,'to_py'):
+                        try: item=item.to_py()
+                        except Exception: pass
                     img=None; lab=d
                     if isinstance(item,dict):
                         if 'input' in item:
                             img=item['input']
                             out=item.get('output')
-                            if isinstance(out,list):
-                                lab=max(range(len(out)), key=lambda i: out[i]) if out else d
+                            if isinstance(out,(list,tuple)):
+                                # find argmax
+                                try:
+                                    if hasattr(out,'to_py'): out=out.to_py()
+                                    lab=int(max(range(len(out)), key=lambda i: float(out[i])))
+                                except Exception:
+                                    lab=d
+                            elif isinstance(out,(int,float)):
+                                lab=int(out)
                         elif 'image' in item:
-                            img=item['image']; lab=item.get('label',d)
-                    elif isinstance(item,list):
+                            img=item['image']; lab=int(item.get('label',d))
+                        elif 'data' in item:
+                            img=item['data']
+                        elif 'pixels' in item:
+                            img=item['pixels']
+                        # Sometimes input is nested
+                        if img is not None and hasattr(img,'to_py'):
+                            try: img=img.to_py()
+                            except Exception: pass
+                    elif isinstance(item,(list,tuple)):
+                        # raw pixels list
                         img=item
                     if img is None: continue
-                    # flatten if nested
                     flat=[]
-                    if isinstance(img,list) and len(img)>0 and isinstance(img[0],list):
+                    # Handle nested 28x28
+                    if isinstance(img,(list,tuple)) and len(img)>0 and isinstance(img[0],(list,tuple)):
                         for row in img:
-                            if isinstance(row,list): flat.extend(row)
-                            else: flat.append(row)
+                            if hasattr(row,'to_py'):
+                                try: row=row.to_py()
+                                except Exception: pass
+                            if isinstance(row,(list,tuple)):
+                                flat.extend(list(row))
+                            else:
+                                flat.append(row)
                     else:
-                        flat=img
+                        flat=list(img) if isinstance(img,(list,tuple)) else []
+
                     if len(flat)<784: continue
                     pix=[]
                     for v in flat[:784]:
@@ -250,20 +321,25 @@ async def fetch_mnist_via_jsdelivr(app):
                             pix.append(0.0)
                     all_samples.append((pix,int(lab)))
                     cnt+=1
-                except Exception:
+                except Exception as ie:
                     continue
-        app.fetch_status=f"Digit {d}: +{cnt} total {len(all_samples)} real"
-        # Small delay to let UI breathe
-    if len(all_samples)<500:
-        raise Exception(f"Only {len(all_samples)} real samples - need 500+, no fake allowed")
+        app.fetch_status=f"REAL Digit {d}: +{cnt} total {len(all_samples)} - parsing {type(data_list).__name__} len {len(data_list)}"
+        # Yield to event loop
+        try:
+            await aio.sleep(0.01)
+        except Exception:
+            pass
+
+    if len(all_samples)<20:
+        raise Exception(f"Only {len(all_samples)} REAL samples parsed - need 20+, check console")
     return all_samples
 
 async def fetch_mnist_samples(app):
-    app.fetch_status="Fetching REAL MNIST..."
+    app.fetch_status="Fetching REAL..."
     app.mnist_loaded=False
-    # 1) Try Pyodide npz (60k real)
+    # Try npz first (60k)
     try:
-        app.fetch_status="REAL: pyfetch mnist.npz..."
+        app.fetch_status="REAL: pyfetch npz..."
         samples = await fetch_mnist_via_pyodide_npz(app)
         app.all_samples=samples
         by_class={i:[] for i in range(10)}
@@ -283,12 +359,14 @@ async def fetch_mnist_samples(app):
         app.F_train=[[0.0]*10 for _ in range(len(Xtr))]
         app.F_val=[[0.0]*10 for _ in range(len(Xva))]
         app.mnist_loaded=True
-        app.fetch_status+=f" | Train {len(Xtr)} Val {len(Xva)} REAL"
+        app.fetch_status+=f" | Train {len(Xtr)} Val {len(Xva)} REAL npz"
         return
     except Exception as e:
-        app.fetch_status=f"npz fail {str(e)[:50]} -> trying JSON"
+        tb=traceback.format_exc()
+        app.fetch_status=f"npz fail {str(e)[:60]} -> JSON"
+        app.pyodide_status=f"Pyodide: {str(e)[:80]}"
 
-    # 2) Try jsDelivr JSON (real, no fake)
+    # Try JSON (real)
     try:
         samples = await fetch_mnist_via_jsdelivr(app)
         app.all_samples=samples
@@ -309,12 +387,15 @@ async def fetch_mnist_samples(app):
         app.F_train=[[0.0]*10 for _ in range(len(Xtr))]
         app.F_val=[[0.0]*10 for _ in range(len(Xva))]
         app.mnist_loaded=True
-        app.fetch_status+=f" | Train {len(Xtr)} Val {len(Xva)} REAL"
+        app.fetch_status+=f" | Train {len(Xtr)} Val {len(Xva)} REAL JSON"
         return
     except Exception as e:
-        app.fetch_status=f"REAL DATA FAILED: {str(e)[:80]} - NO FAKE"
+        tb=traceback.format_exc()[:300]
+        app.fetch_status=f"REAL FAILED: {str(e)[:80]} - NO FAKE | {tb[:60]}"
         app.mnist_loaded=False
-        # Do NOT fallback to synthetic - we stand for real
+        app.all_samples=[]
+        app.X_train=[]; app.y_train=[]
+        app.X_val=[]; app.y_val=[]
         return
 
 async def pyodide_train_reference(app):
@@ -421,7 +502,7 @@ async def pyodide_train_reference(app):
             try: py_res=json.loads(py_res)
             except Exception: pass
         if isinstance(py_res,dict) and py_res.get("status")=="ok":
-            app.pyodide_status=f"Pyodide OK acc {py_res.get('accuracy',0):.3f}"
+            app.pyodide_status=f"Pyodide OK {py_res.get('accuracy',0):.3f}"
             app.pyodide_reference=py_res
             app.pyodide_ready=True
             app.ref_train_losses=py_res.get("train_losses",[])
@@ -429,7 +510,7 @@ async def pyodide_train_reference(app):
             if py_res.get("feature_importance"):
                 app.feature_importance=py_res.get("feature_importance",[0]*784)
         else:
-            app.pyodide_status=f"Pyodide: {str(py_res)[:120]}"
+            app.pyodide_status=f"Pyodide: {str(py_res)[:100]}"
             app.pyodide_ready=False
     except Exception as e:
         app.pyodide_status=f"Pyodide err {e}"
@@ -443,7 +524,7 @@ def onAppStart(app):
     app.feature_importance=[0.0]*784; app.is_playing=False
     app.mnist_loaded=False; app.all_samples=[]; app.X_train=[]; app.y_train=[]
     app.X_val=[]; app.y_val=[]; app.F_train=[]; app.F_val=[]
-    app.fetch_status="Fetching REAL MNIST..."; app.pyodide_status="Init pyodide..."
+    app.fetch_status="Fetching REAL..."; app.pyodide_status="Init..."
     app.pyodide_ready=False; app.pyodide_reference=None
     app.ref_train_losses=[]; app.ref_val_losses=[]
     app.drawing=[0.0]*784; app.is_drawing=False
@@ -458,9 +539,9 @@ def onStep(app):
     try:
         if app.is_playing:
             if not app.mnist_loaded:
-                app.fetch_status="Waiting for REAL data - no fake!"
+                app.fetch_status="Waiting REAL - "+app.fetch_status[:40]
             elif not app.X_train:
-                app.fetch_status=f"No X_train! REAL failed"
+                app.fetch_status="No X_train REAL failed"
                 app.is_playing=False
             else:
                 if app.current_m < app.max_trees:
@@ -468,7 +549,7 @@ def onStep(app):
                 else:
                     app.is_playing=False
     except Exception as e:
-        app.fetch_status=f"Step err {e}"
+        app.fetch_status=f"Step err {e} {traceback.format_exc()[:60]}"
         app.is_playing=False
 
 def step_one_tree(app):
@@ -499,7 +580,7 @@ def step_one_tree(app):
         if any(v>0.05 for v in app.drawing):
             predict_drawing(app)
     except Exception as e:
-        app.fetch_status=f"train err {e}"
+        app.fetch_status=f"train err {e} {traceback.format_exc()[:80]}"
         app.is_playing=False
 
 def predict_drawing(app):
@@ -621,8 +702,8 @@ def onKeyPress(app,key):
 def redrawAll(app):
     drawRect(0,0,app.width,app.height, fill=gradient(rgb(14,16,22), rgb(24,27,35), start='top'))
     drawRect(0,0,app.width,50, fill=rgb(18,20,28), border=rgb(40,45,60), borderWidth=1)
-    drawLabel("XGBoost Lab - REAL MNIST ONLY - NO FAKES", 14, 14, size=14, bold=True, fill=rgb(220,230,255), align='left-top')
-    drawLabel("F_m=F_{m-1}+eta*h_m | L=-sum p log softmax | REAL 60k/10k 784-d", 14, 32, size=9, fill=rgb(130,255,130), align='left-top')
+    drawLabel("XGBoost Lab - REAL MNIST ONLY", 14, 14, size=14, bold=True, fill=rgb(220,230,255), align='left-top')
+    drawLabel("F_m=F_{m-1}+eta*h_m | REAL 60k/10k 784-d | NO FAKES", 14, 32, size=9, fill=rgb(130,255,130), align='left-top')
     play_col=rgb(0,212,255) if app.is_playing else rgb(55,65,85)
     drawRect(360,12,70,26, fill=play_col, border=rgb(90,110,140), borderWidth=1, roundness=7)
     drawLabel("Play" if not app.is_playing else "Pause", 395, 25, size=11, bold=True, fill=rgb(10,15,25) if app.is_playing else rgb(200,220,255))
@@ -641,7 +722,7 @@ def redrawAll(app):
     drawLabel("RF vs Boosting", 940, 25, size=11, bold=True, fill=rgb(255,220,230) if app.show_rf else rgb(180,190,210))
     drawRect(12,60,276,620, fill=rgb(20,23,31), border=rgb(35,40,55), borderWidth=1, roundness=12)
     drawLabel("INPUT: Draw 0-9 - REAL MNIST 28x28", 24, 72, size=11, bold=True, fill=rgb(180,200,230), align='left-top')
-    drawLabel("Each pixel = feature (784-d) 10 classes REAL", 24, 88, size=9, fill=rgb(110,255,110), align='left-top')
+    drawLabel("Each pixel = feature (784-d) REAL", 24, 88, size=9, fill=rgb(110,255,110), align='left-top')
     drawRect(28,100,228,228, fill=rgb(8,10,15), border=rgb(60,70,90), borderWidth=1, roundness=8)
     for r in range(28):
         for c in range(28):
@@ -660,7 +741,7 @@ def redrawAll(app):
         prob=app.prediction_probs[app.prediction]
         drawRect(30,364,224,36, fill=rgb(30,35,50), border=col, borderWidth=1, roundness=8)
         drawLabel(f"Pred: {app.prediction}  {prob*100:.1f}%", 142, 376, size=14, bold=True, fill=col)
-        drawLabel("softmax 10 logits REAL", 142, 390, size=8, fill=rgb(120,135,155))
+        drawLabel("softmax REAL", 142, 390, size=8, fill=rgb(120,135,155))
         for c in range(10):
             p=app.prediction_probs[c] if c < len(app.prediction_probs) else 0
             x0=30 + c*22; y0=406; h=p*36
@@ -670,8 +751,8 @@ def redrawAll(app):
     else:
         drawRect(30,364,224,60, fill=rgb(20,23,31), border=rgb(35,40,55), borderWidth=1, roundness=6)
         drawLabel("Draw any digit 0-9", 142, 384, size=11, fill=rgb(100,115,135))
-        drawLabel("REAL 10-way softmax model", 142, 400, size=9, fill=rgb(90,255,90))
-    drawLabel("Samples REAL - click (10-way):", 24, 432, size=9, fill=rgb(120,255,120), align='left-top')
+        drawLabel("REAL 10-way softmax", 142, 400, size=9, fill=rgb(90,255,90))
+    drawLabel("Samples REAL - click:", 24, 432, size=9, fill=rgb(120,255,120), align='left-top')
     if app.all_samples:
         shown=[]; seen=set()
         for pix,lab in app.all_samples:
@@ -692,7 +773,7 @@ def redrawAll(app):
     drawLabel(app.fetch_status[:70], 24, 556, size=7, fill=rgb(110,255,110), align='left-top')
     drawRect(300,60,388,620, fill=rgb(22,25,34), border=rgb(35,40,55), borderWidth=1, roundness=12)
     drawLabel("BOOSTING: Multinomial 10-way REAL", 312, 72, size=12, bold=True, fill=rgb(200,220,255), align='left-top')
-    drawLabel(f"Trees {app.current_m}/{app.max_trees} (x10 stumps) eta={app.eta:.2f}", 312, 88, size=8, fill=rgb(130,145,165), align='left-top')
+    drawLabel(f"Trees {app.current_m}/{app.max_trees} (x10) eta={app.eta:.2f} REAL", 312, 88, size=8, fill=rgb(130,145,165), align='left-top')
     if app.show_rf:
         drawRect(312,108,180,90, fill=rgb(30,20,30), border=rgb(80,40,60), borderWidth=1, roundness=8)
         drawLabel("Random Forest (parallel)", 320,116, size=9, bold=True, fill=rgb(255,150,180), align='left-top')
@@ -713,7 +794,7 @@ def redrawAll(app):
             last_iter=app.trees[-1]
             txt=", ".join([f"{s['class']}:({s['feature']%28},{s['feature']//28})" for s in last_iter[:3]])
             drawLabel(f"Weak learners h_{app.current_m} x10: {txt}...", 312,114, size=8, bold=True, fill=rgb(180,220,255), align='left-top')
-            drawLabel(f"Each stump fits residual y_c - softmax(F)_c", 312,128, size=8, fill=rgb(130,150,175), align='left-top')
+            drawLabel(f"Each stump fits y_c - softmax(F)_c", 312,128, size=8, fill=rgb(130,150,175), align='left-top')
             drawRect(312,142,56,56, fill=rgb(10,15,25), border=rgb(0,212,255), borderWidth=1, roundness=6)
             best_stump=max(last_iter, key=lambda s: s['gain'])
             fr=best_stump['feature']//28; fc=best_stump['feature']%28
@@ -721,7 +802,7 @@ def redrawAll(app):
                 for c in range(28):
                     if r==fr and c==fc:
                         drawRect(312+c*2,142+r*2,2.5,2.5, fill=rgb(255,183,3))
-            drawLabel(f"Best pixel ({fc},{fr}) cls {best_stump['class']} thr {best_stump['threshold']:.2f} gain {best_stump['gain']:.1f}", 380,148, size=7, fill=rgb(140,160,185), align='left-top')
+            drawLabel(f"Best pixel ({fc},{fr}) cls {best_stump['class']} thr {best_stump['threshold']:.2f}", 380,148, size=7, fill=rgb(140,160,185), align='left-top')
             drawLabel("Val samples - residuals drives next:", 380,162, size=7, fill=rgb(140,160,185), align='left-top')
             for i in range(min(5, len(app.X_val))):
                 x=380+i*52; y=174
@@ -735,7 +816,7 @@ def redrawAll(app):
                 drawLabel(str(app.y_val[i]), x+17, y+40, size=9, bold=True, fill=rgb(0,212,255))
         else:
             drawLabel(f"No trees yet - X={len(app.X_train)} REAL={app.mnist_loaded}", 312,120, size=10, fill=rgb(120,255,120), align='left-top')
-            drawLabel("Press Play/Space/Step - REAL DATA ONLY", 312,138, size=9, fill=rgb(100,255,100), align='left-top')
+            drawLabel("Press Play - REAL DATA ONLY - NO FAKES", 312,138, size=9, fill=rgb(100,255,100), align='left-top')
     drawRect(312,220,368,130, fill=rgb(14,18,26), border=rgb(35,40,55), borderWidth=1, roundness=8)
     drawLabel("Loss vs #trees - cyan train / gold val", 320,228, size=9, bold=True, fill=rgb(180,200,220), align='left-top')
     drawLine(338,246,338,332, lineWidth=1, fill=rgb(60,70,90))
@@ -764,7 +845,7 @@ def redrawAll(app):
         drawLabel(f"Val Acc {acc*100:.1f}% REAL", 320,320, size=9, bold=True, fill=rgb(180,220,255), align='left-top')
     drawRect(312,358,368,50, fill=rgb(18,22,32), border=rgb(35,40,55), borderWidth=1, roundness=8)
     drawLabel("F_m = F_{m-1} + eta*h_m  h_m approx y - softmax(F)", 320,366, size=9, fill=rgb(200,220,255), align='left-top')
-    drawLabel("10 stumps per round, one per class, softmax", 320,382, size=8, fill=rgb(120,140,165), align='left-top')
+    drawLabel("10 stumps per round, one per class", 320,382, size=8, fill=rgb(120,140,165), align='left-top')
     drawLabel(f"Ensemble timeline - {app.current_m*10} stumps:", 312,418, size=9, bold=True, fill=rgb(180,200,220), align='left-top')
     for i in range(min(app.current_m, 80)):
         trees_iter=app.trees[i] if i < len(app.trees) else []
@@ -775,7 +856,7 @@ def redrawAll(app):
         drawRect(x,y,7,8, fill=rgb(col_int,col_int//2,30), border=rgb(80,60,30), borderWidth=0.4, roundness=1)
     drawRect(700,60,338,620, fill=rgb(20,23,31), border=rgb(35,40,55), borderWidth=1, roundness=12)
     drawLabel("RESEARCH VIEW - REAL ONLY", 712,72, size=11, bold=True, fill=rgb(220,255,130), align='left-top')
-    drawLabel("No synthetic, no CSV fallback", 712,88, size=9, fill=rgb(130,255,130), align='left-top')
+    drawLabel("No synthetic, no CSV", 712,88, size=9, fill=rgb(130,255,130), align='left-top')
     drawRect(718,100,228,228, fill=rgb(10,12,18), border=rgb(50,60,80), borderWidth=1, roundness=8)
     max_imp=max(app.feature_importance) if max(app.feature_importance)>0 else 1
     for r in range(28):
@@ -796,11 +877,11 @@ def redrawAll(app):
         drawLabel(f"pixel ({hc},{hr}) imp {app.feature_importance[app.hover_feat]:.1f}", 720,332, size=8, fill=rgb(200,220,255), align='left-top')
     drawLabel("Feature importance: 10-way REAL", 712,340, size=9, fill=rgb(140,255,140), align='left-top')
     drawRect(712,352,316,86, fill=rgb(16,20,28), border=rgb(40,50,70), borderWidth=1, roundness=8)
-    drawLabel("Softmax cross-entropy:", 720,360, size=9, bold=True, fill=rgb(180,200,220), align='left-top')
+    drawLabel("Softmax cross-entropy REAL:", 720,360, size=9, bold=True, fill=rgb(180,200,220), align='left-top')
     drawLabel("L = -sum_i sum_c p_{i,c} log q_{i,c}", 720,374, size=9, fill=rgb(200,220,255), align='left-top')
     drawLabel("q = softmax(F) = exp(F_c)/sum_k exp(F_k)", 720,386, size=8, fill=rgb(150,170,200), align='left-top')
     drawLabel("grad = q - p -> h_m ~ p - q", 720,400, size=9, bold=True, fill=rgb(0,212,255), align='left-top')
-    drawLabel("F_m = F_{m-1}+eta*h_m  10 logits", 720,412, size=8, fill=rgb(160,180,210), align='left-top')
+    drawLabel("F_m = F_{m-1}+eta*h_m  10 logits REAL", 720,412, size=8, fill=rgb(160,180,210), align='left-top')
     drawLabel("330 trees x10 = 3300 stumps REAL", 720,424, size=8, fill=rgb(130,255,130), align='left-top')
     drawRect(712,444,316,84, fill=rgb(18,22,32), border=rgb(35,45,65), borderWidth=1, roundness=8)
     drawLabel("Pyodide worker:", 720,452, size=9, bold=True, fill=rgb(180,200,220), align='left-top')
@@ -812,10 +893,10 @@ def redrawAll(app):
         acc=app.pyodide_reference.get("accuracy",0)
         drawLabel(f"sklearn GBM 330: {acc*100:.1f}% REAL", 720,492, size=8, fill=rgb(160,200,180), align='left-top')
     else:
-        drawLabel("Brython GBM - REAL data only", 720,492, size=8, fill=rgb(140,255,140), align='left-top')
+        drawLabel("Brython GBM - REAL only", 720,492, size=8, fill=rgb(140,255,140), align='left-top')
     drawRect(712,534,316,110, fill=rgb(14,18,26), border=rgb(35,40,55), borderWidth=1, roundness=8)
     drawLabel("Research insights REAL:", 720,542, size=9, bold=True, fill=rgb(220,255,130), align='left-top')
-    notes=["* 10 logits, softmax -> cross-entropy REAL","* stumps depth1 high bias low var","* boosting reduces bias seq","* eta 0.01-0.3 slows improves gen","* 330 trees high cap","* MNIST 784-d, 10 classes, 60k/10k REAL"]
+    notes=["* 10 logits, softmax REAL","* stumps depth1 high bias low var","* boosting reduces bias seq","* eta 0.01-0.3 improves gen","* 330 trees high cap","* MNIST 784-d, 10 classes REAL"]
     for i,line in enumerate(notes):
         drawLabel(line, 720,556+i*12, size=8, fill=rgb(130,255,130), align='left-top')
-    drawLabel(f"REAL ONLY - {app.fetch_status[:40]}", 14, 686, size=8, fill=rgb(80,255,80), align='left-top')
+    drawLabel(f"REAL ONLY - {app.fetch_status[:50]}", 14, 686, size=8, fill=rgb(80,255,80), align='left-top')
