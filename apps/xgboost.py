@@ -209,7 +209,7 @@ async def fetch_mnist_via_jsdelivr_REAL(app):
     return all_samples
 
 async def fetch_mnist_samples(app):
-    app.fetch_status="Fetching REAL 10-way..."
+    app.fetch_status="Fetching 10-way..."
     app.mnist_loaded=False
     try:
         samples = await fetch_mnist_via_jsdelivr_REAL(app)
@@ -437,7 +437,7 @@ def onKeyPress(app,key):
 def redrawAll(app):
     drawRect(0,0,app.width,app.height, fill=gradient(rgb(14,16,22), rgb(24,27,35), start='top'))
     drawRect(0,0,app.width,50, fill=rgb(18,20,28), border=rgb(40,45,60), borderWidth=1)
-    drawLabel("XGBoost Lab - REAL MNIST ONLY - FLAT FIX v3 FINAL", 14, 14, size=14, bold=True, fill=rgb(220,230,255), align='left-top')
+    drawLabel("XGBoost Lab", 14, 14, size=14, bold=True, fill=rgb(220,230,255), align='left-top')
     drawLabel("F_m=F_{m-1}+eta*h_m | REAL 10-way flat chunk 784 | resp.text()+json.loads", 14, 32, size=8, fill=rgb(130,255,130), align='left-top')
     play_col=rgb(0,212,255) if app.is_playing else rgb(55,65,85)
     drawRect(360,12,70,26, fill=play_col, border=rgb(90,110,140), borderWidth=1, roundness=7)
@@ -456,8 +456,8 @@ def redrawAll(app):
     drawRect(860,12,160,26, fill=rf_fill, border=rgb(90,60,80), borderWidth=1, roundness=7)
     drawLabel("RF vs Boosting", 940, 25, size=11, bold=True, fill=rgb(255,220,230) if app.show_rf else rgb(180,190,210))
     drawRect(12,60,276,620, fill=rgb(20,23,31), border=rgb(35,40,55), borderWidth=1, roundness=12)
-    drawLabel("INPUT: Draw 0-9 - REAL MNIST 28x28", 24, 72, size=11, bold=True, fill=rgb(180,200,230), align='left-top')
-    drawLabel("Each pixel = feature (784-d) REAL", 24, 88, size=9, fill=rgb(110,255,110), align='left-top')
+    drawLabel("INPUT: Draw 0-9 - MNIST 28x28", 24, 72, size=11, bold=True, fill=rgb(180,200,230), align='left-top')
+    drawLabel("Each pixel = feature (784-d)", 24, 88, size=9, fill=rgb(110,255,110), align='left-top')
     drawRect(28,100,228,228, fill=rgb(8,10,15), border=rgb(60,70,90), borderWidth=1, roundness=8)
     for r in range(28):
         for c in range(28):
@@ -470,7 +470,7 @@ def redrawAll(app):
         drawLine(30,102+i*8,254,102+i*8, lineWidth=0.4, fill=rgb(30,35,50))
     drawRect(30,338,90,20, fill=rgb(45,50,65), border=rgb(70,80,100), borderWidth=1, roundness=6)
     drawLabel("Clear C", 75, 348, size=10, bold=True, fill=rgb(200,220,255))
-    drawLabel("10-way REAL", 140, 348, size=9, bold=True, fill=rgb(130,255,130), align='left-top')
+    drawLabel("10-way", 140, 348, size=9, bold=True, fill=rgb(130,255,130), align='left-top')
     if app.prediction is not None and app.prediction_probs is not None:
         col=rgb(0,212,255)
         prob=app.prediction_probs[app.prediction]
@@ -486,8 +486,8 @@ def redrawAll(app):
     else:
         drawRect(30,364,224,60, fill=rgb(20,23,31), border=rgb(35,40,55), borderWidth=1, roundness=6)
         drawLabel("Draw any digit 0-9", 142, 384, size=11, fill=rgb(100,115,135))
-        drawLabel("REAL 10-way softmax", 142, 400, size=9, fill=rgb(90,255,90))
-    drawLabel("Samples REAL - click:", 24, 432, size=9, fill=rgb(120,255,120), align='left-top')
+        drawLabel("10-way softmax", 142, 400, size=9, fill=rgb(90,255,90))
+    drawLabel("Samples - click:", 24, 432, size=9, fill=rgb(120,255,120), align='left-top')
     if app.all_samples:
         shown=[]; seen=set()
         for pix,lab in app.all_samples:
@@ -551,7 +551,7 @@ def redrawAll(app):
                 drawLabel(str(app.y_val[i]), x+17, y+40, size=9, bold=True, fill=rgb(0,212,255))
         else:
             drawLabel(f"No trees yet - X={len(app.X_train)} REAL={app.mnist_loaded}", 312,120, size=10, fill=rgb(120,255,120), align='left-top')
-            drawLabel("Press Play - REAL DATA ONLY - FINAL", 312,138, size=9, fill=rgb(100,255,100), align='left-top')
+            drawLabel("Press Play", 312,138, size=9, fill=rgb(100,255,100), align='left-top')
     drawRect(312,220,368,130, fill=rgb(14,18,26), border=rgb(35,40,55), borderWidth=1, roundness=8)
     drawLabel("Loss vs #trees - cyan train / gold val", 320,228, size=9, bold=True, fill=rgb(180,200,220), align='left-top')
     drawLine(338,246,338,332, lineWidth=1, fill=rgb(60,70,90))
@@ -590,8 +590,8 @@ def redrawAll(app):
         col_int=min(255,col_int)
         drawRect(x,y,7,8, fill=rgb(col_int,col_int//2,30), border=rgb(80,60,30), borderWidth=0.4, roundness=1)
     drawRect(700,60,338,620, fill=rgb(20,23,31), border=rgb(35,40,55), borderWidth=1, roundness=12)
-    drawLabel("RESEARCH VIEW - REAL ONLY", 712,72, size=11, bold=True, fill=rgb(220,255,130), align='left-top')
-    drawLabel("No synthetic, no CSV", 712,88, size=9, fill=rgb(130,255,130), align='left-top')
+    drawLabel("RESEARCH VIEW", 712,72, size=11, bold=True, fill=rgb(220,255,130), align='left-top')
+    drawLabel("SIGMA SCHOLAR ALLIANCE", 712,88, size=9, fill=rgb(130,255,130), align='left-top')
     drawRect(718,100,228,228, fill=rgb(10,12,18), border=rgb(50,60,80), borderWidth=1, roundness=8)
     max_imp=max(app.feature_importance) if max(app.feature_importance)>0 else 1
     for r in range(28):
@@ -610,14 +610,14 @@ def redrawAll(app):
         hr=app.hover_feat//28; hc=app.hover_feat%28
         drawRect(720+hc*8,102+hr*8,8,8, fill=None, border=rgb(255,255,255), borderWidth=1.5)
         drawLabel(f"pixel ({hc},{hr}) imp {app.feature_importance[app.hover_feat]:.1f}", 720,332, size=8, fill=rgb(200,220,255), align='left-top')
-    drawLabel("Feature importance: 10-way REAL", 712,340, size=9, fill=rgb(140,255,140), align='left-top')
+    drawLabel("Feature importance: 10-way", 712,340, size=9, fill=rgb(140,255,140), align='left-top')
     drawRect(712,352,316,86, fill=rgb(16,20,28), border=rgb(40,50,70), borderWidth=1, roundness=8)
-    drawLabel("Softmax cross-entropy REAL:", 720,360, size=9, bold=True, fill=rgb(180,200,220), align='left-top')
+    drawLabel("Softmax cross-entropy:", 720,360, size=9, bold=True, fill=rgb(180,200,220), align='left-top')
     drawLabel("L = -sum_i sum_c p_{i,c} log q_{i,c}", 720,374, size=9, fill=rgb(200,220,255), align='left-top')
     drawLabel("q = softmax(F) = exp(F_c)/sum_k exp(F_k)", 720,386, size=8, fill=rgb(150,170,200), align='left-top')
     drawLabel("grad = q - p -> h_m ~ p - q", 720,400, size=9, bold=True, fill=rgb(0,212,255), align='left-top')
-    drawLabel("F_m = F_{m-1}+eta*h_m  10 logits REAL", 720,412, size=8, fill=rgb(160,180,210), align='left-top')
-    drawLabel("330 trees x10 = 3300 stumps REAL", 720,424, size=8, fill=rgb(130,255,130), align='left-top')
+    drawLabel("F_m = F_{m-1}+eta*h_m  10 logits", 720,412, size=8, fill=rgb(160,180,210), align='left-top')
+    drawLabel("330 trees x10 = 3300 stumps", 720,424, size=8, fill=rgb(130,255,130), align='left-top')
     drawRect(712,444,316,84, fill=rgb(18,22,32), border=rgb(35,45,65), borderWidth=1, roundness=8)
     drawLabel("Pyodide worker:", 720,452, size=9, bold=True, fill=rgb(180,200,220), align='left-top')
     status=app.pyodide_status
@@ -628,10 +628,10 @@ def redrawAll(app):
         acc=app.pyodide_reference.get("accuracy",0)
         drawLabel(f"sklearn GBM 330: {acc*100:.1f}% REAL", 720,492, size=8, fill=rgb(160,200,180), align='left-top')
     else:
-        drawLabel("Brython GBM - REAL only - fixed", 720,492, size=8, fill=rgb(140,255,140), align='left-top')
+        drawLabel("Brython GBM", 720,492, size=8, fill=rgb(140,255,140), align='left-top')
     drawRect(712,534,316,110, fill=rgb(14,18,26), border=rgb(35,40,55), borderWidth=1, roundness=8)
-    drawLabel("Research insights REAL:", 720,542, size=9, bold=True, fill=rgb(220,255,130), align='left-top')
-    notes=["* 10 logits, softmax REAL","* stumps depth1 high bias low var","* boosting reduces bias seq","* eta 0.01-0.3 improves gen","* 330 trees high cap","* MNIST 784-d, 10 classes REAL"]
+    drawLabel("Research insights:", 720,542, size=9, bold=True, fill=rgb(220,255,130), align='left-top')
+    notes=["* 10 logits, softmax","* stumps depth1 high bias low var","* boosting reduces bias seq","* eta 0.01-0.3 improves gen","* 330 trees high cap","* MNIST 784-d, 10 classes REAL"]
     for i,line in enumerate(notes):
         drawLabel(line, 720,556+i*12, size=8, fill=rgb(130,255,130), align='left-top')
-    drawLabel(f"REAL ONLY - {app.fetch_status[:60]}", 14, 686, size=8, fill=rgb(80,255,80), align='left-top')
+    drawLabel(f"MNIST DATA {app.fetch_status[:60]}", 14, 686, size=8, fill=rgb(80,255,80), align='left-top')
