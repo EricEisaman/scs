@@ -50,7 +50,7 @@ def accuracy_multiclass(y_true, probs):
             correct+=1
     return correct / len(y_true) if y_true else 0.0
 
-def find_best_stump_fast(X, target, n_feat_sample=36, min_leaf=5):
+def find_best_stump_fast(X, target, n_feat_sample=32, min_leaf=5):
     n = len(X)
     if n==0:
         return 0,0.5,0.0,0.0,0.0
@@ -61,16 +61,24 @@ def find_best_stump_fast(X, target, n_feat_sample=36, min_leaf=5):
     best_thr = 0.5
     best_left = 0.0
     best_right = 0.0
+    # For small n (our case 171 train), do more thorough search
+    exhaustive = n <= 250
     for f in feat_pool:
         vals = [X[i][f] for i in range(n)]
         svals = sorted(vals)
-        # Try 4 quantiles for better split
-        thr_candidates = [
-            svals[n//4],
-            svals[n//2],
-            svals[3*n//4],
-            sum(vals)/n
-        ]
+        if exhaustive:
+            # Try every 5th sorted value as threshold for better split
+            step = max(1, n//20)
+            thr_candidates = [svals[i] for i in range(step, n-step, step)]
+            # Add mean
+            thr_candidates.append(sum(vals)/n)
+        else:
+            thr_candidates = [
+                svals[n//4],
+                svals[n//2],
+                svals[3*n//4],
+                sum(vals)/n
+            ]
         for thr in thr_candidates:
             left_sum=0.0; left_cnt=0; right_sum=0.0; right_cnt=0
             for i in range(n):
@@ -82,8 +90,10 @@ def find_best_stump_fast(X, target, n_feat_sample=36, min_leaf=5):
                 continue
             left_mean = left_sum / left_cnt if left_cnt else 0.0
             right_mean = right_sum / right_cnt if right_cnt else 0.0
-            # Gain weighted by variance reduction
             gain = left_cnt*left_mean*left_mean + right_cnt*right_mean*right_mean
+            # Bonus for balanced split
+            balance = 1.0 - abs(left_cnt - right_cnt)/n * 0.2
+            gain = gain * balance
             if gain > best_gain:
                 best_gain=gain; best_f=f; best_thr=thr; best_left=left_mean; best_right=right_mean
     return best_f,best_thr,best_left,best_right,best_gain
@@ -172,8 +182,28 @@ def synth_mnist_full(n_per_class=80):
     return list(X),list(y)
 
 def train_val_split(X,y,ratio=0.78):
-    n=len(X); n_train=int(n*ratio)
-    return X[:n_train],y[:n_train],X[n_train:],y[n_train:]
+    # Stratified split to keep all 10 classes in train/val
+    by_class={}
+    for xi,yi in zip(X,y):
+        by_class.setdefault(yi, []).append((xi,yi))
+    Xtr=[]; ytr=[]; Xva=[]; yva=[]
+    for c in range(10):
+        lst=by_class.get(c, [])
+        random.shuffle(lst)
+        n=len(lst)
+        n_tr=int(n*ratio)
+        for xi,yi in lst[:n_tr]:
+            Xtr.append(xi); ytr.append(yi)
+        for xi,yi in lst[n_tr:]:
+            Xva.append(xi); yva.append(yi)
+    # Shuffle combined
+    combined=list(zip(Xtr,ytr)); random.shuffle(combined)
+    if combined:
+        Xtr,ytr=zip(*combined); Xtr,ytr=list(Xtr),list(ytr)
+    combined=list(zip(Xva,yva)); random.shuffle(combined)
+    if combined:
+        Xva,yva=zip(*combined); Xva,yva=list(Xva),list(yva)
+    return Xtr,ytr,Xva,yva
 
 async def resilient_pyodide_run(code_str):
     async def unwrap(res, max_depth=8):
@@ -303,17 +333,16 @@ async def fetch_mnist_samples(app):
     app.mnist_loaded=False
     json_gz_candidates=[
         "https://cdn.jsdelivr.net/gh/lorenmh/mnist_handwritten_json@master/mnist_handwritten_test.json.gz",
+        "https://raw.githack.com/lorenmh/mnist_handwritten_json/master/mnist_handwritten_test.json.gz",
         "https://cdn.jsdelivr.net/gh/Eventual-Inc/mnist-json@master/mnist_handwritten_test.json.gz",
-        "https://raw.githubusercontent.com/lorenmh/mnist_handwritten_json/master/mnist_handwritten_test.json.gz",
-        "https://raw.githubusercontent.com/Eventual-Inc/mnist-json/master/mnist_handwritten_test.json.gz",
+        "https://raw.githack.com/Eventual-Inc/mnist-json/master/mnist_handwritten_test.json.gz",
+        "https://cdn.jsdelivr.net/gh/lorenmh/mnist_handwritten_json@main/mnist_handwritten_test.json.gz",
     ]
     csv_candidates=[
         "https://cdn.jsdelivr.net/gh/makeyourownneuralnetwork/makeyourownneuralnetwork@master/mnist_dataset/mnist_train_100.csv",
-        "https://cdn.jsdelivr.net/gh/makeyourownneuralnetwork/makeyourownneuralnetwork@master/mnist_dataset/mnist_test_100.csv",
+        "https://raw.githack.com/makeyourownneuralnetwork/makeyourownneuralnetwork/master/mnist_dataset/mnist_train_100.csv",
         "https://cdn.jsdelivr.net/gh/makeyourownneuralnetwork/makeyourownneuralnetwork@master/mnist_dataset/mnist_test_10.csv",
-        "https://raw.githubusercontent.com/makeyourownneuralnetwork/makeyourownneuralnetwork/master/mnist_dataset/mnist_train_100.csv",
-        "https://raw.githubusercontent.com/makeyourownneuralnetwork/makeyourownneuralnetwork/master/mnist_dataset/mnist_test_100.csv",
-        "https://raw.githubusercontent.com/makeyourownneuralnetwork/makeyourownneuralnetwork/master/mnist_dataset/mnist_test_10.csv",
+        "https://raw.githack.com/makeyourownneuralnetwork/makeyourownneuralnetwork/master/mnist_dataset/mnist_test_10.csv",
     ]
     data_ok=False
     for url in json_gz_candidates:
@@ -615,10 +644,12 @@ def predict_drawing(app):
                 f[c]+=app.eta*stump["left"]
             else:
                 f[c]+=app.eta*stump["right"]
+    # No extra normalization - f are logits directly
     probs=softmax(f)
     pred=max(range(10), key=lambda c: probs[c])
     app.prediction=pred
     app.prediction_probs=probs
+    app.prediction_logits=f[:]
 
 def reset_ensemble(app):
     app.trees=[]; app.loss_history=[]; app.val_loss_history=[]; app.acc_history=[]; app.train_acc_history=[]
@@ -643,14 +674,17 @@ def recompute_F(app):
 
 def paint_at(app,mx,my):
     gx=int((mx-30)//8); gy=int((my-110)//8)
+    # MNIST-like thin brush, centered
     for dy in range(-1,2):
         for dx in range(-1,2):
             ny=gy+dy; nx=gx+dx
             if 0<=ny<28 and 0<=nx<28:
                 dist=math.hypot(dx,dy)
-                intensity=max(0.0,1.0-dist*0.6)
+                if dist>1.2: continue
+                # thin stroke like real MNIST
+                intensity=0.95 if dist<0.5 else 0.25
                 idx=ny*28+nx
-                app.drawing[idx]=min(1.0, app.drawing[idx]+intensity*0.85)
+                app.drawing[idx]=min(1.0, app.drawing[idx]+intensity)
 
 def onMousePress(app,mx,my):
     if 360<=mx<=430 and 12<=my<=36:
@@ -844,8 +878,8 @@ def redrawAll(app):
                 for c in range(28):
                     if r==fr and c==fc:
                         drawRect(312+c*2,142+r*2,2.5,2.5, fill=rgb(255,183,3))
-            drawLabel(f"Best pixel ({fc},{fr}) cls {best_stump['class']} gain {best_stump['gain']:.1f}", 380,148, size=8, fill=rgb(140,160,185), align='left-top')
-            drawLabel("Pseudo-residuals for 5 val samples (true - prob):", 380,162, size=8, fill=rgb(140,160,185), align='left-top')
+            drawLabel(f"Best pixel ({fc},{fr}) cls {best_stump['class']} thr {best_stump['threshold']:.2f} gain {best_stump['gain']:.1f}", 380,148, size=7, fill=rgb(140,160,185), align='left-top')
+            drawLabel("Val samples - residuals y - softmax(F) drives next stump:", 380,162, size=7, fill=rgb(140,160,185), align='left-top')
             for i in range(min(5, len(app.X_val))):
                 x=380+i*52; y=174
                 pix=app.X_val[i]
