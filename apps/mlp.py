@@ -522,26 +522,40 @@ async def process_upload_to_28x28(source):
     src_canvas.width=src_w; src_canvas.height=src_h
     sctx=src_canvas.getContext("2d")
 
-    # Primary: load via DOM <img> from previewUrl - most reliable, no truncation
+    # Primary: load via DOM <img> from previewUrl - use setAttribute to avoid 'src is property of element.style' warning
     try:
         dom_img=document.createElement("img")
-        dom_img.crossOrigin="anonymous"
+        # Use setAttribute for src to avoid Brython style warning
+        try:
+            dom_img.crossOrigin="anonymous"
+        except:
+            pass
         fut=aio.Future()
         def onload(ev):
             try:
                 sctx.drawImage(dom_img,0,0,src_w,src_h)
-                if not fut.done():
+                try:
                     fut.set_result(True)
+                except:
+                    pass
             except Exception as ex:
-                if not fut.done():
+                try:
                     fut.set_result(False)
+                except:
+                    pass
         def onerror(ev):
-            if not fut.done():
+            try:
                 fut.set_result(False)
+            except:
+                pass
         dom_img.bind("load", onload)
         dom_img.bind("error", onerror)
-        # Set src AFTER binding to avoid race
-        dom_img.src=previewUrl
+        # Use setAttribute, not .src property, to avoid warning
+        try:
+            dom_img.setAttribute("src", previewUrl)
+        except:
+            # Fallback to direct assignment if setAttribute fails
+            dom_img.src=previewUrl
         ok=await fut
         if not ok:
             raise Exception("img load failed")
