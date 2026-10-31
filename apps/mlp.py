@@ -504,8 +504,8 @@ async def train_mlp(app):
     app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}% - 100% Complete"
     cache_weights_now(app)
 
-# === FINAL V8: Canvas drawImage scaling, not manual Python sampling, fixes half-black ===
-# === FINAL V8: Canvas drawImage scaling, not manual Python sampling, fixes half-black ===
+# === FINAL V9: Longest side -> 28 + pad to square, preserve all data ===
+# === FINAL V9: Longest side -> 28 + pad to square, preserve all data ===
 async def process_upload_to_28x28(source):
     previewUrl=None
     object_url=None
@@ -557,35 +557,33 @@ async def process_upload_to_28x28(source):
                 pass
             ctx.drawImage(img, 0, 0, w, h)
 
-            # Now scale using canvas drawImage (browser native, no manual sampling bug)
             target=28
+            # Longest side -> target, then pad to square (preserve all data)
             if w == h:
                 inter_w=target
                 inter_h=target
-                crop_x=0
-                crop_y=0
+                pad_x=0
+                pad_y=0
                 is_square=True
-                scale = target / w if w!=0 else 1
-            else:
-                scale = target / min(w, h) if min(w,h)!=0 else 1
-                inter_w=int(round(w*scale))
-                inter_h=int(round(h*scale))
-                inter_w=max(inter_w, target)
-                inter_h=max(inter_h, target)
-                crop_x=(inter_w - target)//2 if inter_w>target else 0
-                crop_y=(inter_h - target)//2 if inter_h>target else 0
+                note="SQUARE ONLY SCALED"
+            elif w > h:
+                # Landscape: longest w -> 28
+                inter_w=target
+                inter_h=int(round(h * target / w))
+                inter_h=max(1, inter_h)
+                pad_x=0
+                pad_y=(target - inter_h)//2
                 is_square=False
-
-            inter_canvas=document.createElement("canvas")
-            inter_canvas.width=inter_w
-            inter_canvas.height=inter_h
-            ictx=inter_canvas.getContext("2d")
-            ictx.imageSmoothingEnabled=True
-            try:
-                ictx.imageSmoothingQuality="high"
-            except:
-                pass
-            ictx.drawImage(src_canvas, 0,0,w,h, 0,0,inter_w,inter_h)
+                note=f"longest {w}x{h} -> {inter_w}x{inter_h} pad y {pad_y} preserve all"
+            else:
+                # Portrait: longest h -> 28
+                inter_h=target
+                inter_w=int(round(w * target / h))
+                inter_w=max(1, inter_w)
+                pad_x=(target - inter_w)//2
+                pad_y=0
+                is_square=False
+                note=f"longest {w}x{h} -> {inter_w}x{inter_h} pad x {pad_x} preserve all"
 
             dst_canvas=document.createElement("canvas")
             dst_canvas.width=target
@@ -596,7 +594,11 @@ async def process_upload_to_28x28(source):
                 dctx.imageSmoothingQuality="high"
             except:
                 pass
-            dctx.drawImage(inter_canvas, crop_x, crop_y, target, target, 0,0,target,target)
+            # Fill black background (Fashion-MNIST background)
+            dctx.fillStyle="#000000"
+            dctx.fillRect(0,0,target,target)
+            # Draw scaled image centered with padding
+            dctx.drawImage(src_canvas, 0,0,w,h, pad_x, pad_y, inter_w, inter_h)
 
             dst_data=dctx.getImageData(0,0,target,target)
             dst_pixels=dst_data.data
@@ -613,12 +615,21 @@ async def process_upload_to_28x28(source):
                 try:
                     r=dst_list[i]; g=dst_list[i+1]; b=dst_list[i+2]
                 except:
-                    r=g=b=255
+                    r=g=b=0
                 gray=(0.299*r+0.587*g+0.114*b)/255.0
                 vec.append(gray)
 
+            # For display we want white-on-black already, but our dst is black background with image
+            # Check if need invert: if average bright (white bg), invert
             if len(vec)==784:
                 avg=sum(vec)/len(vec)
+                # If image was light blue on white, after drawing on black bg with padding,
+                # avg might be low (black bg + light dress). We want white dress on black.
+                # Our draw already has black bg, dress light blue ~0.8 -> after gray ~0.8, which is bright on black - correct
+                # But if original was black dress on white, after our black bg fill, dress would be dark on white?
+                # Let's detect: if background was white in source, our method draws dress on black, so dress remains light
+                # Actually we already have black background, so no need invert if dress is light
+                # But to be safe, if avg > 0.5 (white bg dominant), invert
                 if avg>0.5:
                     vec=[1.0-v for v in vec]
                 mn=min(vec); mx=max(vec)
@@ -641,11 +652,11 @@ async def process_upload_to_28x28(source):
                     bctx.fillRect(x*5, y*5, 5, 5)
             proc_url=big_canvas.toDataURL("image/png")
 
-            result={"processed_url":proc_url,"vector":vec,"crop_info":{"orig_w":w,"orig_h":h,"inter_w":inter_w,"inter_h":inter_h,"crop_x":crop_x,"crop_y":crop_y,"is_square":is_square,"note":"SQUARE ONLY SCALED" if is_square else "shortest->28 center crop"}}
+            result={"processed_url":proc_url,"vector":vec,"crop_info":{"orig_w":w,"orig_h":h,"inter_w":inter_w,"inter_h":inter_h,"pad_x":pad_x,"pad_y":pad_y,"is_square":is_square,"note":note}}
             fut.set_result(result)
         except Exception as ex:
             import traceback
-            print(f"loaded failed {ex}")
+            print(f"loaded V9 failed {ex}")
             print(traceback.format_exc())
             try:
                 fut.set_result(None)
@@ -653,7 +664,7 @@ async def process_upload_to_28x28(source):
                 pass
 
     def on_error(event):
-        print("img load error")
+        print("img load error V9")
         try:
             fut.set_result(None)
         except:
@@ -689,6 +700,8 @@ async def process_upload_to_28x28(source):
         raise ValueError("Image processing failed")
 
     return result
+
+
 
 
 
