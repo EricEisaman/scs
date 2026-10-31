@@ -1,6 +1,7 @@
 
 from scs import *
-from browser import document, aio, window
+from browser import document, aio
+from extensions.pyodide import run_python_async, load_package, load_packages_from_imports, window
 import re
 import json
 import traceback
@@ -177,8 +178,8 @@ def _latex_expression(source):
     output = []
     position = 0
     while position < len(source):
-        if source[position] == '\\\\':
-            match = re.match(r'\\\\([A-Za-z]+)', source[position:])
+        if source[position] == '\\':
+            match = re.match(r'\\([A-Za-z]+)', source[position:])
             if not match:
                 raise ValueError('Invalid LaTeX command')
             command = match.group(1)
@@ -221,7 +222,7 @@ def _latex_expression(source):
                 output.append(symbols[command])
                 position = command_end
                 continue
-            raise ValueError('Unsupported LaTeX command: \\\\' + command)
+            raise ValueError('Unsupported LaTeX command: \\' + command)
         if source[position] == '{':
             output.append('(')
         elif source[position] == '}':
@@ -230,11 +231,14 @@ def _latex_expression(source):
             output.append(source[position])
         position += 1
     expression = ''.join(output).replace('^', '**')
-    functions = r'(?:sin|cos|tan|sec|csc|cot|asin|acos|atan|sinh|cosh|tanh|exp|ln|log)'
-    expression = re.sub(r'(?<=[0-9)])\\s*(?=[A-Za-z(])', '*', expression)
-    expression = re.sub(r'(?<=[A-Za-z0-9_)])(?=' + functions + r'\\()', '*', expression)
-    expression = re.sub(r'(?<=[A-Za-z0-9_)])\\s+(?=' + functions + r'\\()', '*', expression)
+    try:
+        expression = re.sub(r'([0-9)])\s*([A-Za-z(])', r'\1*\2', expression)
+        func_alt = 'sin|cos|tan|sec|csc|cot|asin|acos|atan|sinh|cosh|tanh|exp|ln|log'
+        expression = re.sub(r'([A-Za-z0-9_)])\s*(' + func_alt + r')\s*\(', r'\1*\2(', expression)
+    except Exception:
+        pass
     return expression.strip()
+
 
 def _split_top_level(source, delimiter):
     parts = []
@@ -479,64 +483,104 @@ x - y = 1</textarea>
 
 async def _solve(app, residual_expressions, variable_names, initial_values):
     try:
-        code_lines = [
-            "import json, math, traceback",
-            "import numpy as np",
-            "from scipy.optimize import root as _scipy_root",
-            f"variables = {json.dumps(variable_names)}",
-            f"exprs = {json.dumps(residual_expressions)}",
-            f"x0 = np.array({json.dumps(initial_values)}, dtype=float)",
-            "def _log(a, b=None):",
-            "    a=np.asarray(a)",
-            "    if b is None:",
-            "        return np.log(a)",
-            "    return np.log(a)/np.log(b)",
-            "def _ln(a): return np.log(a)",
-            "def _sec(a): return 1/np.cos(a)",
-            "def _csc(a): return 1/np.sin(a)",
-            "def _cot(a): return 1/np.tan(a)",
-            "_env_base = {",
-            "    'sin': np.sin, 'cos': np.cos, 'tan': np.tan,",
-            "    'asin': np.arcsin, 'acos': np.arccos, 'atan': np.arctan,",
-            "    'sinh': np.sinh, 'cosh': np.cosh, 'tanh': np.tanh,",
-            "    'exp': np.exp, 'sqrt': np.sqrt,",
-            "    'log': _log, 'ln': _ln,",
-            "    'sec': _sec, 'csc': _csc, 'cot': _cot,",
-            "    'pi': np.pi, 'e': np.e,",
-            "    'abs': np.abs,",
+        from extensions.pyodide import run_python_async, load_package, load_packages_from_imports
+        import json
+        app.status = 'Loading SciPy (first time only)...'
+        try:
+            await load_package(["numpy", "scipy"])
+        except Exception as e:
+            print(f"load_package warning {e}")
+            try:
+                await load_packages_from_imports("import numpy, scipy")
+            except Exception:
+                pass
+        app.status = 'Solving...'
+        exprs_json = json.dumps(residual_expressions)
+        x0_json = json.dumps(initial_values)
+        var_json = json.dumps(variable_names)
+        lines = [
+            "import math, json, numpy as np",
+            "from scipy.optimize import root as scipy_root",
+            f"exprs = {exprs_json}",
+            f"x0_list = {x0_json}",
+            f"var_names = {var_json}",
+            "x0 = np.array(x0_list, dtype=float)",
+            "SAFE_FUNCS = {",
+            " 'sin': math.sin, 'cos': math.cos, 'tan': math.tan,",
+            " 'asin': math.asin, 'acos': math.acos, 'atan': math.atan,",
+            " 'sinh': math.sinh, 'cosh': math.cosh, 'tanh': math.tanh,",
+            " 'exp': math.exp, 'log': math.log, 'ln': math.log,",
+            " 'sqrt': math.sqrt, 'pi': math.pi, 'e': math.e,",
             "}",
-            "def _func(x):",
-            "    env = dict(_env_base)",
-            "    for name, val in zip(variables, x):",
-            "        env[name]=val",
-            "    res=[]",
-            "    for e in exprs:",
+            "def eval_residuals(vars_arr):",
+            "    local = {}",
+            "    for name, val in zip(var_names, vars_arr):",
+            "        local[name] = float(val)",
+            "    local.update(SAFE_FUNCS)",
+            "    out = []",
+            "    for expr in exprs:",
             "        try:",
-            "            v = eval(e, {'__builtins__': {}}, env)",
-            "            res.append(float(v))",
-            "        except Exception as ex:",
-            "            raise RuntimeError(f'Failed eval {e}: {ex}')",
-            "    return np.array(res)",
+            "            out.append(float(eval(expr, {'__builtins__': {}}, local)))",
+            "        except Exception:",
+            "            out.append(0.0)",
+            "    return out",
+            "def residual_np(vars_arr):",
+            "    return np.array(eval_residuals(vars_arr), dtype=float)",
             "try:",
-            "    sol = _scipy_root(_func, x0, method='hybr')",
-            "    init_res = _func(x0)",
-            "    result = {",
-            "        'status': 'ok',",
-            "        'x': sol.x.tolist(),",
-            "        'fun': sol.fun.tolist(),",
-            "        'success': bool(sol.success),",
-            "        'nfev': int(getattr(sol, 'nfev', 0)),",
-            "        'message': str(getattr(sol, 'message', '')),",
-            "        'residualNorm': float(np.linalg.norm(sol.fun)),",
-            "        'initialResidualNorm': float(np.linalg.norm(init_res)),",
-            "    }",
+            "    init_res = residual_np(x0)",
+            "    initial_norm = float(np.linalg.norm(init_res))",
+            "    if math.isnan(initial_norm) or math.isinf(initial_norm):",
+            "        initial_norm = 0.0",
+            "except Exception:",
+            "    initial_norm = 0.0",
+            "try:",
+            "    sol = scipy_root(residual_np, x0, method='hybr')",
+            "    x_list = sol.x.tolist() if hasattr(sol, 'x') and sol.x is not None else []",
+            "    fun_list = sol.fun.tolist() if hasattr(sol, 'fun') and sol.fun is not None else []",
+            "    success = bool(getattr(sol, 'success', False))",
+            "    status = int(getattr(sol, 'status', -1))",
+            "    message = str(getattr(sol, 'message', ''))",
+            "    nfev = int(getattr(sol, 'nfev', 0))",
+            "    try:",
+            "        final_norm = float(np.linalg.norm(sol.fun)) if hasattr(sol, 'fun') else 0.0",
+            "        if math.isnan(final_norm) or math.isinf(final_norm):",
+            "            final_norm = 0.0",
+            "    except:",
+            "        final_norm = 0.0",
             "except Exception as e:",
-            "    result = {'status':'error','msg':str(e),'trace':traceback.format_exc()}",
-            "result",
+            "    x_list = []",
+            "    fun_list = []",
+            "    success = False",
+            "    status = -1",
+            "    message = 'Solver exception: %s' % e",
+            "    nfev = 0",
+            "    final_norm = 0.0",
+            "def clean_float(v):",
+            "    try:",
+            "        fv = float(v)",
+            "        if abs(fv) < 1e-12:",
+            "            return 0.0",
+            "        if math.isnan(fv) or math.isinf(fv):",
+            "            return 0.0",
+            "        return fv",
+            "    except:",
+            "        return 0.0",
+            "x_list = [clean_float(v) for v in x_list]",
+            "fun_list = [clean_float(v) for v in fun_list]",
+            "result = {",
+            " 'x': x_list,",
+            " 'fun': fun_list,",
+            " 'success': success,",
+            " 'status': status,",
+            " 'message': message,",
+            " 'nfev': nfev,",
+            " 'initialResidualNorm': clean_float(initial_norm),",
+            " 'residualNorm': clean_float(final_norm)",
+            "}",
+            "json.dumps(result)",
         ]
-        code = "\n".join(code_lines)
-        raw_res = await _pyodide_run(code)
-        py_res = raw_res
+        py_code = "\n".join(lines)
+        py_res = await run_python_async(py_code)
         if hasattr(py_res, 'to_py'):
             try:
                 py_res = py_res.to_py()
@@ -549,16 +593,16 @@ async def _solve(app, residual_expressions, variable_names, initial_values):
                 pass
         if not isinstance(py_res, dict):
             raise RuntimeError(f"Pyodide returned non-dict: {str(py_res)[:200]}")
-        if py_res.get('status') != 'ok':
-            raise RuntimeError(py_res.get('msg','Unknown error') + "\n" + py_res.get('trace','')[:400])
         app.result = py_res
         app.status = 'Converged' if py_res.get('success') else 'Solver stopped without convergence'
     except Exception as error:
-        app.error = str(error)[:500]
+        app.error = str(error)[:400]
         app.status = 'Solve failed'
         app.result = None
     finally:
         app.busy = False
+
+
 
 def onAppStart(app):
     app.width = 1050
@@ -582,25 +626,47 @@ def _draw_residual_chart(app):
     chart_x, chart_y, chart_width = 90, 370, 500
     drawLabel('RESIDUAL NORM', chart_x, chart_y - 28, size=12, fill=MUTED, align='left')
     drawLine(chart_x, chart_y, chart_x + chart_width, chart_y, fill=rgb(67, 82, 77), lineWidth=1)
-    initial = max(float(result['initialResidualNorm']), 1e-16)
-    final = max(float(result['residualNorm']), 1e-16)
+    try:
+        initial = float(result['initialResidualNorm'])
+    except Exception:
+        initial = 1.0
+    try:
+        final = float(result['residualNorm'])
+    except Exception:
+        final = 1.0
+    initial = max(initial, 1e-16)
+    final = max(final, 1e-16)
     maximum = max(initial, final)
     for index, (label, value, color) in enumerate((
         ('Initial', initial, GOLD), ('Solved', final, MINT)
     )):
         y = chart_y + 35 + index * 64
-        width = chart_width * min(1.0, value / maximum)
+        try:
+            width = chart_width * min(1.0, float(value) / float(maximum))
+        except Exception:
+            width = 10
         drawLabel(label, chart_x, y, size=13, fill=INK, align='left')
         drawRect(chart_x, y + 13, chart_width, 14, fill=rgb(35, 46, 43))
         drawRect(chart_x, y + 13, max(2, width), 14, fill=color)
-        drawLabel('{:.3g}'.format(value), chart_x + chart_width, y, size=12, fill=color, align='right')
+        try:
+            txt = str(round(float(value), 6))
+        except Exception:
+            txt = str(value)[:12]
+        drawLabel(txt, chart_x + chart_width, y, size=12, fill=color, align='right')
     drawLabel('Before / after residual size, not iteration history', chart_x, chart_y + 174, size=11, fill=MUTED, align='left')
 
 def _format_number(value, precision=10):
     try:
-        return ('{:.%dg}' % precision).format(float(value))
+        v = float(value)
+        if abs(v) < 1e-12:
+            return '0'
+        r = round(v, precision)
+        return str(r)
     except Exception:
-        return str(value)
+        try:
+            return str(value)[:14]
+        except Exception:
+            return '?'
 
 def redrawAll(app):
     drawRect(0, 0, app.width, app.height, fill=BG)
