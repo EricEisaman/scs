@@ -801,7 +801,7 @@ def redrawAll(app):
             b=app.buttons[bid]
             draw_button(b, app.hover==bid, b["enabled"])
     if app.dataset_loaded:
-        drawLabel(f"Samples 28x28 x3 - {len(app.X_all)} total - 4 FETCHES DONE",32,145,size=10,fill=DIM,align="left-top")
+        drawLabel(f"Samples 28x28 x3 - {len(app.X_all)} total - 4 DATA FETCHES",32,145,size=10,fill=DIM,align="left-top")
         for i in range(10):
             col=i%5; row=i//5; x=32+col*116; y=165+row*76
             drawRect(x,y,104,64,fill=rgb(24,28,44),border=BORDER,roundness=9)
