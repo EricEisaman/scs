@@ -50,25 +50,21 @@ async def fetch_bytes_popular(urls, label):
             else:
                 buf = await resp.arrayBuffer()
             u8 = window.Uint8Array.new(buf)
-            # FAST: Use to_py() then getattr for Array.from to avoid keyword 'from' SyntaxError
             lst=None
             try:
                 py_data = u8.to_py()
                 if isinstance(py_data, (bytes, bytearray)):
                     lst = list(py_data)
                 else:
-                    # py_data is likely memoryview or list
                     lst = list(py_data)
             except:
                 try:
-                    # JS fast path: Array.from via getattr (avoids .from keyword)
                     from_fn = getattr(window.Array, "from")
                     js_arr = from_fn(u8)
                     if hasattr(js_arr, "to_py"):
                         js_arr = js_arr.to_py()
                     lst = list(js_arr)
                 except:
-                    # Slow fallback chunked
                     n = int(getattr(u8, "length", 0))
                     lst=[]
                     step=200000
@@ -199,12 +195,11 @@ def onAppStart(app):
     app.buttons={
         "load":{"x":30,"y":610,"w":160,"h":38,"label":"Load Fashion-MNIST","enabled":True},
         "train":{"x":205,"y":610,"w":130,"h":38,"label":"Train MLP","enabled":False},
-        "reset":{"x":350,"y":610,"w":80,"h":38,"label":"Reset","enabled":True},  # BOTTOM OPEN SPACE - was 600
+        "reset":{"x":350,"y":610,"w":80,"h":38,"label":"Reset","enabled":True},
         "clear":{"x":670,"y":340,"w":80,"h":28,"label":"Clear","enabled":True},
     }
     app.hover=None; app.upload_hover=False
 
-# === TOP-TIER WEIGHT CACHING ===
 CACHE_KEY="fashion_mnist_mlp_top_tier_weights_v1"
 
 def try_load_cached_weights(app):
@@ -509,117 +504,97 @@ async def train_mlp(app):
     app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}% - 100% Complete"
     cache_weights_now(app)
 
-# === FIXED TOP-TIER IMAGE CROPPING & RESIZING - NO SQUASH, PROPER POSITION ===
-# === FIXED TOP-TIER IMAGE - NO SQUASH, PROPER THUMBS ===
+# === CORRECT TOP-TIER PROCESSING: SCALE SHORTEST SIDE TO TARGET THEN CENTER CROP SQUARE, SQUARES ONLY SCALED ===
 async def process_upload_to_28x28(source):
+    # load_image returns pixels, width, height, previewUrl - max_dimension 384 keeps aspect
     result=await load_image(source, max_dimension=384)
     if hasattr(result,"to_py"):
         try: result=result.to_py()
         except: pass
     if not isinstance(result, dict):
         raise ValueError(f"load_image returned {type(result)}")
-    width=result.get("width"); height=result.get("height"); pixels=result.get("pixels"); previewUrl=result.get("previewUrl") or result.get("preview_url")
+    width=result.get("width"); height=result.get("height"); pixels=result.get("pixels")
     if width is None or height is None or pixels is None:
         raise ValueError("missing fields")
     if hasattr(pixels,"to_py"):
         try: pixels=pixels.to_py()
         except: pass
-    # Source canvas - original aspect preserved
+    # Rebuild source canvas preserving original aspect - NO SQUASH
+    src_w=int(width); src_h=int(height)
     src_canvas=document.createElement("canvas")
-    src_canvas.width=int(width); src_canvas.height=int(height)
-    ctx=src_canvas.getContext("2d")
+    src_canvas.width=src_w; src_canvas.height=src_h
+    sctx=src_canvas.getContext("2d")
     try:
-        img_data=ctx.createImageData(int(width), int(height))
+        img_data=sctx.createImageData(src_w, src_h)
         data=img_data.data
         for i in range(min(len(pixels), len(data))):
             try: data[i]=int(pixels[i])
             except: pass
-        ctx.putImageData(img_data,0,0)
-    except:
+        sctx.putImageData(img_data,0,0)
+    except Exception as e:
+        # Fallback via Image element if putImageData fails
+        from_js = result.get("previewUrl") or result.get("preview_url")
         img=window.Image.new()
         img.crossOrigin="anonymous"
         def exec_res(resolve,reject):
             img.onload=lambda ev: resolve(True)
-            img.onerror=lambda ev: reject(Exception("img load fail"))
-        img.src=previewUrl
+            img.onerror=lambda ev: reject(Exception("img load"))
+        img.src=from_js
         try:
             await window.Promise.new(exec_res)
-            ctx.drawImage(img,0,0,int(width),int(height))
+            sctx.drawImage(img,0,0,src_w,src_h)
         except: pass
 
-    # BBox detection - square crop to avoid squash
-    try:
-        full_data=ctx.getImageData(0,0,int(width),int(height))
-        fd=full_data.data
-        if hasattr(fd,"to_py"):
-            fd=fd.to_py()
-        min_x=int(width); max_x=0; min_y=int(height); max_y=0
-        step_x=max(1,int(width)//200)
-        step_y=max(1,int(height)//200)
-        for y in range(0,int(height),step_y):
-            for x in range(0,int(width),step_x):
-                idx=(y*int(width)+x)*4
-                if idx+3>=len(fd): continue
-                try: r=int(fd[idx]); g=int(fd[idx+1]); b=int(fd[idx+2]); a=int(fd[idx+3])
-                except: continue
-                if a<15: continue
-                if (r+g+b)/3 < 245:  # not pure white
-                    if x<min_x: min_x=x
-                    if x>max_x: max_x=x
-                    if y<min_y: min_y=y
-                    if y>max_y: max_y=y
-        if max_x<=min_x or max_y<=min_y:
-            size=min(int(width),int(height))
-            sx=(int(width)-size)//2
-            sy=(int(height)-size)//2
-            bbox_w=size; bbox_h=size
-        else:
-            pad=int(max(max_x-min_x, max_y-min_y)*0.18)
-            min_x=max(0,min_x-pad); max_x=min(int(width)-1,max_x+pad)
-            min_y=max(0,min_y-pad); max_y=min(int(height)-1,max_y+pad)
-            bbox_w=max_x-min_x+1; bbox_h=max_y-min_y+1
-            size=max(bbox_w,bbox_h)
-            sx=min_x + (bbox_w - size)//2
-            sy=min_y + (bbox_h - size)//2
-            sx=max(0,min(sx,int(width)-size))
-            sy=max(0,min(sy,int(height)-size))
-    except:
-        size=min(int(width),int(height))
-        sx=(int(width)-size)//2; sy=(int(height)-size)//2
-        bbox_w=size; bbox_h=size
+    # STEP 1: Scale shortest side down to target (28)
+    # If square, only scaled. If rectangle, scale shortest to 28, long becomes >28 proportionally.
+    target=28
+    short_side=min(src_w, src_h)
+    scale = target / short_side if short_side>0 else 1.0
+    inter_w=int(round(src_w*scale))
+    inter_h=int(round(src_h*scale))
+    # Ensure at least target
+    inter_w=max(inter_w, target)
+    inter_h=max(inter_h, target)
 
-    # 28x28 high-quality resize
+    inter_canvas=document.createElement("canvas")
+    inter_canvas.width=inter_w; inter_canvas.height=inter_h
+    ictx=inter_canvas.getContext("2d")
+    ictx.imageSmoothingEnabled=True
+    ictx.imageSmoothingQuality="high"
+    # Multi-step high quality if large downscale
+    if max(src_w,src_h) > 112:
+        # First downscale to ~112 on short side
+        tmp_scale = 112 / short_side
+        tmp_w=int(round(src_w*tmp_scale))
+        tmp_h=int(round(src_h*tmp_scale))
+        tmp_canvas=document.createElement("canvas")
+        tmp_canvas.width=tmp_w; tmp_canvas.height=tmp_h
+        tctx=tmp_canvas.getContext("2d")
+        tctx.imageSmoothingEnabled=True; tctx.imageSmoothingQuality="high"
+        tctx.drawImage(src_canvas,0,0,src_w,src_h,0,0,tmp_w,tmp_h)
+        ictx.drawImage(tmp_canvas,0,0,tmp_w,tmp_h,0,0,inter_w,inter_h)
+    else:
+        ictx.drawImage(src_canvas,0,0,src_w,src_h,0,0,inter_w,inter_h)
+
+    # STEP 2: Crop square from center of remaining long edge
+    # If square already (inter_w==target and inter_h==target), no crop needed
+    crop_x=0
+    crop_y=0
+    if inter_w > target:
+        crop_x=(inter_w - target)//2
+    if inter_h > target:
+        crop_y=(inter_h - target)//2
+
     dst_canvas=document.createElement("canvas")
-    dst_canvas.width=28; dst_canvas.height=28
+    dst_canvas.width=target; dst_canvas.height=target
     dctx=dst_canvas.getContext("2d")
     dctx.imageSmoothingEnabled=True
     dctx.imageSmoothingQuality="high"
-    try:
-        if size>112:
-            tmp1=document.createElement("canvas")
-            tmp1.width=112; tmp1.height=112
-            t1=tmp1.getContext("2d")
-            t1.imageSmoothingEnabled=True; t1.imageSmoothingQuality="high"
-            t1.drawImage(src_canvas, sx, sy, size, size, 0,0,112,112)
-            tmp2=document.createElement("canvas")
-            tmp2.width=56; tmp2.height=56
-            t2=tmp2.getContext("2d")
-            t2.imageSmoothingEnabled=True; t2.imageSmoothingQuality="high"
-            t2.drawImage(tmp1,0,0,112,112,0,0,56,56)
-            dctx.drawImage(tmp2,0,0,56,56,0,0,28,28)
-        elif size>56:
-            tmp=document.createElement("canvas")
-            tmp.width=56; tmp.height=56
-            t=tmp.getContext("2d")
-            t.imageSmoothingEnabled=True; t.imageSmoothingQuality="high"
-            t.drawImage(src_canvas, sx, sy, size, size, 0,0,56,56)
-            dctx.drawImage(tmp,0,0,56,56,0,0,28,28)
-        else:
-            dctx.drawImage(src_canvas, sx, sy, size, size, 0,0,28,28)
-    except:
-        dctx.drawImage(src_canvas, sx, sy, size, size, 0,0,28,28)
+    dctx.drawImage(inter_canvas, crop_x, crop_y, target, target, 0,0,target,target)
 
-    dst_data=dctx.getImageData(0,0,28,28); dst_pixels=dst_data.data
+    # Vector for MLP
+    dst_data=dctx.getImageData(0,0,target,target)
+    dst_pixels=dst_data.data
     if hasattr(dst_pixels,"to_py"):
         try: dst_pixels=dst_pixels.to_py()
         except: pass
@@ -629,52 +604,39 @@ async def process_upload_to_28x28(source):
         except: r=g=b=0
         gray=(0.299*r+0.587*g+0.114*b)/255.0
         vec.append(gray)
+    # Fashion-MNIST is white item on black bg - invert if needed + contrast stretch
     if len(vec)==784:
         avg=sum(vec)/len(vec)
         if avg>0.5:
             vec=[1.0-v for v in vec]
         mn=min(vec); mx=max(vec)
-        if mx-mn>0.12:
+        if mx-mn>0.10:
             vec=[(v-mn)/(mx-mn) for v in vec]
         vec=[max(0.0,min(1.0,v)) for v in vec]
 
-    # FIXED THUMBS: No squash, proper aspect, centered
-    # Original thumb 100x100 - preserve aspect, white bg
-    orig_thumb=document.createElement("canvas")
-    orig_thumb.width=100; orig_thumb.height=100
-    octx=orig_thumb.getContext("2d")
-    octx.fillStyle="rgb(28,32,52)"
-    octx.fillRect(0,0,100,100)
-    # Fit src into 100x100 preserving aspect
-    scale_o=min(100/int(width), 100/int(height)) * 0.92
-    ow=int(width)*scale_o; oh=int(height)*scale_o
-    ox=(100-ow)//2; oy=(100-oh)//2
-    octx.imageSmoothingEnabled=True
-    octx.imageSmoothingQuality="high"
-    octx.drawImage(src_canvas, 0,0,int(width),int(height), ox, oy, ow, oh)
-    orig_url=orig_thumb.toDataURL("image/png")
+    # SINGLE VISUAL - 140x140 crisp from 28x28, no smoothing, properly placed
+    big_canvas=document.createElement("canvas")
+    big_canvas.width=140; big_canvas.height=140
+    bctx=big_canvas.getContext("2d")
+    bctx.imageSmoothingEnabled=False
+    bctx.drawImage(dst_canvas,0,0,target,target,0,0,140,140)
+    bctx.strokeStyle="rgba(99,102,241,0.35)"
+    bctx.lineWidth=1
+    bctx.strokeRect(0,0,140,140)
+    proc_url=big_canvas.toDataURL("image/png")
 
-    # Proc thumb 140x140 - 28x28 is square, so no squash, crisp upscale
-    proc_thumb=document.createElement("canvas")
-    proc_thumb.width=140; proc_thumb.height=140
-    pctx=proc_thumb.getContext("2d")
-    pctx.imageSmoothingEnabled=False
-    pctx.drawImage(dst_canvas,0,0,28,28,0,0,140,140)
-    pctx.strokeStyle="rgba(99,102,241,0.35)"
-    pctx.lineWidth=1
-    pctx.strokeRect(0,0,140,140)
-    proc_url=proc_thumb.toDataURL("image/png")
-
-    return {"original_url":orig_url,"processed_url":proc_url,"vector":vec,"crop_info":{"sx":sx,"sy":sy,"size":size,"bbox_w":bbox_w,"bbox_h":bbox_h,"orig_w":int(width),"orig_h":int(height)}}
-
+    return {"processed_url":proc_url,"vector":vec,"crop_info":{"orig_w":src_w,"orig_h":src_h,"inter_w":inter_w,"inter_h":inter_h,"crop_x":crop_x,"crop_y":crop_y,"scale":scale}}
 
 async def handle_upload(app, source):
-    app.status="Loading via load_image() - TOP-TIER crop..."
+    app.status="Loading via load_image() - shortest side to 28 then center crop..."
     try:
         result=await process_upload_to_28x28(source)
         vec=result.get("vector")
         vec_f=[max(0.0,min(1.0,float(v))) for v in vec]
-        app.orig_url=result.get("original_url"); app.proc_url=result.get("processed_url"); app.proc_vec=vec_f
+        # SINGLE VISUAL ONLY
+        app.proc_url=result.get("processed_url")
+        app.orig_url=None
+        app.proc_vec=vec_f
         app.crop_info=result.get("crop_info",{})
         if app.W1 is None:
             if try_load_cached_weights(app):
@@ -684,7 +646,7 @@ async def handle_upload(app, source):
         _,_,_,probs=forward(vec_f, app.W1, app.b1, app.W2, app.b2)
         pred=max(range(len(probs)), key=lambda k: probs[k])
         app.probs=probs; app.pred=int(pred)
-        app.status=f"Inferred {LABELS.get(int(pred),str(pred))} {probs[int(pred)]*100:.1f}% - TOP-TIER crop"
+        app.status=f"Inferred {LABELS.get(int(pred),str(pred))} {probs[int(pred)]*100:.1f}% - shortest->28 center crop"
     except Exception as e:
         import traceback
         tb=traceback.format_exc()
@@ -846,15 +808,15 @@ def redrawAll(app):
     drawLabel("10 Softmax",ox,oy+90,size=10,fill=DIM,align="center-top")
     drawLine(ix+6,iy+20,hx-6,hy+20,fill=GRID,lineWidth=0.5)
     drawLine(hx+8,hy+30,ox-6,oy+30,fill=GRID,lineWidth=0.5)
-    # TRAINING BAR - rgb(163,10,129) while training, green ACC2 when 100% - dynamic text
+    # TRAINING BAR - rgb(163,10,129) while training, green ACC2 when 100% - dynamic text Training {int}% Complete
     if app.training or app.progress>0 or app.trained:
         bx,by,bw,bh=400,345,200,16
         drawRect(bx,by,bw,bh,fill=rgb(32,36,60),border=BORDER,roundness=7)
         pct=int(max(0,min(1,app.progress))*100)
         if app.progress>=0.99 or app.trained:
-            bar_fill=ACC2  # green same as training graph rgb(16,185,129)
+            bar_fill=ACC2
         else:
-            bar_fill=rgb(163,10,129)  # required magenta while training
+            bar_fill=rgb(163,10,129)
         drawRect(bx+1,by+1,(bw-2)*app.progress,bh-2,fill=bar_fill,roundness=6)
         drawLabel(f"Training {pct}% Complete",bx+bw/2,by+bh/2,size=10,fill=rgb(255,255,255),bold=True,align="center-center")
     draw_loss_graph(app)
@@ -863,31 +825,24 @@ def redrawAll(app):
     bc=ACC if app.upload_hover else BORDER
     fc=rgb(36,41,68) if app.upload_hover else rgb(28,32,52)
     drawRect(ux,uy,uw,uh,fill=fc,border=bc,borderWidth=2,roundness=12,dashes=True)
-    if app.orig_url is None:
+    if app.proc_url is None:
         drawLabel("DROP or CLICK to upload",ux+uw/2,uy+50,size=14,fill=TXT,bold=True,align="center-top")
         drawLabel("shirt, shoe, pant, skirt, dress, bag...",ux+uw/2,uy+76,size=11,fill=DIM,align="center-top")
         drawLabel("load_image(file, max_dimension=384)",ux+uw/2,uy+102,size=10,fill=ACC,align="center-top")
-        drawLabel("TOP-TIER: bbox detect + multi-step resize",ux+uw/2,uy+118,size=10,fill=DIM,align="center-top")
-        drawLabel("contrast stretch + proper 140x140 artifact",ux+uw/2,uy+132,size=10,fill=DIM,align="center-top")
+        drawLabel("shortest side -> 28 then center crop square",ux+uw/2,uy+118,size=10,fill=DIM,align="center-top")
+        drawLabel("squares only scaled - no squash",ux+uw/2,uy+132,size=10,fill=DIM,align="center-top")
         drawLabel("Cached weights auto-loaded if available",ux+uw/2,uy+158,size=9,fill=ACC2,align="center-top")
     else:
-        # FIXED: Two images - original thumb 100x100 and proc 140x140 - both properly placed inside dashed box, no squash
-        drawRect(ux+6,uy+6,uw-12,uh-12,fill=rgb(24,28,44),roundness=8)
-        drawLabel("Original 100x100:",ux+8,uy+8,size=9,fill=DIM,align="left-top")
-        try: 
-            drawImage(app.orig_url,ux+10,uy+20,100,100)
-        except: 
-            drawRect(ux+10,uy+20,100,100,fill=rgb(50,50,60))
-        drawLabel("Processed 140x140 (28x28 x5):",ux+130,uy+8,size=9,fill=ACC,bold=True,align="left-top")
-        if app.proc_url:
-            try: 
-                drawImage(app.proc_url,ux+130,uy+20,140,140)
-            except: 
-                drawRect(ux+130,uy+20,140,140,fill=rgb(40,40,50))
+        # SINGLE VISUAL ONLY - properly centered 140x140 inside dashed box
+        drawLabel("28x28 x5 (140x140) - shortest->28 center-crop:",ux+8,uy+8,size=10,fill=ACC,bold=True,align="left-top")
+        try:
+            # Centered: (330-140)/2=95, y=24
+            drawImage(app.proc_url,ux+95,uy+24,140,140)
+        except:
+            drawRect(ux+95,uy+24,140,140,fill=rgb(40,40,50))
         if hasattr(app,'crop_info') and app.crop_info:
             ci=app.crop_info
-            drawLabel(f"orig {ci.get('orig_w','?')}x{ci.get('orig_h','?')} crop {ci.get('bbox_w','?')}x{ci.get('bbox_h','?')} sq{ci.get('size','?')}",ux+10,uy+130,size=7,fill=DIM,align="left-top")
-            drawLabel("aspect preserved - no squash",ux+10,uy+142,size=7,fill=ACC2,align="left-top")
+            drawLabel(f"{ci.get('orig_w','?')}x{ci.get('orig_h','?')} -> {ci.get('inter_w','?')}x{ci.get('inter_h','?')} -> 28x28 crop {ci.get('crop_x','?')},{ci.get('crop_y','?')}",ux+8,uy+170,size=7,fill=DIM,align="left-top")
     cb=app.buttons["clear"]
     draw_button(cb,app.hover=="clear",cb["enabled"])
     py=382
@@ -910,7 +865,6 @@ def redrawAll(app):
             drawLabel(f"{SHORT[idx]}",bx+bw+8,by+bh/2,size=10,fill=TXT,align="left-center")
             drawLabel(f"{p*100:.1f}%",bx+bw/2,by+bh/2,size=9,fill=rgb(255,255,255),align="center-center")
 
-# === Override onAppStart to add CACHE button and auto-load cache ===
 orig_onAppStart = onAppStart
 def onAppStart(app):
     orig_onAppStart(app)
