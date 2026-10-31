@@ -35,6 +35,8 @@ _EXAMPLES = {
 # 4. Destroy proxies when done to avoid leaks (Pyodide community standard)
 # 5. Loop until stable (Promise -> coroutine -> proxy -> py)
 
+# --- Mindful proxy-based pyodide handling - CORRECT control flow ---
+# Extension returns coroutine/Promise that MUST be awaited directly, not wrapped in helper that returns coroutine object
 try:
     import extensions.pyodide as _py_ext
     PYODIDE_EXT_OK = True
@@ -44,140 +46,93 @@ except Exception:
     _py_ext = None
     _py_candidates = []
 
-# Global for last error tracking (control flow mindfulness)
-_last_pyodide_error = None
-
-async def _unwrap_proxy(res, max_depth=10):
-    """Mindful proxy unwrapping per Pyodide community standards.
-    Never str() before to_py(). Order: Promise -> coroutine -> PyProxy -> py.
-    Destroys proxies after conversion to prevent leaks.
-    """
-    global _last_pyodide_error
-    for _ in range(max_depth):
+async def _unwrap_proxy(res):
+    """Correct unwrapping: await Promise, await coroutine, then to_py, never str() before."""
+    # Loop up to 10 times for nested Promise->coroutine->Proxy
+    for _ in range(10):
         if res is None:
             break
-        # 1. JS Promise: has .then
-        try:
-            if hasattr(res, 'then') and callable(getattr(res, 'then')):
-                res = await res
-                continue
-        except Exception as e:
-            _last_pyodide_error = f"Promise await failed: {e}"
-            # don't break, try other paths
-            pass
-        # 2. Python coroutine / awaitable
-        try:
-            if hasattr(res, '__await__'):
-                res = await res
-                continue
-        except Exception as e:
-            _last_pyodide_error = f"Coroutine await failed: {e}"
-            pass
-        # 3. PyProxy -> to_py() - most important, must happen before any isinstance or str()
+        # JS Promise
+        if hasattr(res, 'then') and callable(getattr(res, 'then')):
+            res = await res
+            continue
+        # Coroutine
+        if hasattr(res, '__await__'):
+            res = await res
+            continue
+        # PyProxy
         if hasattr(res, 'to_py'):
             try:
-                # Try with depth for nested dicts (community standard)
+                # depth for nested dict
                 try:
-                    py_obj = res.to_py(depth=10)
+                    py = res.to_py(depth=10)
                 except TypeError:
-                    py_obj = res.to_py()
-                # Destroy original proxy after successful conversion
+                    py = res.to_py()
                 try:
                     if hasattr(res, 'destroy'):
                         res.destroy()
                 except Exception:
                     pass
-                if py_obj is not None and py_obj is not res:
-                    res = py_obj
-                    continue
-            except Exception as e:
-                _last_pyodide_error = f"to_py failed: {e} on {type(res)}"
+                res = py
+                continue
+            except Exception:
                 pass
-        # Stable - no more conversions
         break
     return res
 
 async def _pyodide_run(code_str):
-    """Resilient runner with full control-flow mindfulness.
-    Preserves errors, doesn't swallow, returns dict or raises.
-    """
-    global _last_pyodide_error
-    _last_pyodide_error = None
-    last_exc = None
-
-    # Try extension candidates
+    # Direct, correct await - no intermediate coroutine leak
     if PYODIDE_EXT_OK and _py_ext is not None:
         for name in _py_candidates:
+            fn = getattr(_py_ext, name, None)
+            if fn is None:
+                continue
             try:
-                fn = getattr(_py_ext, name, None)
-                if fn is None:
-                    continue
-                # Call - may be sync or async
-                try:
-                    raw = fn(code_str)
-                except Exception as e:
-                    last_exc = e
-                    _last_pyodide_error = f"{name} call failed: {e}"
-                    continue
-                # Unwrap mindful (handles Promise/coroutine/proxy)
+                # CORRECT: await the call directly, not raw = fn(); await unwrap(raw)
+                # This is the control flow that actually gets worker connection
+                raw = fn(code_str)
+                # raw is coroutine or Promise - await it properly
+                if hasattr(raw, '__await__') or hasattr(raw, 'then'):
+                    raw = await raw
+                # Now raw may still be PyProxy - unwrap it
                 res = await _unwrap_proxy(raw)
-                if res is None:
-                    _last_pyodide_error = f"{name} returned None"
-                    continue
-                # If result is stringified coroutine (broken unwrap), skip
-                if isinstance(res, str) and '<coroutine' in res.lower():
-                    _last_pyodide_error = f"{name} returned coroutine string: {res[:100]}"
-                    continue
-                # JSON string fallback (common when worker returns JSON)
                 if isinstance(res, str):
                     try:
                         maybe = json.loads(res)
                         if isinstance(maybe, dict):
                             return maybe
-                    except Exception as e:
-                        _last_pyodide_error = f"{name} JSON parse failed: {e} for {res[:100]}"
-                        # If it's a string error message from pyodide, preserve it
-                        if len(res) < 500:
-                            # Could be actual error string, not JSON
-                            pass
-                        continue
-                # Success: dict
-                if isinstance(res, dict):
-                    return res
-                # If still proxy-like but dict-like, try one more to_py
-                if hasattr(res, 'to_py'):
-                    try:
-                        res = res.to_py()
-                        if isinstance(res, dict):
-                            return res
                     except Exception:
                         pass
-                _last_pyodide_error = f"{name} returned non-dict {type(res)}: {str(res)[:200]}"
-            except Exception as e:
-                last_exc = e
-                _last_pyodide_error = f"{name} exception: {e}\n{traceback.format_exc()[:500]}"
+                    # If string but not JSON, it might be error, still return to show
+                    if res and len(res) < 2000 and 'trace' in res.lower():
+                        return {'status':'error','msg':res}
+                    continue
+                if isinstance(res, dict):
+                    return res
+                if res is not None:
+                    # Try one more conversion
+                    if hasattr(res, 'to_py'):
+                        try:
+                            res = res.to_py()
+                        except Exception:
+                            pass
+                    if isinstance(res, dict):
+                        return res
+                    return res
+            except Exception:
                 continue
-
-    # Fallback: window.pyodide (direct)
+    
+    # Fallback window.pyodide
     try:
         if hasattr(window, 'pyodide') and window.pyodide is not None:
-            raw = window.pyodide.runPythonAsync(code_str)
+            raw = await window.pyodide.runPythonAsync(code_str)
             res = await _unwrap_proxy(raw)
-            if isinstance(res, str):
-                try:
-                    maybe = json.loads(res)
-                    if isinstance(maybe, dict):
-                        return maybe
-                except Exception:
-                    pass
-            if res is not None:
-                return res
-    except Exception as e:
-        last_exc = e
-        _last_pyodide_error = f"window.pyodide failed: {e}"
-
-    # If we get here, everything failed - return None but preserve error for caller
+            return res
+    except Exception:
+        pass
     return None
+
+_last_pyodide_error = None
 
 def _math_group(source, position):
     while position < len(source) and source[position].isspace():
@@ -462,78 +417,43 @@ x - y = 1</textarea>
 
 
 async def _solve(app, residual_expressions, variable_names, initial_values):
-    # Control flow mindfulness: explicit async chain, no swallowed exceptions, retry for worker init
     try:
-        max_retries = 3
-        py_res = None
-        last_err = None
-        for attempt in range(max_retries):
-            try:
-                if attempt == 0:
-                    app.status = 'Starting Pyodide worker and loading SciPy...'
-                else:
-                    app.status = f'Retrying Pyodide worker (attempt {attempt+1}/{max_retries})...'
-                code_lines = [
-                    "import json, math, traceback", "import numpy as np", "from scipy.optimize import root as _scipy_root",
-                    f"variables = {json.dumps(variable_names)}", f"exprs = {json.dumps(residual_expressions)}", f"x0 = np.array({json.dumps(initial_values)}, dtype=float)",
-                    "def _log(a, b=None):",
-                    "    a=np.asarray(a)", "    if b is None: return np.log(a)", "    return np.log(a)/np.log(b)",
-                    "def _ln(a): return np.log(a)", "def _sec(a): return 1/np.cos(a)", "def _csc(a): return 1/np.sin(a)", "def _cot(a): return 1/np.tan(a)",
-                    "_env_base = {'sin': np.sin, 'cos': np.cos, 'tan': np.tan, 'asin': np.arcsin, 'acos': np.arccos, 'atan': np.arctan, 'sinh': np.sinh, 'cosh': np.cosh, 'tanh': np.tanh, 'exp': np.exp, 'sqrt': np.sqrt, 'log': _log, 'ln': _ln, 'sec': _sec, 'csc': _csc, 'cot': _cot, 'pi': np.pi, 'e': np.e, 'abs': np.abs,}",
-                    "def _func(x):",
-                    "    env = dict(_env_base)",
-                    "    for name, val in zip(variables, x): env[name]=val",
-                    "    res=[]",
-                    "    for e in exprs:",
-                    "        try: v = eval(e, {'__builtins__': {}}, env); res.append(float(v))",
-                    "        except Exception as ex: raise RuntimeError(f'Failed eval {e}: {ex}')",
-                    "    return np.array(res)",
-                    "try:", "    sol = _scipy_root(_func, x0, method='hybr')", "    init_res = _func(x0)",
-                    "    result = {'status': 'ok', 'x': sol.x.tolist(), 'fun': sol.fun.tolist(), 'success': bool(sol.success), 'nfev': int(getattr(sol, 'nfev', 0)), 'message': str(getattr(sol, 'message', '')), 'residualNorm': float(np.linalg.norm(sol.fun)), 'initialResidualNorm': float(np.linalg.norm(init_res)),}",
-                    "except Exception as e: result = {'status':'error','msg':str(e),'trace':traceback.format_exc()}", "result",
-                ]
-                code = "\n".join(code_lines)
-                raw_res = await _pyodide_run(code)
-                if raw_res is None:
-                    err_detail = _last_pyodide_error or "worker returned None"
-                    last_err = f"Attempt {attempt+1} failed: {err_detail}"
-                    # Wait a bit for worker to init (community standard)
-                    try:
-                        import asyncio
-                        await aio.sleep(1.5)
-                    except Exception:
-                        try:
-                            await __import__('browser').aio.sleep(1.5)
-                        except Exception:
-                            pass
-                    continue
-                py_res = raw_res
-                if isinstance(py_res, str):
-                    try: py_res = json.loads(py_res)
-                    except Exception: pass
-                if not isinstance(py_res, dict):
-                    last_err = f"Non-dict result: {type(py_res)} {str(py_res)[:200]}"
-                    continue
-                # Got dict
-                break
-            except Exception as e:
-                last_err = f"Attempt {attempt+1} exception: {e}"
-                continue
-        
+        app.status = 'Starting Pyodide worker and loading SciPy...'
+        code_lines = [
+            "import json, math, traceback", "import numpy as np", "from scipy.optimize import root as _scipy_root",
+            f"variables = {json.dumps(variable_names)}", f"exprs = {json.dumps(residual_expressions)}", f"x0 = np.array({json.dumps(initial_values)}, dtype=float)",
+            "def _log(a, b=None):",
+            "    a=np.asarray(a)", "    if b is None: return np.log(a)", "    return np.log(a)/np.log(b)",
+            "def _ln(a): return np.log(a)", "def _sec(a): return 1/np.cos(a)", "def _csc(a): return 1/np.sin(a)", "def _cot(a): return 1/np.tan(a)",
+            "_env_base = {'sin': np.sin, 'cos': np.cos, 'tan': np.tan, 'asin': np.arcsin, 'acos': np.arccos, 'atan': np.arctan, 'sinh': np.sinh, 'cosh': np.cosh, 'tanh': np.tanh, 'exp': np.exp, 'sqrt': np.sqrt, 'log': _log, 'ln': _ln, 'sec': _sec, 'csc': _csc, 'cot': _cot, 'pi': np.pi, 'e': np.e, 'abs': np.abs,}",
+            "def _func(x):",
+            "    env = dict(_env_base)",
+            "    for name, val in zip(variables, x): env[name]=val",
+            "    res=[]",
+            "    for e in exprs:",
+            "        try: v = eval(e, {'__builtins__': {}}, env); res.append(float(v))",
+            "        except Exception as ex: raise RuntimeError(f'Failed eval {e}: {ex}')",
+            "    return np.array(res)",
+            "try:", "    sol = _scipy_root(_func, x0, method='hybr')", "    init_res = _func(x0)",
+            "    result = {'status': 'ok', 'x': sol.x.tolist(), 'fun': sol.fun.tolist(), 'success': bool(sol.success), 'nfev': int(getattr(sol, 'nfev', 0)), 'message': str(getattr(sol, 'message', '')), 'residualNorm': float(np.linalg.norm(sol.fun)), 'initialResidualNorm': float(np.linalg.norm(init_res)),}",
+            "except Exception as e: result = {'status':'error','msg':str(e),'trace':traceback.format_exc()}", "result",
+        ]
+        code = "\n".join(code_lines)
+        raw_res = await _pyodide_run(code)
+        py_res = raw_res
         if py_res is None:
-            err_detail = _last_pyodide_error or last_err or "no detail"
-            raise RuntimeError(f"Pyodide worker returned None after {max_retries} attempts - extension not ready. Last: {err_detail}")
+            raise RuntimeError("Pyodide worker not ready - please try again")
         if isinstance(py_res, str):
             try: py_res = json.loads(py_res)
             except Exception: pass
         if not isinstance(py_res, dict):
-            raise RuntimeError(f"Pyodide returned non-dict: {type(py_res)} {str(py_res)[:200]} | last_err: {last_err}")
+            raise RuntimeError(f"Worker error: {str(py_res)[:200]}")
         if py_res.get('status') != 'ok':
-            raise RuntimeError(py_res.get('msg','Unknown error') + "\n" + py_res.get('trace','')[:400])
+            raise RuntimeError(py_res.get('msg','Unknown error'))
         app.result = py_res
         app.status = 'Converged' if py_res.get('success') else 'Solver stopped without convergence'
     except Exception as error:
-        app.error = str(error)[:600]; app.status = 'Solve failed'; app.result = None
+        app.error = str(error)[:400]; app.status = 'Solve failed'; app.result = None
     finally: app.busy = False
 
 async def _preload_pyodide():
@@ -551,7 +471,7 @@ async def _preload_pyodide():
 
 def onAppStart(app):
     app.width = 1050; app.height = 700; app.stepsPerSecond = 20; app.background = BG
-    app.status = 'Ready \u00b7 enter a system and solve (preloading Pyodide worker...)'; app.busy = False; app.error = None; app.result = None
+    app.status = 'Ready'; app.busy = False; app.error = None; app.result = None
     app.equationLines = ['x^2 + y^2 = 25', 'x - y = 1']; app.variableNames = ['x', 'y']; app.initialValues = [2.0, 1.0]
     _install_controls(app)
     # Community standard: preload worker in background via aio.run
@@ -559,7 +479,6 @@ def onAppStart(app):
         aio.run(_preload_pyodide())
     except Exception:
         pass
-    app.status = 'Ready \u00b7 enter a system and solve'
 
 def onStep(app): pass
 
