@@ -504,210 +504,98 @@ async def train_mlp(app):
     app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}% - 100% Complete"
     cache_weights_now(app)
 
-# === FINAL V9: Longest side -> 28 + pad to square, preserve all data ===
-# === FINAL V9: Longest side -> 28 + pad to square, preserve all data ===
+# === V11 NO FALLBACKS - longest side -> 28 pad to square, direct img->28 ===
+# === V11 NO FALLBACKS - longest side -> 28 pad to square, direct img->28 ===
 async def process_upload_to_28x28(source):
-    previewUrl=None
-    object_url=None
-    try:
-        try:
-            object_url=window.URL.createObjectURL(source)
-        except:
-            try:
-                object_url=window.webkitURL.createObjectURL(source)
-            except:
-                object_url=None
-        if object_url:
-            previewUrl=object_url
-    except:
-        previewUrl=None
-
-    if previewUrl is None:
-        raise ValueError("Could not create blob URL")
-
-    src_canvas=document.createElement("canvas")
-    src_canvas.width=384
-    src_canvas.height=384
-
+    object_url=window.URL.createObjectURL(source)
+    previewUrl=object_url
     fut=aio.Future()
-
     img=window.Image.new()
-
     def loaded(event):
-        try:
-            try:
-                w=int(getattr(img, "naturalWidth", 0) or getattr(img, "width", 0) or 384)
-                h=int(getattr(img, "naturalHeight", 0) or getattr(img, "height", 0) or 384)
-            except:
-                w=384; h=384
-            if w==0: w=384
-            if h==0: h=384
-            max_dim=384
-            if max(w,h) > max_dim:
-                sc=max_dim / max(w,h)
-                w=int(round(w*sc))
-                h=int(round(h*sc))
-            src_canvas.width=w
-            src_canvas.height=h
-            ctx=src_canvas.getContext("2d")
-            ctx.imageSmoothingEnabled=True
-            try:
-                ctx.imageSmoothingQuality="high"
-            except:
-                pass
-            try:
-                nw=int(getattr(img, "naturalWidth", w) or w)
-                nh=int(getattr(img, "naturalHeight", h) or h)
-                ctx.drawImage(img, 0,0,nw,nh, 0,0,w,h)
-            except:
-                ctx.drawImage(img, 0, 0, w, h)
-
-            target=28
-            # Longest side -> target, then pad to square (preserve all data)
-            if w == h:
-                inter_w=target
-                inter_h=target
-                pad_x=0
-                pad_y=0
-                is_square=True
-                note="SQUARE ONLY SCALED"
-            elif w > h:
-                # Landscape: longest w -> 28
-                inter_w=target
-                inter_h=int(round(h * target / w))
-                inter_h=max(1, inter_h)
-                pad_x=0
-                pad_y=(target - inter_h)//2
-                is_square=False
-                note=f"longest {w}x{h} -> {inter_w}x{inter_h} pad y {pad_y} preserve all"
-            else:
-                # Portrait: longest h -> 28
-                inter_h=target
-                inter_w=int(round(w * target / h))
-                inter_w=max(1, inter_w)
-                pad_x=(target - inter_w)//2
-                pad_y=0
-                is_square=False
-                note=f"longest {w}x{h} -> {inter_w}x{inter_h} pad x {pad_x} preserve all"
-
-            dst_canvas=document.createElement("canvas")
-            dst_canvas.width=target
-            dst_canvas.height=target
-            dctx=dst_canvas.getContext("2d")
-            dctx.imageSmoothingEnabled=True
-            try:
-                dctx.imageSmoothingQuality="high"
-            except:
-                pass
-            # Fill black background (Fashion-MNIST background)
-            dctx.fillStyle="#000000"
-            dctx.fillRect(0,0,target,target)
-            # Draw scaled image centered with padding - 9 arg to ensure full src
-            try:
-                dctx.drawImage(src_canvas, 0,0,w,h, pad_x, pad_y, inter_w, inter_h)
-            except:
-                dctx.drawImage(src_canvas, pad_x, pad_y, inter_w, inter_h)
-
-            dst_data=dctx.getImageData(0,0,target,target)
-            dst_pixels=dst_data.data
-            if hasattr(dst_pixels,"to_py"):
-                try: dst_pixels=dst_pixels.to_py()
-                except: pass
-            try:
-                dst_list=list(dst_pixels)
-            except:
-                dst_list=[]
-
-            vec=[]
-            for i in range(0, len(dst_list), 4):
-                try:
-                    r=dst_list[i]; g=dst_list[i+1]; b=dst_list[i+2]
-                except:
-                    r=g=b=0
-                gray=(0.299*r+0.587*g+0.114*b)/255.0
-                vec.append(gray)
-
-            # For display we want white-on-black already, but our dst is black background with image
-            # Check if need invert: if average bright (white bg), invert
-            if len(vec)==784:
-                avg=sum(vec)/len(vec)
-                # If image was light blue on white, after drawing on black bg with padding,
-                # avg might be low (black bg + light dress). We want white dress on black.
-                # Our draw already has black bg, dress light blue ~0.8 -> after gray ~0.8, which is bright on black - correct
-                # But if original was black dress on white, after our black bg fill, dress would be dark on white?
-                # Let's detect: if background was white in source, our method draws dress on black, so dress remains light
-                # Actually we already have black background, so no need invert if dress is light
-                # But to be safe, if avg > 0.5 (white bg dominant), invert
-                if avg>0.5:
-                    vec=[1.0-v for v in vec]
-                mn=min(vec); mx=max(vec)
-                if mx-mn>0.10:
-                    vec=[(v-mn)/(mx-mn) for v in vec]
-                vec=[max(0.0,min(1.0,v)) for v in vec]
-
-            big_canvas=document.createElement("canvas")
-            big_canvas.width=140; big_canvas.height=140
-            bctx=big_canvas.getContext("2d")
-            bctx.fillStyle="#000000"
-            bctx.fillRect(0,0,140,140)
-            for y in range(target):
-                for x in range(target):
-                    idx=y*target + x
-                    if idx>=len(vec): continue
-                    v=vec[idx]
-                    gv=int(v*255)
-                    bctx.fillStyle=f"rgb({gv},{gv},{gv})"
-                    bctx.fillRect(x*5, y*5, 5, 5)
-            proc_url=big_canvas.toDataURL("image/png")
-
-            result={"processed_url":proc_url,"vector":vec,"crop_info":{"orig_w":w,"orig_h":h,"inter_w":inter_w,"inter_h":inter_h,"pad_x":pad_x,"pad_y":pad_y,"is_square":is_square,"note":note}}
-            fut.set_result(result)
-        except Exception as ex:
-            import traceback
-            print(f"loaded V9 failed {ex}")
-            print(traceback.format_exc())
-            try:
-                fut.set_result(None)
-            except:
-                pass
-
+        nw=int(img.naturalWidth)
+        nh=int(img.naturalHeight)
+        if nw==0:
+            nw=int(img.width)
+        if nh==0:
+            nh=int(img.height)
+        target=28
+        if nw == nh:
+            inter_w=target
+            inter_h=target
+            pad_x=0
+            pad_y=0
+            is_square=True
+            note="SQUARE ONLY SCALED"
+        elif nw > nh:
+            inter_w=target
+            inter_h=int(round(nh * target / nw))
+            pad_x=0
+            pad_y=(target - inter_h)//2
+            is_square=False
+            note=f"longest {nw}x{nh} -> {inter_w}x{inter_h} pad y {pad_y} preserve all"
+        else:
+            inter_h=target
+            inter_w=int(round(nw * target / nh))
+            pad_x=(target - inter_w)//2
+            pad_y=0
+            is_square=False
+            note=f"longest {nw}x{nh} -> {inter_w}x{inter_h} pad x {pad_x} preserve all"
+        dst_canvas=document.createElement("canvas")
+        dst_canvas.width=target
+        dst_canvas.height=target
+        dctx=dst_canvas.getContext("2d")
+        dctx.imageSmoothingEnabled=True
+        dctx.imageSmoothingQuality="high"
+        dctx.fillStyle="#000000"
+        dctx.fillRect(0,0,target,target)
+        dctx.drawImage(img, 0,0,nw,nh, pad_x, pad_y, inter_w, inter_h)
+        dst_data=dctx.getImageData(0,0,target,target)
+        dst_pixels=dst_data.data.to_py()
+        vec=[]
+        for i in range(0, len(dst_pixels), 4):
+            r=dst_pixels[i]
+            g=dst_pixels[i+1]
+            b=dst_pixels[i+2]
+            gray=(0.299*r+0.587*g+0.114*b)/255.0
+            vec.append(gray)
+        avg=sum(vec)/len(vec)
+        if avg>0.5:
+            vec=[1.0-v for v in vec]
+        mn=min(vec)
+        mx=max(vec)
+        if mx-mn>0.10:
+            vec=[(v-mn)/(mx-mn) for v in vec]
+        vec=[max(0.0,min(1.0,v)) for v in vec]
+        big_canvas=document.createElement("canvas")
+        big_canvas.width=140
+        big_canvas.height=140
+        bctx=big_canvas.getContext("2d")
+        bctx.fillStyle="#000000"
+        bctx.fillRect(0,0,140,140)
+        for y in range(target):
+            for x in range(target):
+                idx=y*target + x
+                v=vec[idx]
+                gv=int(v*255)
+                bctx.fillStyle=f"rgb({gv},{gv},{gv})"
+                bctx.fillRect(x*5, y*5, 5, 5)
+        proc_url=big_canvas.toDataURL("image/png")
+        result={"processed_url":proc_url,"vector":vec,"crop_info":{"orig_w":nw,"orig_h":nh,"inter_w":inter_w,"inter_h":inter_h,"pad_x":pad_x,"pad_y":pad_y,"is_square":is_square,"note":note}}
+        fut.set_result(result)
     def on_error(event):
-        print("img load error V9")
-        try:
-            fut.set_result(None)
-        except:
-            pass
-
-    try:
-        img.bind("load", loaded)
-        img.bind("error", on_error)
-    except:
-        try:
-            img.onload=loaded
-            img.onerror=on_error
-        except:
-            pass
-
-    try:
-        img.setAttribute("src", previewUrl)
-    except:
-        pass
-
+        fut.set_result(None)
+    img.bind("load", loaded)
+    img.bind("error", on_error)
+    img.setAttribute("src", previewUrl)
     result=await fut
-
-    if object_url is not None:
-        try:
-            window.URL.revokeObjectURL(object_url)
-        except:
-            try:
-                window.webkitURL.revokeObjectURL(object_url)
-            except:
-                pass
-
+    window.URL.revokeObjectURL(object_url)
     if result is None:
-        raise ValueError("Image processing failed")
-
+        raise ValueError("load failed")
     return result
+
+
+
+
 
 
 
