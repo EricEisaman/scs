@@ -2,7 +2,6 @@ from scs import *
 from browser import document, aio
 from extensions.pyodide import root
 import re
-import json
 
 BG = rgb(15, 20, 23)
 PANEL = rgb(25, 33, 37)
@@ -30,7 +29,6 @@ r'\begin{bmatrix}2 & 1 \\ 1 & 3\end{bmatrix}\begin{bmatrix}x \\ y\end{bmatrix}=\
 )
 }
 
-
 def _math_group(source, position):
     while position < len(source) and source[position].isspace():
         position += 1
@@ -52,7 +50,7 @@ def _math_group(source, position):
 def _math_argument(source, position):
     while position < len(source) and source[position].isspace():
         position += 1
-    if source.startswith('\\\\left', position):
+    if source.startswith('\\left', position):
         position += 5
     while position < len(source) and source[position].isspace():
         position += 1
@@ -72,8 +70,8 @@ def _math_argument(source, position):
                     return source[start + 1:position], position + 1
             position += 1
         raise ValueError('Unclosed function argument')
-    if source[position] == '\\\\':
-        match = re.match(r'\\\\([A-Za-z]+)', source[position:])
+    if source[position] == '\\':
+        match = re.match(r'\\([A-Za-z]+)', source[position:])
         if not match:
             raise ValueError('Invalid LaTeX command in function argument')
         command_end = position + len(match.group(0))
@@ -89,7 +87,7 @@ def _math_argument(source, position):
             return source[start:position], position
         return match.group(0), command_end
     start = position
-    match = re.match(r'[A-Za-z][A-Za-z0-9]*|[0-9]+(?:\\.[0-9]+)?', source[position:])
+    match = re.match(r'[A-Za-z][A-Za-z0-9]*|[0-9]+(?:\.[0-9]+)?', source[position:])
     if not match:
         raise ValueError('Expected a variable, number, or grouped LaTeX argument')
     position += len(match.group(0))
@@ -116,8 +114,8 @@ def _latex_expression(source):
     output = []
     position = 0
     while position < len(source):
-        if source[position] == '\\\\':
-            match = re.match(r'\\\\([A-Za-z]+)', source[position:])
+        if source[position] == '\\':
+            match = re.match(r'\\([A-Za-z]+)', source[position:])
             if not match:
                 raise ValueError('Invalid LaTeX command')
             command = match.group(1)
@@ -160,7 +158,7 @@ def _latex_expression(source):
                 output.append(symbols[command])
                 position = command_end
                 continue
-            raise ValueError('Unsupported LaTeX command: \\\\' + command)
+            raise ValueError('Unsupported LaTeX command: \\' + command)
         if source[position] == '{':
             output.append('(')
         elif source[position] == '}':
@@ -168,7 +166,8 @@ def _latex_expression(source):
         else:
             output.append(source[position])
         position += 1
-        expression = ''.join(output).replace('^', '**')
+    expression = ''.join(output).replace('^', '**')
+    # Brython-safe implicit multiplication (no lookbehind)
     try:
         expression = re.sub(r'([0-9)])\s*([A-Za-z(])', r'\1*\2', expression)
         func_alt = 'sin|cos|tan|sec|csc|cot|asin|acos|atan|sinh|cosh|tanh|exp|ln|log'
@@ -230,7 +229,7 @@ def _latex_matrices(source):
     remaining = []
     cursor = 0
     while True:
-        match = re.search(r'\\\\begin\\{([A-Za-z]+)\\}', source[cursor:])
+        match = re.search(r'\\begin\{([A-Za-z]+)\}', source[cursor:])
         if not match:
             remaining.append(source[cursor:])
             break
@@ -239,13 +238,13 @@ def _latex_matrices(source):
         environment = match.group(1)
         if environment not in ('matrix', 'bmatrix', 'pmatrix'):
             raise ValueError('Use matrix, bmatrix, or pmatrix notation')
-        end_token = r'\\end{' + environment + '}'
+        end_token = r'\end{' + environment + '}'
         end = source.find(end_token, command_end)
         if end < 0:
             raise ValueError('Unclosed LaTeX matrix')
         remaining.append(source[cursor:start])
         body = source[command_end:end]
-        rows = [row.strip() for row in re.split(r'\\\\|\\n', body) if row.strip()]
+        rows = [row.strip() for row in re.split(r'\\|\n', body) if row.strip()]
         blocks.append([[_latex_expression(cell.strip()) for cell in row.split('&')] for row in rows])
         cursor = end + len(end_token)
     return blocks, ''.join(remaining)
@@ -261,12 +260,12 @@ def _matrix_residuals(equation, variables):
     if equation.count('=') != 1:
         raise ValueError('Enter one Ax=b matrix equation at a time')
     left, right = equation.split('=')
-    if '\\\\begin{' in equation:
+    if '\\begin{' in equation:
         left_blocks, left_text = _latex_matrices(left)
         right_blocks, right_text = _latex_matrices(right)
         if len(left_blocks) != 2 or len(right_blocks) != 1:
             raise ValueError('Ax=b needs one matrix, one variable vector, and one result vector')
-        left_text = re.sub(r'\\\\(?:cdot|times)|\\*', '', left_text).strip()
+        left_text = re.sub(r'\\(?:cdot|times)|\*', '', left_text).strip()
         if left_text or right_text.strip():
             raise ValueError('Unexpected text outside the matrix and vectors')
         matrix = left_blocks[0]
@@ -275,7 +274,7 @@ def _matrix_residuals(equation, variables):
     else:
         matrix_text, left_remainder = _take_bracket_group(left)
         matrix = _plain_matrix(matrix_text)
-        left_remainder = re.sub(r'^(?:\\\\cdot|\\\\times|\\*)\\s*', '', left_remainder).strip()
+        left_remainder = re.sub(r'^(?:\\cdot|\\times|\*)\s*', '', left_remainder).strip()
         vector_text, left_remainder = _take_bracket_group(left_remainder)
         if left_remainder:
             raise ValueError('Unexpected text after the variable vector')
@@ -311,7 +310,7 @@ def _matrix_residuals(equation, variables):
     return residuals
 
 def _residuals(equations, variables=None):
-    if '\\\\begin{' in equations or equations.lstrip().startswith('[['):
+    if '\\begin{' in equations or equations.lstrip().startswith('[['):
         return _matrix_residuals(equations.strip().replace('$', ''), variables or [])
     residuals = []
     for line in equations.splitlines():
@@ -346,7 +345,7 @@ def _install_controls(app):
     panel.innerHTML = """
 <div style="display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:14px">
 <strong style="font-size:18px;color:#66e0b1">ROOT / NONLINEAR SYSTEMS</strong>
-<span style="color:#899d97">SciPy optimize.root · Pyodide worker · resilient extension</span>
+<span style="color:#899d97">SciPy optimize.root · Pyodide worker · lazy startup</span>
 </div>
 <form id="solver-form" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:12px;align-items:end">
 <label style="display:grid;grid-column:1/-1;gap:6px;color:#b6c6bf">Example
@@ -374,7 +373,7 @@ x - y = 1</textarea>
 </label>
 <button id="solver-submit" type="submit" style="height:39px;padding:0 16px;border:0;background:#66e0b1;color:#10201a;font-weight:bold;font-family:inherit;cursor:pointer">Solve</button>
 </form>
-<div id="solver-note" style="margin-top:10px;color:#899d97">Supports powers, fractions, roots, exp, ln, log bases, and trig functions in radians. For Ax=b, try [[2,1],[1,3]] * [x,y] = [5,7]. First solve downloads SciPy via Pyodide worker.</div>
+<div id="solver-note" style="margin-top:10px;color:#899d97">Supports powers, fractions, roots, exp, ln, log bases, and trig functions in radians. For Ax=b, try [[2,1],[1,3]] * [x,y] = [5,7]. First solve downloads SciPy.</div>
 """
     container = document.getElementById('canvas-container')
     container.parentNode.insertBefore(panel, container)
@@ -399,7 +398,7 @@ x - y = 1</textarea>
         app.initialValues = initial_values
         app.result = None
         app.error = None
-        app.status = 'Starting Pyodide worker and loading SciPy...'
+        app.status = 'Starting Pyodide and loading SciPy...'
         app.busy = True
         aio.run(_solve(app, residual_expressions, variable_names, initial_values))
 
@@ -434,7 +433,7 @@ def onAppStart(app):
     app.height = 700
     app.stepsPerSecond = 20
     app.background = BG
-    app.status = 'Ready \u00b7 enter a system and solve'
+    app.status = 'Ready · enter a system and solve'
     app.busy = False
     app.error = None
     app.result = None
@@ -451,32 +450,59 @@ def _draw_residual_chart(app):
     chart_x, chart_y, chart_width = 90, 370, 500
     drawLabel('RESIDUAL NORM', chart_x, chart_y - 28, size=12, fill=MUTED, align='left')
     drawLine(chart_x, chart_y, chart_x + chart_width, chart_y, fill=rgb(67, 82, 77), lineWidth=1)
-    initial = max(float(result['initialResidualNorm']), 1e-16)
-    final = max(float(result['residualNorm']), 1e-16)
+    try:
+        initial = float(result['initialResidualNorm'])
+    except Exception:
+        initial = 1.0
+    try:
+        final = float(result['residualNorm'])
+    except Exception:
+        final = 1.0
+    # Brython-safe: avoid toExponential bug - clamp to float and use simple str
+    initial = max(initial, 1e-16)
+    final = max(final, 1e-16)
     maximum = max(initial, final)
     for index, (label, value, color) in enumerate((
         ('Initial', initial, GOLD), ('Solved', final, MINT)
     )):
         y = chart_y + 35 + index * 64
-        width = chart_width * min(1.0, value / maximum)
+        try:
+            width = chart_width * min(1.0, float(value) / float(maximum))
+        except Exception:
+            width = 10
         drawLabel(label, chart_x, y, size=13, fill=INK, align='left')
         drawRect(chart_x, y + 13, chart_width, 14, fill=rgb(35, 46, 43))
         drawRect(chart_x, y + 13, max(2, width), 14, fill=color)
-        drawLabel('{:.3g}'.format(value), chart_x + chart_width, y, size=12, fill=color, align='right')
+        # Brython-safe formatting - avoid {:.3g}
+        try:
+            txt = str(round(float(value), 6))
+        except Exception:
+            txt = str(value)[:12]
+        drawLabel(txt, chart_x + chart_width, y, size=12, fill=color, align='right')
     drawLabel('Before / after residual size, not iteration history', chart_x, chart_y + 174, size=11, fill=MUTED, align='left')
 
 def _format_number(value, precision=10):
     try:
-        return ('{:.%dg}' % precision).format(float(value))
+        v = float(value)
+        if abs(v) < 1e-12:
+            return '0'
+        # Brython-safe: don't use format spec g which needs toExponential
+        # Use round and strip
+        r = round(v, precision)
+        # Avoid scientific notation bug - use plain str
+        return str(r)
     except Exception:
-        return str(value)
+        try:
+            return str(value)[:14]
+        except Exception:
+            return '?'
 
 def redrawAll(app):
     drawRect(0, 0, app.width, app.height, fill=BG)
     drawLabel('NONLINEAR ROOT FINDER', 54, 48, size=22, fill=INK, bold=True, align='left')
-    drawLabel('SCIPY / OPTIMIZE.ROOT \u00b7 PYODIDE WORKER v2', 54, 77, size=12, fill=MINT, align='left')
+    drawLabel('SCIPY / OPTIMIZE.ROOT', 54, 77, size=12, fill=MINT, align='left')
     drawLine(54, 105, 996, 105, fill=rgb(55, 69, 64), lineWidth=1)
-    drawLabel(app.status, 54, 140, size=15, fill=GOLD if app.busy else MINT if app.result and app.result.get('success') else RED if app.error else MUTED, align='left')
+    drawLabel(app.status, 54, 140, size=15, fill=GOLD if app.busy else MINT if app.result and app.result['success'] else RED if app.error else MUTED, align='left')
     if app.error:
         drawLabel(app.error[:110], 54, 169, size=12, fill=RED, align='left')
     drawLabel('SYSTEM', 54, 220, size=11, fill=MUTED, align='left')
@@ -489,11 +515,11 @@ def redrawAll(app):
     drawLine(650, 145, 650, 620, fill=rgb(55, 69, 64), lineWidth=1)
     drawLabel('SOLUTION', 700, 178, size=12, fill=MUTED, align='left')
     for index, value in enumerate(app.result['x']):
-        name = app.variableNames[index] if index < len(app.variableNames) else f'x{index}'
+        name = app.variableNames[index]
         drawLabel(name + ' =', 700, 225 + index * 48, size=18, fill=INK, align='left')
         drawLabel(_format_number(value), 970, 225 + index * 48, size=20, fill=MINT, bold=True, align='right')
     drawLabel('Evaluations', 700, 365, size=13, fill=MUTED, align='left')
-    drawLabel(str(app.result.get('nfev','-')), 970, 365, size=14, fill=INK, align='right')
+    drawLabel(str(app.result['nfev']), 970, 365, size=14, fill=INK, align='right')
     drawLabel('Residuals', 700, 410, size=13, fill=MUTED, align='left')
-    for index, value in enumerate(app.result.get('fun', [])):
+    for index, value in enumerate(app.result['fun']):
         drawLabel('F{} = {}'.format(index + 1, _format_number(value, 3)), 700, 442 + index * 25, size=13, fill=INK, align='left')
