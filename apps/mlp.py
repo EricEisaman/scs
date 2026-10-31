@@ -1,4 +1,3 @@
-
 from scs import *
 from browser import aio, window, document
 from extensions.file_loader import load_image, FileLoaderError
@@ -205,6 +204,95 @@ def onAppStart(app):
     }
     app.hover=None; app.upload_hover=False
 
+# === TOP-TIER WEIGHT CACHING ===
+CACHE_KEY="fashion_mnist_mlp_top_tier_weights_v1"
+
+def try_load_cached_weights(app):
+    try:
+        raw = window.localStorage.getItem(CACHE_KEY)
+        if raw is None:
+            return False
+        import json
+        data = window.JSON.parse(raw)
+        if hasattr(data, "to_py"):
+            data = data.to_py()
+        # data is dict with W1,b1,W2,b2,hidden,epoch,acc
+        if not isinstance(data, dict):
+            return False
+        # Validate shapes
+        W1 = data.get("W1")
+        b1 = data.get("b1")
+        W2 = data.get("W2")
+        b2 = data.get("b2")
+        hidden = data.get("hidden", 128)
+        if hasattr(W1, "to_py"): W1 = W1.to_py()
+        if hasattr(b1, "to_py"): b1 = b1.to_py()
+        if hasattr(W2, "to_py"): W2 = W2.to_py()
+        if hasattr(b2, "to_py"): b2 = b2.to_py()
+        if W1 is None or b1 is None or W2 is None or b2 is None:
+            return False
+        # Convert to Python lists if needed
+        app.W1 = W1
+        app.b1 = b1
+        app.W2 = W2
+        app.b2 = b2
+        app.hidden = int(hidden)
+        app.trained = True
+        app.epoch = int(data.get("epoch", 0))
+        app.status = f"Loaded cached weights {app.hidden} hidden - ready for inference"
+        app.fetch_status = f"Cache hit - {len(W1)}x{len(b1)} -> {len(W2[0])} - no training needed"
+        app.buttons["train"]["enabled"] = True
+        # Restore histories if available
+        try:
+            app.loss_hist = list(data.get("loss_hist", []))
+            app.val_acc_hist = list(data.get("val_acc_hist", []))
+        except:
+            pass
+        return True
+    except Exception as e:
+        print(f"Cache load failed: {e}")
+        return False
+
+def cache_weights_now(app):
+    try:
+        if app.W1 is None:
+            app.status = "No weights to cache - train first"
+            return False
+        import json
+        # Store compact - convert to list if needed
+        payload = {
+            "W1": app.W1,
+            "b1": app.b1,
+            "W2": app.W2,
+            "b2": app.b2,
+            "hidden": app.hidden,
+            "epoch": app.epoch,
+            "loss_hist": app.loss_hist[-20:] if len(app.loss_hist)>20 else app.loss_hist,
+            "val_acc_hist": app.val_acc_hist[-20:] if len(app.val_acc_hist)>20 else app.val_acc_hist,
+        }
+        jstr = window.JSON.stringify(payload)
+        window.localStorage.setItem(CACHE_KEY, jstr)
+        app.status = f"Weights cached {len(jstr)//1024}KB to localStorage - will load by default next time"
+        app.fetch_status = f"Cached hidden {app.hidden} epoch {app.epoch}"
+        return True
+    except Exception as e:
+        app.status = f"Cache failed {str(e)[:80]}"
+        print(f"Cache failed: {e}")
+        return False
+
+def clear_cached_weights(app):
+    try:
+        window.localStorage.removeItem(CACHE_KEY)
+        app.W1=None; app.b1=None; app.W2=None; app.b2=None
+        app.trained=False; app.loss_hist=[]; app.acc_hist=[]; app.val_loss_hist=[]; app.val_acc_hist=[]; app.epoch=0; app.lr=0.08
+        app.pred=None; app.probs=None; app.orig_url=None; app.proc_url=None; app.proc_vec=None
+        app.dataset_loaded=False; app.X_train=[]; app.y_train=[]; app.sample_urls=[None]*10
+        app.status="Cache cleared - Reset"; app.fetch_status="Ready"; app.buttons["load"]["enabled"]=True; app.buttons["train"]["enabled"]=False
+        return True
+    except Exception as e:
+        print(f"Clear cache failed {e}")
+        return False
+
 async def build_preview_urls(app):
     app.sample_urls=[None]*10
     for lbl in range(10):
@@ -278,21 +366,23 @@ async def train_mlp(app):
         return
     app.training=True; app.trained=False
     app.loss_hist=[]; app.acc_hist=[]; app.val_loss_hist=[]; app.val_acc_hist=[]
+    # Live curve for smooth plotting every so often
+    app.live_train=[]; app.live_val=[]
     app.epoch=0; app.buttons["train"]["enabled"]=False
-    # RESPONSIBLE PIPELINE: FULL 4915 train, 1085 val, no cut, chunked micro-batches
-    # Push data responsibly: small allocs, yield every 4 samples, progress bar
+    # RESPONSIBLE + SMOOTH: full 4915 train, 1085 val, micro-batches, live curve
     Xtr=app.X_train; ytr=app.y_train; Xva=app.X_val; yva=app.y_val
-    app.batch=16  # Smaller batch = smaller per-chunk work = no freeze
-    app.max_epochs=8  # 8 epochs full dataset = good accuracy for demo
+    app.batch=16  # small batch = smooth
+    app.max_epochs=8
     W1,b1,W2,b2=init_weights(app.hidden)
     app.W1=W1; app.b1=b1; app.W2=W2; app.b2=b2
-    app.status=f"Training FULL {len(Xtr)} samples - responsible pipeline batch {app.batch}"
+    app.status=f"Training FULL {len(Xtr)} samples - smooth pipeline batch {app.batch} + live loss"
     for ep in range(app.max_epochs):
         app.epoch=ep+1
         app.status=f"Training epoch {app.epoch}/{app.max_epochs}..."
         idx=list(range(len(Xtr)))
         random.shuffle(idx)
         total_loss=0.0; correct=0; batches=0
+        total_batches=(len(Xtr)+app.batch-1)//app.batch
         for start in range(0,len(idx),app.batch):
             batch_idx=idx[start:start+app.batch]
             if not batch_idx:
@@ -302,7 +392,6 @@ async def train_mlp(app):
             dW2=[[0.0]*10 for _ in range(app.hidden)]
             db2=[0.0]*10
             batch_loss=0.0; batch_correct=0
-            # Responsible: process samples in micro-chunks of 2, yield between
             for idx_b, bi in enumerate(batch_idx):
                 x=Xtr[bi]; yi=int(ytr[bi])
                 z1,a1,z2,probs=forward(x,W1,b1,W2,b2)
@@ -330,7 +419,6 @@ async def train_mlp(app):
                     db1[h]+=dz1[h]/len(batch_idx)
                     for i in range(784):
                         dW1[i][h]+=x[i]*dz1[h]/len(batch_idx)
-                # Responsible pipeline: yield every 2 samples, not blocking main thread
                 if idx_b%2==0:
                     await aio.sleep(0)
             for i in range(784):
@@ -344,17 +432,34 @@ async def train_mlp(app):
                 b2[o]-=app.lr*db2[o]
             total_loss+=batch_loss/len(batch_idx) if batch_idx else 0
             correct+=batch_correct; batches+=1
-            # Responsible: yield + progress after every micro-batch
-            app.progress=(app.epoch-1 + batches/((len(Xtr)+app.batch-1)//app.batch))/app.max_epochs
+            # Smooth progress - full dataset kept
+            app.progress=(app.epoch-1 + batches/total_batches)/app.max_epochs
+            # === LIVE LOSS CURVE UPDATE EVERY SO OFTEN (every 10 batches + first) ===
+            if batches%10==0 or batches==1 or batches==total_batches:
+                live_avg=total_loss/batches if batches else 0
+                live_acc=correct/(batches*len(batch_idx)) if batches else 0
+                app.live_train.append(live_avg)
+                # Keep loss_hist as live curve for plotting (train)
+                app.loss_hist.append(live_avg)
+                app.acc_hist.append(live_acc)
+                # Keep val aligned (repeat last val until new epoch computed)
+                if app.val_loss_hist:
+                    app.val_loss_hist.append(app.val_loss_hist[-1])
+                    app.val_acc_hist.append(app.val_acc_hist[-1])
+                else:
+                    # No val yet - placeholder to keep arrays aligned
+                    if len(app.val_loss_hist)<len(app.loss_hist):
+                        app.val_loss_hist.append(live_avg)
+                        app.val_acc_hist.append(live_acc)
+                app.status=f"Epoch {app.epoch}/{app.max_epochs} batch {batches}/{total_batches} loss {live_avg:.3f} - live curve"
             await aio.sleep(0.01)
-            if batches%5==0:
-                app.status=f"Epoch {app.epoch}/{app.max_epochs} batch {batches}/{(len(Xtr)+app.batch-1)//app.batch} loss {total_loss/batches:.3f} - pushing {len(Xtr)} samples responsibly"
+            if batches%15==0:
                 await aio.sleep(0)
-
         avg_loss=total_loss/batches if batches else 0
         acc=correct/len(Xtr) if Xtr else 0
         val_loss=0.0; val_correct=0
-        for xi,yi in zip(Xva,yva):
+        # Val eval full 1085 - chunked yield
+        for vi,(xi,yi) in enumerate(zip(Xva,yva)):
             _,_,_,probs=forward(xi,W1,b1,W2,b2)
             yi_int=int(yi)
             p=probs[yi_int] if yi_int < len(probs) else 1e-12
@@ -363,19 +468,33 @@ async def train_mlp(app):
             pred=max(range(len(probs)), key=lambda k: probs[k])
             if pred==yi_int:
                 val_correct+=1
+            if vi%50==0:
+                await aio.sleep(0)
         val_loss/=len(Xva) if Xva else 1
         val_acc=val_correct/len(Xva) if Xva else 0
-        app.loss_hist.append(avg_loss); app.acc_hist.append(acc)
-        app.val_loss_hist.append(val_loss); app.val_acc_hist.append(val_acc)
+        # Epoch final - overwrite last live point with true epoch avg for accuracy
+        if app.loss_hist:
+            app.loss_hist[-1]=avg_loss
+            app.acc_hist[-1]=acc
+        else:
+            app.loss_hist.append(avg_loss); app.acc_hist.append(acc)
+        if app.val_loss_hist:
+            app.val_loss_hist[-1]=val_loss
+            app.val_acc_hist[-1]=val_acc
+        else:
+            app.val_loss_hist.append(val_loss); app.val_acc_hist.append(val_acc)
         app.W1=W1; app.b1=b1; app.W2=W2; app.b2=b2
         app.progress=(ep+1)/app.max_epochs
-        app.status=f"Epoch {app.epoch}/{app.max_epochs} loss {avg_loss:.3f} acc {acc*100:.1f}% val {val_acc*100:.1f}%"
+        app.status=f"Epoch {app.epoch}/{app.max_epochs} loss {avg_loss:.3f} acc {acc*100:.1f}% val {val_acc*100:.1f}% - live curve"
         await aio.sleep(0.05)
         app.lr*=0.95
     app.training=False; app.trained=True; app.buttons["train"]["enabled"]=True
-    app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}% - TOP TIER"
+    app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}% - TOP TIER smooth + live plot"
+    cache_weights_now(app)
 
+# === TOP-TIER IMAGE CROPPING & RESIZING ===
 async def process_upload_to_28x28(source):
+    # TOP-TIER: load_image with proper handling, smart bounding box crop, high-quality multi-step resize
     result=await load_image(source, max_dimension=384)
     if hasattr(result,"to_py"):
         try: result=result.to_py()
@@ -388,6 +507,7 @@ async def process_upload_to_28x28(source):
     if hasattr(pixels,"to_py"):
         try: pixels=pixels.to_py()
         except: pass
+    # Step 1: Reconstruct source canvas at full quality
     src_canvas=document.createElement("canvas")
     src_canvas.width=int(width); src_canvas.height=int(height)
     ctx=src_canvas.getContext("2d")
@@ -409,13 +529,97 @@ async def process_upload_to_28x28(source):
             await window.Promise.new(exec_res)
             ctx.drawImage(img,0,0,int(width),int(height))
         except: pass
-    orig_w=int(width); orig_h=int(height); size=min(orig_w,orig_h)
-    sx=(orig_w-size)//2; sy=(orig_h-size)//2
+
+    # TOP-TIER Step 2: Smart bounding box detection - find content, not just center crop
+    # Get image data for analysis
+    try:
+        full_data=ctx.getImageData(0,0,int(width),int(height))
+        fd=full_data.data
+        if hasattr(fd,"to_py"):
+            fd=fd.to_py()
+        # Find bounding box of non-background (threshold)
+        min_x=int(width); max_x=0; min_y=int(height); max_y=0
+        # Sample for speed if large
+        step_x=max(1,int(width)//200)
+        step_y=max(1,int(height)//200)
+        for y in range(0,int(height),step_y):
+            for x in range(0,int(width),step_x):
+                idx=(y*int(width)+x)*4
+                if idx+2>=len(fd): continue
+                try: r=int(fd[idx]); g=int(fd[idx+1]); b=int(fd[idx+2])
+                except: continue
+                # Consider non-white/light gray as content
+                brightness=(r+g+b)/3
+                if brightness<220:  # Not near white background
+                    if x<min_x: min_x=x
+                    if x>max_x: max_x=x
+                    if y<min_y: min_y=y
+                    if y>max_y: max_y=y
+        # If no content found, fallback to center square
+        if max_x<=min_x or max_y<=min_y:
+            size=min(int(width),int(height))
+            sx=(int(width)-size)//2
+            sy=(int(height)-size)//2
+            bbox_w=size; bbox_h=size
+        else:
+            # Add 15% padding
+            pad_x=int((max_x-min_x)*0.15)
+            pad_y=int((max_y-min_y)*0.15)
+            min_x=max(0,min_x-pad_x); max_x=min(int(width)-1,max_x+pad_x)
+            min_y=max(0,min_y-pad_y); max_y=min(int(height)-1,max_y+pad_y)
+            bbox_w=max_x-min_x+1
+            bbox_h=max_y-min_y+1
+            sx=min_x; sy=min_y
+            size=max(bbox_w,bbox_h)
+            # Center the bbox in square
+            if bbox_w<bbox_h:
+                sx=min_x - (size-bbox_w)//2
+                sx=max(0,min(sx,int(width)-size))
+            else:
+                sy=min_y - (size-bbox_h)//2
+                sy=max(0,min(sy,int(height)-size))
+    except Exception as e:
+        # Fallback center crop
+        orig_w=int(width); orig_h=int(height); size=min(orig_w,orig_h)
+        sx=(orig_w-size)//2; sy=(orig_h-size)//2
+        bbox_w=size; bbox_h=size
+
+    # TOP-TIER Step 3: High-quality multi-step resize for 28x28
+    # Instead of single 384->28, do 384->112->56->28 with high quality
     dst_canvas=document.createElement("canvas")
     dst_canvas.width=28; dst_canvas.height=28
     dctx=dst_canvas.getContext("2d")
-    try: dctx.drawImage(src_canvas, sx, sy, size, size, 0, 0, 28, 28)
-    except: dctx.drawImage(src_canvas,0,0,28,28)
+    dctx.imageSmoothingEnabled=True
+    dctx.imageSmoothingQuality="high"
+    try:
+        # If source crop is large, use intermediate canvases for better quality
+        if size>112:
+            tmp1=document.createElement("canvas")
+            tmp1.width=112; tmp1.height=112
+            t1ctx=tmp1.getContext("2d")
+            t1ctx.imageSmoothingEnabled=True
+            t1ctx.imageSmoothingQuality="high"
+            t1ctx.drawImage(src_canvas, sx, sy, size, size, 0, 0, 112, 112)
+            tmp2=document.createElement("canvas")
+            tmp2.width=56; tmp2.height=56
+            t2ctx=tmp2.getContext("2d")
+            t2ctx.imageSmoothingEnabled=True
+            t2ctx.imageSmoothingQuality="high"
+            t2ctx.drawImage(tmp1, 0, 0, 112, 112, 0, 0, 56, 56)
+            dctx.drawImage(tmp2, 0, 0, 56, 56, 0, 0, 28, 28)
+        elif size>56:
+            tmp=document.createElement("canvas")
+            tmp.width=56; tmp.height=56
+            tctx=tmp.getContext("2d")
+            tctx.imageSmoothingEnabled=True
+            tctx.imageSmoothingQuality="high"
+            tctx.drawImage(src_canvas, sx, sy, size, size, 0, 0, 56, 56)
+            dctx.drawImage(tmp, 0, 0, 56, 56, 0, 0, 28, 28)
+        else:
+            dctx.drawImage(src_canvas, sx, sy, size, size, 0, 0, 28, 28)
+    except:
+        dctx.drawImage(src_canvas, sx, sy, size, size, 0, 0, 28, 28)
+
     dst_data=dctx.getImageData(0,0,28,28); dst_pixels=dst_data.data
     if hasattr(dst_pixels,"to_py"):
         try: dst_pixels=dst_pixels.to_py()
@@ -426,31 +630,64 @@ async def process_upload_to_28x28(source):
         except: r=g=b=0
         gray=(0.299*r+0.587*g+0.114*b)/255.0
         vec.append(gray)
+    # TOP-TIER: Adaptive invert + contrast normalization
     if len(vec)==784:
         avg=sum(vec)/len(vec)
+        # If background is light, invert
         if avg>0.5:
             vec=[1.0-v for v in vec]
+        # Contrast stretch to 0-1 for better MLP input
+        mn=min(vec); mx=max(vec)
+        if mx-mn>0.1:
+            vec=[(v-mn)/(mx-mn) for v in vec]
+        # Clip
+        vec=[max(0.0,min(1.0,v)) for v in vec]
+
+    # TOP-TIER: Create proper positioned artifacts
+    # 1. 140x140 pixel-perfect preview (x5) with crisp pixels
     big_canvas=document.createElement("canvas")
     big_canvas.width=140; big_canvas.height=140
     bctx=big_canvas.getContext("2d")
     bctx.imageSmoothingEnabled=False
     bctx.drawImage(dst_canvas,0,0,140,140)
+    # Add subtle border for artifact positioning
+    bctx.strokeStyle="rgba(99,102,241,0.3)"
+    bctx.lineWidth=1
+    bctx.strokeRect(0,0,140,140)
     proc_url=big_canvas.toDataURL("image/png")
-    return {"original_url":previewUrl,"processed_url":proc_url,"vector":vec}
+
+    # 2. Also create 28x28 grid visualization for debugging (optional)
+    grid_canvas=document.createElement("canvas")
+    grid_canvas.width=28; grid_canvas.height=28
+    gctx=grid_canvas.getContext("2d")
+    for r in range(28):
+        for c in range(28):
+            v=vec[r*28+c]
+            gray=int(v*255)
+            gctx.fillStyle=f"rgb({gray},{gray},{gray})"
+            gctx.fillRect(c,r,1,1)
+    grid_url=grid_canvas.toDataURL("image/png")
+
+    return {"original_url":previewUrl,"processed_url":proc_url,"grid_url":grid_url,"vector":vec,"crop_info":{"sx":sx,"sy":sy,"size":size,"bbox_w":bbox_w,"bbox_h":bbox_h}}
 
 async def handle_upload(app, source):
-    app.status="Loading via load_image()..."
+    app.status="Loading via load_image() - TOP-TIER crop..."
     try:
         result=await process_upload_to_28x28(source)
         vec=result.get("vector")
         vec_f=[max(0.0,min(1.0,float(v))) for v in vec]
-        app.orig_url=result.get("original_url"); app.proc_url=result.get("processed_url"); app.proc_vec=vec_f
+        app.orig_url=result.get("original_url"); app.proc_url=result.get("processed_url"); app.grid_url=result.get("grid_url"); app.proc_vec=vec_f
+        app.crop_info=result.get("crop_info",{})
         if app.W1 is None:
-            app.status="Upload 28x28 processed - train first"; return
+            # Try load cached weights if available
+            if try_load_cached_weights(app):
+                app.status="Upload processed + cached weights loaded - inferring"
+            else:
+                app.status="Upload 28x28 processed - train first or load cached"; return
         _,_,_,probs=forward(vec_f, app.W1, app.b1, app.W2, app.b2)
         pred=max(range(len(probs)), key=lambda k: probs[k])
         app.probs=probs; app.pred=int(pred)
-        app.status=f"Inferred {LABELS.get(int(pred),str(pred))} {probs[int(pred)]*100:.1f}%"
+        app.status=f"Inferred {LABELS.get(int(pred),str(pred))} {probs[int(pred)]*100:.1f}% - TOP-TIER crop"
     except Exception as e:
         import traceback
         tb=traceback.format_exc()
@@ -465,11 +702,10 @@ def onMousePress(app, mx, my):
             elif bid=="train":
                 aio.run(train_mlp(app))
             elif bid=="reset":
-                app.W1=None; app.b1=None; app.W2=None; app.b2=None
-                app.trained=False; app.loss_hist=[]; app.acc_hist=[]; app.val_loss_hist=[]; app.val_acc_hist=[]; app.epoch=0; app.lr=0.08
-                app.pred=None; app.probs=None; app.orig_url=None; app.proc_url=None; app.proc_vec=None
-                app.dataset_loaded=False; app.X_train=[]; app.y_train=[]; app.sample_urls=[None]*10
-                app.status="Reset"; app.fetch_status="Ready"; app.buttons["load"]["enabled"]=True; app.buttons["train"]["enabled"]=False
+                # Now CLEAR CACHE per request
+                clear_cached_weights(app)
+            elif bid=="cache":
+                cache_weights_now(app)
             elif bid=="clear":
                 app.orig_url=None; app.proc_url=None; app.proc_vec=None; app.pred=None; app.probs=None; app.status="Cleared"
             return
@@ -522,7 +758,7 @@ def draw_button(b,hover,enabled):
     drawLabel(b["label"],x+w/2,y+h/2,size=12,fill=tc,bold=True)
 
 def draw_loss_graph(app):
-    gx,gy,gw,gh=40,470,560,110  # MOVED WAY DOWN - was 440, now 470 gives 185px gap
+    gx,gy,gw,gh=40,470,560,110
     drawRect(gx,gy,gw,gh,fill=PANEL2,border=BORDER,roundness=10)
     for i in range(1,4):
         yy=gy+i*gh//4
@@ -533,46 +769,51 @@ def draw_loss_graph(app):
     max_l=max(max(app.loss_hist), max(app.val_loss_hist) if app.val_loss_hist else 0)
     min_l=min(min(app.loss_hist), min(app.val_loss_hist) if app.val_loss_hist else 0)
     rng=max_l-min_l if max_l-min_l>0.05 else 0.5
+    # Live curve - many points, smooth
     pts=[]
     for i,v in enumerate(app.loss_hist):
         x=gx+12 + (i/max(1,len(app.loss_hist)-1))*(gw-24)
         y=gy+gh-12 - ((v-min_l)/rng*(gh-24))
         pts.append((x,y))
     for i in range(len(pts)-1):
-        drawLine(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1],fill=ACC,lineWidth=2.2)
-    for x,y in pts:
-        drawCircle(x,y,3,fill=ACC,border=rgb(255,255,255),borderWidth=1)
+        drawLine(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1],fill=ACC,lineWidth=1.8)
+    # Dots only for epoch ends to avoid clutter when many points
+    step=max(1,len(pts)//12)
+    for j in range(0,len(pts),step):
+        x,y=pts[j]
+        drawCircle(x,y,2.5,fill=ACC,border=rgb(255,255,255),borderWidth=0.8)
+    # Val curve
     pts2=[]
     for i,v in enumerate(app.val_loss_hist):
         x=gx+12 + (i/max(1,len(app.val_loss_hist)-1))*(gw-24)
         y=gy+gh-12 - ((v-min_l)/rng*(gh-24))
         pts2.append((x,y))
     for i in range(len(pts2)-1):
-        drawLine(pts2[i][0],pts2[i][1],pts2[i+1][0],pts2[i+1][1],fill=ACC2,lineWidth=1.6)
-    drawLabel(f"train {app.loss_hist[-1]:.3f}", gx+gw-12, gy+12, size=10, fill=DIM, align="right-top")
-    drawLabel(f"val {app.val_loss_hist[-1]:.3f} acc {app.val_acc_hist[-1]*100:.1f}%", gx+gw-12, gy+26, size=10, fill=ACC2, align="right-top")
+        drawLine(pts2[i][0],pts2[i][1],pts2[i+1][0],pts2[i+1][1],fill=ACC2,lineWidth=1.4)
+    drawLabel(f"train {app.loss_hist[-1]:.3f} ({len(app.loss_hist)} pts live)", gx+gw-12, gy+12, size=10, fill=DIM, align="right-top")
+    if app.val_loss_hist:
+        drawLabel(f"val {app.val_loss_hist[-1]:.3f} acc {app.val_acc_hist[-1]*100:.1f}%", gx+gw-12, gy+26, size=10, fill=ACC2, align="right-top")
 
 def redrawAll(app):
     drawRect(0,0,WIDTH,68,fill=rgb(18,20,32))
-    drawLabel("Fashion-MNIST MLP Lab",28,16,size=18,fill=TXT,bold=True,align="left-top")
-    drawLabel("784->64 ReLU->10 Softmax | Arch Y=345 Loss Y=470 Buttons Y=610",28,42,size=10,fill=DIM,align="left-top")
+    drawLabel("Fashion-MNIST MLP Lab",28,16,size=22,fill=TXT,bold=True,align="left-top")
+    drawLabel("Sigma Scholar Alliance",28,42,size=15,fill=DIM,align="left-top")
     drawRect(0,HEIGHT-30,WIDTH,30,fill=rgb(18,20,32),border=GRID)
     drawLabel(f"{app.status} | {app.fetch_status[:140]}",12,HEIGHT-15,size=9,fill=DIM,align="left-center")
     draw_panel(20,80,600,590,title=f"Training - Official Fashion-MNIST Epoch {app.epoch}/{app.max_epochs} Hidden {app.hidden}")
-    for bid in ["load","train","reset"]:
-        b=app.buttons[bid]
-        draw_button(b, app.hover==bid, b["enabled"])
+    for bid in ["load","train","reset","cache"]:
+        if bid in app.buttons:
+            b=app.buttons[bid]
+            draw_button(b, app.hover==bid, b["enabled"])
     if app.dataset_loaded:
         drawLabel(f"Samples 28x28 x3 - {len(app.X_all)} total - 4 FETCHES DONE",32,145,size=10,fill=DIM,align="left-top")
         for i in range(10):
             col=i%5; row=i//5; x=32+col*116; y=165+row*76
             drawRect(x,y,104,64,fill=rgb(24,28,44),border=BORDER,roundness=9)
             drawLabel(SHORT[i],x+52,y+8,size=10,fill=TXT,bold=True,align="center-top")
-            # FIXED: Draw sample via rects to avoid scs.py img.src warning (drawImage triggers warning for dataURL)
             vec=app.samples.get(i)
             if vec is not None:
                 try:
-                    # Draw 28x28 scaled to 60x36 inside card
                     for r in range(28):
                         for c in range(28):
                             fv=float(vec[r*28+c])
@@ -580,7 +821,6 @@ def redrawAll(app):
                             fv=max(0.0,min(1.0,fv))
                             if fv<0.05: continue
                             gray=int(fv*255)
-                            # Scale 60/28=2.14 width, 36/28=1.28 height
                             px=x+22 + int(c*60/28)
                             py=y+22 + int(r*36/28)
                             pw=max(1,int(60/28))
@@ -591,10 +831,9 @@ def redrawAll(app):
     else:
         drawLabel("Click Load - WILL fire 4 fetches to raw GitHub .gz + S3 .gz - official",32,145,size=10,fill=DIM,align="left-top")
         drawLabel("Sources: raw.githubusercontent.com/.../ubyte.gz + S3 fashion-mnist + TF",32,163,size=9,fill=ACC,align="left-top")
-        drawLabel("Fixed: overlap + slow 47M loop -> fast to_py()",32,181,size=9,fill=ACC2,align="left-top")
-    # FIXED LAYOUT - architecture higher, loss lower - no overlap
+        drawLabel("Fixed: overlap + slow 47M loop -> fast to_py() + CACHE",32,181,size=9,fill=ACC2,align="left-top")
     drawLabel("Architecture:",32,330,size=12,fill=TXT,bold=True,align="left-top")
-    ix,iy=48,345  # MOVED DOWN by 60px = just over half height (80px height)
+    ix,iy=48,345
     for i in range(8):
         drawCircle(ix,iy+i*10,3,fill=rgb(120,130,170))
     drawLabel("784",ix,iy+90,size=10,fill=DIM,align="center-top")
@@ -624,17 +863,24 @@ def redrawAll(app):
         drawLabel("DROP or CLICK to upload",ux+uw/2,uy+50,size=14,fill=TXT,bold=True,align="center-top")
         drawLabel("shirt, shoe, pant, skirt, dress, bag...",ux+uw/2,uy+76,size=11,fill=DIM,align="center-top")
         drawLabel("load_image(file, max_dimension=384)",ux+uw/2,uy+102,size=10,fill=ACC,align="center-top")
-        drawLabel("center-crops to square, resizes to 28x28",ux+uw/2,uy+118,size=10,fill=DIM,align="center-top")
-        drawLabel("grayscale, invert if light, normalize 0-1",ux+uw/2,uy+132,size=10,fill=DIM,align="center-top")
-        drawLabel("Proper method from extensions.file_loader",ux+uw/2,uy+158,size=9,fill=DIM,align="center-top")
+        drawLabel("TOP-TIER: bbox detect + multi-step resize",ux+uw/2,uy+118,size=10,fill=DIM,align="center-top")
+        drawLabel("contrast stretch + proper 140x140 artifact",ux+uw/2,uy+132,size=10,fill=DIM,align="center-top")
+        drawLabel("Cached weights auto-loaded if available",ux+uw/2,uy+158,size=9,fill=ACC2,align="center-top")
     else:
+        # TOP-TIER: Proper positioned artifacts
         drawLabel("Original (via load_image):",ux+8,uy+8,size=10,fill=DIM,align="left-top")
         try: drawImage(app.orig_url,ux+10,uy+24,100,100)
         except: drawRect(ux+10,uy+24,100,100,fill=rgb(50,50,60))
-        drawLabel("28x28 processed x5:",ux+130,uy+8,size=10,fill=DIM,align="left-top")
+        drawLabel("28x28 x5 TOP-TIER:",ux+130,uy+8,size=10,fill=ACC,bold=True,align="left-top")
         if app.proc_url:
-            try: drawImage(app.proc_url,ux+130,uy+24,140,140)
+            try: 
+                # Proper position: 140x140 artifact with crisp pixels, centered in right side
+                drawImage(app.proc_url,ux+130,uy+24,140,140)
             except: drawRect(ux+130,uy+24,140,140,fill=rgb(40,40,50))
+        # Show crop info if available
+        if hasattr(app,'crop_info') and app.crop_info:
+            ci=app.crop_info
+            drawLabel(f"crop {ci.get('bbox_w','?')}x{ci.get('bbox_h','?')}->{ci.get('size','?')} sq",ux+8,uy+134,size=8,fill=DIM,align="left-top")
     cb=app.buttons["clear"]
     draw_button(cb,app.hover=="clear",cb["enabled"])
     py=382
@@ -656,3 +902,21 @@ def redrawAll(app):
             drawRect(bx,by,bw*p,bh,fill=ACC if idx==app.pred else rgb(80,90,130),roundness=4)
             drawLabel(f"{SHORT[idx]}",bx+bw+8,by+bh/2,size=10,fill=TXT,align="left-center")
             drawLabel(f"{p*100:.1f}%",bx+bw/2,by+bh/2,size=9,fill=rgb(255,255,255),align="center-center")
+
+# === Override onAppStart to add CACHE button and auto-load cache ===
+orig_onAppStart = onAppStart
+def onAppStart(app):
+    orig_onAppStart(app)
+    # Add CACHE WEIGHTS button to right of RESET (RESET is at 360,80, CACHE at 455)
+    app.buttons["reset"]["label"]="CLEAR CACHE"
+    app.buttons["reset"]["x"]=360; app.buttons["reset"]["y"]=610; app.buttons["reset"]["w"]=110; app.buttons["reset"]["h"]=38
+    app.buttons["cache"]={"x":485,"y":610,"w":135,"h":38,"label":"CACHE WEIGHTS","enabled":True}
+    # Try load cached weights by default
+    try:
+        if try_load_cached_weights(app):
+            app.buttons["load"]["enabled"]=False
+            app.dataset_loaded=True
+            # Still need samples for display - try load samples from cache or keep empty
+            app.fetch_status="Cache loaded - weights ready"
+    except:
+        pass
