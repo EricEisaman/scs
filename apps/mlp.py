@@ -504,184 +504,188 @@ async def train_mlp(app):
     app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}% - 100% Complete"
     cache_weights_now(app)
 
-# === FINAL V5: Use load_image previewUrl + DOM img + canvas getImageData, Python scaling ===
-# === FINAL V5: Use load_image previewUrl + DOM img + canvas getImageData, Python scaling ===
+# === FINAL V7: User's canonical pattern - window.Image.new() + bind load + getImageData ===
+# === FINAL V7: User's canonical pattern - window.Image.new() + bind load + getImageData ===
 async def process_upload_to_28x28(source):
-    # Get previewUrl from extension (one warning ok)
-    result=await load_image(source, max_dimension=384)
-    if hasattr(result,"to_py"):
-        try: result=result.to_py()
-        except: pass
-    if not isinstance(result, dict):
-        raise ValueError(f"load_image returned {type(result)}")
-    width=result.get("width"); height=result.get("height")
-    previewUrl=result.get("previewUrl") or result.get("preview_url")
-    if width is None or height is None or previewUrl is None:
-        raise ValueError("missing fields")
-    src_w=int(width); src_h=int(height)
-
-    # Load previewUrl into canvas via DOM img (setAttribute to avoid style warning)
-    src_canvas=document.createElement("canvas")
-    src_canvas.width=src_w; src_canvas.height=src_h
-    sctx=src_canvas.getContext("2d")
-
-    dom_img=document.createElement("img")
+    # source is File - create blob URL
+    previewUrl=None
+    object_url=None
     try:
-        dom_img.crossOrigin="anonymous"
-    except:
-        pass
-    fut=aio.Future()
-    def on_load(ev):
         try:
-            sctx.drawImage(dom_img,0,0,src_w,src_h)
-            fut.set_result(True)
-        except Exception as ex:
-            print(f"drawImage failed {ex}")
+            object_url=window.URL.createObjectURL(source)
+        except:
             try:
-                fut.set_result(False)
+                object_url=window.webkitURL.createObjectURL(source)
+            except:
+                object_url=None
+        if object_url:
+            previewUrl=object_url
+    except Exception as e:
+        print(f"createObjectURL failed {e}")
+        previewUrl=None
+
+    if previewUrl is None:
+        raise ValueError("Could not create blob URL")
+
+    # Canvas for source
+    src_canvas=document.createElement("canvas")
+    src_canvas.width=384
+    src_canvas.height=384
+
+    fut=aio.Future()
+
+    # Use window.Image.new() as per user's snippet
+    img=window.Image.new()
+
+    def loaded(event):
+        try:
+            # Get actual image size
+            try:
+                w=int(getattr(img, "naturalWidth", 0) or getattr(img, "width", 0) or 384)
+                h=int(getattr(img, "naturalHeight", 0) or getattr(img, "height", 0) or 384)
+            except:
+                w=384; h=384
+            if w==0: w=384
+            if h==0: h=384
+            # Scale to max 384 if needed (already from blob, but ensure)
+            max_dim=384
+            if max(w,h) > max_dim:
+                sc=max_dim / max(w,h)
+                w=int(round(w*sc))
+                h=int(round(h*sc))
+            src_canvas.width=w
+            src_canvas.height=h
+            ctx=src_canvas.getContext("2d")
+            ctx.imageSmoothingEnabled=True
+            try:
+                ctx.imageSmoothingQuality="high"
             except:
                 pass
-    def on_error(ev):
-        try:
-            fut.set_result(False)
-        except:
-            pass
-    try:
-        dom_img.bind("load", on_load)
-        dom_img.bind("error", on_error)
-    except:
-        try:
-            dom_img.onload=on_load
-            dom_img.onerror=on_error
-        except:
-            pass
-    try:
-        dom_img.setAttribute("src", previewUrl)
-    except:
-        pass
-    ok=await fut
-    if not ok:
-        # Fallback try direct pixels from result if img load failed
-        print("img load failed, using direct pixels")
-        pixels=result.get("pixels")
-        if hasattr(pixels,"to_py"):
-            try: pixels=pixels.to_py()
-            except: pass
-        try:
-            pix_list=list(pixels)
-        except:
-            pix_list=[]
-        # Build source canvas from pix_list via putImageData with manual loop (no .set truncation)
-        try:
-            img_data=sctx.createImageData(src_w, src_h)
-            data=img_data.data
-            # Manual copy to avoid .set truncation
-            lim=min(len(pix_list), int(getattr(data,"length",0)))
-            for i in range(lim):
-                try:
-                    data[i]=int(pix_list[i])
-                except:
-                    pass
-            sctx.putImageData(img_data,0,0)
-        except Exception as e:
-            print(f"putImageData fallback failed {e}")
+            ctx.drawImage(img, 0, 0, w, h)
 
-    # Now get pixels from src_canvas via getImageData (reliable, no truncation)
-    try:
-        src_data=sctx.getImageData(0,0,src_w,src_h)
-        src_pixels=src_data.data
-        if hasattr(src_pixels,"to_py"):
-            try: src_pixels=src_pixels.to_py()
-            except: pass
-        try:
-            src_list=list(src_pixels)
-        except:
-            src_list=[]
-    except Exception as e:
-        print(f"getImageData failed {e}")
-        src_list=[]
-
-    # If src_list still empty, use direct pix_list
-    if len(src_list)==0:
-        try:
-            pixels=result.get("pixels")
-            if hasattr(pixels,"to_py"):
-                try: pixels=pixels.to_py()
+            # Always wait for load before getImageData - as user said
+            data=ctx.getImageData(0, 0, w, h)
+            # Process to 28x28 vector
+            src_pixels=data.data
+            if hasattr(src_pixels,"to_py"):
+                try: src_pixels=src_pixels.to_py()
                 except: pass
-            src_list=list(pixels)
-        except:
-            src_list=[]
-
-    # Ensure src_list length
-    expected=src_w*src_h*4
-    if len(src_list) < expected:
-        print(f"src_list len {len(src_list)} < {expected}, padding")
-        src_list = src_list + [255]*(expected - len(src_list))
-
-    target=28
-    if src_w == src_h:
-        scale = target / src_w
-        inter_w=target
-        inter_h=target
-        crop_x=0
-        crop_y=0
-        is_square=True
-    else:
-        scale = target / min(src_w, src_h)
-        inter_w=int(round(src_w*scale))
-        inter_h=int(round(src_h*scale))
-        inter_w=max(inter_w, target)
-        inter_h=max(inter_h, target)
-        crop_x=(inter_w - target)//2 if inter_w>target else 0
-        crop_y=(inter_h - target)//2 if inter_h>target else 0
-        is_square=False
-
-    vec=[]
-    for dy in range(target):
-        for dx in range(target):
-            ix=dx + crop_x
-            iy=dy + crop_y
-            sx=ix / scale if scale!=0 else 0
-            sy=iy / scale if scale!=0 else 0
-            sx_i=int(round(sx))
-            sy_i=int(round(sy))
-            if sx_i<0: sx_i=0
-            if sy_i<0: sy_i=0
-            if sx_i>=src_w: sx_i=src_w-1
-            if sy_i>=src_h: sy_i=src_h-1
-            idx=(sy_i*src_w + sx_i)*4
             try:
-                r=src_list[idx]; g=src_list[idx+1]; b=src_list[idx+2]
+                src_list=list(src_pixels)
             except:
-                r=g=b=255
-            gray=(0.299*r+0.587*g+0.114*b)/255.0
-            vec.append(gray)
+                src_list=[]
 
-    if len(vec)==784:
-        avg=sum(vec)/len(vec)
-        if avg>0.5:
-            vec=[1.0-v for v in vec]
-        mn=min(vec); mx=max(vec)
-        if mx-mn>0.10:
-            vec=[(v-mn)/(mx-mn) for v in vec]
-        vec=[max(0.0,min(1.0,v)) for v in vec]
+            expected=w*h*4
+            if len(src_list) < expected:
+                src_list = src_list + [255]*(expected - len(src_list))
 
-    big_canvas=document.createElement("canvas")
-    big_canvas.width=140; big_canvas.height=140
-    bctx=big_canvas.getContext("2d")
-    bctx.fillStyle="#000000"
-    bctx.fillRect(0,0,140,140)
-    for y in range(target):
-        for x in range(target):
-            i=y*target + x
-            if i>=len(vec): continue
-            v=vec[i]
-            gv=int(v*255)
-            bctx.fillStyle=f"rgb({gv},{gv},{gv})"
-            bctx.fillRect(x*5, y*5, 5, 5)
-    proc_url=big_canvas.toDataURL("image/png")
+            target=28
+            if w == h:
+                scale = target / w if w!=0 else 1
+                inter_w=target
+                inter_h=target
+                crop_x=0
+                crop_y=0
+                is_square=True
+            else:
+                scale = target / min(w, h) if min(w,h)!=0 else 1
+                inter_w=int(round(w*scale))
+                inter_h=int(round(h*scale))
+                inter_w=max(inter_w, target)
+                inter_h=max(inter_h, target)
+                crop_x=(inter_w - target)//2 if inter_w>target else 0
+                crop_y=(inter_h - target)//2 if inter_h>target else 0
+                is_square=False
 
-    return {"processed_url":proc_url,"vector":vec,"crop_info":{"orig_w":src_w,"orig_h":src_h,"inter_w":inter_w,"inter_h":inter_h,"crop_x":crop_x,"crop_y":crop_y,"is_square":is_square,"note":"SQUARE ONLY SCALED" if is_square else "shortest->28 center crop"}}
+            vec=[]
+            for dy in range(target):
+                for dx in range(target):
+                    ix=dx + crop_x
+                    iy=dy + crop_y
+                    sx=ix / scale if scale!=0 else 0
+                    sy=iy / scale if scale!=0 else 0
+                    sx_i=int(round(sx))
+                    sy_i=int(round(sy))
+                    if sx_i<0: sx_i=0
+                    if sy_i<0: sy_i=0
+                    if sx_i>=w: sx_i=w-1
+                    if sy_i>=h: sy_i=h-1
+                    idx=(sy_i*w + sx_i)*4
+                    try:
+                        r=src_list[idx]; g=src_list[idx+1]; b=src_list[idx+2]
+                    except:
+                        r=g=b=255
+                    gray=(0.299*r+0.587*g+0.114*b)/255.0
+                    vec.append(gray)
+
+            if len(vec)==784:
+                avg=sum(vec)/len(vec)
+                if avg>0.5:
+                    vec=[1.0-v for v in vec]
+                mn=min(vec); mx=max(vec)
+                if mx-mn>0.10:
+                    vec=[(v-mn)/(mx-mn) for v in vec]
+                vec=[max(0.0,min(1.0,v)) for v in vec]
+
+            # Build 140x140 display from vec
+            big_canvas=document.createElement("canvas")
+            big_canvas.width=140; big_canvas.height=140
+            bctx=big_canvas.getContext("2d")
+            bctx.fillStyle="#000000"
+            bctx.fillRect(0,0,140,140)
+            for y in range(target):
+                for x in range(target):
+                    i=y*target + x
+                    if i>=len(vec): continue
+                    v=vec[i]
+                    gv=int(v*255)
+                    bctx.fillStyle=f"rgb({gv},{gv},{gv})"
+                    bctx.fillRect(x*5, y*5, 5, 5)
+            proc_url=big_canvas.toDataURL("image/png")
+
+            result={"processed_url":proc_url,"vector":vec,"crop_info":{"orig_w":w,"orig_h":h,"inter_w":inter_w,"inter_h":inter_h,"crop_x":crop_x,"crop_y":crop_y,"is_square":is_square,"note":"SQUARE ONLY SCALED" if is_square else "shortest->28 center crop"}}
+            fut.set_result(result)
+        except Exception as ex:
+            import traceback
+            print(f"loaded handler failed {ex}")
+            print(traceback.format_exc())
+            try:
+                fut.set_result(None)
+            except:
+                pass
+
+    def on_error(event):
+        print("img load error")
+        try:
+            fut.set_result(None)
+        except:
+            pass
+
+    img.bind("load", loaded)
+    img.bind("error", on_error)
+    # Set src AFTER binding - as per user's snippet
+    img.src=previewUrl
+
+    result=await fut
+
+    # Revoke blob URL
+    if object_url is not None:
+        try:
+            window.URL.revokeObjectURL(object_url)
+        except:
+            try:
+                window.webkitURL.revokeObjectURL(object_url)
+            except:
+                pass
+
+    if result is None:
+        raise ValueError("Image load failed")
+
+    return result
+
+
+
+
 
 
 
