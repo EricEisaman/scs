@@ -474,7 +474,7 @@ async def train_mlp(app):
                         app.val_loss_hist.append(live_avg)
                         app.val_acc_hist.append(live_acc)
                 # SAFE status - val_loss_hist guaranteed non-empty now
-                app.status=f"Epoch {app.epoch}/{app.max_epochs} batch {batches}/{total_batches} loss {live_avg:.3f} val {app.val_loss_hist[-1]:.3f} - live"
+                app.status=f"Epoch {app.epoch}/{app.max_epochs} batch {batches}/{total_batches} loss {live_avg:.3f} val {app.val_loss_hist[-1]:.3f}"
             await aio.sleep(0.01)
             if batches%15==0:
                 await aio.sleep(0)
@@ -506,13 +506,13 @@ async def train_mlp(app):
             app.val_loss_hist.append(val_loss); app.val_acc_hist.append(val_acc)
         app.W1=W1; app.b1=b1; app.W2=W2; app.b2=b2
         app.progress=(ep+1)/app.max_epochs
-        app.status=f"Epoch {app.epoch}/{app.max_epochs} loss {avg_loss:.3f} acc {acc*100:.1f}% val {val_acc*100:.1f}% - live"
+        app.status=f"Epoch {app.epoch}/{app.max_epochs} loss {avg_loss:.3f} acc {acc*100:.1f}% val {val_acc*100:.1f}%"
         await aio.sleep(0.05)
         app.lr*=0.95
     app.training=False; app.trained=True; app.buttons["train"]["enabled"]=True
     if "cache" in app.buttons:
         app.buttons["cache"]["enabled"]=True
-    app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}% - TOP TIER smooth + live"
+    app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}%"
     cache_weights_now(app)
 
 # === TOP-TIER IMAGE CROPPING & RESIZING ===
@@ -784,10 +784,10 @@ def draw_loss_graph(app):
     for j in range(0,len(pts2),vstep):
         x,y=pts2[j]
         drawCircle(x,y,3,fill=ACC2,border=rgb(255,255,255),borderWidth=0.8)
-    drawLabel(f"train {app.loss_hist[-1]:.3f} live {len(app.loss_hist)}pts", gx+gw-12, gy+12, size=10, fill=DIM, align="right-top")
+    drawLabel(f"train {app.loss_hist[-1]:.3f} {len(app.loss_hist)}pts", gx+gw-12, gy+12, size=10, fill=DIM, align="right-top")
     if app.val_loss_hist:
-        drawLabel(f"val {app.val_loss_hist[-1]:.3f} acc {app.val_acc_hist[-1]*100:.1f}% live", gx+gw-12, gy+26, size=10, fill=ACC2, align="right-top")
-    drawLabel("purple=train green=val - both live", gx+12, gy+80, size=8, fill=DIM, align="left-top")
+        drawLabel(f"val {app.val_loss_hist[-1]:.3f} acc {app.val_acc_hist[-1]*100:.1f}%", gx+gw-12, gy+26, size=10, fill=ACC2, align="right-top")
+    drawLabel("purple=train green=val", gx+12, gy+80, size=8, fill=DIM, align="left-top")
 
 def redrawAll(app):
     drawRect(0,0,WIDTH,68,fill=rgb(18,20,32))
