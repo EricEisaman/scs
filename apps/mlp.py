@@ -504,8 +504,8 @@ async def train_mlp(app):
     app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}% - 100% Complete"
     cache_weights_now(app)
 
-# === ROBUST: Pure canvas, no Image element, avoids 'src is property of element.style' warning ===
-# === ROBUST: Pure canvas, no Image element, avoids 'src is property of element.style' warning ===
+# === FINAL: Use DOM img from previewUrl - avoids pixel copy truncation that caused half-black image ===
+# === FINAL: Use DOM img from previewUrl - avoids pixel copy truncation that caused half-black image ===
 async def process_upload_to_28x28(source):
     result=await load_image(source, max_dimension=384)
     if hasattr(result,"to_py"):
@@ -513,65 +513,65 @@ async def process_upload_to_28x28(source):
         except: pass
     if not isinstance(result, dict):
         raise ValueError(f"load_image returned {type(result)}")
-    width=result.get("width"); height=result.get("height"); pixels=result.get("pixels")
-    if width is None or height is None or pixels is None:
+    width=result.get("width"); height=result.get("height"); previewUrl=result.get("previewUrl") or result.get("preview_url")
+    if width is None or height is None or previewUrl is None:
         raise ValueError("missing fields")
     src_w=int(width); src_h=int(height)
 
-    # Create source canvas and copy pixels via JS .set() - no Image.src, no warning
     src_canvas=document.createElement("canvas")
     src_canvas.width=src_w; src_canvas.height=src_h
     sctx=src_canvas.getContext("2d")
+
+    # Primary: load via DOM <img> from previewUrl - most reliable, no truncation
     try:
-        img_data=sctx.createImageData(src_w, src_h)
-        # Fast JS copy: data.set(pixels)
-        try:
-            # pixels is JS Uint8Array, data is Uint8ClampedArray
-            set_fn = getattr(img_data.data, "set")
-            set_fn(pixels)
-        except:
-            # Fallback Python loop if .set fails
-            data=img_data.data
-            if hasattr(pixels,"to_py"):
-                try: py_pix=pixels.to_py()
-                except: py_pix=pixels
-                # py_pix may be list or bytes
-                if isinstance(py_pix, (bytes, bytearray)):
-                    lst=list(py_pix)
-                else:
-                    try: lst=list(py_pix)
-                    except: lst=[]
-                for i in range(min(len(lst), len(data))):
-                    try: data[i]=int(lst[i])
-                    except: pass
-            else:
-                for i in range(min(int(getattr(pixels,"length",0)), int(getattr(data,"length",0)))):
-                    try: data[i]=int(pixels[i])
-                    except: pass
-        sctx.putImageData(img_data,0,0)
-    except Exception as e:
-        print(f"putImageData failed {e}")
-        # Last resort: try previewUrl via <img> created with createElement (not window.Image)
-        try:
-            previewUrl=result.get("previewUrl") or result.get("preview_url")
-            if previewUrl:
-                # Use DOM img element, not window.Image to avoid style warning
-                dom_img=document.createElement("img")
-                fut=aio.Future()
-                def onload(ev):
-                    try:
-                        sctx.drawImage(dom_img,0,0,src_w,src_h)
-                        fut.set_result(True)
-                    except Exception as ex:
-                        fut.set_result(False)
-                def onerror(ev):
+        dom_img=document.createElement("img")
+        dom_img.crossOrigin="anonymous"
+        fut=aio.Future()
+        def onload(ev):
+            try:
+                sctx.drawImage(dom_img,0,0,src_w,src_h)
+                if not fut.done():
+                    fut.set_result(True)
+            except Exception as ex:
+                if not fut.done():
                     fut.set_result(False)
-                dom_img.bind("load", onload)
-                dom_img.bind("error", onerror)
-                dom_img.src=previewUrl
-                await fut
+        def onerror(ev):
+            if not fut.done():
+                fut.set_result(False)
+        dom_img.bind("load", onload)
+        dom_img.bind("error", onerror)
+        # Set src AFTER binding to avoid race
+        dom_img.src=previewUrl
+        ok=await fut
+        if not ok:
+            raise Exception("img load failed")
+    except Exception as e:
+        print(f"img path failed {e}, trying pixel copy")
+        # Fallback: pixel array copy via JS .set()
+        try:
+            pixels=result.get("pixels")
+            if pixels is not None:
+                img_data=sctx.createImageData(src_w, src_h)
+                try:
+                    set_fn=getattr(img_data.data, "set")
+                    set_fn(pixels)
+                except:
+                    # Python list fallback
+                    data=img_data.data
+                    if hasattr(pixels,"to_py"):
+                        try: py_pix=pixels.to_py()
+                        except: py_pix=pixels
+                        if isinstance(py_pix, (bytes, bytearray)):
+                            lst=list(py_pix)
+                        else:
+                            try: lst=list(py_pix)
+                            except: lst=[]
+                        for i in range(min(len(lst), int(getattr(data,"length",0)))):
+                            try: data[i]=int(lst[i])
+                            except: pass
+                sctx.putImageData(img_data,0,0)
         except Exception as e2:
-            print(f"fallback img failed {e2}")
+            print(f"pixel fallback failed {e2}")
 
     target=28
     if src_w == src_h:
@@ -610,7 +610,6 @@ async def process_upload_to_28x28(source):
         try: dst_pixels=dst_pixels.to_py()
         except: pass
     vec=[]
-    # dst_pixels is RGBA
     for i in range(0, len(dst_pixels), 4):
         try: r=int(dst_pixels[i]); g=int(dst_pixels[i+1]); b=int(dst_pixels[i+2])
         except: r=g=b=0
@@ -633,6 +632,8 @@ async def process_upload_to_28x28(source):
     proc_url=big_canvas.toDataURL("image/png")
 
     return {"processed_url":proc_url,"vector":vec,"crop_info":{"orig_w":src_w,"orig_h":src_h,"inter_w":inter_w,"inter_h":inter_h,"crop_x":crop_x,"crop_y":crop_y,"is_square":is_square,"note":"SQUARE ONLY SCALED" if is_square else "shortest->28 center crop"}}
+
+
 
 
 
