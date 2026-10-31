@@ -555,7 +555,12 @@ async def process_upload_to_28x28(source):
                 ctx.imageSmoothingQuality="high"
             except:
                 pass
-            ctx.drawImage(img, 0, 0, w, h)
+            try:
+                nw=int(getattr(img, "naturalWidth", w) or w)
+                nh=int(getattr(img, "naturalHeight", h) or h)
+                ctx.drawImage(img, 0,0,nw,nh, 0,0,w,h)
+            except:
+                ctx.drawImage(img, 0, 0, w, h)
 
             target=28
             # Longest side -> target, then pad to square (preserve all data)
@@ -597,8 +602,11 @@ async def process_upload_to_28x28(source):
             # Fill black background (Fashion-MNIST background)
             dctx.fillStyle="#000000"
             dctx.fillRect(0,0,target,target)
-            # Draw scaled image centered with padding
-            dctx.drawImage(src_canvas, 0,0,w,h, pad_x, pad_y, inter_w, inter_h)
+            # Draw scaled image centered with padding - 9 arg to ensure full src
+            try:
+                dctx.drawImage(src_canvas, 0,0,w,h, pad_x, pad_y, inter_w, inter_h)
+            except:
+                dctx.drawImage(src_canvas, pad_x, pad_y, inter_w, inter_h)
 
             dst_data=dctx.getImageData(0,0,target,target)
             dst_pixels=dst_data.data
@@ -960,7 +968,7 @@ def redrawAll(app):
             if ci.get('is_square'):
                 drawLabel(f"{ci.get('orig_w','?')}x{ci.get('orig_h','?')} SQUARE -> {ci.get('inter_w','?')}x{ci.get('inter_h','?')} ONLY SCALED",ux+8,uy+178,size=7,fill=ACC2,bold=True,align="left-top")
             else:
-                drawLabel(f"{ci.get('orig_w','?')}x{ci.get('orig_h','?')} -> {ci.get('inter_w','?')}x{ci.get('inter_h','?')} -> 28 crop {ci.get('crop_x','?')},{ci.get('crop_y','?')} {ci.get('note','')}",ux+8,uy+178,size=7,fill=DIM,align="left-top")
+                drawLabel(f"{ci.get('orig_w','?')}x{ci.get('orig_h','?')} -> {ci.get('inter_w','?')}x{ci.get('inter_h','?')} pad {ci.get('pad_x','?')},{ci.get('pad_y','?')} {ci.get('note','')}",ux+8,uy+178,size=7,fill=DIM,align="left-top")
     cb=app.buttons["clear"]
     draw_button(cb,app.hover=="clear",cb["enabled"])
     py=382
