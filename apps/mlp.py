@@ -197,9 +197,9 @@ def onAppStart(app):
     app.fetch_status="Ready - Click Load (4 fetches .gz - FAST)"
     app.status="TOP TIER FIXED - Array.from keyword bug + overlap + slow loop"
     app.buttons={
-        "load":{"x":40,"y":610,"w":160,"h":38,"label":"Load Fashion-MNIST","enabled":True},
-        "train":{"x":215,"y":610,"w":130,"h":38,"label":"Train MLP","enabled":False},
-        "reset":{"x":360,"y":610,"w":80,"h":38,"label":"Reset","enabled":True},  # BOTTOM OPEN SPACE - was 600
+        "load":{"x":30,"y":610,"w":160,"h":38,"label":"Load Fashion-MNIST","enabled":True},
+        "train":{"x":205,"y":610,"w":130,"h":38,"label":"Train MLP","enabled":False},
+        "reset":{"x":350,"y":610,"w":80,"h":38,"label":"Reset","enabled":True},  # BOTTOM OPEN SPACE - was 600
         "clear":{"x":670,"y":340,"w":80,"h":28,"label":"Clear","enabled":True},
     }
     app.hover=None; app.upload_hover=False
@@ -240,6 +240,8 @@ def try_load_cached_weights(app):
         app.trained = True
         app.epoch = int(data.get("epoch", 0))
         app.status = f"Loaded cached weights {app.hidden} hidden - ready for inference"
+        if "cache" in app.buttons:
+            app.buttons["cache"]["enabled"]=True  # enable if cache loaded
         app.fetch_status = f"Cache hit - {len(W1)}x{len(b1)} -> {len(W2[0])} - no training needed"
         app.buttons["train"]["enabled"] = True
         # Restore histories if available
@@ -439,19 +441,33 @@ async def train_mlp(app):
                 live_avg=total_loss/batches if batches else 0
                 live_acc=correct/(batches*len(batch_idx)) if batches else 0
                 app.live_train.append(live_avg)
-                # Keep loss_hist as live curve for plotting (train)
                 app.loss_hist.append(live_avg)
                 app.acc_hist.append(live_acc)
-                # Keep val aligned (repeat last val until new epoch computed)
-                if app.val_loss_hist:
-                    app.val_loss_hist.append(app.val_loss_hist[-1])
-                    app.val_acc_hist.append(app.val_acc_hist[-1])
+                # LIVE VAL - compute on subset every 30 batches for meaningful green line
+                if batches%30==0 or batches==total_batches:
+                    # Fast val estimate on 200 samples to keep smooth
+                    v_loss=0.0; v_corr=0; v_n=min(200,len(Xva))
+                    for vi in range(v_n):
+                        xi=Xva[vi]; yi=int(yva[vi])
+                        _,_,_,probs=forward(xi,W1,b1,W2,b2)
+                        p=probs[yi] if yi < len(probs) else 1e-12
+                        p=min(max(p,1e-12),1-1e-12)
+                        v_loss+=-math.log(p)
+                        if max(range(len(probs)), key=lambda k: probs[k])==yi:
+                            v_corr+=1
+                        if vi%40==0:
+                            await aio.sleep(0)
+                    v_loss/=v_n if v_n else 1
+                    v_acc=v_corr/v_n if v_n else 0
+                    app.live_val.append(v_loss)
+                    app.val_loss_hist.append(v_loss)
+                    app.val_acc_hist.append(v_acc)
                 else:
-                    # No val yet - placeholder to keep arrays aligned
-                    if len(app.val_loss_hist)<len(app.loss_hist):
-                        app.val_loss_hist.append(live_avg)
-                        app.val_acc_hist.append(live_acc)
-                app.status=f"Epoch {app.epoch}/{app.max_epochs} batch {batches}/{total_batches} loss {live_avg:.3f} - live curve"
+                    # Keep val array aligned - interpolate towards last true val
+                    if app.val_loss_hist:
+                        app.val_loss_hist.append(app.val_loss_hist[-1])
+                        app.val_acc_hist.append(app.val_acc_hist[-1])
+                app.status=f"Epoch {app.epoch}/{app.max_epochs} batch {batches}/{total_batches} loss {live_avg:.3f} val {app.val_loss_hist[-1]:.3f} - live curves"
             await aio.sleep(0.01)
             if batches%15==0:
                 await aio.sleep(0)
@@ -489,6 +505,7 @@ async def train_mlp(app):
         await aio.sleep(0.05)
         app.lr*=0.95
     app.training=False; app.trained=True; app.buttons["train"]["enabled"]=True
+    app.buttons["cache"]["enabled"]=True  # ENABLE after training completed
     app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}% - TOP TIER smooth + live plot"
     cache_weights_now(app)
 
@@ -769,7 +786,7 @@ def draw_loss_graph(app):
     max_l=max(max(app.loss_hist), max(app.val_loss_hist) if app.val_loss_hist else 0)
     min_l=min(min(app.loss_hist), min(app.val_loss_hist) if app.val_loss_hist else 0)
     rng=max_l-min_l if max_l-min_l>0.05 else 0.5
-    # Live curve - many points, smooth
+    # Train curve - live, smooth, many points
     pts=[]
     for i,v in enumerate(app.loss_hist):
         x=gx+12 + (i/max(1,len(app.loss_hist)-1))*(gw-24)
@@ -777,27 +794,32 @@ def draw_loss_graph(app):
         pts.append((x,y))
     for i in range(len(pts)-1):
         drawLine(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1],fill=ACC,lineWidth=1.8)
-    # Dots only for epoch ends to avoid clutter when many points
-    step=max(1,len(pts)//12)
+    step=max(1,len(pts)//16)
     for j in range(0,len(pts),step):
         x,y=pts[j]
         drawCircle(x,y,2.5,fill=ACC,border=rgb(255,255,255),borderWidth=0.8)
-    # Val curve
+    # Val curve - NOW LIVE meaningful, computed every 30 batches on 200 samples + full epoch
     pts2=[]
     for i,v in enumerate(app.val_loss_hist):
+        # Align val x to train x - val may have fewer points, stretch
         x=gx+12 + (i/max(1,len(app.val_loss_hist)-1))*(gw-24)
         y=gy+gh-12 - ((v-min_l)/rng*(gh-24))
         pts2.append((x,y))
     for i in range(len(pts2)-1):
-        drawLine(pts2[i][0],pts2[i][1],pts2[i+1][0],pts2[i+1][1],fill=ACC2,lineWidth=1.4)
-    drawLabel(f"train {app.loss_hist[-1]:.3f} ({len(app.loss_hist)} pts live)", gx+gw-12, gy+12, size=10, fill=DIM, align="right-top")
+        drawLine(pts2[i][0],pts2[i][1],pts2[i+1][0],pts2[i+1][1],fill=ACC2,lineWidth=2.0)
+    # Val dots more frequent when live
+    vstep=max(1,len(pts2)//12)
+    for j in range(0,len(pts2),vstep):
+        x,y=pts2[j]
+        drawCircle(x,y,3,fill=ACC2,border=rgb(255,255,255),borderWidth=0.8)
+    drawLabel(f"train {app.loss_hist[-1]:.3f} live {len(app.loss_hist)}pts", gx+gw-12, gy+12, size=10, fill=DIM, align="right-top")
     if app.val_loss_hist:
-        drawLabel(f"val {app.val_loss_hist[-1]:.3f} acc {app.val_acc_hist[-1]*100:.1f}%", gx+gw-12, gy+26, size=10, fill=ACC2, align="right-top")
-
+        drawLabel(f"val {app.val_loss_hist[-1]:.3f} acc {app.val_acc_hist[-1]*100:.1f}% live", gx+gw-12, gy+26, size=10, fill=ACC2, align="right-top")
+    drawLabel("purple=train green=val - both live", gx+12, gy+10, size=8, fill=DIM, align="left-top")
 def redrawAll(app):
     drawRect(0,0,WIDTH,68,fill=rgb(18,20,32))
-    drawLabel("Fashion-MNIST MLP Lab",28,16,size=22,fill=TXT,bold=True,align="left-top")
-    drawLabel("Sigma Scholar Alliance",28,42,size=15,fill=DIM,align="left-top")
+    drawLabel("Fashion-MNIST MLP Lab - TOP-TIER CROP + CACHE",28,16,size=18,fill=TXT,bold=True,align="left-top")
+    drawLabel("784->128 ReLU->10 Softmax | Arch Y=345 Loss Y=470 Buttons Y=610 | CACHE WEIGHTS",28,42,size=10,fill=DIM,align="left-top")
     drawRect(0,HEIGHT-30,WIDTH,30,fill=rgb(18,20,32),border=GRID)
     drawLabel(f"{app.status} | {app.fetch_status[:140]}",12,HEIGHT-15,size=9,fill=DIM,align="left-center")
     draw_panel(20,80,600,590,title=f"Training - Official Fashion-MNIST Epoch {app.epoch}/{app.max_epochs} Hidden {app.hidden}")
@@ -909,8 +931,8 @@ def onAppStart(app):
     orig_onAppStart(app)
     # Add CACHE WEIGHTS button to right of RESET (RESET is at 360,80, CACHE at 455)
     app.buttons["reset"]["label"]="CLEAR CACHE"
-    app.buttons["reset"]["x"]=360; app.buttons["reset"]["y"]=610; app.buttons["reset"]["w"]=110; app.buttons["reset"]["h"]=38
-    app.buttons["cache"]={"x":485,"y":610,"w":135,"h":38,"label":"CACHE WEIGHTS","enabled":True}
+    app.buttons["reset"]["x"]=350; app.buttons["reset"]["y"]=610; app.buttons["reset"]["w"]=110; app.buttons["reset"]["h"]=38
+    app.buttons["cache"]={"x":475,"y":610,"w":135,"h":38,"label":"CACHE WEIGHTS","enabled":False}  # DISABLED until training done
     # Try load cached weights by default
     try:
         if try_load_cached_weights(app):
