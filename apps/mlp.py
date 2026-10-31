@@ -504,8 +504,8 @@ async def train_mlp(app):
     app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}% - 100% Complete"
     cache_weights_now(app)
 
-# === CORRECT: shortest side to 28 then center crop square, squares only scaled ===
-# === CORRECT: shortest side to 28 then center crop square, squares only scaled ===
+# === ROBUST: Use previewUrl Image, shortest side -> 28 center crop, squares only scaled ===
+# === ROBUST: Use previewUrl Image, shortest side -> 28 center crop, squares only scaled ===
 async def process_upload_to_28x28(source):
     result=await load_image(source, max_dimension=384)
     if hasattr(result,"to_py"):
@@ -513,50 +513,57 @@ async def process_upload_to_28x28(source):
         except: pass
     if not isinstance(result, dict):
         raise ValueError(f"load_image returned {type(result)}")
-    width=result.get("width"); height=result.get("height"); pixels=result.get("pixels")
-    if width is None or height is None or pixels is None:
+    width=result.get("width"); height=result.get("height")
+    previewUrl=result.get("previewUrl") or result.get("preview_url")
+    if width is None or height is None or previewUrl is None:
         raise ValueError("missing fields")
-    if hasattr(pixels,"to_py"):
-        try: pixels=pixels.to_py()
-        except: pass
     src_w=int(width); src_h=int(height)
-    # Rebuild source canvas
+
+    # Robust source canvas via Image element (avoids pixel array corruption)
     src_canvas=document.createElement("canvas")
     src_canvas.width=src_w; src_canvas.height=src_h
     sctx=src_canvas.getContext("2d")
+    img=window.Image.new()
+    img.crossOrigin="anonymous"
+    # Promise for load
+    def make_promise():
+        def exec_fn(resolve, reject):
+            def onload(ev):
+                try:
+                    sctx.drawImage(img,0,0,src_w,src_h)
+                    resolve(True)
+                except Exception as ex:
+                    reject(ex)
+            def onerror(ev):
+                reject(Exception("image load fail"))
+            img.onload=onload
+            img.onerror=onerror
+        return window.Promise.new(exec_fn)
+    img.src=previewUrl
     try:
-        img_data=sctx.createImageData(src_w, src_h)
-        data=img_data.data
-        for i in range(min(len(pixels), len(data))):
-            try: data[i]=int(pixels[i])
-            except: pass
-        sctx.putImageData(img_data,0,0)
-    except:
-        # fallback via previewUrl if needed
-        from_js = result.get("previewUrl") or result.get("preview_url")
-        if from_js:
-            img=window.Image.new()
-            img.crossOrigin="anonymous"
-            def exec_res(resolve,reject):
-                img.onload=lambda ev: resolve(True)
-                img.onerror=lambda ev: reject(Exception("img"))
-            img.src=from_js
-            try:
-                await window.Promise.new(exec_res)
-                sctx.drawImage(img,0,0,src_w,src_h)
-            except: pass
+        await make_promise()
+    except Exception as e:
+        # Fallback try pixels if image fails
+        try:
+            pixels=result.get("pixels")
+            if hasattr(pixels,"to_py"): pixels=pixels.to_py()
+            if pixels is not None:
+                img_data=sctx.createImageData(src_w, src_h)
+                data=img_data.data
+                for i in range(min(len(pixels), len(data))):
+                    try: data[i]=int(pixels[i])
+                    except: pass
+                sctx.putImageData(img_data,0,0)
+        except: pass
 
     target=28
-    # Shortest side logic
     if src_w == src_h:
-        # Square: only scaled
         inter_w=target
         inter_h=target
         crop_x=0
         crop_y=0
         is_square=True
     else:
-        # Scale shortest to target
         scale = target / min(src_w, src_h)
         inter_w=int(round(src_w*scale))
         inter_h=int(round(src_h*scale))
@@ -566,7 +573,6 @@ async def process_upload_to_28x28(source):
         crop_y=(inter_h - target)//2 if inter_h>target else 0
         is_square=False
 
-    # High quality intermediate
     inter_canvas=document.createElement("canvas")
     inter_canvas.width=inter_w; inter_canvas.height=inter_h
     ictx=inter_canvas.getContext("2d")
@@ -574,7 +580,6 @@ async def process_upload_to_28x28(source):
     ictx.imageSmoothingQuality="high"
     ictx.drawImage(src_canvas,0,0,src_w,src_h,0,0,inter_w,inter_h)
 
-    # Crop center square
     dst_canvas=document.createElement("canvas")
     dst_canvas.width=target; dst_canvas.height=target
     dctx=dst_canvas.getContext("2d")
@@ -582,7 +587,6 @@ async def process_upload_to_28x28(source):
     dctx.imageSmoothingQuality="high"
     dctx.drawImage(inter_canvas, crop_x, crop_y, target, target, 0,0,target,target)
 
-    # Vector
     dst_data=dctx.getImageData(0,0,target,target)
     dst_pixels=dst_data.data
     if hasattr(dst_pixels,"to_py"):
@@ -594,8 +598,10 @@ async def process_upload_to_28x28(source):
         except: r=g=b=0
         gray=(0.299*r+0.587*g+0.114*b)/255.0
         vec.append(gray)
+    # Fashion-MNIST style: white item on black bg
     if len(vec)==784:
         avg=sum(vec)/len(vec)
+        # If avg > 0.5, background is white, invert to black bg white item
         if avg>0.5:
             vec=[1.0-v for v in vec]
         mn=min(vec); mx=max(vec)
@@ -603,7 +609,6 @@ async def process_upload_to_28x28(source):
             vec=[(v-mn)/(mx-mn) for v in vec]
         vec=[max(0.0,min(1.0,v)) for v in vec]
 
-    # Single visual data URL for fallback, but primary render will be via vec rects
     big_canvas=document.createElement("canvas")
     big_canvas.width=140; big_canvas.height=140
     bctx=big_canvas.getContext("2d")
@@ -611,7 +616,9 @@ async def process_upload_to_28x28(source):
     bctx.drawImage(dst_canvas,0,0,target,target,0,0,140,140)
     proc_url=big_canvas.toDataURL("image/png")
 
-    return {"processed_url":proc_url,"vector":vec,"crop_info":{"orig_w":src_w,"orig_h":src_h,"inter_w":inter_w,"inter_h":inter_h,"crop_x":crop_x,"crop_y":crop_y,"is_square":is_square,"note":"square only scaled" if is_square else "shortest->28 center crop"}}
+    return {"processed_url":proc_url,"vector":vec,"crop_info":{"orig_w":src_w,"orig_h":src_h,"inter_w":inter_w,"inter_h":inter_h,"crop_x":crop_x,"crop_y":crop_y,"is_square":is_square,"note":"SQUARE ONLY SCALED" if is_square else "shortest->28 center crop"}}
+
+
 
 
 
@@ -829,18 +836,15 @@ def redrawAll(app):
         img_s=140
         # Background for image
         drawRect(img_x-2,img_y-2,img_s+4,img_s+4,fill=rgb(18,20,32),border=BORDER,roundness=6)
-        # Draw vec as 28x28 blocks scaled to 140
+        # Draw vec as 28x28 blocks scaled to 140 - draw ALL to show true data (no skip)
         if app.proc_vec and len(app.proc_vec)==784:
-            cell=img_s//28
             for r in range(28):
                 for c in range(28):
                     v=app.proc_vec[r*28+c]
-                    if v<0.05: continue
+                    v=max(0.0,min(1.0,v))
                     gray=int(v*255)
-                    # Use rgb for SCS
                     drawRect(img_x+c*5, img_y+r*5, 5, 5, fill=rgb(gray,gray,gray))
         else:
-            # Fallback to image if vec missing
             try:
                 drawImage(app.proc_url,img_x,img_y,img_s,img_s)
             except:
