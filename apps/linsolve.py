@@ -31,7 +31,7 @@ r'\\begin{bmatrix}2 & 1 \\\\ 1 & 3\\end{bmatrix}\\begin{bmatrix}x \\\\ y\\end{bm
 )
 }
 
-# --- Pyodide extension - correct proxy handling - await BEFORE to_py ---
+# --- Pyodide extension - DEFINITIVE fix for coroutine leak ---
 try:
     import extensions.pyodide as _py_ext
     PYODIDE_EXT_OK = True
@@ -41,27 +41,26 @@ except Exception:
     _py_ext = None
     _py_candidates = []
 
-async def _unwrap_pyodide_result(res, max_depth=12):
-    # CORRECT ORDER: await coroutine/Promise FIRST, then to_py
-    # Previous bug: to_py before await returned coroutine object as <coroutine run_python_async>
-    for _ in range(max_depth):
+async def _unwrap_pyodide_result(res):
+    # Await until no more awaitable, then to_py
+    for _ in range(15):
         if res is None:
             break
-        # 1. Coroutine -> await (MUST be first)
+        # Await coroutine
         if hasattr(res, '__await__'):
             try:
                 res = await res
                 continue
             except Exception:
-                pass
-        # 2. JS Promise -> await
+                break
+        # Await Promise
         if hasattr(res, 'then') and callable(getattr(res, 'then')):
             try:
                 res = await res
                 continue
             except Exception:
-                pass
-        # 3. PyProxy -> to_py AFTER await
+                break
+        # Convert proxy
         if hasattr(res, 'to_py'):
             try:
                 try:
@@ -73,7 +72,7 @@ async def _unwrap_pyodide_result(res, max_depth=12):
                         res.destroy()
                 except Exception:
                     pass
-                if tmp is not None and tmp is not res:
+                if tmp is not res:
                     res = tmp
                     continue
             except Exception:
@@ -82,34 +81,42 @@ async def _unwrap_pyodide_result(res, max_depth=12):
     return res
 
 async def _pyodide_run(code_str):
+    # DEFINITIVE: never return coroutine object, always await fully
     if PYODIDE_EXT_OK and _py_ext is not None:
         for name in _py_candidates:
+            fn = getattr(_py_ext, name, None)
+            if fn is None:
+                continue
             try:
-                fn = getattr(_py_ext, name, None)
-                if fn is None:
-                    continue
-                # fn(code) returns coroutine - MUST be awaited via unwrap which now awaits first
-                raw = fn(code_str)
-                res = await _unwrap_pyodide_result(raw)
-                if res is None:
-                    continue
-                # If still coroutine string, skip
-                if isinstance(res, str) and '<coroutine' in res.lower():
-                    continue
-                # If result is coroutine object (not string), unwrap didn't await it - try direct await
+                # Try direct await first - this is correct API: await fn(code)
+                try:
+                    res = await fn(code_str)
+                except TypeError:
+                    # fn may be sync, calling it returns coroutine that needs await
+                    tmp = fn(code_str)
+                    res = await tmp
+                # Unwrap any remaining proxy layers
+                res = await _unwrap_pyodide_result(res)
+                # Safety: if still coroutine after all awaits, force await one more time
                 if hasattr(res, '__await__'):
                     try:
                         res = await res
                         res = await _unwrap_pyodide_result(res)
                     except Exception:
                         continue
+                if res is None:
+                    continue
+                if isinstance(res, str) and '<coroutine' in res.lower():
+                    continue
+                # Success - return whatever (dict, etc)
                 return res
             except Exception:
                 continue
+    # Fallback window.pyodide
     try:
         if hasattr(window, 'pyodide') and window.pyodide is not None:
-            raw = await window.pyodide.runPythonAsync(code_str)
-            res = await _unwrap_pyodide_result(raw)
+            res = await window.pyodide.runPythonAsync(code_str)
+            res = await _unwrap_pyodide_result(res)
             return res
     except Exception:
         pass
