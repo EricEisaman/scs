@@ -504,9 +504,9 @@ async def train_mlp(app):
     app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}% - 100% Complete"
     cache_weights_now(app)
 
-# === CORRECT TOP-TIER PROCESSING: SCALE SHORTEST SIDE TO TARGET THEN CENTER CROP SQUARE, SQUARES ONLY SCALED ===
+# === CORRECT: shortest side to 28 then center crop square, squares only scaled ===
+# === CORRECT: shortest side to 28 then center crop square, squares only scaled ===
 async def process_upload_to_28x28(source):
-    # load_image returns pixels, width, height, previewUrl - max_dimension 384 keeps aspect
     result=await load_image(source, max_dimension=384)
     if hasattr(result,"to_py"):
         try: result=result.to_py()
@@ -519,8 +519,8 @@ async def process_upload_to_28x28(source):
     if hasattr(pixels,"to_py"):
         try: pixels=pixels.to_py()
         except: pass
-    # Rebuild source canvas preserving original aspect - NO SQUASH
     src_w=int(width); src_h=int(height)
+    # Rebuild source canvas
     src_canvas=document.createElement("canvas")
     src_canvas.width=src_w; src_canvas.height=src_h
     sctx=src_canvas.getContext("2d")
@@ -531,60 +531,50 @@ async def process_upload_to_28x28(source):
             try: data[i]=int(pixels[i])
             except: pass
         sctx.putImageData(img_data,0,0)
-    except Exception as e:
-        # Fallback via Image element if putImageData fails
+    except:
+        # fallback via previewUrl if needed
         from_js = result.get("previewUrl") or result.get("preview_url")
-        img=window.Image.new()
-        img.crossOrigin="anonymous"
-        def exec_res(resolve,reject):
-            img.onload=lambda ev: resolve(True)
-            img.onerror=lambda ev: reject(Exception("img load"))
-        img.src=from_js
-        try:
-            await window.Promise.new(exec_res)
-            sctx.drawImage(img,0,0,src_w,src_h)
-        except: pass
+        if from_js:
+            img=window.Image.new()
+            img.crossOrigin="anonymous"
+            def exec_res(resolve,reject):
+                img.onload=lambda ev: resolve(True)
+                img.onerror=lambda ev: reject(Exception("img"))
+            img.src=from_js
+            try:
+                await window.Promise.new(exec_res)
+                sctx.drawImage(img,0,0,src_w,src_h)
+            except: pass
 
-    # STEP 1: Scale shortest side down to target (28)
-    # If square, only scaled. If rectangle, scale shortest to 28, long becomes >28 proportionally.
     target=28
-    short_side=min(src_w, src_h)
-    scale = target / short_side if short_side>0 else 1.0
-    inter_w=int(round(src_w*scale))
-    inter_h=int(round(src_h*scale))
-    # Ensure at least target
-    inter_w=max(inter_w, target)
-    inter_h=max(inter_h, target)
+    # Shortest side logic
+    if src_w == src_h:
+        # Square: only scaled
+        inter_w=target
+        inter_h=target
+        crop_x=0
+        crop_y=0
+        is_square=True
+    else:
+        # Scale shortest to target
+        scale = target / min(src_w, src_h)
+        inter_w=int(round(src_w*scale))
+        inter_h=int(round(src_h*scale))
+        inter_w=max(inter_w, target)
+        inter_h=max(inter_h, target)
+        crop_x=(inter_w - target)//2 if inter_w>target else 0
+        crop_y=(inter_h - target)//2 if inter_h>target else 0
+        is_square=False
 
+    # High quality intermediate
     inter_canvas=document.createElement("canvas")
     inter_canvas.width=inter_w; inter_canvas.height=inter_h
     ictx=inter_canvas.getContext("2d")
     ictx.imageSmoothingEnabled=True
     ictx.imageSmoothingQuality="high"
-    # Multi-step high quality if large downscale
-    if max(src_w,src_h) > 112:
-        # First downscale to ~112 on short side
-        tmp_scale = 112 / short_side
-        tmp_w=int(round(src_w*tmp_scale))
-        tmp_h=int(round(src_h*tmp_scale))
-        tmp_canvas=document.createElement("canvas")
-        tmp_canvas.width=tmp_w; tmp_canvas.height=tmp_h
-        tctx=tmp_canvas.getContext("2d")
-        tctx.imageSmoothingEnabled=True; tctx.imageSmoothingQuality="high"
-        tctx.drawImage(src_canvas,0,0,src_w,src_h,0,0,tmp_w,tmp_h)
-        ictx.drawImage(tmp_canvas,0,0,tmp_w,tmp_h,0,0,inter_w,inter_h)
-    else:
-        ictx.drawImage(src_canvas,0,0,src_w,src_h,0,0,inter_w,inter_h)
+    ictx.drawImage(src_canvas,0,0,src_w,src_h,0,0,inter_w,inter_h)
 
-    # STEP 2: Crop square from center of remaining long edge
-    # If square already (inter_w==target and inter_h==target), no crop needed
-    crop_x=0
-    crop_y=0
-    if inter_w > target:
-        crop_x=(inter_w - target)//2
-    if inter_h > target:
-        crop_y=(inter_h - target)//2
-
+    # Crop center square
     dst_canvas=document.createElement("canvas")
     dst_canvas.width=target; dst_canvas.height=target
     dctx=dst_canvas.getContext("2d")
@@ -592,7 +582,7 @@ async def process_upload_to_28x28(source):
     dctx.imageSmoothingQuality="high"
     dctx.drawImage(inter_canvas, crop_x, crop_y, target, target, 0,0,target,target)
 
-    # Vector for MLP
+    # Vector
     dst_data=dctx.getImageData(0,0,target,target)
     dst_pixels=dst_data.data
     if hasattr(dst_pixels,"to_py"):
@@ -604,7 +594,6 @@ async def process_upload_to_28x28(source):
         except: r=g=b=0
         gray=(0.299*r+0.587*g+0.114*b)/255.0
         vec.append(gray)
-    # Fashion-MNIST is white item on black bg - invert if needed + contrast stretch
     if len(vec)==784:
         avg=sum(vec)/len(vec)
         if avg>0.5:
@@ -614,18 +603,17 @@ async def process_upload_to_28x28(source):
             vec=[(v-mn)/(mx-mn) for v in vec]
         vec=[max(0.0,min(1.0,v)) for v in vec]
 
-    # SINGLE VISUAL - 140x140 crisp from 28x28, no smoothing, properly placed
+    # Single visual data URL for fallback, but primary render will be via vec rects
     big_canvas=document.createElement("canvas")
     big_canvas.width=140; big_canvas.height=140
     bctx=big_canvas.getContext("2d")
     bctx.imageSmoothingEnabled=False
     bctx.drawImage(dst_canvas,0,0,target,target,0,0,140,140)
-    bctx.strokeStyle="rgba(99,102,241,0.35)"
-    bctx.lineWidth=1
-    bctx.strokeRect(0,0,140,140)
     proc_url=big_canvas.toDataURL("image/png")
 
-    return {"processed_url":proc_url,"vector":vec,"crop_info":{"orig_w":src_w,"orig_h":src_h,"inter_w":inter_w,"inter_h":inter_h,"crop_x":crop_x,"crop_y":crop_y,"scale":scale}}
+    return {"processed_url":proc_url,"vector":vec,"crop_info":{"orig_w":src_w,"orig_h":src_h,"inter_w":inter_w,"inter_h":inter_h,"crop_x":crop_x,"crop_y":crop_y,"is_square":is_square,"note":"square only scaled" if is_square else "shortest->28 center crop"}}
+
+
 
 async def handle_upload(app, source):
     app.status="Loading via load_image() - shortest side to 28 then center crop..."
@@ -825,24 +813,44 @@ def redrawAll(app):
     bc=ACC if app.upload_hover else BORDER
     fc=rgb(36,41,68) if app.upload_hover else rgb(28,32,52)
     drawRect(ux,uy,uw,uh,fill=fc,border=bc,borderWidth=2,roundness=12,dashes=True)
-    if app.proc_url is None:
+    if app.proc_vec is None:
         drawLabel("DROP or CLICK to upload",ux+uw/2,uy+50,size=14,fill=TXT,bold=True,align="center-top")
         drawLabel("shirt, shoe, pant, skirt, dress, bag...",ux+uw/2,uy+76,size=11,fill=DIM,align="center-top")
         drawLabel("load_image(file, max_dimension=384)",ux+uw/2,uy+102,size=10,fill=ACC,align="center-top")
-        drawLabel("shortest side -> 28 then center crop square",ux+uw/2,uy+118,size=10,fill=DIM,align="center-top")
-        drawLabel("squares only scaled - no squash",ux+uw/2,uy+132,size=10,fill=DIM,align="center-top")
+        drawLabel("shortest side -> 28 then center crop",ux+uw/2,uy+118,size=10,fill=DIM,align="center-top")
+        drawLabel("squares ONLY scaled - no squash",ux+uw/2,uy+132,size=10,fill=ACC2,bold=True,align="center-top")
         drawLabel("Cached weights auto-loaded if available",ux+uw/2,uy+158,size=9,fill=ACC2,align="center-top")
     else:
-        # SINGLE VISUAL ONLY - properly centered 140x140 inside dashed box
-        drawLabel("28x28 x5 (140x140) - shortest->28 center-crop:",ux+8,uy+8,size=10,fill=ACC,bold=True,align="left-top")
-        try:
-            # Centered: (330-140)/2=95, y=24
-            drawImage(app.proc_url,ux+95,uy+24,140,140)
-        except:
-            drawRect(ux+95,uy+24,140,140,fill=rgb(40,40,50))
+        # SINGLE VISUAL - 140x140 inside dashed box - drawn via rects for 100% placement guarantee, no drawImage drift
+        drawLabel("28x28 x5 (140x140) - shortest->28 center-crop:",ux+8,uy+8,size=9,fill=ACC,bold=True,align="left-top")
+        # Centered position inside 330x200 box
+        img_x=ux+95
+        img_y=uy+28
+        img_s=140
+        # Background for image
+        drawRect(img_x-2,img_y-2,img_s+4,img_s+4,fill=rgb(18,20,32),border=BORDER,roundness=6)
+        # Draw vec as 28x28 blocks scaled to 140
+        if app.proc_vec and len(app.proc_vec)==784:
+            cell=img_s//28
+            for r in range(28):
+                for c in range(28):
+                    v=app.proc_vec[r*28+c]
+                    if v<0.05: continue
+                    gray=int(v*255)
+                    # Use rgb for SCS
+                    drawRect(img_x+c*5, img_y+r*5, 5, 5, fill=rgb(gray,gray,gray))
+        else:
+            # Fallback to image if vec missing
+            try:
+                drawImage(app.proc_url,img_x,img_y,img_s,img_s)
+            except:
+                drawRect(img_x,img_y,img_s,img_s,fill=rgb(40,40,50))
         if hasattr(app,'crop_info') and app.crop_info:
             ci=app.crop_info
-            drawLabel(f"{ci.get('orig_w','?')}x{ci.get('orig_h','?')} -> {ci.get('inter_w','?')}x{ci.get('inter_h','?')} -> 28x28 crop {ci.get('crop_x','?')},{ci.get('crop_y','?')}",ux+8,uy+170,size=7,fill=DIM,align="left-top")
+            if ci.get('is_square'):
+                drawLabel(f"{ci.get('orig_w','?')}x{ci.get('orig_h','?')} SQUARE -> {ci.get('inter_w','?')}x{ci.get('inter_h','?')} ONLY SCALED",ux+8,uy+178,size=7,fill=ACC2,bold=True,align="left-top")
+            else:
+                drawLabel(f"{ci.get('orig_w','?')}x{ci.get('orig_h','?')} -> {ci.get('inter_w','?')}x{ci.get('inter_h','?')} -> 28 crop {ci.get('crop_x','?')},{ci.get('crop_y','?')} {ci.get('note','')}",ux+8,uy+178,size=7,fill=DIM,align="left-top")
     cb=app.buttons["clear"]
     draw_button(cb,app.hover=="clear",cb["enabled"])
     py=382
