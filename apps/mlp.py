@@ -198,9 +198,9 @@ def onAppStart(app):
     app.fetch_status="Ready - Click Load (4 fetches .gz - FAST)"
     app.status="TOP TIER FIXED - Array.from keyword bug + overlap + slow loop"
     app.buttons={
-        "load":{"x":30,"y":92,"w":160,"h":38,"label":"Load Fashion-MNIST","enabled":True},
-        "train":{"x":205,"y":92,"w":130,"h":38,"label":"Train MLP","enabled":False},
-        "reset":{"x":350,"y":92,"w":80,"h":38,"label":"Reset","enabled":True},
+        "load":{"x":40,"y":545,"w":160,"h":38,"label":"Load Fashion-MNIST","enabled":True},
+        "train":{"x":215,"y":545,"w":130,"h":38,"label":"Train MLP","enabled":False},
+        "reset":{"x":360,"y":545,"w":80,"h":38,"label":"Reset","enabled":True},
         "clear":{"x":670,"y":340,"w":80,"h":28,"label":"Clear","enabled":True},
     }
     app.hover=None; app.upload_hover=False
@@ -279,9 +279,13 @@ async def train_mlp(app):
     app.training=True; app.trained=False
     app.loss_hist=[]; app.acc_hist=[]; app.val_loss_hist=[]; app.val_acc_hist=[]
     app.epoch=0; app.buttons["train"]["enabled"]=False
+    # FIXED: Use smaller subset to avoid lockup - full 4915 freezes Brython
+    # Use 1200 train, 300 val for fast demo
+    Xtr_full=app.X_train; ytr_full=app.y_train; Xva_full=app.X_val; yva_full=app.y_val
+    Xtr=Xtr_full[:1200]; ytr=ytr_full[:1200]
+    Xva=Xva_full[:300]; yva=yva_full[:300]
     W1,b1,W2,b2=init_weights(app.hidden)
     app.W1=W1; app.b1=b1; app.W2=W2; app.b2=b2
-    Xtr=app.X_train; ytr=app.y_train; Xva=app.X_val; yva=app.y_val
     for ep in range(app.max_epochs):
         app.epoch=ep+1
         app.status=f"Training epoch {app.epoch}/{app.max_epochs}..."
@@ -335,8 +339,12 @@ async def train_mlp(app):
                 b2[o]-=app.lr*db2[o]
             total_loss+=batch_loss/len(batch_idx) if batch_idx else 0
             correct+=batch_correct; batches+=1
-            if batches%15==0:
-                await aio.sleep(0)
+            # FIXED: Yield every batch to avoid freezing device
+            await aio.sleep(0)
+            # Update UI every 4 batches
+            if batches%4==0:
+                app.status=f"Epoch {app.epoch}/{app.max_epochs} batch {batches}/{len(Xtr)//app.batch} loss {total_loss/batches:.3f}"
+
         avg_loss=total_loss/batches if batches else 0
         acc=correct/len(Xtr) if Xtr else 0
         val_loss=0.0; val_correct=0
@@ -554,25 +562,41 @@ def redrawAll(app):
             col=i%5; row=i//5; x=32+col*116; y=165+row*76
             drawRect(x,y,104,64,fill=rgb(24,28,44),border=BORDER,roundness=9)
             drawLabel(SHORT[i],x+52,y+8,size=10,fill=TXT,bold=True,align="center-top")
-            url=app.sample_urls[i]
-            if url:
-                try: drawImage(url,x+22,y+22,60,36)
-                except: drawRect(x+22,y+22,60,36,fill=rgb(70,70,80))
+            # FIXED: Draw sample via rects to avoid scs.py img.src warning (drawImage triggers warning for dataURL)
+            vec=app.samples.get(i)
+            if vec is not None:
+                try:
+                    # Draw 28x28 scaled to 60x36 inside card
+                    for r in range(28):
+                        for c in range(28):
+                            fv=float(vec[r*28+c])
+                            if fv>1.0: fv/=255.0
+                            fv=max(0.0,min(1.0,fv))
+                            if fv<0.05: continue
+                            gray=int(fv*255)
+                            # Scale 60/28=2.14 width, 36/28=1.28 height
+                            px=x+22 + int(c*60/28)
+                            py=y+22 + int(r*36/28)
+                            pw=max(1,int(60/28))
+                            ph=max(1,int(36/28))
+                            drawRect(px,py,pw,ph,fill=rgb(gray,gray,gray))
+                except:
+                    pass
     else:
         drawLabel("Click Load - WILL fire 4 fetches to raw GitHub .gz + S3 .gz - official",32,145,size=10,fill=DIM,align="left-top")
         drawLabel("Sources: raw.githubusercontent.com/.../ubyte.gz + S3 fashion-mnist + TF",32,163,size=9,fill=ACC,align="left-top")
         drawLabel("Fixed: overlap + slow 47M loop -> fast to_py()",32,181,size=9,fill=ACC2,align="left-top")
     # FIXED LAYOUT - architecture higher, loss lower - no overlap
-    drawLabel("Architecture:",32,260,size=12,fill=TXT,bold=True,align="left-top")
-    ix,iy=48,275
+    drawLabel("Architecture:",32,325,size=12,fill=TXT,bold=True,align="left-top")
+    ix,iy=48,340
     for i in range(8):
         drawCircle(ix,iy+i*10,3,fill=rgb(120,130,170))
     drawLabel("784",ix,iy+90,size=10,fill=DIM,align="center-top")
-    hx,hy=180,275
+    hx,hy=180,340
     for i in range(6):
         drawCircle(hx,hy+i*13,5,fill=ACC)
     drawLabel(f"{app.hidden} ReLU",hx,hy+90,size=10,fill=ACC,align="center-top")
-    ox,oy=320,275
+    ox,oy=320,340
     for i in range(10):
         c=ACC2 if app.pred is not None and i==app.pred else rgb(100,110,140)
         drawCircle(ox,oy+i*8,4,fill=c)
@@ -580,7 +604,7 @@ def redrawAll(app):
     drawLine(ix+6,iy+20,hx-6,hy+20,fill=GRID,lineWidth=0.5)
     drawLine(hx+8,hy+30,ox-6,oy+30,fill=GRID,lineWidth=0.5)
     if app.training:
-        bx,by,bw,bh=400,275,200,14
+        bx,by,bw,bh=400,340,200,14
         drawRect(bx,by,bw,bh,fill=rgb(32,36,60),border=BORDER,roundness=6)
         drawRect(bx,by,bw*app.progress,bh,fill=ACC,roundness=6)
         drawLabel("Training...",bx+bw/2,by+bh/2,size=10,fill=rgb(255,255,255),bold=True)
