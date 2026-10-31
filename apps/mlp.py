@@ -504,20 +504,15 @@ async def train_mlp(app):
     app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}% - 100% Complete"
     cache_weights_now(app)
 
-# === V11 NO FALLBACKS - longest side -> 28 pad to square, direct img->28 ===
-# === V11 NO FALLBACKS - longest side -> 28 pad to square, direct img->28 ===
+# === V13 EVENT DRIVEN ONLY - no timeouts, no fallbacks ===
+# === V13 EVENT DRIVEN ONLY - no timeouts, no fallbacks ===
 async def process_upload_to_28x28(source):
     object_url=window.URL.createObjectURL(source)
-    previewUrl=object_url
     fut=aio.Future()
     img=window.Image.new()
     def loaded(event):
         nw=int(img.naturalWidth)
         nh=int(img.naturalHeight)
-        if nw==0:
-            nw=int(img.width)
-        if nh==0:
-            nh=int(img.height)
         target=28
         if nw == nh:
             inter_w=target
@@ -550,9 +545,9 @@ async def process_upload_to_28x28(source):
         dctx.fillRect(0,0,target,target)
         dctx.drawImage(img, 0,0,nw,nh, pad_x, pad_y, inter_w, inter_h)
         dst_data=dctx.getImageData(0,0,target,target)
-        dst_pixels=dst_data.data.to_py()
+        dst_pixels=dst_data.data
         vec=[]
-        for i in range(0, len(dst_pixels), 4):
+        for i in range(0, 3136, 4):
             r=dst_pixels[i]
             g=dst_pixels[i+1]
             b=dst_pixels[i+2]
@@ -586,12 +581,14 @@ async def process_upload_to_28x28(source):
         fut.set_result(None)
     img.bind("load", loaded)
     img.bind("error", on_error)
-    img.setAttribute("src", previewUrl)
+    img.setAttribute("src", object_url)
     result=await fut
     window.URL.revokeObjectURL(object_url)
-    if result is None:
-        raise ValueError("load failed")
     return result
+
+
+
+
 
 
 
