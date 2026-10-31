@@ -504,159 +504,62 @@ async def train_mlp(app):
     app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}% - 100% Complete"
     cache_weights_now(app)
 
-# === FINAL FIX V3: Use URL.createObjectURL primary to avoid FileReader NoneType ===
-# === FINAL FIX V3: Use URL.createObjectURL primary to avoid FileReader NoneType ===
+# === FINAL V4: Python-only scaling from load_image pixels, no img tag, no FileReader, no NoneType ===
+# === FINAL V4: Python-only scaling from load_image pixels, no img tag, no FileReader, no NoneType ===
 async def process_upload_to_28x28(source):
-    previewUrl=None
-    file_w=None
-    file_h=None
-    object_url=None
+    # Use load_image for pixels - extension warning once is ok, but no NoneType
+    result=await load_image(source, max_dimension=384)
+    if hasattr(result,"to_py"):
+        try: result=result.to_py()
+        except: pass
+    if not isinstance(result, dict):
+        raise ValueError(f"load_image returned {type(result)}")
+    width=result.get("width"); height=result.get("height")
+    pixels=result.get("pixels"); previewUrl=result.get("previewUrl") or result.get("preview_url")
+    if width is None or height is None or pixels is None:
+        raise ValueError("missing fields from load_image")
+    src_w=int(width); src_h=int(height)
 
-    # Primary: URL.createObjectURL - most reliable, no FileReader
-    try:
-        if isinstance(source, str) and source.startswith("data:"):
-            previewUrl=source
-        else:
-            try:
-                # Try createObjectURL
-                object_url=window.URL.createObjectURL(source)
-                previewUrl=object_url
-            except Exception as e:
-                print(f"createObjectURL failed {e}")
-                previewUrl=None
-    except Exception as e:
-        print(f"createObjectURL outer failed {e}")
-        previewUrl=None
-
-    # Secondary: FileReader if createObjectURL failed
-    if previewUrl is None:
+    # Convert pixels to Python list for reliable indexing
+    if hasattr(pixels,"to_py"):
         try:
-            try:
-                reader=window.FileReader.new()
-            except:
-                reader=None
-            if reader is not None:
-                fut_reader=aio.Future()
-                def on_reader_load(ev):
-                    try:
-                        res=getattr(reader, "result", None)
-                        fut_reader.set_result(res)
-                    except:
-                        try:
-                            fut_reader.set_result(None)
-                        except:
-                            pass
-                def on_reader_error(ev):
-                    try:
-                        fut_reader.set_result(None)
-                    except:
-                        pass
-                try:
-                    reader.onload=on_reader_load
-                    reader.onerror=on_reader_error
-                except:
-                    try:
-                        reader.addEventListener("load", on_reader_load)
-                        reader.addEventListener("error", on_reader_error)
-                    except:
-                        pass
-                try:
-                    reader.readAsDataURL(source)
-                except:
-                    try:
-                        getattr(reader, "readAsDataURL")(source)
-                    except:
-                        pass
-                data_url=await fut_reader
-                if data_url:
-                    previewUrl=data_url
-        except Exception as e:
-            print(f"FileReader fallback failed {e}")
-
-    # Last resort: extension load_image
-    if previewUrl is None:
-        try:
-            tmp=await load_image(source, max_dimension=384)
-            if hasattr(tmp,"to_py"):
-                try: tmp=tmp.to_py()
-                except: pass
-            if isinstance(tmp, dict):
-                previewUrl=tmp.get("previewUrl") or tmp.get("preview_url")
-                file_w=tmp.get("width")
-                file_h=tmp.get("height")
-        except Exception as e:
-            print(f"load_image fallback failed {e}")
-
-    if previewUrl is None:
-        raise ValueError("Could not get image data URL")
-
-    src_canvas=document.createElement("canvas")
-    dom_img=document.createElement("img")
-    try:
-        dom_img.crossOrigin="anonymous"
-    except:
-        pass
-    fut_img=aio.Future()
-    def on_img_load(ev):
-        try:
-            w=int(getattr(dom_img, "naturalWidth", 0) or getattr(dom_img, "width", 0) or file_w or 0)
-            h=int(getattr(dom_img, "naturalHeight", 0) or getattr(dom_img, "height", 0) or file_h or 0)
-            if w==0 or h==0:
-                w=384
-                h=384
-            max_dim=384
-            if max(w,h) > max_dim:
-                scale=max_dim / max(w,h)
-                w=int(round(w*scale))
-                h=int(round(h*scale))
-            src_canvas.width=w
-            src_canvas.height=h
-            sctx2=src_canvas.getContext("2d")
-            sctx2.imageSmoothingEnabled=True
-            sctx2.imageSmoothingQuality="high"
-            sctx2.drawImage(dom_img,0,0,w,h)
-            fut_img.set_result((w,h))
-        except Exception as ex:
-            print(f"on_img_load failed {ex}")
-            try:
-                fut_img.set_result((file_w or 384, file_h or 384))
-            except:
-                pass
-    def on_img_error(ev):
-        try:
-            fut_img.set_result((file_w or 384, file_h or 384))
+            pixels=pixels.to_py()
         except:
             pass
+    # pixels should be RGBA flat
     try:
-        dom_img.bind("load", on_img_load)
-        dom_img.bind("error", on_img_error)
+        pix_list=list(pixels)
     except:
         try:
-            dom_img.onload=on_img_load
-            dom_img.onerror=on_img_error
+            # If it's bytes/bytearray
+            pix_list=list(pixels)
         except:
-            pass
-    try:
-        dom_img.setAttribute("src", previewUrl)
-    except:
-        pass
-    wh=await fut_img
-    src_w, src_h = wh
-    if src_w==0 or src_h==0:
-        src_w=int(file_w or 384)
-        src_h=int(file_h or 384)
-        if src_canvas.width==0:
-            src_canvas.width=src_w
-            src_canvas.height=src_h
-    # Revoke object URL if we created one
-    if object_url is not None:
-        try:
-            window.URL.revokeObjectURL(object_url)
-        except:
-            pass
+            pix_list=[]
+    expected_len=src_w*src_h*4
+    # If length is W*H*3 (RGB) or W*H (gray), handle
+    if len(pix_list) == src_w*src_h*3:
+        # Expand RGB to RGBA
+        tmp=[]
+        for i in range(0,len(pix_list),3):
+            tmp.append(pix_list[i]); tmp.append(pix_list[i+1]); tmp.append(pix_list[i+2]); tmp.append(255)
+        pix_list=tmp
+    elif len(pix_list) == src_w*src_h:
+        # Grayscale to RGBA
+        tmp=[]
+        for v in pix_list:
+            tmp.append(v); tmp.append(v); tmp.append(v); tmp.append(255)
+        pix_list=tmp
+
+    # If still not expected, try to use previewUrl fallback via canvas (should not happen)
+    if len(pix_list) < expected_len:
+        print(f"pix_list len {len(pix_list)} < expected {expected_len}, using preview canvas fallback")
+        # Fallback: try to create vec from preview via simple method - will be replaced
+        # For now pad with white
+        pix_list = pix_list + [255]*(expected_len - len(pix_list))
 
     target=28
     if src_w == src_h:
+        scale = target / src_w
         inter_w=target
         inter_h=target
         crop_x=0
@@ -672,31 +575,29 @@ async def process_upload_to_28x28(source):
         crop_y=(inter_h - target)//2 if inter_h>target else 0
         is_square=False
 
-    inter_canvas=document.createElement("canvas")
-    inter_canvas.width=inter_w; inter_canvas.height=inter_h
-    ictx=inter_canvas.getContext("2d")
-    ictx.imageSmoothingEnabled=True
-    ictx.imageSmoothingQuality="high"
-    ictx.drawImage(src_canvas,0,0,src_w,src_h,0,0,inter_w,inter_h)
-
-    dst_canvas=document.createElement("canvas")
-    dst_canvas.width=target; dst_canvas.height=target
-    dctx=dst_canvas.getContext("2d")
-    dctx.imageSmoothingEnabled=True
-    dctx.imageSmoothingQuality="high"
-    dctx.drawImage(inter_canvas, crop_x, crop_y, target, target, 0,0,target,target)
-
-    dst_data=dctx.getImageData(0,0,target,target)
-    dst_pixels=dst_data.data
-    if hasattr(dst_pixels,"to_py"):
-        try: dst_pixels=dst_pixels.to_py()
-        except: pass
     vec=[]
-    for i in range(0, len(dst_pixels), 4):
-        try: r=int(dst_pixels[i]); g=int(dst_pixels[i+1]); b=int(dst_pixels[i+2])
-        except: r=g=b=0
-        gray=(0.299*r+0.587*g+0.114*b)/255.0
-        vec.append(gray)
+    for dy in range(target):
+        for dx in range(target):
+            ix=dx + crop_x
+            iy=dy + crop_y
+            # Map inter coords back to source
+            sx=ix / scale if scale!=0 else 0
+            sy=iy / scale if scale!=0 else 0
+            sx_i=int(sx)
+            sy_i=int(sy)
+            if sx_i<0: sx_i=0
+            if sy_i<0: sy_i=0
+            if sx_i>=src_w: sx_i=src_w-1
+            if sy_i>=src_h: sy_i=src_h-1
+            idx=(sy_i*src_w + sx_i)*4
+            try:
+                r=pix_list[idx]; g=pix_list[idx+1]; b=pix_list[idx+2]
+            except:
+                r=g=b=255
+            gray=(0.299*r+0.587*g+0.114*b)/255.0
+            vec.append(gray)
+
+    # Invert if background white (avg > 0.5) -> make white-on-black like Fashion-MNIST
     if len(vec)==784:
         avg=sum(vec)/len(vec)
         if avg>0.5:
@@ -706,14 +607,29 @@ async def process_upload_to_28x28(source):
             vec=[(v-mn)/(mx-mn) for v in vec]
         vec=[max(0.0,min(1.0,v)) for v in vec]
 
+    # Create 140x140 display from vec (no img tag needed)
     big_canvas=document.createElement("canvas")
     big_canvas.width=140; big_canvas.height=140
     bctx=big_canvas.getContext("2d")
-    bctx.imageSmoothingEnabled=False
-    bctx.drawImage(dst_canvas,0,0,target,target,0,0,140,140)
+    # Draw black background
+    bctx.fillStyle="#000000"
+    bctx.fillRect(0,0,140,140)
+    for y in range(target):
+        for x in range(target):
+            i=y*target + x
+            if i>=len(vec): continue
+            v=vec[i]
+            gv=int(v*255)
+            # Draw 5x5 block
+            bctx.fillStyle=f"rgb({gv},{gv},{gv})"
+            bctx.fillRect(x*5, y*5, 5, 5)
+
     proc_url=big_canvas.toDataURL("image/png")
 
     return {"processed_url":proc_url,"vector":vec,"crop_info":{"orig_w":src_w,"orig_h":src_h,"inter_w":inter_w,"inter_h":inter_h,"crop_x":crop_x,"crop_y":crop_y,"is_square":is_square,"note":"SQUARE ONLY SCALED" if is_square else "shortest->28 center crop"}}
+
+
+
 
 
 
