@@ -664,7 +664,7 @@ async def process_upload_to_28x28(source):
     img.bind("load", loaded)
     img.bind("error", on_error)
     # Set src AFTER binding - as per user's snippet
-    img.src=previewUrl
+    img.setAttribute("src", previewUrl)
 
     result=await fut
 
