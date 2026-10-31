@@ -212,14 +212,11 @@ def try_load_cached_weights(app):
         raw = window.localStorage.getItem(CACHE_KEY)
         if raw is None:
             return False
-        import json
         data = window.JSON.parse(raw)
         if hasattr(data, "to_py"):
             data = data.to_py()
-        # data is dict with W1,b1,W2,b2,hidden,epoch,acc
         if not isinstance(data, dict):
             return False
-        # Validate shapes
         W1 = data.get("W1")
         b1 = data.get("b1")
         W2 = data.get("W2")
@@ -231,7 +228,6 @@ def try_load_cached_weights(app):
         if hasattr(b2, "to_py"): b2 = b2.to_py()
         if W1 is None or b1 is None or W2 is None or b2 is None:
             return False
-        # Convert to Python lists if needed
         app.W1 = W1
         app.b1 = b1
         app.W2 = W2
@@ -239,15 +235,17 @@ def try_load_cached_weights(app):
         app.hidden = int(hidden)
         app.trained = True
         app.epoch = int(data.get("epoch", 0))
-        app.status = f"Loaded cached weights {app.hidden} hidden - ready for inference"
+        app.progress = 1.0
+        app.status = f"Loaded cached weights {app.hidden} hidden - ready"
         if "cache" in app.buttons:
-            app.buttons["cache"]["enabled"]=True  # enable if cache loaded
-        app.fetch_status = f"Cache hit - {len(W1)}x{len(b1)} -> {len(W2[0])} - no training needed"
+            app.buttons["cache"]["enabled"]=True
+        app.fetch_status = f"Cache hit - {len(W1)}x{len(b1)} -> {len(W2[0])}"
         app.buttons["train"]["enabled"] = True
-        # Restore histories if available
         try:
             app.loss_hist = list(data.get("loss_hist", []))
             app.val_acc_hist = list(data.get("val_acc_hist", []))
+            app.val_loss_hist = list(data.get("val_loss_hist", []))
+            app.acc_hist = list(data.get("acc_hist", []))
         except:
             pass
         return True
@@ -260,8 +258,6 @@ def cache_weights_now(app):
         if app.W1 is None:
             app.status = "No weights to cache - train first"
             return False
-        import json
-        # Store compact - convert to list if needed
         payload = {
             "W1": app.W1,
             "b1": app.b1,
@@ -269,12 +265,14 @@ def cache_weights_now(app):
             "b2": app.b2,
             "hidden": app.hidden,
             "epoch": app.epoch,
-            "loss_hist": app.loss_hist[-20:] if len(app.loss_hist)>20 else app.loss_hist,
-            "val_acc_hist": app.val_acc_hist[-20:] if len(app.val_acc_hist)>20 else app.val_acc_hist,
+            "loss_hist": app.loss_hist[-30:] if len(app.loss_hist)>30 else app.loss_hist,
+            "val_loss_hist": app.val_loss_hist[-30:] if len(app.val_loss_hist)>30 else app.val_loss_hist,
+            "val_acc_hist": app.val_acc_hist[-30:] if len(app.val_acc_hist)>30 else app.val_acc_hist,
+            "acc_hist": app.acc_hist[-30:] if len(app.acc_hist)>30 else app.acc_hist,
         }
         jstr = window.JSON.stringify(payload)
         window.localStorage.setItem(CACHE_KEY, jstr)
-        app.status = f"Weights cached {len(jstr)//1024}KB to localStorage - will load by default next time"
+        app.status = f"Weights cached {len(jstr)//1024}KB"
         app.fetch_status = f"Cached hidden {app.hidden} epoch {app.epoch}"
         return True
     except Exception as e:
@@ -286,10 +284,12 @@ def clear_cached_weights(app):
     try:
         window.localStorage.removeItem(CACHE_KEY)
         app.W1=None; app.b1=None; app.W2=None; app.b2=None
-        app.trained=False; app.loss_hist=[]; app.acc_hist=[]; app.val_loss_hist=[]; app.val_acc_hist=[]; app.epoch=0; app.lr=0.08
+        app.trained=False; app.loss_hist=[]; app.acc_hist=[]; app.val_loss_hist=[]; app.val_acc_hist=[]; app.epoch=0; app.lr=0.08; app.progress=0.0
         app.pred=None; app.probs=None; app.orig_url=None; app.proc_url=None; app.proc_vec=None
         app.dataset_loaded=False; app.X_train=[]; app.y_train=[]; app.sample_urls=[None]*10
         app.status="Cache cleared - Reset"; app.fetch_status="Ready"; app.buttons["load"]["enabled"]=True; app.buttons["train"]["enabled"]=False
+        if "cache" in app.buttons:
+            app.buttons["cache"]["enabled"]=False
         return True
     except Exception as e:
         print(f"Clear cache failed {e}")
@@ -319,7 +319,7 @@ async def load_fashion(app):
     if app.dataset_loaded:
         return
     app.buttons["load"]["enabled"]=False
-    app.status="Fetching 4 IDX .gz - WATCH NETWORK TAB - FAST"
+    app.status="Fetching 4 IDX .gz"
     try:
         app.fetch_status="Fetching train-images .gz..."
         img_bytes=await fetch_bytes_popular(SOURCES["train_images"], "train-images")
@@ -351,7 +351,7 @@ async def load_fashion(app):
         app.samples=samples
         await build_preview_urls(app)
         app.dataset_loaded=True
-        app.fetch_status=f"Loaded {len(X_all)} | Train {len(Xtr)} Val {len(Xva)} - 4 FETCHES DONE"
+        app.fetch_status=f"Loaded {len(X_all)} | Train {len(Xtr)} Val {len(Xva)}"
         app.status=f"Fashion-MNIST loaded {len(X_all)}"
         app.buttons["train"]["enabled"]=True
         app.buttons["load"]["enabled"]=False
@@ -370,7 +370,6 @@ async def train_mlp(app):
     app.loss_hist=[]; app.acc_hist=[]; app.val_loss_hist=[]; app.val_acc_hist=[]
     app.live_train=[]; app.live_val=[]
     app.epoch=0; app.buttons["train"]["enabled"]=False
-    # Disable cache button during training
     if "cache" in app.buttons:
         app.buttons["cache"]["enabled"]=False
     Xtr=app.X_train; ytr=app.y_train; Xva=app.X_val; yva=app.y_val
@@ -378,10 +377,9 @@ async def train_mlp(app):
     app.max_epochs=8
     W1,b1,W2,b2=init_weights(app.hidden)
     app.W1=W1; app.b1=b1; app.W2=W2; app.b2=b2
-    app.status=f"Training FULL {len(Xtr)} samples - smooth pipeline batch {app.batch} + live loss"
+    app.status=f"Training FULL {len(Xtr)} samples"
     for ep in range(app.max_epochs):
         app.epoch=ep+1
-        app.status=f"Training epoch {app.epoch}/{app.max_epochs}..."
         idx=list(range(len(Xtr)))
         random.shuffle(idx)
         total_loss=0.0; correct=0; batches=0
@@ -436,14 +434,12 @@ async def train_mlp(app):
             total_loss+=batch_loss/len(batch_idx) if batch_idx else 0
             correct+=batch_correct; batches+=1
             app.progress=(app.epoch-1 + batches/total_batches)/app.max_epochs
-            # FIXED: Live loss curve every 10 batches, safe val access
             if batches%10==0 or batches==1 or batches==total_batches:
                 live_avg=total_loss/batches if batches else 0
-                live_acc=correct/(batches*app.batch) if batches else 0
+                live_acc=correct/(batches*len(batch_idx)) if batches else 0
                 app.live_train.append(live_avg)
                 app.loss_hist.append(live_avg)
                 app.acc_hist.append(live_acc)
-                # FIXED: Always ensure val_loss_hist has at least one entry before reading [-1]
                 if batches%30==0 or batches==total_batches:
                     v_loss=0.0; v_corr=0; v_n=min(200,len(Xva))
                     if v_n>0:
@@ -470,11 +466,8 @@ async def train_mlp(app):
                         app.val_loss_hist.append(app.val_loss_hist[-1])
                         app.val_acc_hist.append(app.val_acc_hist[-1])
                     else:
-                        # First batches - initialize val with live train to avoid IndexError
                         app.val_loss_hist.append(live_avg)
                         app.val_acc_hist.append(live_acc)
-                # SAFE status - val_loss_hist guaranteed non-empty now
-                app.status=f"Epoch {app.epoch}/{app.max_epochs} batch {batches}/{total_batches} loss {live_avg:.3f} val {app.val_loss_hist[-1]:.3f}"
             await aio.sleep(0.01)
             if batches%15==0:
                 await aio.sleep(0)
@@ -512,10 +505,12 @@ async def train_mlp(app):
     app.training=False; app.trained=True; app.buttons["train"]["enabled"]=True
     if "cache" in app.buttons:
         app.buttons["cache"]["enabled"]=True
-    app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}%"
+    app.progress=1.0
+    app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}% - 100% Complete"
     cache_weights_now(app)
 
-# === TOP-TIER IMAGE CROPPING & RESIZING ===
+# === FIXED TOP-TIER IMAGE CROPPING & RESIZING - NO SQUASH, PROPER POSITION ===
+# === FIXED TOP-TIER IMAGE - NO SQUASH, PROPER THUMBS ===
 async def process_upload_to_28x28(source):
     result=await load_image(source, max_dimension=384)
     if hasattr(result,"to_py"):
@@ -529,6 +524,7 @@ async def process_upload_to_28x28(source):
     if hasattr(pixels,"to_py"):
         try: pixels=pixels.to_py()
         except: pass
+    # Source canvas - original aspect preserved
     src_canvas=document.createElement("canvas")
     src_canvas.width=int(width); src_canvas.height=int(height)
     ctx=src_canvas.getContext("2d")
@@ -539,17 +535,19 @@ async def process_upload_to_28x28(source):
             try: data[i]=int(pixels[i])
             except: pass
         ctx.putImageData(img_data,0,0)
-    except Exception as e:
+    except:
         img=window.Image.new()
         img.crossOrigin="anonymous"
         def exec_res(resolve,reject):
             img.onload=lambda ev: resolve(True)
-            img.onerror=lambda ev: reject(e)
+            img.onerror=lambda ev: reject(Exception("img load fail"))
         img.src=previewUrl
         try:
             await window.Promise.new(exec_res)
             ctx.drawImage(img,0,0,int(width),int(height))
         except: pass
+
+    # BBox detection - square crop to avoid squash
     try:
         full_data=ctx.getImageData(0,0,int(width),int(height))
         fd=full_data.data
@@ -561,11 +559,11 @@ async def process_upload_to_28x28(source):
         for y in range(0,int(height),step_y):
             for x in range(0,int(width),step_x):
                 idx=(y*int(width)+x)*4
-                if idx+2>=len(fd): continue
-                try: r=int(fd[idx]); g=int(fd[idx+1]); b=int(fd[idx+2])
+                if idx+3>=len(fd): continue
+                try: r=int(fd[idx]); g=int(fd[idx+1]); b=int(fd[idx+2]); a=int(fd[idx+3])
                 except: continue
-                brightness=(r+g+b)/3
-                if brightness<220:
+                if a<15: continue
+                if (r+g+b)/3 < 245:  # not pure white
                     if x<min_x: min_x=x
                     if x>max_x: max_x=x
                     if y<min_y: min_y=y
@@ -576,24 +574,21 @@ async def process_upload_to_28x28(source):
             sy=(int(height)-size)//2
             bbox_w=size; bbox_h=size
         else:
-            pad_x=int((max_x-min_x)*0.15)
-            pad_y=int((max_y-min_y)*0.15)
-            min_x=max(0,min_x-pad_x); max_x=min(int(width)-1,max_x+pad_x)
-            min_y=max(0,min_y-pad_y); max_y=min(int(height)-1,max_y+pad_y)
-            bbox_w=max_x-min_x+1
-            bbox_h=max_y-min_y+1
-            sx=min_x; sy=min_y
+            pad=int(max(max_x-min_x, max_y-min_y)*0.18)
+            min_x=max(0,min_x-pad); max_x=min(int(width)-1,max_x+pad)
+            min_y=max(0,min_y-pad); max_y=min(int(height)-1,max_y+pad)
+            bbox_w=max_x-min_x+1; bbox_h=max_y-min_y+1
             size=max(bbox_w,bbox_h)
-            if bbox_w<bbox_h:
-                sx=min_x - (size-bbox_w)//2
-                sx=max(0,min(sx,int(width)-size))
-            else:
-                sy=min_y - (size-bbox_h)//2
-                sy=max(0,min(sy,int(height)-size))
-    except Exception as e:
-        orig_w=int(width); orig_h=int(height); size=min(orig_w,orig_h)
-        sx=(orig_w-size)//2; sy=(orig_h-size)//2
+            sx=min_x + (bbox_w - size)//2
+            sy=min_y + (bbox_h - size)//2
+            sx=max(0,min(sx,int(width)-size))
+            sy=max(0,min(sy,int(height)-size))
+    except:
+        size=min(int(width),int(height))
+        sx=(int(width)-size)//2; sy=(int(height)-size)//2
         bbox_w=size; bbox_h=size
+
+    # 28x28 high-quality resize
     dst_canvas=document.createElement("canvas")
     dst_canvas.width=28; dst_canvas.height=28
     dctx=dst_canvas.getContext("2d")
@@ -603,29 +598,27 @@ async def process_upload_to_28x28(source):
         if size>112:
             tmp1=document.createElement("canvas")
             tmp1.width=112; tmp1.height=112
-            t1ctx=tmp1.getContext("2d")
-            t1ctx.imageSmoothingEnabled=True
-            t1ctx.imageSmoothingQuality="high"
-            t1ctx.drawImage(src_canvas, sx, sy, size, size, 0, 0, 112, 112)
+            t1=tmp1.getContext("2d")
+            t1.imageSmoothingEnabled=True; t1.imageSmoothingQuality="high"
+            t1.drawImage(src_canvas, sx, sy, size, size, 0,0,112,112)
             tmp2=document.createElement("canvas")
             tmp2.width=56; tmp2.height=56
-            t2ctx=tmp2.getContext("2d")
-            t2ctx.imageSmoothingEnabled=True
-            t2ctx.imageSmoothingQuality="high"
-            t2ctx.drawImage(tmp1, 0, 0, 112, 112, 0, 0, 56, 56)
-            dctx.drawImage(tmp2, 0, 0, 56, 56, 0, 0, 28, 28)
+            t2=tmp2.getContext("2d")
+            t2.imageSmoothingEnabled=True; t2.imageSmoothingQuality="high"
+            t2.drawImage(tmp1,0,0,112,112,0,0,56,56)
+            dctx.drawImage(tmp2,0,0,56,56,0,0,28,28)
         elif size>56:
             tmp=document.createElement("canvas")
             tmp.width=56; tmp.height=56
-            tctx=tmp.getContext("2d")
-            tctx.imageSmoothingEnabled=True
-            tctx.imageSmoothingQuality="high"
-            tctx.drawImage(src_canvas, sx, sy, size, size, 0, 0, 56, 56)
-            dctx.drawImage(tmp, 0, 0, 56, 56, 0, 0, 28, 28)
+            t=tmp.getContext("2d")
+            t.imageSmoothingEnabled=True; t.imageSmoothingQuality="high"
+            t.drawImage(src_canvas, sx, sy, size, size, 0,0,56,56)
+            dctx.drawImage(tmp,0,0,56,56,0,0,28,28)
         else:
-            dctx.drawImage(src_canvas, sx, sy, size, size, 0, 0, 28, 28)
+            dctx.drawImage(src_canvas, sx, sy, size, size, 0,0,28,28)
     except:
-        dctx.drawImage(src_canvas, sx, sy, size, size, 0, 0, 28, 28)
+        dctx.drawImage(src_canvas, sx, sy, size, size, 0,0,28,28)
+
     dst_data=dctx.getImageData(0,0,28,28); dst_pixels=dst_data.data
     if hasattr(dst_pixels,"to_py"):
         try: dst_pixels=dst_pixels.to_py()
@@ -641,29 +634,39 @@ async def process_upload_to_28x28(source):
         if avg>0.5:
             vec=[1.0-v for v in vec]
         mn=min(vec); mx=max(vec)
-        if mx-mn>0.1:
+        if mx-mn>0.12:
             vec=[(v-mn)/(mx-mn) for v in vec]
         vec=[max(0.0,min(1.0,v)) for v in vec]
-    big_canvas=document.createElement("canvas")
-    big_canvas.width=140; big_canvas.height=140
-    bctx=big_canvas.getContext("2d")
-    bctx.imageSmoothingEnabled=False
-    bctx.drawImage(dst_canvas,0,0,140,140)
-    bctx.strokeStyle="rgba(99,102,241,0.3)"
-    bctx.lineWidth=1
-    bctx.strokeRect(0,0,140,140)
-    proc_url=big_canvas.toDataURL("image/png")
-    grid_canvas=document.createElement("canvas")
-    grid_canvas.width=28; grid_canvas.height=28
-    gctx=grid_canvas.getContext("2d")
-    for r in range(28):
-        for c in range(28):
-            v=vec[r*28+c]
-            gray=int(v*255)
-            gctx.fillStyle=f"rgb({gray},{gray},{gray})"
-            gctx.fillRect(c,r,1,1)
-    grid_url=grid_canvas.toDataURL("image/png")
-    return {"original_url":previewUrl,"processed_url":proc_url,"grid_url":grid_url,"vector":vec,"crop_info":{"sx":sx,"sy":sy,"size":size,"bbox_w":bbox_w,"bbox_h":bbox_h}}
+
+    # FIXED THUMBS: No squash, proper aspect, centered
+    # Original thumb 100x100 - preserve aspect, white bg
+    orig_thumb=document.createElement("canvas")
+    orig_thumb.width=100; orig_thumb.height=100
+    octx=orig_thumb.getContext("2d")
+    octx.fillStyle="rgb(28,32,52)"
+    octx.fillRect(0,0,100,100)
+    # Fit src into 100x100 preserving aspect
+    scale_o=min(100/int(width), 100/int(height)) * 0.92
+    ow=int(width)*scale_o; oh=int(height)*scale_o
+    ox=(100-ow)//2; oy=(100-oh)//2
+    octx.imageSmoothingEnabled=True
+    octx.imageSmoothingQuality="high"
+    octx.drawImage(src_canvas, 0,0,int(width),int(height), ox, oy, ow, oh)
+    orig_url=orig_thumb.toDataURL("image/png")
+
+    # Proc thumb 140x140 - 28x28 is square, so no squash, crisp upscale
+    proc_thumb=document.createElement("canvas")
+    proc_thumb.width=140; proc_thumb.height=140
+    pctx=proc_thumb.getContext("2d")
+    pctx.imageSmoothingEnabled=False
+    pctx.drawImage(dst_canvas,0,0,28,28,0,0,140,140)
+    pctx.strokeStyle="rgba(99,102,241,0.35)"
+    pctx.lineWidth=1
+    pctx.strokeRect(0,0,140,140)
+    proc_url=proc_thumb.toDataURL("image/png")
+
+    return {"original_url":orig_url,"processed_url":proc_url,"vector":vec,"crop_info":{"sx":sx,"sy":sy,"size":size,"bbox_w":bbox_w,"bbox_h":bbox_h,"orig_w":int(width),"orig_h":int(height)}}
+
 
 async def handle_upload(app, source):
     app.status="Loading via load_image() - TOP-TIER crop..."
@@ -671,7 +674,7 @@ async def handle_upload(app, source):
         result=await process_upload_to_28x28(source)
         vec=result.get("vector")
         vec_f=[max(0.0,min(1.0,float(v))) for v in vec]
-        app.orig_url=result.get("original_url"); app.proc_url=result.get("processed_url"); app.grid_url=result.get("grid_url"); app.proc_vec=vec_f
+        app.orig_url=result.get("original_url"); app.proc_url=result.get("processed_url"); app.proc_vec=vec_f
         app.crop_info=result.get("crop_info",{})
         if app.W1 is None:
             if try_load_cached_weights(app):
@@ -787,7 +790,7 @@ def draw_loss_graph(app):
     drawLabel(f"train {app.loss_hist[-1]:.3f} {len(app.loss_hist)}pts", gx+gw-12, gy+12, size=10, fill=DIM, align="right-top")
     if app.val_loss_hist:
         drawLabel(f"val {app.val_loss_hist[-1]:.3f} acc {app.val_acc_hist[-1]*100:.1f}%", gx+gw-12, gy+26, size=10, fill=ACC2, align="right-top")
-    drawLabel("purple=train green=val", gx+12, gy+80, size=8, fill=DIM, align="left-top")
+    drawLabel("purple=train green=val", gx+12, gy+10, size=8, fill=DIM, align="left-top")
 
 def redrawAll(app):
     drawRect(0,0,WIDTH,68,fill=rgb(18,20,32))
@@ -843,11 +846,17 @@ def redrawAll(app):
     drawLabel("10 Softmax",ox,oy+90,size=10,fill=DIM,align="center-top")
     drawLine(ix+6,iy+20,hx-6,hy+20,fill=GRID,lineWidth=0.5)
     drawLine(hx+8,hy+30,ox-6,oy+30,fill=GRID,lineWidth=0.5)
-    if app.training:
-        bx,by,bw,bh=400,345,200,14
-        drawRect(bx,by,bw,bh,fill=rgb(32,36,60),border=BORDER,roundness=6)
-        drawRect(bx,by,bw*app.progress,bh,fill=ACC,roundness=6)
-        drawLabel("Training...",bx+bw/2,by+bh/2,size=10,fill=rgb(255,255,255),bold=True)
+    # TRAINING BAR - rgb(163,10,129) while training, green ACC2 when 100% - dynamic text
+    if app.training or app.progress>0 or app.trained:
+        bx,by,bw,bh=400,345,200,16
+        drawRect(bx,by,bw,bh,fill=rgb(32,36,60),border=BORDER,roundness=7)
+        pct=int(max(0,min(1,app.progress))*100)
+        if app.progress>=0.99 or app.trained:
+            bar_fill=ACC2  # green same as training graph rgb(16,185,129)
+        else:
+            bar_fill=rgb(163,10,129)  # required magenta while training
+        drawRect(bx+1,by+1,(bw-2)*app.progress,bh-2,fill=bar_fill,roundness=6)
+        drawLabel(f"Training {pct}% Complete",bx+bw/2,by+bh/2,size=10,fill=rgb(255,255,255),bold=True,align="center-center")
     draw_loss_graph(app)
     draw_panel(640,80,390,590,title="Inference - Upload Auto Scaled & Cropped 28x28")
     ux,uy,uw,uh=670,120,330,200
@@ -862,17 +871,23 @@ def redrawAll(app):
         drawLabel("contrast stretch + proper 140x140 artifact",ux+uw/2,uy+132,size=10,fill=DIM,align="center-top")
         drawLabel("Cached weights auto-loaded if available",ux+uw/2,uy+158,size=9,fill=ACC2,align="center-top")
     else:
-        drawLabel("Original (via load_image):",ux+8,uy+8,size=10,fill=DIM,align="left-top")
-        try: drawImage(app.orig_url,ux+10,uy+24,100,100)
-        except: drawRect(ux+10,uy+24,100,100,fill=rgb(50,50,60))
-        drawLabel("28x28 x5 TOP-TIER:",ux+130,uy+8,size=10,fill=ACC,bold=True,align="left-top")
+        # FIXED: Two images - original thumb 100x100 and proc 140x140 - both properly placed inside dashed box, no squash
+        drawRect(ux+6,uy+6,uw-12,uh-12,fill=rgb(24,28,44),roundness=8)
+        drawLabel("Original 100x100:",ux+8,uy+8,size=9,fill=DIM,align="left-top")
+        try: 
+            drawImage(app.orig_url,ux+10,uy+20,100,100)
+        except: 
+            drawRect(ux+10,uy+20,100,100,fill=rgb(50,50,60))
+        drawLabel("Processed 140x140 (28x28 x5):",ux+130,uy+8,size=9,fill=ACC,bold=True,align="left-top")
         if app.proc_url:
             try: 
-                drawImage(app.proc_url,ux+130,uy+24,140,140)
-            except: drawRect(ux+130,uy+24,140,140,fill=rgb(40,40,50))
+                drawImage(app.proc_url,ux+130,uy+20,140,140)
+            except: 
+                drawRect(ux+130,uy+20,140,140,fill=rgb(40,40,50))
         if hasattr(app,'crop_info') and app.crop_info:
             ci=app.crop_info
-            drawLabel(f"crop {ci.get('bbox_w','?')}x{ci.get('bbox_h','?')}->{ci.get('size','?')} sq",ux+8,uy+134,size=8,fill=DIM,align="left-top")
+            drawLabel(f"orig {ci.get('orig_w','?')}x{ci.get('orig_h','?')} crop {ci.get('bbox_w','?')}x{ci.get('bbox_h','?')} sq{ci.get('size','?')}",ux+10,uy+130,size=7,fill=DIM,align="left-top")
+            drawLabel("aspect preserved - no squash",ux+10,uy+142,size=7,fill=ACC2,align="left-top")
     cb=app.buttons["clear"]
     draw_button(cb,app.hover=="clear",cb["enabled"])
     py=382
