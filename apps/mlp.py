@@ -504,33 +504,44 @@ async def train_mlp(app):
     app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}% - 100% Complete"
     cache_weights_now(app)
 
-# === FINAL FIX: Bulletproof FileReader + img, no bind on FileReader, no done() checks ===
-# === FINAL FIX: Bulletproof FileReader + img, no bind on FileReader, no done() checks ===
+# === FINAL FIX V3: Use URL.createObjectURL primary to avoid FileReader NoneType ===
+# === FINAL FIX V3: Use URL.createObjectURL primary to avoid FileReader NoneType ===
 async def process_upload_to_28x28(source):
     previewUrl=None
     file_w=None
     file_h=None
-    # Try own FileReader first to avoid extension warning
+    object_url=None
+
+    # Primary: URL.createObjectURL - most reliable, no FileReader
     try:
         if isinstance(source, str) and source.startswith("data:"):
             previewUrl=source
         else:
-            # FileReader via JS
+            try:
+                # Try createObjectURL
+                object_url=window.URL.createObjectURL(source)
+                previewUrl=object_url
+            except Exception as e:
+                print(f"createObjectURL failed {e}")
+                previewUrl=None
+    except Exception as e:
+        print(f"createObjectURL outer failed {e}")
+        previewUrl=None
+
+    # Secondary: FileReader if createObjectURL failed
+    if previewUrl is None:
+        try:
             try:
                 reader=window.FileReader.new()
             except:
-                try:
-                    reader=window.FileReader()
-                except:
-                    reader=None
+                reader=None
             if reader is not None:
                 fut_reader=aio.Future()
                 def on_reader_load(ev):
                     try:
-                        # reader.result is data URL
                         res=getattr(reader, "result", None)
                         fut_reader.set_result(res)
-                    except Exception as ex:
+                    except:
                         try:
                             fut_reader.set_result(None)
                         except:
@@ -540,12 +551,10 @@ async def process_upload_to_28x28(source):
                         fut_reader.set_result(None)
                     except:
                         pass
-                # Use direct property, not bind, for FileReader
                 try:
                     reader.onload=on_reader_load
                     reader.onerror=on_reader_error
                 except:
-                    # Fallback try addEventListener
                     try:
                         reader.addEventListener("load", on_reader_load)
                         reader.addEventListener("error", on_reader_error)
@@ -553,7 +562,7 @@ async def process_upload_to_28x28(source):
                         pass
                 try:
                     reader.readAsDataURL(source)
-                except Exception as ex:
+                except:
                     try:
                         getattr(reader, "readAsDataURL")(source)
                     except:
@@ -561,11 +570,10 @@ async def process_upload_to_28x28(source):
                 data_url=await fut_reader
                 if data_url:
                     previewUrl=data_url
-    except Exception as e:
-        print(f"FileReader path failed {e}")
-        previewUrl=None
+        except Exception as e:
+            print(f"FileReader fallback failed {e}")
 
-    # Fallback to extension if needed
+    # Last resort: extension load_image
     if previewUrl is None:
         try:
             tmp=await load_image(source, max_dimension=384)
@@ -609,7 +617,7 @@ async def process_upload_to_28x28(source):
             sctx2.drawImage(dom_img,0,0,w,h)
             fut_img.set_result((w,h))
         except Exception as ex:
-            print(f"on_img_load draw failed {ex}")
+            print(f"on_img_load failed {ex}")
             try:
                 fut_img.set_result((file_w or 384, file_h or 384))
             except:
@@ -619,12 +627,10 @@ async def process_upload_to_28x28(source):
             fut_img.set_result((file_w or 384, file_h or 384))
         except:
             pass
-    # Use bind for DOM img (works for DOM elements)
     try:
         dom_img.bind("load", on_img_load)
         dom_img.bind("error", on_img_error)
     except:
-        # Fallback direct assignment
         try:
             dom_img.onload=on_img_load
             dom_img.onerror=on_img_error
@@ -633,10 +639,7 @@ async def process_upload_to_28x28(source):
     try:
         dom_img.setAttribute("src", previewUrl)
     except:
-        try:
-            setattr(dom_img, "src", previewUrl)
-        except:
-            pass
+        pass
     wh=await fut_img
     src_w, src_h = wh
     if src_w==0 or src_h==0:
@@ -645,6 +648,12 @@ async def process_upload_to_28x28(source):
         if src_canvas.width==0:
             src_canvas.width=src_w
             src_canvas.height=src_h
+    # Revoke object URL if we created one
+    if object_url is not None:
+        try:
+            window.URL.revokeObjectURL(object_url)
+        except:
+            pass
 
     target=28
     if src_w == src_h:
@@ -705,6 +714,8 @@ async def process_upload_to_28x28(source):
     proc_url=big_canvas.toDataURL("image/png")
 
     return {"processed_url":proc_url,"vector":vec,"crop_info":{"orig_w":src_w,"orig_h":src_h,"inter_w":inter_w,"inter_h":inter_h,"crop_x":crop_x,"crop_y":crop_y,"is_square":is_square,"note":"SQUARE ONLY SCALED" if is_square else "shortest->28 center crop"}}
+
+
 
 
 
