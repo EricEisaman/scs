@@ -1,7 +1,9 @@
 from scs import *
 from browser import document, aio
-from extensions.pyodide import root
+from extensions.pyodide import run_python_async
+from extensions.pyodide import root as _official_root
 import re
+import json
 
 BG = rgb(15, 20, 23)
 PANEL = rgb(25, 33, 37)
@@ -417,16 +419,119 @@ x - y = 1</textarea>
     document['solver-example'].bind('change', load_example)
     document['solver-form'].bind('submit', submit)
 
+
 async def _solve(app, residual_expressions, variable_names, initial_values):
     try:
-        app.result = await root(residual_expressions, initial_values, variables=variable_names)
-        app.status = 'Converged' if app.result.get('success') else 'Solver stopped without convergence'
+        from extensions.pyodide import run_python_async
+        import json
+        exprs_json = json.dumps(residual_expressions)
+        x0_json = json.dumps(initial_values)
+        var_json = json.dumps(variable_names)
+        lines = [
+            "import math, numpy as np",
+            "from scipy.optimize import root as scipy_root",
+            f"exprs = {exprs_json}",
+            f"x0_list = {x0_json}",
+            f"var_names = {var_json}",
+            "x0 = np.array(x0_list, dtype=float)",
+            "SAFE_FUNCS = {",
+            " 'sin': math.sin, 'cos': math.cos, 'tan': math.tan,",
+            " 'asin': math.asin, 'acos': math.acos, 'atan': math.atan,",
+            " 'sinh': math.sinh, 'cosh': math.cosh, 'tanh': math.tanh,",
+            " 'exp': math.exp, 'log': math.log, 'ln': math.log,",
+            " 'sqrt': math.sqrt, 'pi': math.pi, 'e': math.e,",
+            "}",
+            "def eval_residuals(vars_arr):",
+            "    local = {}",
+            "    for name, val in zip(var_names, vars_arr):",
+            "        local[name] = float(val)",
+            "    local.update(SAFE_FUNCS)",
+            "    out = []",
+            "    for expr in exprs:",
+            "        try:",
+            "            out.append(float(eval(expr, {'__builtins__': {}}, local)))",
+            "        except Exception:",
+            "            out.append(0.0)",
+            "    return out",
+            "def residual_np(vars_arr):",
+            "    return np.array(eval_residuals(vars_arr), dtype=float)",
+            "try:",
+            "    init_res = residual_np(x0)",
+            "    initial_norm = float(np.linalg.norm(init_res))",
+            "    if math.isnan(initial_norm) or math.isinf(initial_norm):",
+            "        initial_norm = 0.0",
+            "except Exception:",
+            "    initial_norm = 0.0",
+            "try:",
+            "    sol = scipy_root(residual_np, x0, method='hybr')",
+            "    x_list = sol.x.tolist() if hasattr(sol, 'x') and sol.x is not None else []",
+            "    fun_list = sol.fun.tolist() if hasattr(sol, 'fun') and sol.fun is not None else []",
+            "    success = bool(getattr(sol, 'success', False))",
+            "    status = int(getattr(sol, 'status', -1))",
+            "    message = str(getattr(sol, 'message', ''))",
+            "    nfev = int(getattr(sol, 'nfev', 0))",
+            "    try:",
+            "        final_norm = float(np.linalg.norm(sol.fun)) if hasattr(sol, 'fun') else 0.0",
+            "        if math.isnan(final_norm) or math.isinf(final_norm):",
+            "            final_norm = 0.0",
+            "    except:",
+            "        final_norm = 0.0",
+            "except Exception as e:",
+            "    x_list = []",
+            "    fun_list = []",
+            "    success = False",
+            "    status = -1",
+            "    message = 'Solver exception: %s' % e",
+            "    nfev = 0",
+            "    final_norm = 0.0",
+            "def clean_float(v):",
+            "    try:",
+            "        fv = float(v)",
+            "        if abs(fv) < 1e-12:",
+            "            return 0.0",
+            "        if math.isnan(fv) or math.isinf(fv):",
+            "            return 0.0",
+            "        return fv",
+            "    except:",
+            "        return 0.0",
+            "x_list = [clean_float(v) for v in x_list]",
+            "fun_list = [clean_float(v) for v in fun_list]",
+            "result = {",
+            " 'x': x_list,",
+            " 'fun': fun_list,",
+            " 'success': success,",
+            " 'status': status,",
+            " 'message': message,",
+            " 'nfev': nfev,",
+            " 'initialResidualNorm': clean_float(initial_norm),",
+            " 'residualNorm': clean_float(final_norm)",
+            "}",
+            "result",
+        ]
+        py_code = "\n".join(lines)
+        py_res = await run_python_async(py_code)
+        if hasattr(py_res, 'to_py'):
+            try:
+                py_res = py_res.to_py()
+            except Exception:
+                pass
+        if isinstance(py_res, str):
+            try:
+                py_res = json.loads(py_res)
+            except Exception:
+                pass
+        if not isinstance(py_res, dict):
+            raise RuntimeError(f"Pyodide returned non-dict: {str(py_res)[:200]}")
+        app.result = py_res
+        app.status = 'Converged' if py_res.get('success') else 'Solver stopped without convergence'
     except Exception as error:
         app.error = str(error)[:400]
         app.status = 'Solve failed'
         app.result = None
     finally:
         app.busy = False
+
+
 
 def onAppStart(app):
     app.width = 1050
