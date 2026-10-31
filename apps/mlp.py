@@ -504,10 +504,9 @@ async def train_mlp(app):
     app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}% - 100% Complete"
     cache_weights_now(app)
 
-# === FINAL V7: User's canonical pattern - window.Image.new() + bind load + getImageData ===
-# === FINAL V7: User's canonical pattern - window.Image.new() + bind load + getImageData ===
+# === FINAL V8: Canvas drawImage scaling, not manual Python sampling, fixes half-black ===
+# === FINAL V8: Canvas drawImage scaling, not manual Python sampling, fixes half-black ===
 async def process_upload_to_28x28(source):
-    # source is File - create blob URL
     previewUrl=None
     object_url=None
     try:
@@ -520,26 +519,22 @@ async def process_upload_to_28x28(source):
                 object_url=None
         if object_url:
             previewUrl=object_url
-    except Exception as e:
-        print(f"createObjectURL failed {e}")
+    except:
         previewUrl=None
 
     if previewUrl is None:
         raise ValueError("Could not create blob URL")
 
-    # Canvas for source
     src_canvas=document.createElement("canvas")
     src_canvas.width=384
     src_canvas.height=384
 
     fut=aio.Future()
 
-    # Use window.Image.new() as per user's snippet
     img=window.Image.new()
 
     def loaded(event):
         try:
-            # Get actual image size
             try:
                 w=int(getattr(img, "naturalWidth", 0) or getattr(img, "width", 0) or 384)
                 h=int(getattr(img, "naturalHeight", 0) or getattr(img, "height", 0) or 384)
@@ -547,7 +542,6 @@ async def process_upload_to_28x28(source):
                 w=384; h=384
             if w==0: w=384
             if h==0: h=384
-            # Scale to max 384 if needed (already from blob, but ensure)
             max_dim=384
             if max(w,h) > max_dim:
                 sc=max_dim / max(w,h)
@@ -563,30 +557,15 @@ async def process_upload_to_28x28(source):
                 pass
             ctx.drawImage(img, 0, 0, w, h)
 
-            # Always wait for load before getImageData - as user said
-            data=ctx.getImageData(0, 0, w, h)
-            # Process to 28x28 vector
-            src_pixels=data.data
-            if hasattr(src_pixels,"to_py"):
-                try: src_pixels=src_pixels.to_py()
-                except: pass
-            try:
-                src_list=list(src_pixels)
-            except:
-                src_list=[]
-
-            expected=w*h*4
-            if len(src_list) < expected:
-                src_list = src_list + [255]*(expected - len(src_list))
-
+            # Now scale using canvas drawImage (browser native, no manual sampling bug)
             target=28
             if w == h:
-                scale = target / w if w!=0 else 1
                 inter_w=target
                 inter_h=target
                 crop_x=0
                 crop_y=0
                 is_square=True
+                scale = target / w if w!=0 else 1
             else:
                 scale = target / min(w, h) if min(w,h)!=0 else 1
                 inter_w=int(round(w*scale))
@@ -597,26 +576,46 @@ async def process_upload_to_28x28(source):
                 crop_y=(inter_h - target)//2 if inter_h>target else 0
                 is_square=False
 
+            inter_canvas=document.createElement("canvas")
+            inter_canvas.width=inter_w
+            inter_canvas.height=inter_h
+            ictx=inter_canvas.getContext("2d")
+            ictx.imageSmoothingEnabled=True
+            try:
+                ictx.imageSmoothingQuality="high"
+            except:
+                pass
+            ictx.drawImage(src_canvas, 0,0,w,h, 0,0,inter_w,inter_h)
+
+            dst_canvas=document.createElement("canvas")
+            dst_canvas.width=target
+            dst_canvas.height=target
+            dctx=dst_canvas.getContext("2d")
+            dctx.imageSmoothingEnabled=True
+            try:
+                dctx.imageSmoothingQuality="high"
+            except:
+                pass
+            dctx.drawImage(inter_canvas, crop_x, crop_y, target, target, 0,0,target,target)
+
+            dst_data=dctx.getImageData(0,0,target,target)
+            dst_pixels=dst_data.data
+            if hasattr(dst_pixels,"to_py"):
+                try: dst_pixels=dst_pixels.to_py()
+                except: pass
+            try:
+                dst_list=list(dst_pixels)
+            except:
+                dst_list=[]
+
             vec=[]
-            for dy in range(target):
-                for dx in range(target):
-                    ix=dx + crop_x
-                    iy=dy + crop_y
-                    sx=ix / scale if scale!=0 else 0
-                    sy=iy / scale if scale!=0 else 0
-                    sx_i=int(round(sx))
-                    sy_i=int(round(sy))
-                    if sx_i<0: sx_i=0
-                    if sy_i<0: sy_i=0
-                    if sx_i>=w: sx_i=w-1
-                    if sy_i>=h: sy_i=h-1
-                    idx=(sy_i*w + sx_i)*4
-                    try:
-                        r=src_list[idx]; g=src_list[idx+1]; b=src_list[idx+2]
-                    except:
-                        r=g=b=255
-                    gray=(0.299*r+0.587*g+0.114*b)/255.0
-                    vec.append(gray)
+            for i in range(0, len(dst_list), 4):
+                try:
+                    r=dst_list[i]; g=dst_list[i+1]; b=dst_list[i+2]
+                except:
+                    r=g=b=255
+                gray=(0.299*r+0.587*g+0.114*b)/255.0
+                vec.append(gray)
 
             if len(vec)==784:
                 avg=sum(vec)/len(vec)
@@ -627,7 +626,6 @@ async def process_upload_to_28x28(source):
                     vec=[(v-mn)/(mx-mn) for v in vec]
                 vec=[max(0.0,min(1.0,v)) for v in vec]
 
-            # Build 140x140 display from vec
             big_canvas=document.createElement("canvas")
             big_canvas.width=140; big_canvas.height=140
             bctx=big_canvas.getContext("2d")
@@ -635,9 +633,9 @@ async def process_upload_to_28x28(source):
             bctx.fillRect(0,0,140,140)
             for y in range(target):
                 for x in range(target):
-                    i=y*target + x
-                    if i>=len(vec): continue
-                    v=vec[i]
+                    idx=y*target + x
+                    if idx>=len(vec): continue
+                    v=vec[idx]
                     gv=int(v*255)
                     bctx.fillStyle=f"rgb({gv},{gv},{gv})"
                     bctx.fillRect(x*5, y*5, 5, 5)
@@ -647,7 +645,7 @@ async def process_upload_to_28x28(source):
             fut.set_result(result)
         except Exception as ex:
             import traceback
-            print(f"loaded handler failed {ex}")
+            print(f"loaded failed {ex}")
             print(traceback.format_exc())
             try:
                 fut.set_result(None)
@@ -661,14 +659,23 @@ async def process_upload_to_28x28(source):
         except:
             pass
 
-    img.bind("load", loaded)
-    img.bind("error", on_error)
-    # Set src AFTER binding - as per user's snippet
-    img.setAttribute("src", previewUrl)
+    try:
+        img.bind("load", loaded)
+        img.bind("error", on_error)
+    except:
+        try:
+            img.onload=loaded
+            img.onerror=on_error
+        except:
+            pass
+
+    try:
+        img.setAttribute("src", previewUrl)
+    except:
+        pass
 
     result=await fut
 
-    # Revoke blob URL
     if object_url is not None:
         try:
             window.URL.revokeObjectURL(object_url)
@@ -679,9 +686,11 @@ async def process_upload_to_28x28(source):
                 pass
 
     if result is None:
-        raise ValueError("Image load failed")
+        raise ValueError("Image processing failed")
 
     return result
+
+
 
 
 
