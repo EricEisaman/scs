@@ -2,6 +2,7 @@ from scs import *
 from browser import document, aio
 from extensions.pyodide import root
 import re
+import json
 
 BG = rgb(15, 20, 23)
 PANEL = rgb(25, 33, 37)
@@ -419,82 +420,10 @@ x - y = 1</textarea>
 
 async def _solve(app, residual_expressions, variable_names, initial_values):
     try:
-        code_lines = [
-            "import json, math, traceback",
-            "import numpy as np",
-            "from scipy.optimize import root as _scipy_root",
-            f"variables = {json.dumps(variable_names)}",
-            f"exprs = {json.dumps(residual_expressions)}",
-            f"x0 = np.array({json.dumps(initial_values)}, dtype=float)",
-            "def _log(a, b=None):",
-            "    a=np.asarray(a)",
-            "    if b is None:",
-            "        return np.log(a)",
-            "    return np.log(a)/np.log(b)",
-            "def _ln(a): return np.log(a)",
-            "def _sec(a): return 1/np.cos(a)",
-            "def _csc(a): return 1/np.sin(a)",
-            "def _cot(a): return 1/np.tan(a)",
-            "_env_base = {",
-            "    'sin': np.sin, 'cos': np.cos, 'tan': np.tan,",
-            "    'asin': np.arcsin, 'acos': np.arccos, 'atan': np.arctan,",
-            "    'sinh': np.sinh, 'cosh': np.cosh, 'tanh': np.tanh,",
-            "    'exp': np.exp, 'sqrt': np.sqrt,",
-            "    'log': _log, 'ln': _ln,",
-            "    'sec': _sec, 'csc': _csc, 'cot': _cot,",
-            "    'pi': np.pi, 'e': np.e,",
-            "    'abs': np.abs,",
-            "}",
-            "def _func(x):",
-            "    env = dict(_env_base)",
-            "    for name, val in zip(variables, x):",
-            "        env[name]=val",
-            "    res=[]",
-            "    for e in exprs:",
-            "        try:",
-            "            v = eval(e, {'__builtins__': {}}, env)",
-            "            res.append(float(v))",
-            "        except Exception as ex:",
-            "            raise RuntimeError(f'Failed eval {e}: {ex}')",
-            "    return np.array(res)",
-            "try:",
-            "    sol = _scipy_root(_func, x0, method='hybr')",
-            "    init_res = _func(x0)",
-            "    result = {",
-            "        'status': 'ok',",
-            "        'x': sol.x.tolist(),",
-            "        'fun': sol.fun.tolist(),",
-            "        'success': bool(sol.success),",
-            "        'nfev': int(getattr(sol, 'nfev', 0)),",
-            "        'message': str(getattr(sol, 'message', '')),",
-            "        'residualNorm': float(np.linalg.norm(sol.fun)),",
-            "        'initialResidualNorm': float(np.linalg.norm(init_res)),",
-            "    }",
-            "except Exception as e:",
-            "    result = {'status':'error','msg':str(e),'trace':traceback.format_exc()}",
-            "result",
-        ]
-        code = "\n".join(code_lines)
-        raw_res = await _pyodide_run(code)
-        py_res = raw_res
-        if hasattr(py_res, 'to_py'):
-            try:
-                py_res = py_res.to_py()
-            except Exception:
-                pass
-        if isinstance(py_res, str):
-            try:
-                py_res = json.loads(py_res)
-            except Exception:
-                pass
-        if not isinstance(py_res, dict):
-            raise RuntimeError(f"Pyodide returned non-dict: {str(py_res)[:200]}")
-        if py_res.get('status') != 'ok':
-            raise RuntimeError(py_res.get('msg','Unknown error') + "\n" + py_res.get('trace','')[:400])
-        app.result = py_res
-        app.status = 'Converged' if py_res.get('success') else 'Solver stopped without convergence'
+        app.result = await root(residual_expressions, initial_values, variables=variable_names)
+        app.status = 'Converged' if app.result.get('success') else 'Solver stopped without convergence'
     except Exception as error:
-        app.error = str(error)[:500]
+        app.error = str(error)[:400]
         app.status = 'Solve failed'
         app.result = None
     finally:
