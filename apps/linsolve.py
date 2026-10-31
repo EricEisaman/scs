@@ -1,10 +1,7 @@
-
 from scs import *
-from browser import document, aio
-from extensions.pyodide import run_python_async, load_package, load_packages_from_imports, window
+from browser import document, aio, window
 import re
 import json
-import traceback
 
 BG = rgb(15, 20, 23)
 PANEL = rgb(25, 33, 37)
@@ -17,81 +14,16 @@ RED = rgb(244, 111, 104)
 _PANEL_ID = 'linear-solver-controls'
 
 _EXAMPLES = {
-'nonlinear': ('Nonlinear system', 'x^2 + y^2 = 25\\nx - y = 1', 'x, y', '2, 1'),
-'exp-command': ('Exponential: exp(x)', r'\\exp x = 2', 'x', '0.5'),
+'nonlinear': ('Nonlinear system', 'x^2 + y^2 = 25\nx - y = 1', 'x, y', '2, 1'),
+'exp-command': ('Exponential: exp(x)', r'\exp x = 2', 'x', '0.5'),
 'exp-power': ('Exponential: e^x', 'e^x = 2', 'x', '0.5'),
-'log-natural': ('Natural logarithm: ln(x)', r'\\ln x = 1', 'x', '2.5'),
-'log-base': ('Base logarithm: log_2(x)', r'\\log_{2}x = 3', 'x', '7'),
-'trig-sincos': ('Trigonometric: sin(x) = cos(x)', r'\\sin x = \\cos x', 'x', '0.7'),
-'trig-tan': ('Trigonometric: tan(x) = 1', r'\\tan x = 1', 'x', '0.7'),
+'log-natural': ('Natural logarithm: ln(x)', r'\ln x = 1', 'x', '2.5'),
+'log-base': ('Base logarithm: log_2(x)', r'\log_{2}x = 3', 'x', '7'),
+'trig-sincos': ('Trigonometric: sin(x) = cos(x)', r'\sin x = \cos x', 'x', '0.7'),
+'trig-tan': ('Trigonometric: tan(x) = 1', r'\tan x = 1', 'x', '0.7'),
 'matrix-brackets': ('Ax=b: bracket notation', '[[2,1],[1,3]] * [x,y] = [5,7]', 'x, y', '1, 1'),
-'matrix-latex': (
-'Ax=b: LaTeX bmatrix',
-r'\\begin{bmatrix}2 & 1 \\\\ 1 & 3\\end{bmatrix}\\begin{bmatrix}x \\\\ y\\end{bmatrix}=\\begin{bmatrix}5 \\\\ 7\\end{bmatrix}',
-'x, y', '1, 1'
-)
+'matrix-latex': ('Ax=b: LaTeX bmatrix', r'\begin{bmatrix}2 & 1 \\ 1 & 3\end{bmatrix}\begin{bmatrix}x \\ y\end{bmatrix}=\begin{bmatrix}5 \\ 7\end{bmatrix}', 'x, y', '1, 1')
 }
-
-# --- New Pyodide extension handling (resilient) ---
-try:
-    import extensions.pyodide as _py_ext
-    PYODIDE_EXT_OK = True
-    _py_candidates = ['run_python_async','run_python','run','exec','evaluate','run_code','execute','runPythonAsync']
-except Exception:
-    PYODIDE_EXT_OK = False
-    _py_ext = None
-    _py_candidates = []
-
-async def _unwrap_pyodide_result(res, max_depth=12):
-    for _ in range(max_depth):
-        if res is None:
-            break
-        if hasattr(res, 'to_py'):
-            try:
-                tmp = res.to_py()
-                if tmp is not None:
-                    res = tmp
-            except Exception:
-                pass
-        try:
-            if hasattr(res, '__await__'):
-                res = await res
-                continue
-            if hasattr(res, 'then') and callable(getattr(res, 'then')):
-                res = await res
-                continue
-            s = str(res)
-            if '<coroutine' in s.lower() and isinstance(res, str):
-                return None
-        except Exception:
-            pass
-        break
-    return res
-
-async def _pyodide_run(code_str):
-    if PYODIDE_EXT_OK and _py_ext is not None:
-        for name in _py_candidates:
-            try:
-                fn = getattr(_py_ext, name, None)
-                if fn is None:
-                    continue
-                raw = fn(code_str)
-                res = await _unwrap_pyodide_result(raw)
-                if res is None:
-                    continue
-                if isinstance(res, str) and '<coroutine' in res.lower():
-                    continue
-                return res
-            except Exception:
-                continue
-    try:
-        if hasattr(window, 'pyodide') and window.pyodide is not None:
-            raw = await window.pyodide.runPythonAsync(code_str)
-            res = await _unwrap_pyodide_result(raw)
-            return res
-    except Exception:
-        pass
-    return None
 
 def _math_group(source, position):
     while position < len(source) and source[position].isspace():
@@ -101,21 +33,17 @@ def _math_group(source, position):
     depth = 1
     start = position + 1
     position += 1
-    while position < len(source) and depth:
+    while position < len(source) and depth > 0:
         if source[position] == '{':
             depth += 1
         elif source[position] == '}':
             depth -= 1
+            if depth == 0:
+                return source[start:position], position + 1
         position += 1
-    if depth:
-        raise ValueError('Unclosed LaTeX group')
-    return source[start:position - 1], position
+    raise ValueError('Unclosed braced LaTeX argument')
 
 def _math_argument(source, position):
-    while position < len(source) and source[position].isspace():
-        position += 1
-    if source.startswith('\\\\left', position):
-        position += 5
     while position < len(source) and source[position].isspace():
         position += 1
     if position >= len(source):
@@ -134,8 +62,8 @@ def _math_argument(source, position):
                     return source[start + 1:position], position + 1
             position += 1
         raise ValueError('Unclosed function argument')
-    if source[position] == '\\\\':
-        match = re.match(r'\\\\([A-Za-z]+)', source[position:])
+    if source[position] == '\\':
+        match = re.match(r'\\([A-Za-z]+)', source[position:])
         if not match:
             raise ValueError('Invalid LaTeX command in function argument')
         command_end = position + len(match.group(0))
@@ -151,7 +79,7 @@ def _math_argument(source, position):
             return source[start:position], position
         return match.group(0), command_end
     start = position
-    match = re.match(r'[A-Za-z][A-Za-z0-9]*|[0-9]+(?:\\.[0-9]+)?', source[position:])
+    match = re.match(r'[A-Za-z][A-Za-z0-9]*|[0-9]+(?:\.[0-9]+)?', source[position:])
     if not match:
         raise ValueError('Expected a variable, number, or grouped LaTeX argument')
     position += len(match.group(0))
@@ -239,7 +167,6 @@ def _latex_expression(source):
         pass
     return expression.strip()
 
-
 def _split_top_level(source, delimiter):
     parts = []
     start = 0
@@ -286,14 +213,23 @@ def _plain_matrix(source):
     rows = _split_top_level(contents, ';')
     if len(rows) == 1:
         rows = _split_top_level(contents, ',')
-    return [_plain_vector(row) for row in rows]
+        if all(r.strip().startswith('[') for r in rows):
+            return [_plain_vector(row) for row in rows]
+    result = []
+    for row in rows:
+        row = row.strip()
+        if row.startswith('['):
+            result.append(_plain_vector(row))
+        else:
+            result.append(_split_top_level(row, ','))
+    return result
 
 def _latex_matrices(source):
     blocks = []
     remaining = []
     cursor = 0
     while True:
-        match = re.search(r'\\\\begin\\{([A-Za-z]+)\\}', source[cursor:])
+        match = re.search(r'\\begin\{([A-Za-z]+)\}', source[cursor:])
         if not match:
             remaining.append(source[cursor:])
             break
@@ -302,13 +238,13 @@ def _latex_matrices(source):
         environment = match.group(1)
         if environment not in ('matrix', 'bmatrix', 'pmatrix'):
             raise ValueError('Use matrix, bmatrix, or pmatrix notation')
-        end_token = r'\\end{' + environment + '}'
+        end_token = '\\end{' + environment + '}'
         end = source.find(end_token, command_end)
         if end < 0:
             raise ValueError('Unclosed LaTeX matrix')
         remaining.append(source[cursor:start])
         body = source[command_end:end]
-        rows = [row.strip() for row in re.split(r'\\\\|\\n', body) if row.strip()]
+        rows = [row.strip() for row in re.split(r'\\\\|\n', body) if row.strip()]
         blocks.append([[_latex_expression(cell.strip()) for cell in row.split('&')] for row in rows])
         cursor = end + len(end_token)
     return blocks, ''.join(remaining)
@@ -324,12 +260,12 @@ def _matrix_residuals(equation, variables):
     if equation.count('=') != 1:
         raise ValueError('Enter one Ax=b matrix equation at a time')
     left, right = equation.split('=')
-    if '\\\\begin{' in equation:
+    if '\\begin{' in equation:
         left_blocks, left_text = _latex_matrices(left)
         right_blocks, right_text = _latex_matrices(right)
         if len(left_blocks) != 2 or len(right_blocks) != 1:
             raise ValueError('Ax=b needs one matrix, one variable vector, and one result vector')
-        left_text = re.sub(r'\\\\(?:cdot|times)|\\*', '', left_text).strip()
+        left_text = re.sub(r'\\(?:cdot|times)|\*', '', left_text).strip()
         if left_text or right_text.strip():
             raise ValueError('Unexpected text outside the matrix and vectors')
         matrix = left_blocks[0]
@@ -338,7 +274,7 @@ def _matrix_residuals(equation, variables):
     else:
         matrix_text, left_remainder = _take_bracket_group(left)
         matrix = _plain_matrix(matrix_text)
-        left_remainder = re.sub(r'^(?:\\\\cdot|\\\\times|\\*)\\s*', '', left_remainder).strip()
+        left_remainder = re.sub(r'^(?:\\cdot|\\times|\*)\s*', '', left_remainder).strip()
         vector_text, left_remainder = _take_bracket_group(left_remainder)
         if left_remainder:
             raise ValueError('Unexpected text after the variable vector')
@@ -374,7 +310,7 @@ def _matrix_residuals(equation, variables):
     return residuals
 
 def _residuals(equations, variables=None):
-    if '\\\\begin{' in equations or equations.lstrip().startswith('[['):
+    if '\\begin{' in equations or equations.lstrip().startswith('[['):
         return _matrix_residuals(equations.strip().replace('$', ''), variables or [])
     residuals = []
     for line in equations.splitlines():
@@ -402,69 +338,35 @@ def _install_controls(app):
     panel = document.createElement('section')
     panel.id = _PANEL_ID
     panel.style.cssText = (
-        'box-sizing:border-box;width:1050px;max-width:95vw;padding:20px 24px 18px;'
-        'margin:0 0 12px;background:#191f22;border:1px solid #34413e;color:#e5eee8;'
-        'font:13px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;'
+        'display:grid;gap:14px;padding:16px 20px;background:#0f1417;'
+        'border:1px solid #1f2a28;margin:0 0 16px 0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;'
     )
-    panel.innerHTML = """
-<div style="display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:14px">
-<strong style="font-size:18px;color:#66e0b1">ROOT / NONLINEAR SYSTEMS</strong>
-<span style="color:#899d97">SciPy optimize.root · Pyodide worker · resilient extension</span>
-</div>
-<form id="solver-form" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:12px;align-items:end">
-<label style="display:grid;grid-column:1/-1;gap:6px;color:#b6c6bf">Example
-<select id="solver-example" style="box-sizing:border-box;width:100%;max-width:420px;background:#0f1417;color:#e5eee8;border:1px solid #43524d;padding:10px;font:13px ui-monospace,SFMono-Regular,Consolas,monospace">
-<option value="nonlinear" selected>Nonlinear system</option>
-<option value="exp-command">Exponential: exp(x)</option>
-<option value="exp-power">Exponential: e^x</option>
-<option value="log-natural">Natural logarithm: ln(x)</option>
-<option value="log-base">Base logarithm: log_2(x)</option>
-<option value="trig-sincos">Trigonometric: sin(x) = cos(x)</option>
-<option value="trig-tan">Trigonometric: tan(x) = 1</option>
-<option value="matrix-brackets">Ax=b: bracket notation</option>
-<option value="matrix-latex">Ax=b: LaTeX bmatrix</option>
-</select>
-</label>
-<label style="display:grid;grid-column:1/-1;gap:6px;color:#b6c6bf">Equations <span style="color:#899d97">one LaTeX-style equality per line</span>
-<textarea id="solver-equations" rows="3" spellcheck="false" style="box-sizing:border-box;width:100%;resize:vertical;background:#0f1417;color:#e5eee8;border:1px solid #43524d;padding:9px;font:13px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace">x^2 + y^2 = 25
-x - y = 1</textarea>
-</label>
-<label style="display:grid;gap:6px;color:#b6c6bf">Variables
-<input id="solver-variables" value="x, y" autocomplete="off" style="box-sizing:border-box;width:100%;background:#0f1417;color:#e5eee8;border:1px solid #43524d;padding:10px;font:13px ui-monospace,SFMono-Regular,Consolas,monospace">
-</label>
-<label style="display:grid;gap:6px;color:#b6c6bf">Initial guess
-<input id="solver-initial" value="2, 1" autocomplete="off" style="box-sizing:border-box;width:100%;background:#0f1417;color:#e5eee8;border:1px solid #43524d;padding:10px;font:13px ui-monospace,SFMono-Regular,Consolas,monospace">
-</label>
-<button id="solver-submit" type="submit" style="height:39px;padding:0 16px;border:0;background:#66e0b1;color:#10201a;font-weight:bold;font-family:inherit;cursor:pointer">Solve</button>
-</form>
-<div id="solver-note" style="margin-top:10px;color:#899d97">Supports powers, fractions, roots, exp, ln, log bases, and trig functions in radians. For Ax=b, try [[2,1],[1,3]] * [x,y] = [5,7]. First solve downloads SciPy via Pyodide worker.</div>
-"""
-    container = document.getElementById('canvas-container')
-    container.parentNode.insertBefore(panel, container)
+    options = ''.join(f'<option value="{k}">{v[0]}</option>' for k, v in _EXAMPLES.items())
+    panel.innerHTML = '<form id="solver-form" style="display:grid;grid-template-columns:1fr 1fr auto;gap:12px;align-items:end"><label style="display:grid;gap:6px;color:#b6c6bf">Example<select id="solver-example" style="background:#0f1417;color:#e5eee8;border:1px solid #43524d;padding:10px;font:13px ui-monospace">' + options + '</select></label><label style="display:grid;grid-column:1/-1;gap:6px;color:#b6c6bf">Equations <span style="color:#899d97">one LaTeX-style equality per line</span><textarea id="solver-equations" rows="3" spellcheck="false" style="box-sizing:border-box;width:100%;resize:vertical;background:#0f1417;color:#e5eee8;border:1px solid #43524d;padding:9px;font:13px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace">x^2 + y^2 = 25\nx - y = 1</textarea></label><label style="display:grid;gap:6px;color:#b6c6bf">Variables<input id="solver-variables" value="x, y" autocomplete="off" style="box-sizing:border-box;width:100%;background:#0f1417;color:#e5eee8;border:1px solid #43524d;padding:10px;font:13px ui-monospace,SFMono-Regular,Consolas,monospace"></label><label style="display:grid;gap:6px;color:#b6c6bf">Initial guess<input id="solver-initial" value="2, 1" autocomplete="off" style="box-sizing:border-box;width:100%;background:#0f1417;color:#e5eee8;border:1px solid #43524d;padding:10px;font:13px ui-monospace,SFMono-Regular,Consolas,monospace"></label><button id="solver-submit" type="submit" style="height:39px;padding:0 16px;border:0;background:#66e0b1;color:#10201a;font-weight:bold;font-family:inherit;cursor:pointer">Solve</button></form>'
+    document.body.insertBefore(panel, document.body.firstChild)
 
     def submit(event):
         event.preventDefault()
-        variable_names = [item.strip() for item in document['solver-variables'].value.split(',')]
         try:
-            residual_expressions = _residuals(document['solver-equations'].value, variable_names)
-            initial_values = _parse_csv_numbers(document['solver-initial'].value, 'Initial guess')
+            equations = document['solver-equations'].value
+            variables_text = document['solver-variables'].value
+            initial_text = document['solver-initial'].value
+            variable_names = [name.strip() for name in variables_text.split(',') if name.strip()]
+            initial_values = _parse_csv_numbers(initial_text, 'Initial guess')
             if len(variable_names) != len(initial_values):
-                raise ValueError('Enter one initial value for each variable')
-            if len(residual_expressions) != len(variable_names):
-                raise ValueError('For root finding, equations and variables must have the same count')
+                raise ValueError('Variables and Initial guess counts must match')
+            residual_expressions = _residuals(equations, variable_names)
+            app.equationLines = [line.strip() for line in equations.splitlines() if line.strip()]
+            app.variableNames = variable_names
+            app.initialValues = initial_values
+            app.result = None
+            app.error = None
+            app.status = 'Starting Pyodide and loading SciPy...'
+            app.busy = True
+            aio.run(_solve(app, residual_expressions, variable_names, initial_values))
         except Exception as error:
             app.error = str(error)
             app.status = 'Check the system'
-            app.result = None
-            return
-        app.equationLines = [line.strip() for line in document['solver-equations'].value.splitlines() if line.strip()]
-        app.variableNames = variable_names
-        app.initialValues = initial_values
-        app.result = None
-        app.error = None
-        app.status = 'Starting Pyodide worker and loading SciPy...'
-        app.busy = True
-        aio.run(_solve(app, residual_expressions, variable_names, initial_values))
 
     def load_example(event):
         label, equations, variables, initial = _EXAMPLES[document['solver-example'].value]
@@ -602,14 +504,12 @@ async def _solve(app, residual_expressions, variable_names, initial_values):
     finally:
         app.busy = False
 
-
-
 def onAppStart(app):
     app.width = 1050
     app.height = 700
     app.stepsPerSecond = 20
     app.background = BG
-    app.status = 'Ready \u00b7 enter a system and solve'
+    app.status = 'Ready · enter a system and solve'
     app.busy = False
     app.error = None
     app.result = None
@@ -671,7 +571,7 @@ def _format_number(value, precision=10):
 def redrawAll(app):
     drawRect(0, 0, app.width, app.height, fill=BG)
     drawLabel('NONLINEAR ROOT FINDER', 54, 48, size=22, fill=INK, bold=True, align='left')
-    drawLabel('SCIPY / OPTIMIZE.ROOT \u00b7 PYODIDE WORKER v2', 54, 77, size=12, fill=MINT, align='left')
+    drawLabel('SCIPY / OPTIMIZE.ROOT · PYODIDE WORKER v2', 54, 77, size=12, fill=MINT, align='left')
     drawLine(54, 105, 996, 105, fill=rgb(55, 69, 64), lineWidth=1)
     drawLabel(app.status, 54, 140, size=15, fill=GOLD if app.busy else MINT if app.result and app.result.get('success') else RED if app.error else MUTED, align='left')
     if app.error:
