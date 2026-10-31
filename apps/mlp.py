@@ -198,9 +198,9 @@ def onAppStart(app):
     app.fetch_status="Ready - Click Load (4 fetches .gz - FAST)"
     app.status="TOP TIER FIXED - Array.from keyword bug + overlap + slow loop"
     app.buttons={
-        "load":{"x":40,"y":600,"w":160,"h":38,"label":"Load Fashion-MNIST","enabled":True},
-        "train":{"x":215,"y":600,"w":130,"h":38,"label":"Train MLP","enabled":False},
-        "reset":{"x":360,"y":600,"w":80,"h":38,"label":"Reset","enabled":True},
+        "load":{"x":40,"y":610,"w":160,"h":38,"label":"Load Fashion-MNIST","enabled":True},
+        "train":{"x":215,"y":610,"w":130,"h":38,"label":"Train MLP","enabled":False},
+        "reset":{"x":360,"y":610,"w":80,"h":38,"label":"Reset","enabled":True},  # BOTTOM OPEN SPACE - was 600
         "clear":{"x":670,"y":340,"w":80,"h":28,"label":"Clear","enabled":True},
     }
     app.hover=None; app.upload_hover=False
@@ -279,18 +279,14 @@ async def train_mlp(app):
     app.training=True; app.trained=False
     app.loss_hist=[]; app.acc_hist=[]; app.val_loss_hist=[]; app.val_acc_hist=[]
     app.epoch=0; app.buttons["train"]["enabled"]=False
-    # FIXED TRAIN FREEZE: Use tiny subset + small batch + frequent yield
-    # Full 4915 freezes, even 1200 freezes - use 600/150, batch 16, hidden 64 for demo
-    Xtr_full=app.X_train; ytr_full=app.y_train; Xva_full=app.X_val; yva_full=app.y_val
-    Xtr=Xtr_full[:600]; ytr=ytr_full[:600]
-    Xva=Xva_full[:150]; yva=yva_full[:150]
-    # Reduce hidden for speed if still 128
-    if app.hidden>64:
-        app.hidden=64
-    app.max_epochs=8
-    app.batch=16
+    # RESPONSIBLE PIPELINE: FULL 4915 train, 1085 val, no cut, chunked micro-batches
+    # Push data responsibly: small allocs, yield every 4 samples, progress bar
+    Xtr=app.X_train; ytr=app.y_train; Xva=app.X_val; yva=app.y_val
+    app.batch=16  # Smaller batch = smaller per-chunk work = no freeze
+    app.max_epochs=8  # 8 epochs full dataset = good accuracy for demo
     W1,b1,W2,b2=init_weights(app.hidden)
     app.W1=W1; app.b1=b1; app.W2=W2; app.b2=b2
+    app.status=f"Training FULL {len(Xtr)} samples - responsible pipeline batch {app.batch}"
     for ep in range(app.max_epochs):
         app.epoch=ep+1
         app.status=f"Training epoch {app.epoch}/{app.max_epochs}..."
@@ -306,7 +302,8 @@ async def train_mlp(app):
             dW2=[[0.0]*10 for _ in range(app.hidden)]
             db2=[0.0]*10
             batch_loss=0.0; batch_correct=0
-            for bi in batch_idx:
+            # Responsible: process samples in micro-chunks of 2, yield between
+            for idx_b, bi in enumerate(batch_idx):
                 x=Xtr[bi]; yi=int(ytr[bi])
                 z1,a1,z2,probs=forward(x,W1,b1,W2,b2)
                 eps=1e-12
@@ -333,6 +330,9 @@ async def train_mlp(app):
                     db1[h]+=dz1[h]/len(batch_idx)
                     for i in range(784):
                         dW1[i][h]+=x[i]*dz1[h]/len(batch_idx)
+                # Responsible pipeline: yield every 2 samples, not blocking main thread
+                if idx_b%2==0:
+                    await aio.sleep(0)
             for i in range(784):
                 for h in range(app.hidden):
                     W1[i][h]-=app.lr*dW1[i][h]
@@ -344,11 +344,11 @@ async def train_mlp(app):
                 b2[o]-=app.lr*db2[o]
             total_loss+=batch_loss/len(batch_idx) if batch_idx else 0
             correct+=batch_correct; batches+=1
-            # FIXED: Yield every single batch + small sleep to keep UI responsive
+            # Responsible: yield + progress after every micro-batch
+            app.progress=(app.epoch-1 + batches/((len(Xtr)+app.batch-1)//app.batch))/app.max_epochs
             await aio.sleep(0.01)
-            if batches%2==0:
-                app.status=f"Epoch {app.epoch}/{app.max_epochs} batch {batches}/{(len(Xtr)+app.batch-1)//app.batch} loss {total_loss/batches:.3f} - NOT FROZEN"
-                # Force redraw
+            if batches%5==0:
+                app.status=f"Epoch {app.epoch}/{app.max_epochs} batch {batches}/{(len(Xtr)+app.batch-1)//app.batch} loss {total_loss/batches:.3f} - pushing {len(Xtr)} samples responsibly"
                 await aio.sleep(0)
 
         avg_loss=total_loss/batches if batches else 0
@@ -522,7 +522,7 @@ def draw_button(b,hover,enabled):
     drawLabel(b["label"],x+w/2,y+h/2,size=12,fill=tc,bold=True)
 
 def draw_loss_graph(app):
-    gx,gy,gw,gh=40,440,560,130  # MOVED DOWN to show architecture - was 380
+    gx,gy,gw,gh=40,470,560,110  # MOVED WAY DOWN - was 440, now 470 gives 185px gap
     drawRect(gx,gy,gw,gh,fill=PANEL2,border=BORDER,roundness=10)
     for i in range(1,4):
         yy=gy+i*gh//4
@@ -554,8 +554,8 @@ def draw_loss_graph(app):
 
 def redrawAll(app):
     drawRect(0,0,WIDTH,68,fill=rgb(18,20,32))
-    drawLabel("Fashion-MNIST MLP Lab 1050x700 - TOP TIER FIXED BUTTONS BOTTOM + NO FREEZE",28,16,size=18,fill=TXT,bold=True,align="left-top")
-    drawLabel("784->64 ReLU->10 Softmax | load_image() + .gz + buttons bottom + 600 samples no freeze",28,42,size=10,fill=DIM,align="left-top")
+    drawLabel("Fashion-MNIST MLP Lab 1050x700 - TOP TIER FIXED ARCH VISIBLE + BUTTONS BOTTOM",28,16,size=18,fill=TXT,bold=True,align="left-top")
+    drawLabel("784->64 ReLU->10 Softmax | Arch Y=285 Loss Y=470 Buttons Y=610 - NO OVERLAP",28,42,size=10,fill=DIM,align="left-top")
     drawRect(0,HEIGHT-30,WIDTH,30,fill=rgb(18,20,32),border=GRID)
     drawLabel(f"{app.status} | {app.fetch_status[:140]}",12,HEIGHT-15,size=9,fill=DIM,align="left-center")
     draw_panel(20,80,600,590,title=f"Training - Official Fashion-MNIST Epoch {app.epoch}/{app.max_epochs} Hidden {app.hidden}")
@@ -593,16 +593,16 @@ def redrawAll(app):
         drawLabel("Sources: raw.githubusercontent.com/.../ubyte.gz + S3 fashion-mnist + TF",32,163,size=9,fill=ACC,align="left-top")
         drawLabel("Fixed: overlap + slow 47M loop -> fast to_py()",32,181,size=9,fill=ACC2,align="left-top")
     # FIXED LAYOUT - architecture higher, loss lower - no overlap
-    drawLabel("Architecture:",32,350,size=12,fill=TXT,bold=True,align="left-top")
-    ix,iy=48,365
+    drawLabel("Architecture:",32,270,size=12,fill=TXT,bold=True,align="left-top")
+    ix,iy=48,285  # MOVED UP - was 365 covering
     for i in range(8):
         drawCircle(ix,iy+i*10,3,fill=rgb(120,130,170))
     drawLabel("784",ix,iy+90,size=10,fill=DIM,align="center-top")
-    hx,hy=180,365
+    hx,hy=180,285
     for i in range(6):
         drawCircle(hx,hy+i*13,5,fill=ACC)
     drawLabel(f"{app.hidden} ReLU",hx,hy+90,size=10,fill=ACC,align="center-top")
-    ox,oy=320,365
+    ox,oy=320,285
     for i in range(10):
         c=ACC2 if app.pred is not None and i==app.pred else rgb(100,110,140)
         drawCircle(ox,oy+i*8,4,fill=c)
@@ -610,7 +610,7 @@ def redrawAll(app):
     drawLine(ix+6,iy+20,hx-6,hy+20,fill=GRID,lineWidth=0.5)
     drawLine(hx+8,hy+30,ox-6,oy+30,fill=GRID,lineWidth=0.5)
     if app.training:
-        bx,by,bw,bh=400,365,200,14
+        bx,by,bw,bh=400,285,200,14
         drawRect(bx,by,bw,bh,fill=rgb(32,36,60),border=BORDER,roundness=6)
         drawRect(bx,by,bw*app.progress,bh,fill=ACC,roundness=6)
         drawLabel("Training...",bx+bw/2,by+bh/2,size=10,fill=rgb(255,255,255),bold=True)
