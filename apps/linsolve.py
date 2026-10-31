@@ -1,9 +1,7 @@
-
 from scs import *
-from browser import document, aio, window
+from browser import document, aio
+from extensions.pyodide import root
 import re
-import json
-import traceback
 
 BG = rgb(15, 20, 23)
 PANEL = rgb(25, 33, 37)
@@ -16,111 +14,20 @@ RED = rgb(244, 111, 104)
 _PANEL_ID = 'linear-solver-controls'
 
 _EXAMPLES = {
-'nonlinear': ('Nonlinear system', 'x^2 + y^2 = 25\\nx - y = 1', 'x, y', '2, 1'),
-'exp-command': ('Exponential: exp(x)', r'\\exp x = 2', 'x', '0.5'),
+'nonlinear': ('Nonlinear system', 'x^2 + y^2 = 25\nx - y = 1', 'x, y', '2, 1'),
+'exp-command': ('Exponential: exp(x)', r'\exp x = 2', 'x', '0.5'),
 'exp-power': ('Exponential: e^x', 'e^x = 2', 'x', '0.5'),
-'log-natural': ('Natural logarithm: ln(x)', r'\\ln x = 1', 'x', '2.5'),
-'log-base': ('Base logarithm: log_2(x)', r'\\log_{2}x = 3', 'x', '7'),
-'trig-sincos': ('Trigonometric: sin(x) = cos(x)', r'\\sin x = \\cos x', 'x', '0.7'),
-'trig-tan': ('Trigonometric: tan(x) = 1', r'\\tan x = 1', 'x', '0.7'),
+'log-natural': ('Natural logarithm: ln(x)', r'\ln x = 1', 'x', '2.5'),
+'log-base': ('Base logarithm: log_2(x)', r'\log_{2}x = 3', 'x', '7'),
+'trig-sincos': ('Trigonometric: sin(x) = cos(x)', r'\sin x = \cos x', 'x', '0.7'),
+'trig-tan': ('Trigonometric: tan(x) = 1', r'\tan x = 1', 'x', '0.7'),
 'matrix-brackets': ('Ax=b: bracket notation', '[[2,1],[1,3]] * [x,y] = [5,7]', 'x, y', '1, 1'),
 'matrix-latex': (
 'Ax=b: LaTeX bmatrix',
-r'\\begin{bmatrix}2 & 1 \\\\ 1 & 3\\end{bmatrix}\\begin{bmatrix}x \\\\ y\\end{bmatrix}=\\begin{bmatrix}5 \\\\ 7\\end{bmatrix}',
+r'\begin{bmatrix}2 & 1 \\ 1 & 3\end{bmatrix}\begin{bmatrix}x \\ y\end{bmatrix}=\begin{bmatrix}5 \\ 7\end{bmatrix}',
 'x, y', '1, 1'
 )
 }
-
-# --- Pyodide extension - DEFINITIVE fix for coroutine leak ---
-try:
-    import extensions.pyodide as _py_ext
-    PYODIDE_EXT_OK = True
-    _py_candidates = ['run_python_async','run_python','run','exec','evaluate','run_code','execute','runPythonAsync']
-except Exception:
-    PYODIDE_EXT_OK = False
-    _py_ext = None
-    _py_candidates = []
-
-async def _unwrap_pyodide_result(res):
-    # Await until no more awaitable, then to_py
-    for _ in range(15):
-        if res is None:
-            break
-        # Await coroutine
-        if hasattr(res, '__await__'):
-            try:
-                res = await res
-                continue
-            except Exception:
-                break
-        # Await Promise
-        if hasattr(res, 'then') and callable(getattr(res, 'then')):
-            try:
-                res = await res
-                continue
-            except Exception:
-                break
-        # Convert proxy
-        if hasattr(res, 'to_py'):
-            try:
-                try:
-                    tmp = res.to_py(depth=10)
-                except TypeError:
-                    tmp = res.to_py()
-                try:
-                    if hasattr(res, 'destroy'):
-                        res.destroy()
-                except Exception:
-                    pass
-                if tmp is not res:
-                    res = tmp
-                    continue
-            except Exception:
-                pass
-        break
-    return res
-
-async def _pyodide_run(code_str):
-    # DEFINITIVE: never return coroutine object, always await fully
-    if PYODIDE_EXT_OK and _py_ext is not None:
-        for name in _py_candidates:
-            fn = getattr(_py_ext, name, None)
-            if fn is None:
-                continue
-            try:
-                # Try direct await first - this is correct API: await fn(code)
-                try:
-                    res = await fn(code_str)
-                except TypeError:
-                    # fn may be sync, calling it returns coroutine that needs await
-                    tmp = fn(code_str)
-                    res = await tmp
-                # Unwrap any remaining proxy layers
-                res = await _unwrap_pyodide_result(res)
-                # Safety: if still coroutine after all awaits, force await one more time
-                if hasattr(res, '__await__'):
-                    try:
-                        res = await res
-                        res = await _unwrap_pyodide_result(res)
-                    except Exception:
-                        continue
-                if res is None:
-                    continue
-                if isinstance(res, str) and '<coroutine' in res.lower():
-                    continue
-                # Success - return whatever (dict, etc)
-                return res
-            except Exception:
-                continue
-    # Fallback window.pyodide
-    try:
-        if hasattr(window, 'pyodide') and window.pyodide is not None:
-            res = await window.pyodide.runPythonAsync(code_str)
-            res = await _unwrap_pyodide_result(res)
-            return res
-    except Exception:
-        pass
-    return None
 
 
 def _math_group(source, position):
@@ -260,9 +167,7 @@ def _latex_expression(source):
         else:
             output.append(source[position])
         position += 1
-    expression = ''.join(output).replace('^', '**')
-    functions = r'(?:sin|cos|tan|sec|csc|cot|asin|acos|atan|sinh|cosh|tanh|exp|ln|log)'
-    # Brython-safe implicit mult
+        expression = ''.join(output).replace('^', '**')
     try:
         expression = re.sub(r'([0-9)])\s*([A-Za-z(])', r'\1*\2', expression)
         func_alt = 'sin|cos|tan|sec|csc|cot|asin|acos|atan|sinh|cosh|tanh|exp|ln|log'
@@ -515,43 +420,85 @@ x - y = 1</textarea>
 async def _solve(app, residual_expressions, variable_names, initial_values):
     try:
         code_lines = [
-            "import json, math, traceback", "import numpy as np", "from scipy.optimize import root as _scipy_root",
-            f"variables = {json.dumps(variable_names)}", f"exprs = {json.dumps(residual_expressions)}", f"x0 = np.array({json.dumps(initial_values)}, dtype=float)",
+            "import json, math, traceback",
+            "import numpy as np",
+            "from scipy.optimize import root as _scipy_root",
+            f"variables = {json.dumps(variable_names)}",
+            f"exprs = {json.dumps(residual_expressions)}",
+            f"x0 = np.array({json.dumps(initial_values)}, dtype=float)",
             "def _log(a, b=None):",
-            "    a=np.asarray(a)", "    if b is None: return np.log(a)", "    return np.log(a)/np.log(b)",
-            "def _ln(a): return np.log(a)", "def _sec(a): return 1/np.cos(a)", "def _csc(a): return 1/np.sin(a)", "def _cot(a): return 1/np.tan(a)",
-            "_env_base = {'sin': np.sin, 'cos': np.cos, 'tan': np.tan, 'asin': np.arcsin, 'acos': np.arccos, 'atan': np.arctan, 'sinh': np.sinh, 'cosh': np.cosh, 'tanh': np.tanh, 'exp': np.exp, 'sqrt': np.sqrt, 'log': _log, 'ln': _ln, 'sec': _sec, 'csc': _csc, 'cot': _cot, 'pi': np.pi, 'e': np.e, 'abs': np.abs,}",
+            "    a=np.asarray(a)",
+            "    if b is None:",
+            "        return np.log(a)",
+            "    return np.log(a)/np.log(b)",
+            "def _ln(a): return np.log(a)",
+            "def _sec(a): return 1/np.cos(a)",
+            "def _csc(a): return 1/np.sin(a)",
+            "def _cot(a): return 1/np.tan(a)",
+            "_env_base = {",
+            "    'sin': np.sin, 'cos': np.cos, 'tan': np.tan,",
+            "    'asin': np.arcsin, 'acos': np.arccos, 'atan': np.arctan,",
+            "    'sinh': np.sinh, 'cosh': np.cosh, 'tanh': np.tanh,",
+            "    'exp': np.exp, 'sqrt': np.sqrt,",
+            "    'log': _log, 'ln': _ln,",
+            "    'sec': _sec, 'csc': _csc, 'cot': _cot,",
+            "    'pi': np.pi, 'e': np.e,",
+            "    'abs': np.abs,",
+            "}",
             "def _func(x):",
             "    env = dict(_env_base)",
-            "    for name, val in zip(variables, x): env[name]=val",
+            "    for name, val in zip(variables, x):",
+            "        env[name]=val",
             "    res=[]",
             "    for e in exprs:",
-            "        try: v = eval(e, {'__builtins__': {}}, env); res.append(float(v))",
-            "        except Exception as ex: raise RuntimeError(f'Failed eval {e}: {ex}')",
+            "        try:",
+            "            v = eval(e, {'__builtins__': {}}, env)",
+            "            res.append(float(v))",
+            "        except Exception as ex:",
+            "            raise RuntimeError(f'Failed eval {e}: {ex}')",
             "    return np.array(res)",
-            "try:", "    sol = _scipy_root(_func, x0, method='hybr')", "    init_res = _func(x0)",
-            "    result = {'status': 'ok', 'x': sol.x.tolist(), 'fun': sol.fun.tolist(), 'success': bool(sol.success), 'nfev': int(getattr(sol, 'nfev', 0)), 'message': str(getattr(sol, 'message', '')), 'residualNorm': float(np.linalg.norm(sol.fun)), 'initialResidualNorm': float(np.linalg.norm(init_res)),}",
-            "except Exception as e: result = {'status':'error','msg':str(e),'trace':traceback.format_exc()}", "result",
+            "try:",
+            "    sol = _scipy_root(_func, x0, method='hybr')",
+            "    init_res = _func(x0)",
+            "    result = {",
+            "        'status': 'ok',",
+            "        'x': sol.x.tolist(),",
+            "        'fun': sol.fun.tolist(),",
+            "        'success': bool(sol.success),",
+            "        'nfev': int(getattr(sol, 'nfev', 0)),",
+            "        'message': str(getattr(sol, 'message', '')),",
+            "        'residualNorm': float(np.linalg.norm(sol.fun)),",
+            "        'initialResidualNorm': float(np.linalg.norm(init_res)),",
+            "    }",
+            "except Exception as e:",
+            "    result = {'status':'error','msg':str(e),'trace':traceback.format_exc()}",
+            "result",
         ]
         code = "\n".join(code_lines)
         raw_res = await _pyodide_run(code)
         py_res = raw_res
-        if py_res is None:
-            raise RuntimeError("Pyodide worker not ready")
+        if hasattr(py_res, 'to_py'):
+            try:
+                py_res = py_res.to_py()
+            except Exception:
+                pass
         if isinstance(py_res, str):
-            try: py_res = json.loads(py_res)
-            except Exception: pass
+            try:
+                py_res = json.loads(py_res)
+            except Exception:
+                pass
         if not isinstance(py_res, dict):
-            raise RuntimeError(f"Worker error: {str(py_res)[:300]}")
+            raise RuntimeError(f"Pyodide returned non-dict: {str(py_res)[:200]}")
         if py_res.get('status') != 'ok':
-            raise RuntimeError(py_res.get('msg','Unknown error'))
+            raise RuntimeError(py_res.get('msg','Unknown error') + "\n" + py_res.get('trace','')[:400])
         app.result = py_res
         app.status = 'Converged' if py_res.get('success') else 'Solver stopped without convergence'
     except Exception as error:
-        app.error = str(error)[:400]; app.status = 'Solve failed'; app.result = None
-    finally: app.busy = False
-
-
+        app.error = str(error)[:500]
+        app.status = 'Solve failed'
+        app.result = None
+    finally:
+        app.busy = False
 
 def onAppStart(app):
     app.width = 1050
