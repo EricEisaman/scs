@@ -554,8 +554,8 @@ def draw_loss_graph(app):
 
 def redrawAll(app):
     drawRect(0,0,WIDTH,68,fill=rgb(18,20,32))
-    drawLabel("Fashion-MNIST MLP Lab 1050x700 - TOP TIER FIXED ARCH VISIBLE + BUTTONS BOTTOM",28,16,size=18,fill=TXT,bold=True,align="left-top")
-    drawLabel("784->64 ReLU->10 Softmax | Arch Y=285 Loss Y=470 Buttons Y=610 - NO OVERLAP",28,42,size=10,fill=DIM,align="left-top")
+    drawLabel("Fashion-MNIST MLP Lab 1050x700 - TOP TIER ARCH DOWN 60px + NO OVERLAP",28,16,size=18,fill=TXT,bold=True,align="left-top")
+    drawLabel("784->64 ReLU->10 Softmax | Arch Y=345 Loss Y=470 Buttons Y=610 - MOVED DOWN 60px per request",28,42,size=10,fill=DIM,align="left-top")
     drawRect(0,HEIGHT-30,WIDTH,30,fill=rgb(18,20,32),border=GRID)
     drawLabel(f"{app.status} | {app.fetch_status[:140]}",12,HEIGHT-15,size=9,fill=DIM,align="left-center")
     draw_panel(20,80,600,590,title=f"Training - Official Fashion-MNIST Epoch {app.epoch}/{app.max_epochs} Hidden {app.hidden}")
@@ -593,16 +593,16 @@ def redrawAll(app):
         drawLabel("Sources: raw.githubusercontent.com/.../ubyte.gz + S3 fashion-mnist + TF",32,163,size=9,fill=ACC,align="left-top")
         drawLabel("Fixed: overlap + slow 47M loop -> fast to_py()",32,181,size=9,fill=ACC2,align="left-top")
     # FIXED LAYOUT - architecture higher, loss lower - no overlap
-    drawLabel("Architecture:",32,270,size=12,fill=TXT,bold=True,align="left-top")
-    ix,iy=48,285  # MOVED UP - was 365 covering
+    drawLabel("Architecture:",32,330,size=12,fill=TXT,bold=True,align="left-top")
+    ix,iy=48,345  # MOVED DOWN by 60px = just over half height (80px height)
     for i in range(8):
         drawCircle(ix,iy+i*10,3,fill=rgb(120,130,170))
     drawLabel("784",ix,iy+90,size=10,fill=DIM,align="center-top")
-    hx,hy=180,285
+    hx,hy=180,345
     for i in range(6):
         drawCircle(hx,hy+i*13,5,fill=ACC)
     drawLabel(f"{app.hidden} ReLU",hx,hy+90,size=10,fill=ACC,align="center-top")
-    ox,oy=320,285
+    ox,oy=320,345
     for i in range(10):
         c=ACC2 if app.pred is not None and i==app.pred else rgb(100,110,140)
         drawCircle(ox,oy+i*8,4,fill=c)
@@ -610,7 +610,7 @@ def redrawAll(app):
     drawLine(ix+6,iy+20,hx-6,hy+20,fill=GRID,lineWidth=0.5)
     drawLine(hx+8,hy+30,ox-6,oy+30,fill=GRID,lineWidth=0.5)
     if app.training:
-        bx,by,bw,bh=400,285,200,14
+        bx,by,bw,bh=400,345,200,14
         drawRect(bx,by,bw,bh,fill=rgb(32,36,60),border=BORDER,roundness=6)
         drawRect(bx,by,bw*app.progress,bh,fill=ACC,roundness=6)
         drawLabel("Training...",bx+bw/2,by+bh/2,size=10,fill=rgb(255,255,255),bold=True)
