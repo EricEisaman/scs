@@ -790,7 +790,7 @@ def draw_loss_graph(app):
     drawLabel(f"train {app.loss_hist[-1]:.3f} {len(app.loss_hist)}pts", gx+gw-12, gy+12, size=10, fill=DIM, align="right-top")
     if app.val_loss_hist:
         drawLabel(f"val {app.val_loss_hist[-1]:.3f} acc {app.val_acc_hist[-1]*100:.1f}%", gx+gw-12, gy+26, size=10, fill=ACC2, align="right-top")
-    drawLabel("purple=train green=val", gx+12, gy+80, size=8, fill=DIM, align="left-top")
+    drawLabel("purple=train green=val", gx+12, gy+95, size=8, fill=DIM, align="left-top")
 
 def redrawAll(app):
     drawRect(0,0,WIDTH,68,fill=rgb(18,20,32))
