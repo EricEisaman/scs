@@ -195,7 +195,7 @@ def onAppStart(app):
     app.training=False; app.trained=False; app.progress=0.0
     app.orig_url=None; app.proc_url=None; app.proc_vec=None; app.pred=None; app.probs=None
     app.fetch_status="Ready - Click Load (4 fetches .gz - FAST)"
-    app.status="TOP TIER FIXED - Array.from keyword bug + overlap + slow loop"
+    app.status="SIGMA SCHOLAR RESEARCH LABORATORY"
     app.buttons={
         "load":{"x":30,"y":610,"w":160,"h":38,"label":"Load Fashion-MNIST","enabled":True},
         "train":{"x":205,"y":610,"w":130,"h":38,"label":"Train MLP","enabled":False},
@@ -352,7 +352,7 @@ async def load_fashion(app):
         await build_preview_urls(app)
         app.dataset_loaded=True
         app.fetch_status=f"Loaded {len(X_all)} | Train {len(Xtr)} Val {len(Xva)} - 4 FETCHES DONE"
-        app.status=f"Fashion-MNIST loaded {len(X_all)} - TOP TIER"
+        app.status=f"Fashion-MNIST loaded {len(X_all)}"
         app.buttons["train"]["enabled"]=True
         app.buttons["load"]["enabled"]=False
     except Exception as e:
