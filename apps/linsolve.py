@@ -16,27 +16,22 @@ RED = rgb(244, 111, 104)
 _PANEL_ID = 'linear-solver-controls'
 
 _EXAMPLES = {
-'nonlinear': ('Nonlinear system', 'x^2 + y^2 = 25\nx - y = 1', 'x, y', '2, 1'),
-'exp-command': ('Exponential: exp(x)', r'\exp x = 2', 'x', '0.5'),
+'nonlinear': ('Nonlinear system', 'x^2 + y^2 = 25\\nx - y = 1', 'x, y', '2, 1'),
+'exp-command': ('Exponential: exp(x)', r'\\exp x = 2', 'x', '0.5'),
 'exp-power': ('Exponential: e^x', 'e^x = 2', 'x', '0.5'),
-'log-natural': ('Natural logarithm: ln(x)', r'\ln x = 1', 'x', '2.5'),
-'log-base': ('Base logarithm: log_2(x)', r'\log_{2}x = 3', 'x', '7'),
-'trig-sincos': ('Trigonometric: sin(x) = cos(x)', r'\sin x = \cos x', 'x', '0.7'),
-'trig-tan': ('Trigonometric: tan(x) = 1', r'\tan x = 1', 'x', '0.7'),
+'log-natural': ('Natural logarithm: ln(x)', r'\\ln x = 1', 'x', '2.5'),
+'log-base': ('Base logarithm: log_2(x)', r'\\log_{2}x = 3', 'x', '7'),
+'trig-sincos': ('Trigonometric: sin(x) = cos(x)', r'\\sin x = \\cos x', 'x', '0.7'),
+'trig-tan': ('Trigonometric: tan(x) = 1', r'\\tan x = 1', 'x', '0.7'),
 'matrix-brackets': ('Ax=b: bracket notation', '[[2,1],[1,3]] * [x,y] = [5,7]', 'x, y', '1, 1'),
-'matrix-latex': ('Ax=b: LaTeX bmatrix', r'\begin{bmatrix}2 & 1 \\ 1 & 3\end{bmatrix}\begin{bmatrix}x \\ y\end{bmatrix}=\begin{bmatrix}5 \\ 7\end{bmatrix}', 'x, y', '1, 1')
+'matrix-latex': (
+'Ax=b: LaTeX bmatrix',
+r'\\begin{bmatrix}2 & 1 \\\\ 1 & 3\\end{bmatrix}\\begin{bmatrix}x \\\\ y\\end{bmatrix}=\\begin{bmatrix}5 \\\\ 7\\end{bmatrix}',
+'x, y', '1, 1'
+)
 }
 
-# --- Community standard: mindful proxy-based pyodide handling ---
-# Pattern established in SCS: 
-# 1. Extension returns PyProxy / JS Promise / coroutine - never assume plain value
-# 2. Always await Promise (.then) and coroutine (__await__) before inspecting
-# 3. Always call to_py() to convert proxy -> Python, never str() before to_py()
-# 4. Destroy proxies when done to avoid leaks (Pyodide community standard)
-# 5. Loop until stable (Promise -> coroutine -> proxy -> py)
-
-# --- Mindful proxy-based pyodide handling - CORRECT control flow ---
-# Extension returns coroutine/Promise that MUST be awaited directly, not wrapped in helper that returns coroutine object
+# --- Pyodide extension - correct proxy handling - await BEFORE to_py ---
 try:
     import extensions.pyodide as _py_ext
     PYODIDE_EXT_OK = True
@@ -46,93 +41,80 @@ except Exception:
     _py_ext = None
     _py_candidates = []
 
-async def _unwrap_proxy(res):
-    """Correct unwrapping: await Promise, await coroutine, then to_py, never str() before."""
-    # Loop up to 10 times for nested Promise->coroutine->Proxy
-    for _ in range(10):
+async def _unwrap_pyodide_result(res, max_depth=12):
+    # CORRECT ORDER: await coroutine/Promise FIRST, then to_py
+    # Previous bug: to_py before await returned coroutine object as <coroutine run_python_async>
+    for _ in range(max_depth):
         if res is None:
             break
-        # JS Promise
-        if hasattr(res, 'then') and callable(getattr(res, 'then')):
-            res = await res
-            continue
-        # Coroutine
+        # 1. Coroutine -> await (MUST be first)
         if hasattr(res, '__await__'):
-            res = await res
-            continue
-        # PyProxy
+            try:
+                res = await res
+                continue
+            except Exception:
+                pass
+        # 2. JS Promise -> await
+        if hasattr(res, 'then') and callable(getattr(res, 'then')):
+            try:
+                res = await res
+                continue
+            except Exception:
+                pass
+        # 3. PyProxy -> to_py AFTER await
         if hasattr(res, 'to_py'):
             try:
-                # depth for nested dict
                 try:
-                    py = res.to_py(depth=10)
+                    tmp = res.to_py(depth=10)
                 except TypeError:
-                    py = res.to_py()
+                    tmp = res.to_py()
                 try:
                     if hasattr(res, 'destroy'):
                         res.destroy()
                 except Exception:
                     pass
-                res = py
-                continue
+                if tmp is not None and tmp is not res:
+                    res = tmp
+                    continue
             except Exception:
                 pass
         break
     return res
 
 async def _pyodide_run(code_str):
-    # Direct, correct await - no intermediate coroutine leak
     if PYODIDE_EXT_OK and _py_ext is not None:
         for name in _py_candidates:
-            fn = getattr(_py_ext, name, None)
-            if fn is None:
-                continue
             try:
-                # CORRECT: await the call directly, not raw = fn(); await unwrap(raw)
-                # This is the control flow that actually gets worker connection
-                raw = fn(code_str)
-                # raw is coroutine or Promise - await it properly
-                if hasattr(raw, '__await__') or hasattr(raw, 'then'):
-                    raw = await raw
-                # Now raw may still be PyProxy - unwrap it
-                res = await _unwrap_proxy(raw)
-                if isinstance(res, str):
-                    try:
-                        maybe = json.loads(res)
-                        if isinstance(maybe, dict):
-                            return maybe
-                    except Exception:
-                        pass
-                    # If string but not JSON, it might be error, still return to show
-                    if res and len(res) < 2000 and 'trace' in res.lower():
-                        return {'status':'error','msg':res}
+                fn = getattr(_py_ext, name, None)
+                if fn is None:
                     continue
-                if isinstance(res, dict):
-                    return res
-                if res is not None:
-                    # Try one more conversion
-                    if hasattr(res, 'to_py'):
-                        try:
-                            res = res.to_py()
-                        except Exception:
-                            pass
-                    if isinstance(res, dict):
-                        return res
-                    return res
+                # fn(code) returns coroutine - MUST be awaited via unwrap which now awaits first
+                raw = fn(code_str)
+                res = await _unwrap_pyodide_result(raw)
+                if res is None:
+                    continue
+                # If still coroutine string, skip
+                if isinstance(res, str) and '<coroutine' in res.lower():
+                    continue
+                # If result is coroutine object (not string), unwrap didn't await it - try direct await
+                if hasattr(res, '__await__'):
+                    try:
+                        res = await res
+                        res = await _unwrap_pyodide_result(res)
+                    except Exception:
+                        continue
+                return res
             except Exception:
                 continue
-    
-    # Fallback window.pyodide
     try:
         if hasattr(window, 'pyodide') and window.pyodide is not None:
             raw = await window.pyodide.runPythonAsync(code_str)
-            res = await _unwrap_proxy(raw)
+            res = await _unwrap_pyodide_result(raw)
             return res
     except Exception:
         pass
     return None
 
-_last_pyodide_error = None
 
 def _math_group(source, position):
     while position < len(source) and source[position].isspace():
@@ -143,31 +125,44 @@ def _math_group(source, position):
     start = position + 1
     position += 1
     while position < len(source) and depth:
-        if source[position] == '{': depth += 1
-        elif source[position] == '}': depth -= 1
+        if source[position] == '{':
+            depth += 1
+        elif source[position] == '}':
+            depth -= 1
         position += 1
-    if depth: raise ValueError('Unclosed LaTeX group')
+    if depth:
+        raise ValueError('Unclosed LaTeX group')
     return source[start:position - 1], position
 
 def _math_argument(source, position):
-    while position < len(source) and source[position].isspace(): position += 1
-    if source.startswith('\\left', position): position += 5
-    while position < len(source) and source[position].isspace(): position += 1
-    if position >= len(source): raise ValueError('Expected a LaTeX function argument')
-    if source[position] == '{': return _math_group(source, position)
+    while position < len(source) and source[position].isspace():
+        position += 1
+    if source.startswith('\\\\left', position):
+        position += 5
+    while position < len(source) and source[position].isspace():
+        position += 1
+    if position >= len(source):
+        raise ValueError('Expected a LaTeX function argument')
+    if source[position] == '{':
+        return _math_group(source, position)
     if source[position] == '(':
-        start = position; depth = 0
+        start = position
+        depth = 0
         while position < len(source):
-            if source[position] == '(': depth += 1
+            if source[position] == '(':
+                depth += 1
             elif source[position] == ')':
                 depth -= 1
-                if depth == 0: return source[start + 1:position], position + 1
+                if depth == 0:
+                    return source[start + 1:position], position + 1
             position += 1
         raise ValueError('Unclosed function argument')
-    if source[position] == '\\':
-        match = re.match(r'\\([A-Za-z]+)', source[position:])
-        if not match: raise ValueError('Invalid LaTeX command in function argument')
-        command_end = position + len(match.group(0)); command = match.group(1)
+    if source[position] == '\\\\':
+        match = re.match(r'\\\\([A-Za-z]+)', source[position:])
+        if not match:
+            raise ValueError('Invalid LaTeX command in function argument')
+        command_end = position + len(match.group(0))
+        command = match.group(1)
         if command in ('frac',):
             start = position
             _, position = _math_group(source, command_end)
@@ -179,32 +174,42 @@ def _math_argument(source, position):
             return source[start:position], position
         return match.group(0), command_end
     start = position
-    match = re.match(r'[A-Za-z][A-Za-z0-9]*|[0-9]+(?:\.[0-9]+)?', source[position:])
-    if not match: raise ValueError('Expected a variable, number, or grouped LaTeX argument')
+    match = re.match(r'[A-Za-z][A-Za-z0-9]*|[0-9]+(?:\\.[0-9]+)?', source[position:])
+    if not match:
+        raise ValueError('Expected a variable, number, or grouped LaTeX argument')
     position += len(match.group(0))
     if position < len(source) and source[position] == '_':
         position += 1
-        if position < len(source) and source[position] == '{': _, position = _math_group(source, position)
+        if position < len(source) and source[position] == '{':
+            _, position = _math_group(source, position)
         else:
             subscript = re.match(r'[A-Za-z0-9]+', source[position:])
-            if subscript: position += len(subscript.group(0))
+            if subscript:
+                position += len(subscript.group(0))
     if position < len(source) and source[position] == '^':
         position += 1
-        if position < len(source) and source[position] == '{': _, position = _math_group(source, position)
+        if position < len(source) and source[position] == '{':
+            _, position = _math_group(source, position)
         else:
             power = re.match(r'[A-Za-z0-9]+', source[position:])
-            if power: position += len(power.group(0))
+            if power:
+                position += len(power.group(0))
     return source[start:position], position
 
 def _latex_expression(source):
     source = source.strip().replace('$', '').replace('−', '-')
-    output = []; position = 0
+    output = []
+    position = 0
     while position < len(source):
-        if source[position] == '\\':
-            match = re.match(r'\\([A-Za-z]+)', source[position:])
-            if not match: raise ValueError('Invalid LaTeX command')
-            command = match.group(1); command_end = position + len(match.group(0))
-            if command in ('left', 'right'): position = command_end; continue
+        if source[position] == '\\\\':
+            match = re.match(r'\\\\([A-Za-z]+)', source[position:])
+            if not match:
+                raise ValueError('Invalid LaTeX command')
+            command = match.group(1)
+            command_end = position + len(match.group(0))
+            if command in ('left', 'right'):
+                position = command_end
+                continue
             if command == 'frac':
                 numerator, next_position = _math_group(source, command_end)
                 denominator, position = _math_group(source, next_position)
@@ -214,150 +219,217 @@ def _latex_expression(source):
                 argument, position = _math_argument(source, command_end)
                 output.append('sqrt(' + _latex_expression(argument) + ')')
                 continue
-            functions = {'sin':'sin','cos':'cos','tan':'tan','sec':'sec','csc':'csc','cot':'cot','arcsin':'asin','arccos':'acos','arctan':'atan','sinh':'sinh','cosh':'cosh','tanh':'tanh','exp':'exp','ln':'ln','log':'log'}
+            functions = {
+                'sin': 'sin', 'cos': 'cos', 'tan': 'tan',
+                'sec': 'sec', 'csc': 'csc', 'cot': 'cot',
+                'arcsin': 'asin', 'arccos': 'acos', 'arctan': 'atan',
+                'sinh': 'sinh', 'cosh': 'cosh', 'tanh': 'tanh',
+                'exp': 'exp', 'ln': 'ln', 'log': 'log'
+            }
             if command in functions:
-                argument_position = command_end; base = None
+                argument_position = command_end
+                base = None
                 if command == 'log' and argument_position < len(source) and source[argument_position] == '_':
                     base, argument_position = _math_argument(source, argument_position + 1)
                 argument, position = _math_argument(source, argument_position)
                 call = functions[command] + '(' + _latex_expression(argument)
-                if base is not None: call += ', ' + _latex_expression(base)
-                output.append(call + ')'); continue
-            symbols = {'cdot':'*','times':'*','pi':'pi','theta':'theta','alpha':'alpha','beta':'beta'}
-            if command in symbols: output.append(symbols[command]); position = command_end; continue
-            raise ValueError('Unsupported LaTeX command: \\' + command)
-        if source[position] == '{': output.append('(')
-        elif source[position] == '}': output.append(')')
-        else: output.append(source[position])
+                if base is not None:
+                    call += ', ' + _latex_expression(base)
+                output.append(call + ')')
+                continue
+            symbols = {
+                'cdot': '*', 'times': '*', 'pi': 'pi',
+                'theta': 'theta', 'alpha': 'alpha', 'beta': 'beta'
+            }
+            if command in symbols:
+                output.append(symbols[command])
+                position = command_end
+                continue
+            raise ValueError('Unsupported LaTeX command: \\\\' + command)
+        if source[position] == '{':
+            output.append('(')
+        elif source[position] == '}':
+            output.append(')')
+        else:
+            output.append(source[position])
         position += 1
     expression = ''.join(output).replace('^', '**')
-    # Brython-safe: no lookbehind (?<=) - community standard for Brython regex
-    try:
-        expression = re.sub(r'([0-9)])\s*([A-Za-z(])', r'\1*\2', expression)
-        func_alt = 'sin|cos|tan|sec|csc|cot|asin|acos|atan|sinh|cosh|tanh|exp|ln|log'
-        expression = re.sub(r'([A-Za-z0-9_)])\s*(' + func_alt + r')\s*\(', r'\1*\2(', expression)
-    except Exception:
-        pass
+    functions = r'(?:sin|cos|tan|sec|csc|cot|asin|acos|atan|sinh|cosh|tanh|exp|ln|log)'
+    expression = re.sub(r'(?<=[0-9)])\\s*(?=[A-Za-z(])', '*', expression)
+    expression = re.sub(r'(?<=[A-Za-z0-9_)])(?=' + functions + r'\\()', '*', expression)
+    expression = re.sub(r'(?<=[A-Za-z0-9_)])\\s+(?=' + functions + r'\\()', '*', expression)
     return expression.strip()
 
 def _split_top_level(source, delimiter):
-    parts = []; start = 0; depth = 0
+    parts = []
+    start = 0
+    depth = 0
     for position, character in enumerate(source):
-        if character in '[({': depth += 1
-        elif character in '])}': depth -= 1
+        if character in '[({':
+            depth += 1
+        elif character in '])}':
+            depth -= 1
         elif character == delimiter and depth == 0:
-            parts.append(source[start:position].strip()); start = position + 1
-    parts.append(source[start:].strip()); return parts
+            parts.append(source[start:position].strip())
+            start = position + 1
+    parts.append(source[start:].strip())
+    return parts
 
 def _take_bracket_group(source):
     source = source.strip()
-    if not source.startswith('['): raise ValueError('Expected a bracketed matrix or vector')
+    if not source.startswith('['):
+        raise ValueError('Expected a bracketed matrix or vector')
     depth = 0
     for position, character in enumerate(source):
-        if character == '[': depth += 1
+        if character == '[':
+            depth += 1
         elif character == ']':
             depth -= 1
-            if depth == 0: return source[:position + 1], source[position + 1:].strip()
+            if depth == 0:
+                return source[:position + 1], source[position + 1:].strip()
     raise ValueError('Unclosed matrix or vector bracket')
 
 def _plain_vector(source):
     group, remainder = _take_bracket_group(source)
-    if remainder: raise ValueError('Unexpected text after vector')
+    if remainder:
+        raise ValueError('Unexpected text after vector')
     values = _split_top_level(group[1:-1], ',')
-    if not values or any(not value for value in values): raise ValueError('Vectors cannot be empty')
+    if not values or any(not value for value in values):
+        raise ValueError('Vectors cannot be empty')
     return values
 
 def _plain_matrix(source):
     group, remainder = _take_bracket_group(source)
-    if remainder: raise ValueError('Unexpected text after matrix')
+    if remainder:
+        raise ValueError('Unexpected text after matrix')
     contents = group[1:-1]
     rows = _split_top_level(contents, ';')
-    if len(rows) == 1: rows = _split_top_level(contents, ',')
+    if len(rows) == 1:
+        rows = _split_top_level(contents, ',')
     return [_plain_vector(row) for row in rows]
 
 def _latex_matrices(source):
-    blocks = []; remaining = []; cursor = 0
+    blocks = []
+    remaining = []
+    cursor = 0
     while True:
-        match = re.search(r'\\begin\{([A-Za-z]+)\}', source[cursor:])
-        if not match: remaining.append(source[cursor:]); break
-        start = cursor + match.start(); command_end = cursor + match.end()
+        match = re.search(r'\\\\begin\\{([A-Za-z]+)\\}', source[cursor:])
+        if not match:
+            remaining.append(source[cursor:])
+            break
+        start = cursor + match.start()
+        command_end = cursor + match.end()
         environment = match.group(1)
-        if environment not in ('matrix', 'bmatrix', 'pmatrix'): raise ValueError('Use matrix, bmatrix, or pmatrix notation')
-        end_token = r'\end{' + environment + '}'; end = source.find(end_token, command_end)
-        if end < 0: raise ValueError('Unclosed LaTeX matrix')
+        if environment not in ('matrix', 'bmatrix', 'pmatrix'):
+            raise ValueError('Use matrix, bmatrix, or pmatrix notation')
+        end_token = r'\\end{' + environment + '}'
+        end = source.find(end_token, command_end)
+        if end < 0:
+            raise ValueError('Unclosed LaTeX matrix')
         remaining.append(source[cursor:start])
         body = source[command_end:end]
-        rows = [row.strip() for row in re.split(r'\\|\n', body) if row.strip()]
+        rows = [row.strip() for row in re.split(r'\\\\|\\n', body) if row.strip()]
         blocks.append([[_latex_expression(cell.strip()) for cell in row.split('&')] for row in rows])
         cursor = end + len(end_token)
     return blocks, ''.join(remaining)
 
 def _flatten_matrix_vector(matrix):
-    if all(len(row) == 1 for row in matrix): return [row[0] for row in matrix]
-    if len(matrix) == 1: return matrix[0]
+    if all(len(row) == 1 for row in matrix):
+        return [row[0] for row in matrix]
+    if len(matrix) == 1:
+        return matrix[0]
     raise ValueError('A vector must have one row or one column')
 
 def _matrix_residuals(equation, variables):
-    if equation.count('=') != 1: raise ValueError('Enter one Ax=b matrix equation at a time')
+    if equation.count('=') != 1:
+        raise ValueError('Enter one Ax=b matrix equation at a time')
     left, right = equation.split('=')
-    if '\\begin{' in equation:
+    if '\\\\begin{' in equation:
         left_blocks, left_text = _latex_matrices(left)
         right_blocks, right_text = _latex_matrices(right)
-        if len(left_blocks) != 2 or len(right_blocks) != 1: raise ValueError('Ax=b needs one matrix, one variable vector, and one result vector')
-        left_text = re.sub(r'\\(?:cdot|times)|\*', '', left_text).strip()
-        if left_text or right_text.strip(): raise ValueError('Unexpected text outside the matrix and vectors')
-        matrix = left_blocks[0]; vector = _flatten_matrix_vector(left_blocks[1]); values = _flatten_matrix_vector(right_blocks[0])
+        if len(left_blocks) != 2 or len(right_blocks) != 1:
+            raise ValueError('Ax=b needs one matrix, one variable vector, and one result vector')
+        left_text = re.sub(r'\\\\(?:cdot|times)|\\*', '', left_text).strip()
+        if left_text or right_text.strip():
+            raise ValueError('Unexpected text outside the matrix and vectors')
+        matrix = left_blocks[0]
+        vector = _flatten_matrix_vector(left_blocks[1])
+        values = _flatten_matrix_vector(right_blocks[0])
     else:
         matrix_text, left_remainder = _take_bracket_group(left)
         matrix = _plain_matrix(matrix_text)
-        left_remainder = re.sub(r'^(?:\\cdot|\\times|\*)\s*', '', left_remainder).strip()
+        left_remainder = re.sub(r'^(?:\\\\cdot|\\\\times|\\*)\\s*', '', left_remainder).strip()
         vector_text, left_remainder = _take_bracket_group(left_remainder)
-        if left_remainder: raise ValueError('Unexpected text after the variable vector')
-        vector = _plain_vector(vector_text); values = _plain_vector(right)
+        if left_remainder:
+            raise ValueError('Unexpected text after the variable vector')
+        vector = _plain_vector(vector_text)
+        values = _plain_vector(right)
     vector_names = [_latex_expression(value) for value in vector]
-    if any(not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name) for name in vector_names): raise ValueError('The Ax=b vector must contain variable names only')
-    if variables and vector_names != variables: raise ValueError('The variable vector must match the Variables field in order')
-    if not variables: variables = vector_names
-    row_count = len(matrix); column_count = len(matrix[0]) if matrix else 0
-    if (not matrix or any(len(row) != column_count for row in matrix) or column_count != len(vector) or row_count != len(values)): raise ValueError('Matrix and vector dimensions do not match')
-    if row_count != len(variables): raise ValueError('SciPy root requires a square system: rows must equal variables')
+    if any(not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name) for name in vector_names):
+        raise ValueError('The Ax=b vector must contain variable names only')
+    if variables and vector_names != variables:
+        raise ValueError('The variable vector must match the Variables field in order')
+    if not variables:
+        variables = vector_names
+    row_count = len(matrix)
+    column_count = len(matrix[0]) if matrix else 0
+    if (not matrix or any(len(row) != column_count for row in matrix)
+        or column_count != len(vector) or row_count != len(values)):
+        raise ValueError('Matrix and vector dimensions do not match')
+    if row_count != len(variables):
+        raise ValueError('SciPy root requires a square system: rows must equal variables')
     residuals = []
     for row, target in zip(matrix, values):
         terms = []
         for coefficient, variable in zip(row, vector_names):
             coeff_expr = _latex_expression(coefficient) if isinstance(coefficient, str) else str(coefficient)
-            if coeff_expr == '1': terms.append(variable)
-            elif coeff_expr == '-1': terms.append(f'-{variable}')
-            else: terms.append(f'({coeff_expr})*{variable}')
+            if coeff_expr == '1':
+                terms.append(variable)
+            elif coeff_expr == '-1':
+                terms.append(f'-{variable}')
+            else:
+                terms.append(f'({coeff_expr})*{variable}')
         left_expr = ' + '.join(terms).replace('+ -', '- ')
         residuals.append(f'({left_expr})-({ _latex_expression(target) })')
     return residuals
 
 def _residuals(equations, variables=None):
-    if '\\begin{' in equations or equations.lstrip().startswith('[['): return _matrix_residuals(equations.strip().replace('$', ''), variables or [])
+    if '\\\\begin{' in equations or equations.lstrip().startswith('[['):
+        return _matrix_residuals(equations.strip().replace('$', ''), variables or [])
     residuals = []
     for line in equations.splitlines():
         line = line.strip()
-        if not line: continue
-        if line.count('=') != 1: raise ValueError('Enter one equality per line, such as x^2 + y^2 = 25')
+        if not line:
+            continue
+        if line.count('=') != 1:
+            raise ValueError('Enter one equality per line, such as x^2 + y^2 = 25')
         left, right = line.split('=')
         residuals.append('(' + _latex_expression(left) + ')-(' + _latex_expression(right) + ')')
-    if not residuals: raise ValueError('Enter at least one equation')
+    if not residuals:
+        raise ValueError('Enter at least one equation')
     return residuals
 
 def _parse_csv_numbers(source, field_name):
-    try: return [float(value.strip()) for value in source.split(',')]
-    except Exception: raise ValueError(field_name + ' must be comma-separated numbers')
+    try:
+        return [float(value.strip()) for value in source.split(',')]
+    except Exception:
+        raise ValueError(field_name + ' must be comma-separated numbers')
 
 def _install_controls(app):
     existing = document.getElementById(_PANEL_ID)
-    if existing: existing.parentNode.removeChild(existing)
-    panel = document.createElement('section'); panel.id = _PANEL_ID
-    panel.style.cssText = ('box-sizing:border-box;width:1050px;max-width:95vw;padding:20px 24px 18px;margin:0 0 12px;background:#191f22;border:1px solid #34413e;color:#e5eee8;font:13px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;')
+    if existing:
+        existing.parentNode.removeChild(existing)
+    panel = document.createElement('section')
+    panel.id = _PANEL_ID
+    panel.style.cssText = (
+        'box-sizing:border-box;width:1050px;max-width:95vw;padding:20px 24px 18px;'
+        'margin:0 0 12px;background:#191f22;border:1px solid #34413e;color:#e5eee8;'
+        'font:13px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;'
+    )
     panel.innerHTML = """
 <div style="display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:14px">
 <strong style="font-size:18px;color:#66e0b1">ROOT / NONLINEAR SYSTEMS</strong>
-<span style="color:#899d97">SciPy optimize.root · Pyodide worker · mindful proxy</span>
+<span style="color:#899d97">SciPy optimize.root · Pyodide worker · resilient extension</span>
 </div>
 <form id="solver-form" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:12px;align-items:end">
 <label style="display:grid;grid-column:1/-1;gap:6px;color:#b6c6bf">Example
@@ -389,20 +461,31 @@ x - y = 1</textarea>
 """
     container = document.getElementById('canvas-container')
     container.parentNode.insertBefore(panel, container)
+
     def submit(event):
         event.preventDefault()
         variable_names = [item.strip() for item in document['solver-variables'].value.split(',')]
         try:
             residual_expressions = _residuals(document['solver-equations'].value, variable_names)
             initial_values = _parse_csv_numbers(document['solver-initial'].value, 'Initial guess')
-            if len(variable_names) != len(initial_values): raise ValueError('Enter one initial value for each variable')
-            if len(residual_expressions) != len(variable_names): raise ValueError('For root finding, equations and variables must have the same count')
+            if len(variable_names) != len(initial_values):
+                raise ValueError('Enter one initial value for each variable')
+            if len(residual_expressions) != len(variable_names):
+                raise ValueError('For root finding, equations and variables must have the same count')
         except Exception as error:
-            app.error = str(error); app.status = 'Check the system'; app.result = None; return
+            app.error = str(error)
+            app.status = 'Check the system'
+            app.result = None
+            return
         app.equationLines = [line.strip() for line in document['solver-equations'].value.splitlines() if line.strip()]
-        app.variableNames = variable_names; app.initialValues = initial_values
-        app.result = None; app.error = None; app.status = 'Starting Pyodide worker and loading SciPy...'; app.busy = True
+        app.variableNames = variable_names
+        app.initialValues = initial_values
+        app.result = None
+        app.error = None
+        app.status = 'Starting Pyodide worker and loading SciPy...'
+        app.busy = True
         aio.run(_solve(app, residual_expressions, variable_names, initial_values))
+
     def load_example(event):
         label, equations, variables, initial = _EXAMPLES[document['solver-example'].value]
         document['solver-equations'].value = equations
@@ -411,14 +494,15 @@ x - y = 1</textarea>
         app.equationLines = [line.strip() for line in equations.splitlines() if line.strip()]
         app.variableNames = [item.strip() for item in variables.split(',')]
         app.initialValues = _parse_csv_numbers(initial, 'Initial guess')
-        app.result = None; app.error = None; app.status = 'Example loaded: ' + label
+        app.result = None
+        app.error = None
+        app.status = 'Example loaded: ' + label
+
     document['solver-example'].bind('change', load_example)
     document['solver-form'].bind('submit', submit)
 
-
 async def _solve(app, residual_expressions, variable_names, initial_values):
     try:
-        app.status = 'Starting Pyodide worker and loading SciPy...'
         code_lines = [
             "import json, math, traceback", "import numpy as np", "from scipy.optimize import root as _scipy_root",
             f"variables = {json.dumps(variable_names)}", f"exprs = {json.dumps(residual_expressions)}", f"x0 = np.array({json.dumps(initial_values)}, dtype=float)",
@@ -442,12 +526,12 @@ async def _solve(app, residual_expressions, variable_names, initial_values):
         raw_res = await _pyodide_run(code)
         py_res = raw_res
         if py_res is None:
-            raise RuntimeError("Pyodide worker not ready - please try again")
+            raise RuntimeError("Pyodide worker not ready")
         if isinstance(py_res, str):
             try: py_res = json.loads(py_res)
             except Exception: pass
         if not isinstance(py_res, dict):
-            raise RuntimeError(f"Worker error: {str(py_res)[:200]}")
+            raise RuntimeError(f"Worker error: {str(py_res)[:300]}")
         if py_res.get('status') != 'ok':
             raise RuntimeError(py_res.get('msg','Unknown error'))
         app.result = py_res
@@ -456,39 +540,38 @@ async def _solve(app, residual_expressions, variable_names, initial_values):
         app.error = str(error)[:400]; app.status = 'Solve failed'; app.result = None
     finally: app.busy = False
 
-async def _preload_pyodide():
-    """Preload pyodide worker early - community standard: warm up on app start"""
-    try:
-        # Simple warmup code
-        test_code = "import sys; result = {'status':'ok','warmup':True}; result"
-        res = await _pyodide_run(test_code)
-        # If None, try direct window fallback init
-        if res is None and hasattr(window, 'pyodide') is None:
-            # Worker may need time, extension will handle
-            pass
-    except Exception:
-        pass
+
 
 def onAppStart(app):
-    app.width = 1050; app.height = 700; app.stepsPerSecond = 20; app.background = BG
-    app.status = 'Ready'; app.busy = False; app.error = None; app.result = None
-    app.equationLines = ['x^2 + y^2 = 25', 'x - y = 1']; app.variableNames = ['x', 'y']; app.initialValues = [2.0, 1.0]
+    app.width = 1050
+    app.height = 700
+    app.stepsPerSecond = 20
+    app.background = BG
+    app.status = 'Ready \u00b7 enter a system and solve'
+    app.busy = False
+    app.error = None
+    app.result = None
+    app.equationLines = ['x^2 + y^2 = 25', 'x - y = 1']
+    app.variableNames = ['x', 'y']
+    app.initialValues = [2.0, 1.0]
     _install_controls(app)
-    # Community standard: preload worker in background via aio.run
-    try:
-        aio.run(_preload_pyodide())
-    except Exception:
-        pass
 
-def onStep(app): pass
+def onStep(app):
+    pass
 
 def _draw_residual_chart(app):
-    result = app.result; chart_x, chart_y, chart_width = 90, 370, 500
+    result = app.result
+    chart_x, chart_y, chart_width = 90, 370, 500
     drawLabel('RESIDUAL NORM', chart_x, chart_y - 28, size=12, fill=MUTED, align='left')
     drawLine(chart_x, chart_y, chart_x + chart_width, chart_y, fill=rgb(67, 82, 77), lineWidth=1)
-    initial = max(float(result['initialResidualNorm']), 1e-16); final = max(float(result['residualNorm']), 1e-16); maximum = max(initial, final)
-    for index, (label, value, color) in enumerate((('Initial', initial, GOLD), ('Solved', final, MINT))):
-        y = chart_y + 35 + index * 64; width = chart_width * min(1.0, value / maximum)
+    initial = max(float(result['initialResidualNorm']), 1e-16)
+    final = max(float(result['residualNorm']), 1e-16)
+    maximum = max(initial, final)
+    for index, (label, value, color) in enumerate((
+        ('Initial', initial, GOLD), ('Solved', final, MINT)
+    )):
+        y = chart_y + 35 + index * 64
+        width = chart_width * min(1.0, value / maximum)
         drawLabel(label, chart_x, y, size=13, fill=INK, align='left')
         drawRect(chart_x, y + 13, chart_width, 14, fill=rgb(35, 46, 43))
         drawRect(chart_x, y + 13, max(2, width), 14, fill=color)
@@ -496,19 +579,25 @@ def _draw_residual_chart(app):
     drawLabel('Before / after residual size, not iteration history', chart_x, chart_y + 174, size=11, fill=MUTED, align='left')
 
 def _format_number(value, precision=10):
-    try: return ('{:.%dg}' % precision).format(float(value))
-    except Exception: return str(value)
+    try:
+        return ('{:.%dg}' % precision).format(float(value))
+    except Exception:
+        return str(value)
 
 def redrawAll(app):
     drawRect(0, 0, app.width, app.height, fill=BG)
     drawLabel('NONLINEAR ROOT FINDER', 54, 48, size=22, fill=INK, bold=True, align='left')
-    drawLabel('SCIPY / OPTIMIZE.ROOT \u00b7 PYODIDE WORKER v3 mindful proxy', 54, 77, size=12, fill=MINT, align='left')
+    drawLabel('SCIPY / OPTIMIZE.ROOT \u00b7 PYODIDE WORKER v2', 54, 77, size=12, fill=MINT, align='left')
     drawLine(54, 105, 996, 105, fill=rgb(55, 69, 64), lineWidth=1)
     drawLabel(app.status, 54, 140, size=15, fill=GOLD if app.busy else MINT if app.result and app.result.get('success') else RED if app.error else MUTED, align='left')
-    if app.error: drawLabel(app.error[:110], 54, 169, size=12, fill=RED, align='left')
+    if app.error:
+        drawLabel(app.error[:110], 54, 169, size=12, fill=RED, align='left')
     drawLabel('SYSTEM', 54, 220, size=11, fill=MUTED, align='left')
-    for index, equation in enumerate(app.equationLines[:5]): drawLabel(equation[:70], 54, 251 + index * 27, size=15, fill=INK, align='left')
-    if not app.result: drawLabel('Enter equations above, then solve.', 54, 570, size=14, fill=MUTED, align='left'); return
+    for index, equation in enumerate(app.equationLines[:5]):
+        drawLabel(equation[:70], 54, 251 + index * 27, size=15, fill=INK, align='left')
+    if not app.result:
+        drawLabel('Enter equations above, then solve.', 54, 570, size=14, fill=MUTED, align='left')
+        return
     _draw_residual_chart(app)
     drawLine(650, 145, 650, 620, fill=rgb(55, 69, 64), lineWidth=1)
     drawLabel('SOLUTION', 700, 178, size=12, fill=MUTED, align='left')
@@ -519,4 +608,5 @@ def redrawAll(app):
     drawLabel('Evaluations', 700, 365, size=13, fill=MUTED, align='left')
     drawLabel(str(app.result.get('nfev','-')), 970, 365, size=14, fill=INK, align='right')
     drawLabel('Residuals', 700, 410, size=13, fill=MUTED, align='left')
-    for index, value in enumerate(app.result.get('fun', [])): drawLabel('F{} = {}'.format(index + 1, _format_number(value, 3)), 700, 442 + index * 25, size=13, fill=INK, align='left')
+    for index, value in enumerate(app.result.get('fun', [])):
+        drawLabel('F{} = {}'.format(index + 1, _format_number(value, 3)), 700, 442 + index * 25, size=13, fill=INK, align='left')
