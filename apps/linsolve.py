@@ -255,9 +255,13 @@ def _latex_expression(source):
         position += 1
     expression = ''.join(output).replace('^', '**')
     functions = r'(?:sin|cos|tan|sec|csc|cot|asin|acos|atan|sinh|cosh|tanh|exp|ln|log)'
-    expression = re.sub(r'(?<=[0-9)])\\s*(?=[A-Za-z(])', '*', expression)
-    expression = re.sub(r'(?<=[A-Za-z0-9_)])(?=' + functions + r'\\()', '*', expression)
-    expression = re.sub(r'(?<=[A-Za-z0-9_)])\\s+(?=' + functions + r'\\()', '*', expression)
+    # Brython-safe implicit mult
+    try:
+        expression = re.sub(r'([0-9)])\s*([A-Za-z(])', r'\1*\2', expression)
+        func_alt = 'sin|cos|tan|sec|csc|cot|asin|acos|atan|sinh|cosh|tanh|exp|ln|log'
+        expression = re.sub(r'([A-Za-z0-9_)])\s*(' + func_alt + r')\s*\(', r'\1*\2(', expression)
+    except Exception:
+        pass
     return expression.strip()
 
 def _split_top_level(source, delimiter):
