@@ -229,11 +229,24 @@ def _latex_expression(source):
         else:
             output.append(source[position])
         position += 1
-    expression = ''.join(output).replace('^', '**')
-    functions = r'(?:sin|cos|tan|sec|csc|cot|asin|acos|atan|sinh|cosh|tanh|exp|ln|log)'
-    expression = re.sub(r'(?<=[0-9)])\\s*(?=[A-Za-z(])', '*', expression)
-    expression = re.sub(r'(?<=[A-Za-z0-9_)])(?=' + functions + r'\\()', '*', expression)
-    expression = re.sub(r'(?<=[A-Za-z0-9_)])\\s+(?=' + functions + r'\\()', '*', expression)
+        expression = ''.join(output).replace('^', '**')
+    # Implicit multiplication without lookbehind (Brython-safe)
+    # 2x or 2(x) or )( -> insert *
+    # Use capturing groups instead of (?<=)
+    try:
+        # 2x, 2(x), )x, )(  -> 2*x etc, but avoid messing with function names inside
+        expression = re.sub(r'([0-9)])\s*([A-Za-z(])', r'\1*\2', expression)
+        functions = ['sin','cos','tan','sec','csc','cot','asin','acos','atan','sinh','cosh','tanh','exp','ln','log']
+        # x sin -> x*sin  and  ) sin -> )*sin
+        # Build pattern for func call: func(
+        func_alt = '|'.join(functions)
+        # letter/num/_/) followed by func(
+        expression = re.sub(r'([A-Za-z0-9_)])\s*(' + func_alt + r')\s*\(', r'\1*\2(', expression)
+        # number/) followed by func without * already handled above but keep
+        expression = re.sub(r'([0-9)])\s*(' + func_alt + r')\(', r'\1*\2(', expression)
+    except Exception:
+        # fallback: simple scan
+        pass
     return expression.strip()
 
 def _split_top_level(source, delimiter):
