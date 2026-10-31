@@ -555,7 +555,7 @@ def draw_loss_graph(app):
 def redrawAll(app):
     drawRect(0,0,WIDTH,68,fill=rgb(18,20,32))
     drawLabel("Fashion-MNIST MLP Lab",28,16,size=18,fill=TXT,bold=True,align="left-top")
-    drawLabel("784->64 ReLU->10 Softmax | Arch Y=345 Loss Y=470 Buttons Y=610 - MOVED DOWN 60px per request",28,42,size=10,fill=DIM,align="left-top")
+    drawLabel("784->64 ReLU->10 Softmax | Arch Y=345 Loss Y=470 Buttons Y=610",28,42,size=10,fill=DIM,align="left-top")
     drawRect(0,HEIGHT-30,WIDTH,30,fill=rgb(18,20,32),border=GRID)
     drawLabel(f"{app.status} | {app.fetch_status[:140]}",12,HEIGHT-15,size=9,fill=DIM,align="left-center")
     draw_panel(20,80,600,590,title=f"Training - Official Fashion-MNIST Epoch {app.epoch}/{app.max_epochs} Hidden {app.hidden}")
