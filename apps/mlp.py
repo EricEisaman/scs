@@ -368,12 +368,13 @@ async def train_mlp(app):
         return
     app.training=True; app.trained=False
     app.loss_hist=[]; app.acc_hist=[]; app.val_loss_hist=[]; app.val_acc_hist=[]
-    # Live curve for smooth plotting every so often
     app.live_train=[]; app.live_val=[]
     app.epoch=0; app.buttons["train"]["enabled"]=False
-    # RESPONSIBLE + SMOOTH: full 4915 train, 1085 val, micro-batches, live curve
+    # Disable cache button during training
+    if "cache" in app.buttons:
+        app.buttons["cache"]["enabled"]=False
     Xtr=app.X_train; ytr=app.y_train; Xva=app.X_val; yva=app.y_val
-    app.batch=16  # small batch = smooth
+    app.batch=16
     app.max_epochs=8
     W1,b1,W2,b2=init_weights(app.hidden)
     app.W1=W1; app.b1=b1; app.W2=W2; app.b2=b2
@@ -434,47 +435,52 @@ async def train_mlp(app):
                 b2[o]-=app.lr*db2[o]
             total_loss+=batch_loss/len(batch_idx) if batch_idx else 0
             correct+=batch_correct; batches+=1
-            # Smooth progress - full dataset kept
             app.progress=(app.epoch-1 + batches/total_batches)/app.max_epochs
-            # === LIVE LOSS CURVE UPDATE EVERY SO OFTEN (every 10 batches + first) ===
+            # FIXED: Live loss curve every 10 batches, safe val access
             if batches%10==0 or batches==1 or batches==total_batches:
                 live_avg=total_loss/batches if batches else 0
-                live_acc=correct/(batches*len(batch_idx)) if batches else 0
+                live_acc=correct/(batches*app.batch) if batches else 0
                 app.live_train.append(live_avg)
                 app.loss_hist.append(live_avg)
                 app.acc_hist.append(live_acc)
-                # LIVE VAL - compute on subset every 30 batches for meaningful green line
+                # FIXED: Always ensure val_loss_hist has at least one entry before reading [-1]
                 if batches%30==0 or batches==total_batches:
-                    # Fast val estimate on 200 samples to keep smooth
                     v_loss=0.0; v_corr=0; v_n=min(200,len(Xva))
-                    for vi in range(v_n):
-                        xi=Xva[vi]; yi=int(yva[vi])
-                        _,_,_,probs=forward(xi,W1,b1,W2,b2)
-                        p=probs[yi] if yi < len(probs) else 1e-12
-                        p=min(max(p,1e-12),1-1e-12)
-                        v_loss+=-math.log(p)
-                        if max(range(len(probs)), key=lambda k: probs[k])==yi:
-                            v_corr+=1
-                        if vi%40==0:
-                            await aio.sleep(0)
-                    v_loss/=v_n if v_n else 1
-                    v_acc=v_corr/v_n if v_n else 0
+                    if v_n>0:
+                        for vi in range(v_n):
+                            xi=Xva[vi]; yi=int(yva[vi])
+                            _,_,_,probs=forward(xi,W1,b1,W2,b2)
+                            p=probs[yi] if yi < len(probs) else 1e-12
+                            p=min(max(p,1e-12),1-1e-12)
+                            v_loss+=-math.log(p)
+                            if max(range(len(probs)), key=lambda k: probs[k])==yi:
+                                v_corr+=1
+                            if vi%40==0:
+                                await aio.sleep(0)
+                        v_loss/=v_n
+                        v_acc=v_corr/v_n if v_n else 0
+                    else:
+                        v_loss=live_avg
+                        v_acc=live_acc
                     app.live_val.append(v_loss)
                     app.val_loss_hist.append(v_loss)
                     app.val_acc_hist.append(v_acc)
                 else:
-                    # Keep val array aligned - interpolate towards last true val
                     if app.val_loss_hist:
                         app.val_loss_hist.append(app.val_loss_hist[-1])
                         app.val_acc_hist.append(app.val_acc_hist[-1])
-                app.status=f"Epoch {app.epoch}/{app.max_epochs} batch {batches}/{total_batches} loss {live_avg:.3f} val {app.val_loss_hist[-1]:.3f} - live curves"
+                    else:
+                        # First batches - initialize val with live train to avoid IndexError
+                        app.val_loss_hist.append(live_avg)
+                        app.val_acc_hist.append(live_acc)
+                # SAFE status - val_loss_hist guaranteed non-empty now
+                app.status=f"Epoch {app.epoch}/{app.max_epochs} batch {batches}/{total_batches} loss {live_avg:.3f} val {app.val_loss_hist[-1]:.3f} - live"
             await aio.sleep(0.01)
             if batches%15==0:
                 await aio.sleep(0)
         avg_loss=total_loss/batches if batches else 0
         acc=correct/len(Xtr) if Xtr else 0
         val_loss=0.0; val_correct=0
-        # Val eval full 1085 - chunked yield
         for vi,(xi,yi) in enumerate(zip(Xva,yva)):
             _,_,_,probs=forward(xi,W1,b1,W2,b2)
             yi_int=int(yi)
@@ -488,7 +494,6 @@ async def train_mlp(app):
                 await aio.sleep(0)
         val_loss/=len(Xva) if Xva else 1
         val_acc=val_correct/len(Xva) if Xva else 0
-        # Epoch final - overwrite last live point with true epoch avg for accuracy
         if app.loss_hist:
             app.loss_hist[-1]=avg_loss
             app.acc_hist[-1]=acc
@@ -501,17 +506,17 @@ async def train_mlp(app):
             app.val_loss_hist.append(val_loss); app.val_acc_hist.append(val_acc)
         app.W1=W1; app.b1=b1; app.W2=W2; app.b2=b2
         app.progress=(ep+1)/app.max_epochs
-        app.status=f"Epoch {app.epoch}/{app.max_epochs} loss {avg_loss:.3f} acc {acc*100:.1f}% val {val_acc*100:.1f}% - live curve"
+        app.status=f"Epoch {app.epoch}/{app.max_epochs} loss {avg_loss:.3f} acc {acc*100:.1f}% val {val_acc*100:.1f}% - live"
         await aio.sleep(0.05)
         app.lr*=0.95
     app.training=False; app.trained=True; app.buttons["train"]["enabled"]=True
-    app.buttons["cache"]["enabled"]=True  # ENABLE after training completed
-    app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}% - TOP TIER smooth + live plot"
+    if "cache" in app.buttons:
+        app.buttons["cache"]["enabled"]=True
+    app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}% - TOP TIER smooth + live"
     cache_weights_now(app)
 
 # === TOP-TIER IMAGE CROPPING & RESIZING ===
 async def process_upload_to_28x28(source):
-    # TOP-TIER: load_image with proper handling, smart bounding box crop, high-quality multi-step resize
     result=await load_image(source, max_dimension=384)
     if hasattr(result,"to_py"):
         try: result=result.to_py()
@@ -524,7 +529,6 @@ async def process_upload_to_28x28(source):
     if hasattr(pixels,"to_py"):
         try: pixels=pixels.to_py()
         except: pass
-    # Step 1: Reconstruct source canvas at full quality
     src_canvas=document.createElement("canvas")
     src_canvas.width=int(width); src_canvas.height=int(height)
     ctx=src_canvas.getContext("2d")
@@ -546,17 +550,12 @@ async def process_upload_to_28x28(source):
             await window.Promise.new(exec_res)
             ctx.drawImage(img,0,0,int(width),int(height))
         except: pass
-
-    # TOP-TIER Step 2: Smart bounding box detection - find content, not just center crop
-    # Get image data for analysis
     try:
         full_data=ctx.getImageData(0,0,int(width),int(height))
         fd=full_data.data
         if hasattr(fd,"to_py"):
             fd=fd.to_py()
-        # Find bounding box of non-background (threshold)
         min_x=int(width); max_x=0; min_y=int(height); max_y=0
-        # Sample for speed if large
         step_x=max(1,int(width)//200)
         step_y=max(1,int(height)//200)
         for y in range(0,int(height),step_y):
@@ -565,21 +564,18 @@ async def process_upload_to_28x28(source):
                 if idx+2>=len(fd): continue
                 try: r=int(fd[idx]); g=int(fd[idx+1]); b=int(fd[idx+2])
                 except: continue
-                # Consider non-white/light gray as content
                 brightness=(r+g+b)/3
-                if brightness<220:  # Not near white background
+                if brightness<220:
                     if x<min_x: min_x=x
                     if x>max_x: max_x=x
                     if y<min_y: min_y=y
                     if y>max_y: max_y=y
-        # If no content found, fallback to center square
         if max_x<=min_x or max_y<=min_y:
             size=min(int(width),int(height))
             sx=(int(width)-size)//2
             sy=(int(height)-size)//2
             bbox_w=size; bbox_h=size
         else:
-            # Add 15% padding
             pad_x=int((max_x-min_x)*0.15)
             pad_y=int((max_y-min_y)*0.15)
             min_x=max(0,min_x-pad_x); max_x=min(int(width)-1,max_x+pad_x)
@@ -588,7 +584,6 @@ async def process_upload_to_28x28(source):
             bbox_h=max_y-min_y+1
             sx=min_x; sy=min_y
             size=max(bbox_w,bbox_h)
-            # Center the bbox in square
             if bbox_w<bbox_h:
                 sx=min_x - (size-bbox_w)//2
                 sx=max(0,min(sx,int(width)-size))
@@ -596,20 +591,15 @@ async def process_upload_to_28x28(source):
                 sy=min_y - (size-bbox_h)//2
                 sy=max(0,min(sy,int(height)-size))
     except Exception as e:
-        # Fallback center crop
         orig_w=int(width); orig_h=int(height); size=min(orig_w,orig_h)
         sx=(orig_w-size)//2; sy=(orig_h-size)//2
         bbox_w=size; bbox_h=size
-
-    # TOP-TIER Step 3: High-quality multi-step resize for 28x28
-    # Instead of single 384->28, do 384->112->56->28 with high quality
     dst_canvas=document.createElement("canvas")
     dst_canvas.width=28; dst_canvas.height=28
     dctx=dst_canvas.getContext("2d")
     dctx.imageSmoothingEnabled=True
     dctx.imageSmoothingQuality="high"
     try:
-        # If source crop is large, use intermediate canvases for better quality
         if size>112:
             tmp1=document.createElement("canvas")
             tmp1.width=112; tmp1.height=112
@@ -636,7 +626,6 @@ async def process_upload_to_28x28(source):
             dctx.drawImage(src_canvas, sx, sy, size, size, 0, 0, 28, 28)
     except:
         dctx.drawImage(src_canvas, sx, sy, size, size, 0, 0, 28, 28)
-
     dst_data=dctx.getImageData(0,0,28,28); dst_pixels=dst_data.data
     if hasattr(dst_pixels,"to_py"):
         try: dst_pixels=dst_pixels.to_py()
@@ -647,33 +636,23 @@ async def process_upload_to_28x28(source):
         except: r=g=b=0
         gray=(0.299*r+0.587*g+0.114*b)/255.0
         vec.append(gray)
-    # TOP-TIER: Adaptive invert + contrast normalization
     if len(vec)==784:
         avg=sum(vec)/len(vec)
-        # If background is light, invert
         if avg>0.5:
             vec=[1.0-v for v in vec]
-        # Contrast stretch to 0-1 for better MLP input
         mn=min(vec); mx=max(vec)
         if mx-mn>0.1:
             vec=[(v-mn)/(mx-mn) for v in vec]
-        # Clip
         vec=[max(0.0,min(1.0,v)) for v in vec]
-
-    # TOP-TIER: Create proper positioned artifacts
-    # 1. 140x140 pixel-perfect preview (x5) with crisp pixels
     big_canvas=document.createElement("canvas")
     big_canvas.width=140; big_canvas.height=140
     bctx=big_canvas.getContext("2d")
     bctx.imageSmoothingEnabled=False
     bctx.drawImage(dst_canvas,0,0,140,140)
-    # Add subtle border for artifact positioning
     bctx.strokeStyle="rgba(99,102,241,0.3)"
     bctx.lineWidth=1
     bctx.strokeRect(0,0,140,140)
     proc_url=big_canvas.toDataURL("image/png")
-
-    # 2. Also create 28x28 grid visualization for debugging (optional)
     grid_canvas=document.createElement("canvas")
     grid_canvas.width=28; grid_canvas.height=28
     gctx=grid_canvas.getContext("2d")
@@ -684,7 +663,6 @@ async def process_upload_to_28x28(source):
             gctx.fillStyle=f"rgb({gray},{gray},{gray})"
             gctx.fillRect(c,r,1,1)
     grid_url=grid_canvas.toDataURL("image/png")
-
     return {"original_url":previewUrl,"processed_url":proc_url,"grid_url":grid_url,"vector":vec,"crop_info":{"sx":sx,"sy":sy,"size":size,"bbox_w":bbox_w,"bbox_h":bbox_h}}
 
 async def handle_upload(app, source):
@@ -696,7 +674,6 @@ async def handle_upload(app, source):
         app.orig_url=result.get("original_url"); app.proc_url=result.get("processed_url"); app.grid_url=result.get("grid_url"); app.proc_vec=vec_f
         app.crop_info=result.get("crop_info",{})
         if app.W1 is None:
-            # Try load cached weights if available
             if try_load_cached_weights(app):
                 app.status="Upload processed + cached weights loaded - inferring"
             else:
@@ -719,7 +696,6 @@ def onMousePress(app, mx, my):
             elif bid=="train":
                 aio.run(train_mlp(app))
             elif bid=="reset":
-                # Now CLEAR CACHE per request
                 clear_cached_weights(app)
             elif bid=="cache":
                 cache_weights_now(app)
@@ -786,7 +762,6 @@ def draw_loss_graph(app):
     max_l=max(max(app.loss_hist), max(app.val_loss_hist) if app.val_loss_hist else 0)
     min_l=min(min(app.loss_hist), min(app.val_loss_hist) if app.val_loss_hist else 0)
     rng=max_l-min_l if max_l-min_l>0.05 else 0.5
-    # Train curve - live, smooth, many points
     pts=[]
     for i,v in enumerate(app.loss_hist):
         x=gx+12 + (i/max(1,len(app.loss_hist)-1))*(gw-24)
@@ -798,16 +773,13 @@ def draw_loss_graph(app):
     for j in range(0,len(pts),step):
         x,y=pts[j]
         drawCircle(x,y,2.5,fill=ACC,border=rgb(255,255,255),borderWidth=0.8)
-    # Val curve - NOW LIVE meaningful, computed every 30 batches on 200 samples + full epoch
     pts2=[]
     for i,v in enumerate(app.val_loss_hist):
-        # Align val x to train x - val may have fewer points, stretch
         x=gx+12 + (i/max(1,len(app.val_loss_hist)-1))*(gw-24)
         y=gy+gh-12 - ((v-min_l)/rng*(gh-24))
         pts2.append((x,y))
     for i in range(len(pts2)-1):
         drawLine(pts2[i][0],pts2[i][1],pts2[i+1][0],pts2[i+1][1],fill=ACC2,lineWidth=2.0)
-    # Val dots more frequent when live
     vstep=max(1,len(pts2)//12)
     for j in range(0,len(pts2),vstep):
         x,y=pts2[j]
@@ -816,6 +788,7 @@ def draw_loss_graph(app):
     if app.val_loss_hist:
         drawLabel(f"val {app.val_loss_hist[-1]:.3f} acc {app.val_acc_hist[-1]*100:.1f}% live", gx+gw-12, gy+26, size=10, fill=ACC2, align="right-top")
     drawLabel("purple=train green=val - both live", gx+12, gy+10, size=8, fill=DIM, align="left-top")
+
 def redrawAll(app):
     drawRect(0,0,WIDTH,68,fill=rgb(18,20,32))
     drawLabel("Fashion-MNIST MLP Lab",28,16,size=22,fill=TXT,bold=True,align="left-top")
@@ -889,17 +862,14 @@ def redrawAll(app):
         drawLabel("contrast stretch + proper 140x140 artifact",ux+uw/2,uy+132,size=10,fill=DIM,align="center-top")
         drawLabel("Cached weights auto-loaded if available",ux+uw/2,uy+158,size=9,fill=ACC2,align="center-top")
     else:
-        # TOP-TIER: Proper positioned artifacts
         drawLabel("Original (via load_image):",ux+8,uy+8,size=10,fill=DIM,align="left-top")
         try: drawImage(app.orig_url,ux+10,uy+24,100,100)
         except: drawRect(ux+10,uy+24,100,100,fill=rgb(50,50,60))
         drawLabel("28x28 x5 TOP-TIER:",ux+130,uy+8,size=10,fill=ACC,bold=True,align="left-top")
         if app.proc_url:
             try: 
-                # Proper position: 140x140 artifact with crisp pixels, centered in right side
                 drawImage(app.proc_url,ux+130,uy+24,140,140)
             except: drawRect(ux+130,uy+24,140,140,fill=rgb(40,40,50))
-        # Show crop info if available
         if hasattr(app,'crop_info') and app.crop_info:
             ci=app.crop_info
             drawLabel(f"crop {ci.get('bbox_w','?')}x{ci.get('bbox_h','?')}->{ci.get('size','?')} sq",ux+8,uy+134,size=8,fill=DIM,align="left-top")
@@ -929,16 +899,13 @@ def redrawAll(app):
 orig_onAppStart = onAppStart
 def onAppStart(app):
     orig_onAppStart(app)
-    # Add CACHE WEIGHTS button to right of RESET (RESET is at 360,80, CACHE at 455)
     app.buttons["reset"]["label"]="CLEAR CACHE"
     app.buttons["reset"]["x"]=350; app.buttons["reset"]["y"]=610; app.buttons["reset"]["w"]=110; app.buttons["reset"]["h"]=38
-    app.buttons["cache"]={"x":475,"y":610,"w":135,"h":38,"label":"CACHE WEIGHTS","enabled":False}  # DISABLED until training done
-    # Try load cached weights by default
+    app.buttons["cache"]={"x":475,"y":610,"w":135,"h":38,"label":"CACHE WEIGHTS","enabled":False}
     try:
         if try_load_cached_weights(app):
             app.buttons["load"]["enabled"]=False
             app.dataset_loaded=True
-            # Still need samples for display - try load samples from cache or keep empty
             app.fetch_status="Cache loaded - weights ready"
     except:
         pass
