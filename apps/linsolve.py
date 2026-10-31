@@ -422,8 +422,20 @@ x - y = 1</textarea>
 
 async def _solve(app, residual_expressions, variable_names, initial_values):
     try:
-        from extensions.pyodide import run_python_async
+        from extensions.pyodide import run_python_async, load_package, load_packages_from_imports
         import json
+        # Top-tier: lazy load scipy only when actually needed, with ready wait
+        app.status = 'Loading SciPy (first time only)...'
+        try:
+            await load_package(["numpy", "scipy"])
+        except Exception as e:
+            # Fallback: try load via pyodide directly
+            print(f"load_package warning {e}")
+            try:
+                await load_packages_from_imports("import numpy, scipy")
+            except Exception:
+                pass
+        app.status = 'Solving...'
         exprs_json = json.dumps(residual_expressions)
         x0_json = json.dumps(initial_values)
         var_json = json.dumps(variable_names)
