@@ -504,10 +504,10 @@ async def train_mlp(app):
     app.status=f"Done acc {app.acc_hist[-1]*100:.1f}% val {app.val_acc_hist[-1]*100:.1f}% - 100% Complete"
     cache_weights_now(app)
 
-# === FINAL V4: Python-only scaling from load_image pixels, no img tag, no FileReader, no NoneType ===
-# === FINAL V4: Python-only scaling from load_image pixels, no img tag, no FileReader, no NoneType ===
+# === FINAL V5: Use load_image previewUrl + DOM img + canvas getImageData, Python scaling ===
+# === FINAL V5: Use load_image previewUrl + DOM img + canvas getImageData, Python scaling ===
 async def process_upload_to_28x28(source):
-    # Use load_image for pixels - extension warning once is ok, but no NoneType
+    # Get previewUrl from extension (one warning ok)
     result=await load_image(source, max_dimension=384)
     if hasattr(result,"to_py"):
         try: result=result.to_py()
@@ -515,47 +515,108 @@ async def process_upload_to_28x28(source):
     if not isinstance(result, dict):
         raise ValueError(f"load_image returned {type(result)}")
     width=result.get("width"); height=result.get("height")
-    pixels=result.get("pixels"); previewUrl=result.get("previewUrl") or result.get("preview_url")
-    if width is None or height is None or pixels is None:
-        raise ValueError("missing fields from load_image")
+    previewUrl=result.get("previewUrl") or result.get("preview_url")
+    if width is None or height is None or previewUrl is None:
+        raise ValueError("missing fields")
     src_w=int(width); src_h=int(height)
 
-    # Convert pixels to Python list for reliable indexing
-    if hasattr(pixels,"to_py"):
+    # Load previewUrl into canvas via DOM img (setAttribute to avoid style warning)
+    src_canvas=document.createElement("canvas")
+    src_canvas.width=src_w; src_canvas.height=src_h
+    sctx=src_canvas.getContext("2d")
+
+    dom_img=document.createElement("img")
+    try:
+        dom_img.crossOrigin="anonymous"
+    except:
+        pass
+    fut=aio.Future()
+    def on_load(ev):
         try:
-            pixels=pixels.to_py()
+            sctx.drawImage(dom_img,0,0,src_w,src_h)
+            fut.set_result(True)
+        except Exception as ex:
+            print(f"drawImage failed {ex}")
+            try:
+                fut.set_result(False)
+            except:
+                pass
+    def on_error(ev):
+        try:
+            fut.set_result(False)
         except:
             pass
-    # pixels should be RGBA flat
     try:
-        pix_list=list(pixels)
+        dom_img.bind("load", on_load)
+        dom_img.bind("error", on_error)
     except:
         try:
-            # If it's bytes/bytearray
+            dom_img.onload=on_load
+            dom_img.onerror=on_error
+        except:
+            pass
+    try:
+        dom_img.setAttribute("src", previewUrl)
+    except:
+        pass
+    ok=await fut
+    if not ok:
+        # Fallback try direct pixels from result if img load failed
+        print("img load failed, using direct pixels")
+        pixels=result.get("pixels")
+        if hasattr(pixels,"to_py"):
+            try: pixels=pixels.to_py()
+            except: pass
+        try:
             pix_list=list(pixels)
         except:
             pix_list=[]
-    expected_len=src_w*src_h*4
-    # If length is W*H*3 (RGB) or W*H (gray), handle
-    if len(pix_list) == src_w*src_h*3:
-        # Expand RGB to RGBA
-        tmp=[]
-        for i in range(0,len(pix_list),3):
-            tmp.append(pix_list[i]); tmp.append(pix_list[i+1]); tmp.append(pix_list[i+2]); tmp.append(255)
-        pix_list=tmp
-    elif len(pix_list) == src_w*src_h:
-        # Grayscale to RGBA
-        tmp=[]
-        for v in pix_list:
-            tmp.append(v); tmp.append(v); tmp.append(v); tmp.append(255)
-        pix_list=tmp
+        # Build source canvas from pix_list via putImageData with manual loop (no .set truncation)
+        try:
+            img_data=sctx.createImageData(src_w, src_h)
+            data=img_data.data
+            # Manual copy to avoid .set truncation
+            lim=min(len(pix_list), int(getattr(data,"length",0)))
+            for i in range(lim):
+                try:
+                    data[i]=int(pix_list[i])
+                except:
+                    pass
+            sctx.putImageData(img_data,0,0)
+        except Exception as e:
+            print(f"putImageData fallback failed {e}")
 
-    # If still not expected, try to use previewUrl fallback via canvas (should not happen)
-    if len(pix_list) < expected_len:
-        print(f"pix_list len {len(pix_list)} < expected {expected_len}, using preview canvas fallback")
-        # Fallback: try to create vec from preview via simple method - will be replaced
-        # For now pad with white
-        pix_list = pix_list + [255]*(expected_len - len(pix_list))
+    # Now get pixels from src_canvas via getImageData (reliable, no truncation)
+    try:
+        src_data=sctx.getImageData(0,0,src_w,src_h)
+        src_pixels=src_data.data
+        if hasattr(src_pixels,"to_py"):
+            try: src_pixels=src_pixels.to_py()
+            except: pass
+        try:
+            src_list=list(src_pixels)
+        except:
+            src_list=[]
+    except Exception as e:
+        print(f"getImageData failed {e}")
+        src_list=[]
+
+    # If src_list still empty, use direct pix_list
+    if len(src_list)==0:
+        try:
+            pixels=result.get("pixels")
+            if hasattr(pixels,"to_py"):
+                try: pixels=pixels.to_py()
+                except: pass
+            src_list=list(pixels)
+        except:
+            src_list=[]
+
+    # Ensure src_list length
+    expected=src_w*src_h*4
+    if len(src_list) < expected:
+        print(f"src_list len {len(src_list)} < {expected}, padding")
+        src_list = src_list + [255]*(expected - len(src_list))
 
     target=28
     if src_w == src_h:
@@ -580,24 +641,22 @@ async def process_upload_to_28x28(source):
         for dx in range(target):
             ix=dx + crop_x
             iy=dy + crop_y
-            # Map inter coords back to source
             sx=ix / scale if scale!=0 else 0
             sy=iy / scale if scale!=0 else 0
-            sx_i=int(sx)
-            sy_i=int(sy)
+            sx_i=int(round(sx))
+            sy_i=int(round(sy))
             if sx_i<0: sx_i=0
             if sy_i<0: sy_i=0
             if sx_i>=src_w: sx_i=src_w-1
             if sy_i>=src_h: sy_i=src_h-1
             idx=(sy_i*src_w + sx_i)*4
             try:
-                r=pix_list[idx]; g=pix_list[idx+1]; b=pix_list[idx+2]
+                r=src_list[idx]; g=src_list[idx+1]; b=src_list[idx+2]
             except:
                 r=g=b=255
             gray=(0.299*r+0.587*g+0.114*b)/255.0
             vec.append(gray)
 
-    # Invert if background white (avg > 0.5) -> make white-on-black like Fashion-MNIST
     if len(vec)==784:
         avg=sum(vec)/len(vec)
         if avg>0.5:
@@ -607,11 +666,9 @@ async def process_upload_to_28x28(source):
             vec=[(v-mn)/(mx-mn) for v in vec]
         vec=[max(0.0,min(1.0,v)) for v in vec]
 
-    # Create 140x140 display from vec (no img tag needed)
     big_canvas=document.createElement("canvas")
     big_canvas.width=140; big_canvas.height=140
     bctx=big_canvas.getContext("2d")
-    # Draw black background
     bctx.fillStyle="#000000"
     bctx.fillRect(0,0,140,140)
     for y in range(target):
@@ -620,13 +677,13 @@ async def process_upload_to_28x28(source):
             if i>=len(vec): continue
             v=vec[i]
             gv=int(v*255)
-            # Draw 5x5 block
             bctx.fillStyle=f"rgb({gv},{gv},{gv})"
             bctx.fillRect(x*5, y*5, 5, 5)
-
     proc_url=big_canvas.toDataURL("image/png")
 
     return {"processed_url":proc_url,"vector":vec,"crop_info":{"orig_w":src_w,"orig_h":src_h,"inter_w":inter_w,"inter_h":inter_h,"crop_x":crop_x,"crop_y":crop_y,"is_square":is_square,"note":"SQUARE ONLY SCALED" if is_square else "shortest->28 center crop"}}
+
+
 
 
 
