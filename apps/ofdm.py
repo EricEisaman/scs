@@ -628,7 +628,7 @@ def drawHeader(app):
     drawRect(0,0,W,HEADER_H,fill=rgb(16,20,36),border=PANEL_BORDER,borderWidth=1)
     drawLabel("OFDM LAB  |  FIBER / COAX / RADIO  |  deltaF = Fs/N  |  orthogonal iff sep=1.0  |  CP protects ISI",W*0.5,10,fill=rgb(230,245,255),size=14,bold=True,align="center-top")
     # mode buttons
-    btnW=92; btnH=30; gap=10; sx=16; sy=25
+    btnW=92; btnH=30; gap=10; sx=16; sy=27
     for i,m in enumerate(app.modes):
         bx=sx+i*(btnW+gap); by=sy
         sel=app.mode==m
@@ -942,7 +942,7 @@ def drawMedium(app):
             drawLine(satX,satY+6,cx,cy,fill=CYAN,lineWidth=0.6,opacity=0.18,dashes=True)
 
         # fiber cross-section inset bottom-left
-        ix=gx+10; iy=gy+gh-52; iw=110; ih=42
+        ix=gx+10; iy=gy+gh-122; iw=110; ih=42
         drawRect(ix,iy,iw,ih,fill=rgb(18,24,40),border=FIBER_COL,borderWidth=1,roundness=6)
         drawLabel("FIBER X-SEC",ix+4,iy+2,fill=FIBER_COL,size=6,align="left-top")
         drawRect(ix+10,iy+16,iw-20,14,fill=rgb(30,40,70),border=rgb(90,120,180),borderWidth=0.8,roundness=7)
