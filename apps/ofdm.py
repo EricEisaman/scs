@@ -641,8 +641,8 @@ def drawHeader(app):
             drawLabel(m,bx+btnW/2,by+btnH/2,fill=col,size=11,bold=True,align="center")
     # status
     status=f"{app.fetchMsg}  BER:{app.ber*100:.1f}% EVM:{app.evm:.2f} SNR:{-db(app.evm) if app.evm>0 else 99:.0f}dB ICI:{app.iciPower*100:.1f}%"
-    drawLabel(status,W-16,16,fill=rgb(160,180,210),size=9,align="right-top")
-    drawLabel(f"PLAY:SPACE  RND:R  EQ:E  MODE:1-3  NOISE:Q/W  |  fs={int(app.fs)}Hz deltaF={app.deltaF:.1f}Hz Ts={app.Ts*1000:.1f}ms",W-16,32,fill=rgb(130,150,185),size=9,align="right-top")
+    drawLabel(status,W-16,26,fill=rgb(160,180,210),size=9,align="right-top")
+    drawLabel(f"PLAY:SPACE  RND:R  EQ:E  MODE:1-3  NOISE:Q/W  |  fs={int(app.fs)}Hz deltaF={app.deltaF:.1f}Hz Ts={app.Ts*1000:.1f}ms",W-16,42,fill=rgb(130,150,185),size=9,align="right-top")
 
 def drawTimeDomain(app):
     drawPanel(TIME_X,TIME_Y,TIME_W,TIME_H,"TIME DOMAIN: Tx + Rx  |  CP overhead")
