@@ -84,10 +84,27 @@ def dipole_field_line(L,n=72):
     return pts
 
 SOURCES={
-    "kp":["https://services.swpc.noaa.gov/json/planetary_k_index_1m.json","https://api.allorigins.win/raw?url=https://services.swpc.noaa.gov/json/planetary_k_index_1m.json"],
-    "intermagnet":["https://api.allorigins.win/raw?url=https://www.intermagnet.org/data_download.html","https://corsproxy.io/?https://www.intermagnet.org/data_download.html"],
-    "datagov":["https://api.allorigins.win/raw?url=https://catalog.data.gov/api/3/action/package_show?id=data-on-the-earths-magnetic-field-and-its-secular-change-since-1800","https://catalog.data.gov/api/3/action/package_show?id=data-on-the-earths-magnetic-field-and-its-secular-change-since-1800"],
-    "ncei":["https://api.allorigins.win/raw?url=https://www.ncei.noaa.gov/products/geomagnetic-data","https://www.ncei.noaa.gov/products/geomagnetic-data"],
+    # SWPC supports CORS directly, no proxy needed
+    "kp":[
+        "https://services.swpc.noaa.gov/json/planetary_k_index_1m.json",
+        "https://api.codetabs.com/v1/proxy?quest=https://services.swpc.noaa.gov/json/planetary_k_index_1m.json",
+    ],
+    # INTERMAGNET has no CORS, need proxy that sends ACAO *
+    "intermagnet":[
+        "https://api.codetabs.com/v1/proxy?quest=https://www.intermagnet.org/data_download.html",
+        "https://thingproxy.freeboard.io/fetch/https://www.intermagnet.org/data_download.html",
+        "https://api.cors.lol/?url=https://www.intermagnet.org/data_download.html",
+    ],
+    "datagov":[
+        "https://api.codetabs.com/v1/proxy?quest=https://catalog.data.gov/api/3/action/package_show?id=data-on-the-earths-magnetic-field-and-its-secular-change-since-1800",
+        "https://thingproxy.freeboard.io/fetch/https://catalog.data.gov/api/3/action/package_show?id=data-on-the-earths-magnetic-field-and-its-secular-change-since-1800",
+        "https://api.cors.lol/?url=https://catalog.data.gov/api/3/action/package_show?id=data-on-the-earths-magnetic-field-and-its-secular-change-since-1800",
+    ],
+    "ncei":[
+        "https://www.ncei.noaa.gov/products/geomagnetic-data",
+        "https://api.codetabs.com/v1/proxy?quest=https://www.ncei.noaa.gov/products/geomagnetic-data",
+        "https://thingproxy.freeboard.io/fetch/https://www.ncei.noaa.gov/products/geomagnetic-data",
+    ],
 }
 
 def _to_py(o):
@@ -112,20 +129,47 @@ def _js_get(o,k,d=None):
 
 async def fetch_json_popular(urls,label):
     last=None
+    # Try extensions.fetch first like Fourier Ear Lab - it has better CORS handling
+    if HAS_FETCH and fetch_json:
+        for url in urls:
+            try:
+                data=await fetch_json(url)
+                data=_to_py(data)
+                if data:
+                    print(f"fetch_json {label} OK via extensions.fetch {url[:60]}")
+                    return data
+            except Exception as e:
+                last=e
+                print(f"extensions.fetch_json {label} {url[:60]} failed {e}")
+                continue
+    # Fallback to window.fetch with proxies
     for url in urls:
         try:
             resp=await window.fetch(url)
             if not resp.ok: raise Exception(f"HTTP {resp.status}")
             data=await resp.json()
+            print(f"fetch_json {label} OK via window.fetch {url[:60]}")
             return _to_py(data)
         except Exception as e:
             last=e
-            print(f"fetch_json_popular {label} {url} {e}")
+            print(f"window.fetch_json {label} {url[:60]} failed {e}")
             continue
     raise Exception(f"All failed {label}: {last}")
 
 async def fetch_text_popular(urls,label):
     last=None
+    if HAS_FETCH and fetch_text:
+        for url in urls:
+            try:
+                txt=await fetch_text(url)
+                txt=str(txt)
+                if len(txt)>=10:
+                    print(f"fetch_text {label} OK via extensions.fetch {url[:60]} len {len(txt)}")
+                    return txt
+            except Exception as e:
+                last=e
+                print(f"extensions.fetch_text {label} {url[:60]} failed {e}")
+                continue
     for url in urls:
         try:
             resp=await window.fetch(url)
@@ -133,26 +177,39 @@ async def fetch_text_popular(urls,label):
             txt=await resp.text()
             txt=str(txt)
             if len(txt)<10: raise Exception("short")
+            print(f"fetch_text {label} OK via window.fetch {url[:60]} len {len(txt)}")
             return txt
         except Exception as e:
             last=e
-            print(f"fetch_text_popular {label} {url} {e}")
+            print(f"window.fetch_text {label} {url[:60]} failed {e}")
             continue
     raise Exception(f"All failed {label}: {last}")
 
-# Fixed pyodide - no micropip import at top level, load numpy via loadPackage
+# Fixed pyodide - no micropip import, load via js global which has loadPackage
 PYODIDE_CODE = """
-# Fourier Ear Lab parity: no micropip crash, use loadPackage numpy directly
+# SIGMA fix: pyodide Python module has no loadPackage, use pyodide_js / js.pyodide
 try:
-    import pyodide
-    await pyodide.loadPackage("numpy")
+    import pyodide_js
+    await pyodide_js.loadPackage("numpy")
+    print("pyodide_js loadPackage numpy OK")
 except Exception as e:
-    print(f"pyodide load numpy failed {e}")
+    print(f"pyodide_js loadPackage numpy failed {e}, trying js.pyodide")
     try:
-        import pyodide_js
-        await pyodide_js.loadPackage("numpy")
+        import js
+        await js.pyodide.loadPackage("numpy")
+        print("js.pyodide loadPackage numpy OK")
     except Exception as e2:
-        print(f"pyodide_js load numpy failed {e2}")
+        print(f"js.pyodide load failed {e2}, trying pyodide module")
+        try:
+            import pyodide
+            await pyodide.loadPackage("numpy")
+        except Exception as e3:
+            print(f"pyodide load failed {e3} - maybe numpy already loaded")
+            try:
+                import pyodide
+                # some versions expose loadPackage via pyodide_js only
+            except:
+                pass
 
 import numpy as np
 year=globals().get('year',2025); moment=globals().get('moment',7.7)
