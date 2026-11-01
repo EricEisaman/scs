@@ -628,7 +628,7 @@ def drawHeader(app):
     drawRect(0,0,W,HEADER_H,fill=rgb(16,20,36),border=PANEL_BORDER,borderWidth=1)
     drawLabel("OFDM LAB  |  FIBER / COAX / RADIO  |  deltaF = Fs/N  |  orthogonal iff sep=1.0  |  CP protects ISI",W*0.5,10,fill=rgb(230,245,255),size=14,bold=True,align="center-top")
     # mode buttons
-    btnW=92; btnH=30; gap=10; sx=16; sy=12
+    btnW=92; btnH=30; gap=10; sx=16; sy=25
     for i,m in enumerate(app.modes):
         bx=sx+i*(btnW+gap); by=sy
         sel=app.mode==m
