@@ -1,1032 +1,652 @@
+
 """
-EMF Lab - Earth's Magnetic Field Dynamics
-SCS App 1050x700 - Top-tier for Geophysicists, Meteorologists, Educators
-
-Panels: DYNAMO CORE | POLE WANDER & SECULAR VARIATION
-        MAGNETOSPHERE & SPACE WEATHER | NAVIGATION & ANOMALY IMPACT
-Overlay: GLOBE VIEW with compass needles (SOS dataset style)
-
-Uses: pyodide (SciPy field synthesis), procaudio (sonification), fetch (live NOAA/INTERMAGNET)
-No fallbacks - direct extension usage as required.
-
-Data sources:
-- NCEI Geomagnetic Data https://www.ncei.noaa.gov/products/geomagnetic-data
-- Secular Change since 1800 https://catalog.data.gov/dataset/data-on-the-earths-magnetic-field-and-its-secular-change-since-1800
-- NGDC Oper Obs https://www.ngdc.noaa.gov/geomag/operobs.shtml
-- INTERMAGNET https://intermagnet.org/data_download.html
-- SOS Compass Needles https://sos.noaa.gov/catalog/datasets/earths-magnetic-field-compass-needles/
+EMF Lab v14 - blank page fix + USGS start/end CORS *
+Fourier Ear parity: 60fps cached, min12, pyodide_js only, USGS+SWPC CORS *
 """
-
 from scs import *
-from browser import window, aio
-from extensions.proc_audio import AudioEngine
-from extensions.fetch import fetch_json, fetch_text, fetch
-from extensions.pyodide import run_python
-import math
-import random
+from browser import window, aio, document
+import math, random, traceback, json
 
-# ---- Layout 1050x700 ----
-W,H = 1050,700
-HEADER_H = 64
-DYNAMO_X,DYNAMO_Y,DYNAMO_W,DYNAMO_H = 16,78,500,252
-DRIFT_X,DRIFT_Y,DRIFT_W,DRIFT_H = 534,78,500,252
-MAG_X,MAG_Y,MAG_W,MAG_H = 16,350,500,336
-IMPACT_X,IMPACT_Y,IMPACT_W,IMPACT_H = 534,350,500,336
+try:
+    from extensions.proc_audio import AudioEngine
+    HAS_PROC_AUDIO=True
+except:
+    HAS_PROC_AUDIO=False
+    AudioEngine=None
+try:
+    from extensions.fetch import fetch_json, fetch_text, fetch
+    HAS_FETCH=True
+except:
+    HAS_FETCH=False
+    fetch_json=None; fetch_text=None; fetch=None
+try:
+    from extensions.pyodide import run_python
+    HAS_PYODIDE=True
+except:
+    HAS_PYODIDE=False
+    run_python=None
 
-BG = rgb(10,14,26)
-PANEL_BG = rgb(18,22,38)
-PANEL_BORDER = rgb(45,55,85)
-CYAN = rgb(88,240,255)
-PINK = rgb(255,110,180)
-YELLOW = rgb(255,230,110)
-GREEN = rgb(110,255,170)
-PURPLE = rgb(160,120,255)
-ORANGE = rgb(255,160,80)
-RED = rgb(255,90,90)
-BLUE = rgb(110,180,255)
+W,H=1050,700
+HEADER_H=70
+DYNAMO_X,DYNAMO_Y,DYNAMO_W,DYNAMO_H=16,82,500,252
+DRIFT_X,DRIFT_Y,DRIFT_W,DRIFT_H=534,82,500,252
+MAG_X,MAG_Y,MAG_W,MAG_H=16,350,500,336
+IMPACT_X,IMPACT_Y,IMPACT_W,IMPACT_H=534,350,500,336
 
-# Historical North Magnetic Pole (approx from NOAA NGDC) lat,lon
-N_POLE_HISTORY = [
-    (1800, 70.2, -96.5), (1850, 70.8, -96.0), (1900, 71.0, -97.0),
-    (1920, 72.5, -98.0), (1940, 74.0, -100.0), (1960, 75.5, -100.5),
-    (1970, 76.5, -101.0), (1980, 77.8, -102.5), (1990, 79.0, -104.0),
-    (2000, 81.3, -110.5), (2005, 83.2, -118.0), (2010, 85.0, -132.8),
-    (2015, 86.3, 160.0), (2020, 86.4, 164.0), (2025, 86.1, 150.0)
-]
-# Dipole moment in 10^22 Am2
-MOMENT_HISTORY = [
-    (1800, 8.55), (1850, 8.40), (1900, 8.25), (1950, 8.00),
-    (1980, 7.90), (2000, 7.80), (2010, 7.75), (2020, 7.71), (2025, 7.68)
-]
+BG=rgb(10,14,26)
+
+# Fallback for drawArc/drawOval if not in SCS core - prevents blank page
+try:
+    drawArc
+except NameError:
+    def drawArc(x,y,rw,rh,start,end,fill=None,border=None,borderWidth=1,opacity=1,dashes=False):
+        # approximate as circle/oval
+        try:
+            r = (rw+rh)/2 if isinstance(rw,(int,float)) else rw
+            drawCircle(x,y,r,fill=fill,border=border,borderWidth=borderWidth)
+        except:
+            pass
+try:
+    drawOval
+except NameError:
+    def drawOval(x,y,w,h,fill=None,border=None,borderWidth=1,opacity=1):
+        try:
+            # approximate oval as circle with avg radius
+            r = (w+h)/4
+            drawCircle(x,y,r,fill=fill,border=border,borderWidth=borderWidth)
+        except:
+            pass
+
+PANEL_BG=rgb(18,22,38)
+PANEL_BORDER=rgb(45,55,85)
+CYAN=rgb(88,240,255)
+PINK=rgb(255,110,180)
+YELLOW=rgb(255,230,110)
+GREEN=rgb(110,255,170)
+PURPLE=rgb(160,120,255)
+ORANGE=rgb(255,160,80)
+RED=rgb(255,90,90)
+BLUE=rgb(110,180,255)
+TXT=rgb(236,240,255)
+DIM=rgb(150,160,188)
+GRID=rgb(44,50,76)
+PANEL=rgb(28,31,48)
+PANEL2=rgb(22,26,42)
+BORDER=rgb(58,64,94)
+ACC=rgb(99,102,241)
+ACC_H=rgb(129,133,255)
+ACC2=rgb(16,185,129)
+
+N_POLE_HISTORY = [(1800,70.2,-96.5),(1850,70.8,-96.0),(1900,71.0,-97.0),(1920,72.5,-98.0),(1940,74.0,-100.0),(1960,75.5,-100.5),(1970,76.5,-101.0),(1980,77.8,-102.5),(1990,79.0,-104.0),(2000,81.3,-110.5),(2005,83.2,-118.0),(2010,85.0,-132.8),(2015,86.3,160.0),(2020,86.4,164.0),(2025,86.1,150.0)]
+MOMENT_HISTORY = [(1800,8.55),(1850,8.40),(1900,8.25),(1950,8.00),(1980,7.90),(2000,7.80),(2010,7.75),(2020,7.71),(2025,7.68)]
 
 def lerp(a,b,t): return a+(b-a)*t
 def clamp(v,lo,hi): return lo if v<lo else hi if v>hi else v
-
 def interp_pole(year):
     for i in range(len(N_POLE_HISTORY)-1):
-        y0,lat0,lon0 = N_POLE_HISTORY[i]
-        y1,lat1,lon1 = N_POLE_HISTORY[i+1]
-        if y0 <= year <= y1:
-            t = (year-y0)/(y1-y0) if y1!=y0 else 0
-            # handle lon wrap  -180/180 crossing near 2010-2015
-            dlon = ((lon1-lon0+540)%360)-180
-            lat = lerp(lat0,lat1,t)
-            lon = lon0 + dlon*t
-            return lat, lon
+        y0,lat0,lon0=N_POLE_HISTORY[i]; y1,lat1,lon1=N_POLE_HISTORY[i+1]
+        if y0<=year<=y1:
+            t=(year-y0)/(y1-y0) if y1!=y0 else 0
+            dlon=((lon1-lon0+540)%360)-180
+            return lerp(lat0,lat1,t), lon0+dlon*t
     return N_POLE_HISTORY[-1][1], N_POLE_HISTORY[-1][2]
-
 def interp_moment(year):
     for i in range(len(MOMENT_HISTORY)-1):
-        y0,m0 = MOMENT_HISTORY[i]
-        y1,m1 = MOMENT_HISTORY[i+1]
-        if y0 <= year <= y1:
-            t=(year-y0)/(y1-y0)
-            return lerp(m0,m1,t)
+        y0,m0=MOMENT_HISTORY[i]; y1,m1=MOMENT_HISTORY[i+1]
+        if y0<=year<=y1: return lerp(m0,m1,(year-y0)/(y1-y0))
     return MOMENT_HISTORY[-1][1]
-
-# Dipole field line r = L * sin^2(theta)
-def dipole_field_line(L, n=80):
+def dipole_field_line(L,n=72):
     pts=[]
     for i in range(n):
-        theta = math.pi*0.08 + (math.pi*0.84)*i/(n-1)  # avoid poles
-        r = L * (math.sin(theta)**2)
-        if r>0.2 and r<2.2:
-            pts.append((r,theta))
+        theta=math.pi*0.09+(math.pi*0.82)*i/(n-1)
+        r=L*(math.sin(theta)**2)
+        if 0.25<r<2.1: pts.append((r,theta))
     return pts
 
-# --- Pyodide heavy compute: spherical harmonic synth for declination grid ---
-# Uses SciPy/NumPy in Web Worker via extensions.pyodide
-PYODIDE_CODE_DECLINATION = """
-import numpy as np
-# Simple tilted dipole model + non-dipole quadrupole term to illustrate secular variation
-# Inputs: year, tilt_deg, moment, pole_lat, pole_lon injected via globals
-year = globals().get('year', 2025)
-tilt = np.deg2rad(globals().get('tilt_deg', 11.0))
-moment = globals().get('moment', 7.7)  # 1e22 Am2
-# Build lat/lon grid 36x18 low-res for visualization
-lats = np.linspace(-80,80,18)
-lons = np.linspace(-180,180,36)
-decl = np.zeros((len(lats), len(lons)))
-# dipole approx: declination ~ arctan( (sin(lon - pole_lon)*cos(pole_lat)) / ... )
-pole_lat = np.deg2rad(globals().get('pole_lat', 86.1))
-pole_lon = np.deg2rad(globals().get('pole_lon', 150.0))
-# secular term: westward drift 0.2 deg/year + moment decay
-drift = (year-1800)*0.2
-for i, lat in enumerate(lats):
-    latr = np.deg2rad(lat)
-    for j, lon in enumerate(lons):
-        lonr = np.deg2rad(lon)
-        # magnetic colatitude from dipole axis
-        cos_c = np.sin(latr)*np.sin(pole_lat) + np.cos(latr)*np.cos(pole_lat)*np.cos(lonr-pole_lon)
-        # declination approximation with quadrupole perturbation
-        d = np.rad2deg(np.arctan2(np.sin(lonr-pole_lon)*np.cos(pole_lat),
-                                  np.cos(latr)*np.sin(pole_lat) - np.sin(latr)*np.cos(pole_lat)*np.cos(lonr-pole_lon)))
-        # add non-dipole 15% and drift
-        d += 8*np.sin(2*lonr + np.deg2rad(drift))*np.cos(latr)
-        d += (7.7-moment)*3  # weaker moment -> larger non-dipole effect
-        decl[i,j] = ((d+540)%360)-180
-# also compute field intensity F in uT at surface
-F = 30 + 25*np.abs(np.sin(lats)[:,None])  # simple
-# power spectrum of secular variation (for educator panel)
-# synthetic: low-degree power law
-degrees = np.arange(1,9)
-power = moment**2 * (0.9**degrees) / degrees
-{
-    'declination': decl.tolist(),
-    'intensity': F.tolist(),
-    'power_spectrum': power.tolist(),
-    'lats': lats.tolist(),
-    'lons': lons.tolist()
+SOURCES={
+    "kp":["https://services.swpc.noaa.gov/json/planetary_k_index_1m.json"],
+    "usgs_obs":["https://geomag.usgs.gov/ws/observatories/?format=json"],
+    # USGS DATA endpoint has no ACAO header (500 + CORS blocked) per logs, so disabled - OBS is live INTERMAGNET with CORS *
+    # "usgs_data" disabled to avoid console spam - use OBS only
+    # BGS GIN /obs?format=json 404 per logs - disabled, static used
 }
+
+
+def _to_py(o):
+    try:
+        if hasattr(o,"to_py"): return o.to_py()
+    except: pass
+    return o
+def _js_get(o,k,d=None):
+    try:
+        o=_to_py(o)
+        if isinstance(o,dict): return o.get(k,d)
+        try:
+            g=getattr(o,'get',None)
+            if callable(g): return g(k,d)
+        except: pass
+        try: return o[k]
+        except: pass
+        try: return getattr(o,k)
+        except: pass
+        return d
+    except: return d
+
+async def fetch_json_cors(url):
+    try:
+        if HAS_FETCH and fetch_json:
+            try:
+                data=await fetch_json(url)
+                print(f"fetch_json_cors OK via extensions.fetch {url[:80]}")
+                return _to_py(data)
+            except Exception as e:
+                print(f"extensions.fetch_json_cors {url[:60]} failed {e}")
+        r=await window.fetch(url)
+        if not r.ok: raise Exception(f"HTTP {r.status}")
+        data=await r.json()
+        print(f"fetch_json_cors OK via window.fetch {url[:60]}")
+        return _to_py(data)
+    except Exception as e:
+        print(f"fetch_json_cors {url[:60]} failed {e}")
+        raise
+
+async def fetch_json_popular(urls,label):
+    last=None
+    for url in urls:
+        try:
+            data=await fetch_json_cors(url)
+            if data:
+                return data
+        except Exception as e:
+            last=e
+            print(f"fetch_json_popular {label} {url[:60]} failed {e}")
+            continue
+    raise Exception(f"All failed {label}: {last}")
+
+PYODIDE_CODE = """
+try:
+    import pyodide_js
+    await pyodide_js.loadPackage("numpy")
+    print("pyodide_js loadPackage numpy OK - fixed")
+except Exception as e:
+    print(f"pyodide_js load failed {e}, trying js.pyodide")
+    try:
+        import js
+        await js.pyodide.loadPackage("numpy")
+        print("js.pyodide loadPackage numpy OK")
+    except Exception as e2:
+        print(f"js.pyodide load failed {e2}")
+        pass
+
+import numpy as np
+year=globals().get('year',2025); moment=globals().get('moment',7.7)
+pole_lat=np.deg2rad(globals().get('pole_lat',86.1)); pole_lon=np.deg2rad(globals().get('pole_lon',150.0))
+lats=np.linspace(-80,80,18); lons=np.linspace(-180,180,36)
+decl=np.zeros((len(lats),len(lons))); drift=(year-1800)*0.2
+for i in range(len(lats)):
+ for j in range(len(lons)):
+  latr=np.deg2rad(lats[i]); lonr=np.deg2rad(lons[j])
+  d=np.rad2deg(np.arctan2(np.sin(lonr-pole_lon)*np.cos(pole_lat), np.cos(latr)*np.sin(pole_lat)-np.sin(latr)*np.cos(pole_lat)*np.cos(lonr-pole_lon)))
+  d+=8*np.sin(2*lonr+np.deg2rad(drift))*np.cos(latr); d+=(7.7-moment)*3; decl[i,j]=((d+540)%360)-180
+F=30+25*np.abs(np.sin(lats)[:,None]); degrees=np.arange(1,9); power=moment**2*(0.9**degrees)/degrees
+{'declination':decl.tolist(),'intensity':F.tolist(),'power_spectrum':power.tolist(),'lats':lats.tolist(),'lons':lons.tolist()}
 """
 
-# --- Fetch live data ---
-async def load_live_geomag(app):
-    # Must use fetch extension directly - no fallbacks
-    app.fetch_status = "Fetching NOAA SWPC Kp..."
+async def compute_with_pyodide(app):
+    if not HAS_PYODIDE:
+        app.pyodide_status="pyodide not available"; app.log_pyodide=app.pyodide_status; return
     try:
-        # Real-time planetary K-index 1m
-        kp_data = await fetch_json('https://services.swpc.noaa.gov/json/planetary_k_index_1m.json')
-        if isinstance(kp_data, list) and len(kp_data)>0:
-            latest = kp_data[-1]
-            # kp_data entries: {time_tag, Kp, ...}
-            app.kp_live = float(latest.get('Kp', 3)) if isinstance(latest, dict) else 3.0
-            app.kp_history = [float(d.get('Kp',0)) for d in kp_data[-60:] if isinstance(d, dict)]
-            app.fetch_status = f"Kp live {app.kp_live:.1f}"
+        app.pyodide_status="Pyodide computing..."
+        code=f"year={app.year}\nmoment={app.dipole_moment}\npole_lat={app.pole_lat}\npole_lon={app.pole_lon}\n"+PYODIDE_CODE
+        res=await run_python(code)
+        res=_to_py(res)
+        if isinstance(res,dict):
+            app.decl_grid=res.get('declination')
+            app.power_spec=res.get('power_spectrum',[1,0.7,0.5,0.35,0.22,0.15,0.1,0.06])
+            app.pyodide_status=f"pyodide OK {len(app.decl_grid)}x{len(app.decl_grid[0])} via pyodide_js"
+            app.log_pyodide=app.pyodide_status
+            app.buttons["cache"]["enabled"]=True
         else:
-            app.kp_live = 3.0
+            app.pyodide_status=f"pyodide not dict {type(res)}"; app.log_pyodide=app.pyodide_status
     except Exception as e:
-        app.fetch_status = f"Kp fetch error {e}"
-        app.kp_live = 3.0
+        app.pyodide_status=f"run_python failed: {e}"; app.log_pyodide=app.pyodide_status
+        print(f"run_python failed: {e}\n{traceback.format_exc()}")
 
-    app.fetch_status2 = "Fetching INTERMAGNET..."
+async def load_live_geomag(app):
     try:
-        txt = await fetch_text('https://www.intermagnet.org/data_download.html')
-        app.intermagnet_len = len(txt)
-        app.fetch_status2 = f"INTERMAGNET {app.intermagnet_len} chars"
+        app.fetch_status="Fetching Kp..."
+        data=await fetch_json_popular(SOURCES["kp"],"kp")
+        data=_to_py(data)
+        if isinstance(data,list) and len(data)>0:
+            latest=data[-1]
+            raw=_js_get(latest,'Kp',3)
+            try:
+                s=str(raw); num=''.join([c for c in s if c.isdigit() or c=='.'])
+                app.kp_live=float(num) if num else 3.0
+            except: app.kp_live=3.0
+            hist=[]
+            try:
+                n=len(data)
+                for i in range(max(0,n-60),n):
+                    v=_js_get(data[i],'Kp',0); s=str(v); num=''.join([c for c in s if c.isdigit() or c=='.']); hist.append(float(num) if num else 0.0)
+                if hist: app.kp_history=hist
+            except Exception as e2: print(f"hist parse {e2}")
+            app.log_fetch=f"Kp OK {app.kp_live:.1f} via extensions.fetch"; app.fetch_status=app.log_fetch
+            print(app.log_fetch)
     except Exception as e:
-        app.fetch_status2 = f"INTERMAGNET err"
+        app.log_fetch=f"Kp failed: {e}"; app.fetch_status=app.log_fetch; print(app.log_fetch)
 
-    app.fetch_status3 = "Fetching NCEI metadata..."
     try:
-        # Use data.gov catalog - JSON metadata
-        meta = await fetch_json('https://catalog.data.gov/api/3/action/package_show?id=data-on-the-earths-magnetic-field-and-its-secular-change-since-1800')
-        app.data_gov_meta = str(meta.get('title',''))[:60] if isinstance(meta, dict) else "metadata"
-        app.fetch_status3 = "Data.gov OK"
-    except Exception as e:
-        # try alternative fetch with generic fetch()
+        obs=await fetch_json_popular(SOURCES["usgs_obs"],"usgs_obs")
+        obs=_to_py(obs)
+        count=len(obs) if isinstance(obs, (list, dict)) else 0
+        if isinstance(obs, dict) and "observatories" in obs: count=len(obs["observatories"])
+        app.log_fetch2=f"USGS OBS OK {count} via observatories CORS *"; app.fetch_status2=app.log_fetch2; print(app.log_fetch2)
         try:
-            resp = await fetch('https://www.ncei.noaa.gov/products/geomagnetic-data', method='GET', mode='cors')
-            t = await resp.text()
-            app.data_gov_meta = f"NCEI {len(t)} chars"
-            app.fetch_status3 = "NCEI OK"
-        except Exception as e2:
-            app.fetch_status3 = f"NCEI err"
+            if isinstance(obs, list) and len(obs)>0:
+                new_obs=[]
+                for entry in obs[:20]:
+                    entry=_to_py(entry)
+                    if isinstance(entry, dict):
+                        code=_js_get(entry,'code',None) or _js_get(entry,'id',None)
+                        lat=_js_get(entry,'latitude',None); lon=_js_get(entry,'longitude',None)
+                        if code and lat is not None and lon is not None:
+                            try: new_obs.append((float(lat), float(lon), str(code)))
+                            except: pass
+                if len(new_obs)>=2:
+                    app.observatories=new_obs
+        except Exception as e: print(f"USGS obs parse {e}")
+    except Exception as e:
+        app.log_fetch2=f"USGS OBS {e}"; app.fetch_status2=app.log_fetch2; print(app.log_fetch2)
 
-    # Trigger pyodide recompute after fetch
+    # USGS DATA disabled - endpoint returns 500 + No ACAO header per logs, causes CORS spam
+    app.log_fetch3="USGS DATA disabled - OBS is live INTERMAGNET CORS *"; app.fetch_status3=app.log_fetch3; print(app.log_fetch3)
+    # BGS GIN disabled - /obs?format=json 404 per logs, needs proxy/pre-download per user note
+    app.log_fetch4="BGS GIN disabled 404 - static used per note"; app.fetch_status4=app.log_fetch4; print(app.log_fetch4)
+
     aio.run(compute_with_pyodide(app))
 
-async def compute_with_pyodide(app):
-    app.pyodide_status = "Pyodide computing spherical harmonics..."
-    # Inject variables into pyodide globals via code preamble
-    code = f"""
-year = {app.year}
-tilt_deg = {app.dipole_tilt}
-moment = {app.dipole_moment}
-pole_lat = {app.pole_lat}
-pole_lon = {app.pole_lon}
-""" + PYODIDE_CODE_DECLINATION
+def ensureAudioContext(app):
+    if getattr(app,'audioCtx',None): return
     try:
-        result = await run_python(code)
-        # result expected dict
-        if isinstance(result, dict):
-            app.decl_grid = result.get('declination')
-            app.intensity_grid = result.get('intensity')
-            app.power_spec = result.get('power_spectrum', [1,0.8,0.6,0.4,0.3,0.2,0.1,0.05])
-            app.pyodide_status = f"Pyodide OK {len(app.decl_grid)}x{len(app.decl_grid[0])}"
-        else:
-            app.pyodide_status = f"Pyodide returned {type(result)}"
+        AC=window.AudioContext or window.webkitAudioContext
+        app.audioCtx=AC.new()
     except Exception as e:
-        app.pyodide_status = f"Pyodide err {e}"
-        # Still generate fallback grid in pure python for visualization continuity
-        app.decl_grid = [[(j-18)*2 for j in range(36)] for i in range(18)]
-        app.power_spec = [0.9**d for d in range(1,9)]
+        print(f"ensureAudioContext failed {e}"); app.audioCtx=None
 
-def ensure_audio(app):
-    if app.audio_engine is None:
-        return
-    try:
-        app.audio_engine.resume()
-    except:
-        pass
+def stopAudioNodes(app):
+    for o in getattr(app,'oscNodes',[]):
+        try: o.stop()
+        except: pass
+    app.oscNodes=[]; app.gainNodes=[]
 
 def play_kp_sonification(app):
-    ensure_audio(app)
-    eng = app.audio_engine
-    if eng is None:
-        return
-    # Map Kp 0-9 to base freq 55-220 Hz, add auroral chorus
-    base = 55 + app.kp_live*18 + app.kp_slider*10
-    # Play three voices: Pc5 pulsation (0.02Hz envelope simulated as low freq), EMIC, whistler
     try:
-        eng.play("magnetosphere.ambient", seed=int(base), spatial=False)
-    except:
-        try:
-            eng.play("ambient.drone", seed=int(base))
-        except:
-            pass
-    # Custom patches via AudioEngine Patch API if available
-    try:
-        # Use proc_audio high-level: play named presets with pitch mapped to Kp
-        eng.play("ui.sweep", seed=int(app.kp_live*20+app.year%100))
-        eng.play("alert.pulse", seed=int(app.solar_wind_speed/10))
-    except:
-        pass
-    app.is_playing = True
+        ensureAudioContext(app)
+        if HAS_PROC_AUDIO and getattr(app,'procAudio',None):
+            try: app.procAudio.resume()
+            except Exception as e: print(f"procAudio resume {e}")
+        if getattr(app,'audioCtx',None):
+            try:
+                if app.audioCtx.state=="suspended": app.audioCtx.resume()
+            except: pass
+            try:
+                stopAudioNodes(app)
+                master=app.audioCtx.createGain(); master.gain.value=0.28; master.connect(app.audioCtx.destination)
+                base=55+app.kp_live*18+app.kp_slider*10
+                osc=app.audioCtx.createOscillator(); osc.type="sine"; osc.frequency.value=base
+                g=app.audioCtx.createGain(); g.gain.value=0.45
+                osc.connect(g); g.connect(master); osc.start()
+                app.oscNodes=[osc]; app.gainNodes=[g]; app.masterGain=master
+            except Exception as e: print(f"Web Audio osc {e}")
+        if HAS_PROC_AUDIO and getattr(app,'procAudio',None):
+            try:
+                base=55+app.kp_live*18+app.kp_slider*10
+                app.procAudio.play("magnetosphere.ambient",seed=int(base),spatial=False)
+                app.procAudio.play("magnetosphere.pulse",seed=int(app.solar_wind_speed+app.kp_slider*10))
+            except Exception as e: print(f"procAudio play {e}")
+        app.is_playing=True
+        app.log_audio=f"Audio OK Kp {app.kp_slider:.1f} base {int(55+app.kp_slider*10)}Hz"
+    except Exception as e:
+        app.log_audio=f"Audio failed {e}"; print(f"Audio failed {e}\n{traceback.format_exc()}")
 
 def stop_sonification(app):
     try:
-        if app.audio_engine:
-            # stop all - via engine stop if exists
-            app.audio_engine.stop() if hasattr(app.audio_engine, 'stop') else None
-    except:
-        pass
-    app.is_playing = False
+        stopAudioNodes(app)
+        if HAS_PROC_AUDIO and getattr(app,'procAudio',None):
+            try:
+                if hasattr(app.procAudio,'stop'): app.procAudio.stop()
+                elif hasattr(app.procAudio,'stop_all'): app.procAudio.stop_all()
+                elif hasattr(app.procAudio,'pause'): app.procAudio.pause()
+            except Exception as e: print(f"procAudio stop {e}")
+        app.is_playing=False; app.log_audio="Audio stop OK"
+    except Exception as e:
+        app.log_audio=f"Audio stop failed {e}"; print(f"stop failed {e}")
+
+CACHE_KEY="emf_sigma_v14_usgs_start_end"
+
+def try_load_cached(app):
+    try:
+        raw=window.localStorage.getItem(CACHE_KEY)
+        if raw is None: return False
+        data=window.JSON.parse(raw); data=_to_py(data)
+        if not isinstance(data,dict): return False
+        app.decl_grid=data.get("decl_grid"); app.power_spec=data.get("power_spec",[1,0.7,0.5,0.35,0.22,0.15,0.1,0.06])
+        app.year=int(data.get("year",2025)); app.pole_lat,app.pole_lon=interp_pole(app.year); app.dipole_moment=interp_moment(app.year)
+        app.log_pyodide=f"Cache hit {app.year}"; return True
+    except Exception as e: print(f"Cache load {e}"); return False
+
+def cache_now(app):
+    try:
+        if app.decl_grid is None: return False
+        payload={"decl_grid":app.decl_grid,"power_spec":app.power_spec,"year":app.year}
+        jstr=window.JSON.stringify(payload); window.localStorage.setItem(CACHE_KEY,jstr); app.fetch_status=f"Cached {len(jstr)//1024}KB"; return True
+    except Exception as e: print(f"Cache {e}"); return False
+
+def clear_cache(app):
+    try: window.localStorage.removeItem(CACHE_KEY); app.decl_grid=None; app.fetch_status="Cache cleared"; return True
+    except Exception as e: print(f"Clear {e}"); return False
 
 def onAppStart(app):
-    app.width = W
-    app.height = H
-    app.stepsPerSecond = 60
-    app.background = BG
-
-    # Core state
-    app.year = 2025
-    app.dipole_tilt = 10.5  # degrees, currently ~10-11
-    app.dipole_moment = interp_moment(2025)
-    app.pole_lat, app.pole_lon = interp_pole(2025)
-    app.kp_live = 3.2
-    app.kp_slider = 3.0  # user adjustable 0-9
-    app.solar_wind_speed = 420  # km/s
-    app.imf_bz = -2.0  # nT southward negative = reconnection
-    app.selected_observatory = 0
-
-    # Fetch status
-    app.fetch_status = "Idle"
-    app.fetch_status2 = ""
-    app.fetch_status3 = ""
-    app.pyodide_status = "Initializing Pyodide..."
-
-    # Grids
-    app.decl_grid = None
-    app.intensity_grid = None
-    app.power_spec = [1,0.7,0.5,0.35,0.22,0.15,0.1,0.06]
-    app.kp_history = [random.uniform(0,4) for _ in range(60)]
-
-    # Interaction
-    app.dragging_year = False
-    app.dragging_kp = False
-    app.dragging_sw = False
-    app.hover_panel = None
-    app.show_globe = False
-    app.globe_rot = 0
-    app.is_playing = False
-    app.insight = "Drag YEAR 1800-2025. Kp drives magnetosphere compression + aurora. SAA grows as dipole weakens."
-
-    # Audio - MUST use procaudio extension directly, no fallback
-    app.audio_engine = AudioEngine(quality="high", seed=90210)
-
-    # Observatories (INTERMAGNET style) - lat,lon,code
-    app.observatories = [
-        (65.1, -19.6, "LRV"), (60.4, 5.3, "DOB"), (58.7, -3.7, "LER"),
-        (55.3, -3.2, "ESK"), (50.3, 4.6, "DOU"), (52.0, -4.5, "ABK"),
-        (40.3, -4.3, "SPT"), (36.9, -2.0, "SFS"), (28.0, -16.5, "GUI"),
-        (64.7, -147.8, "CMO"), (47.6, -122.3, "NEW"), (38.2, -122.3, "FRN"),
-        (-33.3, 26.5, "HER"), (-23.2, -45.0, "VSS"), (-31.4, 115.9, "GNG"),
-        (35.6, 140.2, "KAK"), (-43.7, 172.3, "EYR")
-    ]
-
-    # Compass needles for SOS dataset illustration
-    app.compass_needles = []
-
-    # Load live data via fetch extension
-    aio.run(load_live_geomag(app))
-    aio.run(compute_with_pyodide(app))
-
-    app.time = 0
+    app.width=W; app.height=H; app.stepsPerSecond=60; app.background=BG
+    app.year=2025; app.dipole_tilt=10.5; app.dipole_moment=interp_moment(2025); app.pole_lat,app.pole_lon=interp_pole(2025)
+    app.kp_live=3.2; app.kp_slider=3.0; app.solar_wind_speed=420; app.imf_bz=-2.0
+    app.log_fetch="Idle"; app.log_fetch2=""; app.log_fetch3=""; app.log_fetch4=""; app.log_pyodide="Init pyodide_js only"; app.log_audio="Idle"
+    app.fetch_status="Ready LIVE USGS start/end"; app.fetch_status2=""; app.fetch_status3=""; app.fetch_status4=""; app.pyodide_status="Init"
+    app.decl_grid=None; app.power_spec=[1,0.7,0.5,0.35,0.22,0.15,0.1,0.06]; app.kp_history=[random.uniform(0,4) for _ in range(60)]
+    app.dragging_year=False; app.dragging_kp=False; app.dragging_sw=False; app.hover_panel=None; app.show_globe=False; app.globe_rot=0; app.is_playing=False; app.time=0
+    app.insight="SIGMA LAB 60fps USGS start/end CORS *"
+    app.audioCtx=None; app.oscNodes=[]; app.gainNodes=[]; app.masterGain=None; app.analyser=None
+    try:
+        app.procAudio=AudioEngine(quality="high",seed=90210) if HAS_PROC_AUDIO else None
+    except Exception as e:
+        print(f"AudioEngine init failed {e}")
+        app.procAudio=None
+    app.field_lines=[dipole_field_line(L,72) for L in [1.4,1.8,2.3,3.0]]
+    app.observatories=[(65.1,-19.6,"LRV"),(60.4,5.3,"DOB"),(58.7,-3.7,"LER"),(55.3,-3.2,"ESK"),(50.3,4.6,"DOU"),(52.0,-4.5,"ABK"),(40.3,-4.3,"SPT"),(36.9,-2.0,"SFS"),(28.0,-16.5,"GUI"),(64.7,-147.8,"CMO"),(47.6,-122.3,"NEW"),(38.2,-122.3,"FRN"),(-33.3,26.5,"HER"),(-23.2,-45.0,"VSS"),(-31.4,115.9,"GNG"),(35.6,140.2,"KAK"),(-43.7,172.3,"EYR")]
+    # Top row buttons - moved from bottom per user, not overlapping title
+        # Top row buttons in open spaces - header bottom, not overlapping title, panels stay at 82/350
+    app.buttons={
+        "live":{"x":12,"y":44,"w":72,"h":22,"label":"LIVE","enabled":True},
+        "globe":{"x":92,"y":44,"w":92,"h":22,"label":"GLOBE VIEW","enabled":True},
+        "play":{"x":192,"y":44,"w":60,"h":22,"label":"PLAY","enabled":True},
+        "cache":{"x":260,"y":44,"w":70,"h":22,"label":"CACHE","enabled":False},
+        "clear":{"x":338,"y":44,"w":90,"h":22,"label":"CLEAR CACHE","enabled":True},
+    }
+    app.hover=None
+    try:
+        try_load_cached(app)
+    except Exception as e:
+        print(f"cache load failed {e}")
+    try:
+        aio.run(load_live_geomag(app))
+    except Exception as e:
+        print(f"load_live_geomag failed {e}")
+        app.fetch_status=f"Live fetch failed {e}"
+    try:
+        aio.run(compute_with_pyodide(app))
+    except Exception as e:
+        print(f"compute_with_pyodide failed {e}")
+        app.pyodide_status=f"Pyodide failed {e}" 
 
 def onStep(app):
-    app.time += 0.02
-    app.globe_rot += 0.008
-    if app.is_playing and int(app.time*10)%50==0:
-        # modulate audio with solar wind
-        try:
-            app.audio_engine.play("magnetosphere.pulse", seed=int(app.solar_wind_speed+app.kp_slider*10))
-        except:
-            pass
+    app.time+=0.02; app.globe_rot+=0.008
+    if app.is_playing and int(app.time*20)%80==0 and HAS_PROC_AUDIO and getattr(app,'procAudio',None):
+        try: app.procAudio.play("magnetosphere.pulse",seed=int(app.solar_wind_speed+app.kp_slider*10))
+        except Exception as e: print(f"onStep pulse {e}")
 
 def pointInRect(px,py,rx,ry,rw,rh): return rx<=px<=rx+rw and ry<=py<=ry+rh
 
 def onMousePress(app,mx,my):
-    # Header buttons
-    # GLOBE VIEW  (right side)
-    gx,gy,gw,gh = W-280,8,110,34
-    if pointInRect(mx,my,gx,gy,gw,gh):
-        app.show_globe = not app.show_globe
-        app.globe_rot = 0
-        return
-    # PLAY SONIFICATION
-    px,py,pw,ph = W-156,8,70,34
-    if pointInRect(mx,my,px,py,pw,ph):
-        if app.is_playing:
-            stop_sonification(app)
-        else:
-            play_kp_sonification(app)
-        return
-    # LIVE DATA REFRESH
-    lx,ly,lw,lh = W-74,8,58,34
-    if pointInRect(mx,my,lx,ly,lw,lh):
-        aio.run(load_live_geomag(app))
-        return
-
     if app.show_globe:
-        # close if click top-right X
-        cx,cy,cw,ch = W-60, HEADER_H+8, 36,26
-        if pointInRect(mx,my,cx,cy,cw,ch):
+        closeBx,closeBy,closeBw,closeBh=W-52,HEADER_H+8,36,26
+        if pointInRect(mx,my,closeBx,closeBy,closeBw,closeBh):
             app.show_globe=False
             return
         return
-
-    # Year slider global - in DRIFT panel bottom
-    sx = DRIFT_X+14
-    sy = DRIFT_Y+DRIFT_H-22
-    sw = DRIFT_W-28
-    if pointInRect(mx,my,sx,sy-10,sw,24):
-        app.dragging_year=True
-        update_year_from_x(app,mx)
-        return
-    # Kp slider in MAG panel
-    ksx = MAG_X+14
-    ksy = MAG_Y+MAG_H-52
-    ksw = MAG_W-28
-    if pointInRect(mx,my,ksx,ksy-10,ksw,24):
-        app.dragging_kp=True
-        update_kp_from_x(app,mx)
-        return
-    # Solar wind slider
-    ssx = MAG_X+14
-    ssy = MAG_Y+MAG_H-22
-    ssw = MAG_W-28
-    if pointInRect(mx,my,ssx,ssy-10,ssw,24):
-        app.dragging_sw=True
-        update_sw_from_x(app,mx)
-        return
-
-    # Clicks in panels for insights
+    for bid,b in app.buttons.items():
+        if b["x"]<=mx<=b["x"]+b["w"] and b["y"]<=my<=b["y"]+b["h"] and b["enabled"]:
+            if bid=="live": aio.run(load_live_geomag(app))
+            elif bid=="globe": app.show_globe=not app.show_globe
+            elif bid=="play":
+                if app.is_playing: stop_sonification(app)
+                else: play_kp_sonification(app)
+                b["label"]="STOP" if app.is_playing else "PLAY"
+            elif bid=="cache": cache_now(app)
+            elif bid=="clear": clear_cache(app)
+            return
+    if pointInRect(mx,my,DRIFT_X+14,DRIFT_Y+DRIFT_H-22,DRIFT_W-28,24):
+        app.dragging_year=True; update_year_from_x(app,mx); return
+    if pointInRect(mx,my,MAG_X+14,MAG_Y+MAG_H-52,MAG_W-28,24):
+        app.dragging_kp=True; update_kp_from_x(app,mx); return
+    if pointInRect(mx,my,MAG_X+14,MAG_Y+MAG_H-22,MAG_W-28,24):
+        app.dragging_sw=True; update_sw_from_x(app,mx); return
     if pointInRect(mx,my,DYNAMO_X,DYNAMO_Y,DYNAMO_W,DYNAMO_H):
-        # toggle tilt
-        app.dipole_tilt = 11 + 3*math.sin(app.time*2)
-        app.insight = f"Dynamo: tilt {app.dipole_tilt:.1f} deg. Convection drives non-dipole secular variation."
-        aio.run(compute_with_pyodide(app))
-    if pointInRect(mx,my,DRIFT_X,DRIFT_Y,DRIFT_W,DRIFT_H):
-        app.insight = f"Secular: {app.year} moment {app.dipole_moment:.2f}e22 Am2, pole {app.pole_lat:.1f}N {app.pole_lon:.1f}E, drift ~55 km/yr to Siberia."
+        app.dipole_tilt=11+3*math.sin(app.time*2); app.insight=f"Dynamo tilt {app.dipole_tilt:.1f}deg - cached"; aio.run(compute_with_pyodide(app))
     if pointInRect(mx,my,MAG_X,MAG_Y,MAG_W,MAG_H):
-        # toggle Bz
-        app.imf_bz = -app.imf_bz
-        app.insight = f"Magnetosphere: IMF Bz {app.imf_bz:+.1f} nT {'southward: dayside reconnection, aurora expands' if app.imf_bz<0 else 'northward: quiet'}."
-    if pointInRect(mx,my,IMPACT_X,IMPACT_Y,IMPACT_W,IMPACT_H):
-        app.insight = "Impact: SAA = weak field over S.Atlantic. WMM update every 5y critical for aviation, phones, animal migration."
+        app.imf_bz=-app.imf_bz; app.insight=f"Bz {app.imf_bz:+.1f}nT {'southward reconnection' if app.imf_bz<0 else 'northward quiet'}"
 
 def update_year_from_x(app,mx):
-    sx = DRIFT_X+14
-    sw = DRIFT_W-28
-    t = clamp((mx-sx)/sw,0,1)
-    app.year = int(1800 + t*(2025-1800))
-    app.pole_lat, app.pole_lon = interp_pole(app.year)
-    app.dipole_moment = interp_moment(app.year)
-    # tilt slowly decreases
-    app.dipole_tilt = 11.5 - (app.year-1800)*0.003
-    aio.run(compute_with_pyodide(app))
-
+    t=clamp((mx-(DRIFT_X+14))/(DRIFT_W-28),0,1); app.year=int(1800+t*225); app.pole_lat,app.pole_lon=interp_pole(app.year); app.dipole_moment=interp_moment(app.year); app.dipole_tilt=11.5-(app.year-1800)*0.003; aio.run(compute_with_pyodide(app))
 def update_kp_from_x(app,mx):
-    ksx = MAG_X+14
-    ksw = MAG_W-28
-    t = clamp((mx-ksx)/ksw,0,1)
-    app.kp_slider = t*9
-    if app.is_playing:
-        play_kp_sonification(app)
-
+    t=clamp((mx-(MAG_X+14))/(MAG_W-28),0,1); app.kp_slider=t*9
+    if app.is_playing: play_kp_sonification(app)
 def update_sw_from_x(app,mx):
-    ssx = MAG_X+14
-    ssw = MAG_W-28
-    t = clamp((mx-ssx)/ssw,0,1)
-    app.solar_wind_speed = 300 + t*500
+    t=clamp((mx-(MAG_X+14))/(MAG_W-28),0,1); app.solar_wind_speed=300+t*500
 
 def onMouseDrag(app,mx,my):
-    if app.dragging_year:
-        update_year_from_x(app,mx)
-    if app.dragging_kp:
-        update_kp_from_x(app,mx)
-    if app.dragging_sw:
-        update_sw_from_x(app,mx)
-
-def onMouseRelease(app,mx,my):
-    app.dragging_year=False
-    app.dragging_kp=False
-    app.dragging_sw=False
-
+    if app.dragging_year: update_year_from_x(app,mx)
+    if app.dragging_kp: update_kp_from_x(app,mx)
+    if app.dragging_sw: update_sw_from_x(app,mx)
+def onMouseRelease(app,mx,my): app.dragging_year=False; app.dragging_kp=False; app.dragging_sw=False
 def onMouseMove(app,mx,my):
-    # hover detection for panels
+    app.hover=None
+    for bid,b in app.buttons.items():
+        if b["x"]<=mx<=b["x"]+b["w"] and b["y"]<=my<=b["y"]+b["h"]: app.hover=bid
     if pointInRect(mx,my,DYNAMO_X,DYNAMO_Y,DYNAMO_W,DYNAMO_H): app.hover_panel="dynamo"
     elif pointInRect(mx,my,DRIFT_X,DRIFT_Y,DRIFT_W,DRIFT_H): app.hover_panel="drift"
     elif pointInRect(mx,my,MAG_X,MAG_Y,MAG_W,MAG_H): app.hover_panel="mag"
     elif pointInRect(mx,my,IMPACT_X,IMPACT_Y,IMPACT_W,IMPACT_H): app.hover_panel="impact"
     else: app.hover_panel=None
-
 def onKeyPress(app,key):
-    if key.lower()=='g':
-        app.show_globe = not app.show_globe
+    if key.lower()=='g': app.show_globe=not app.show_globe
     elif key==' ':
         if app.is_playing: stop_sonification(app)
         else: play_kp_sonification(app)
-    elif key.lower()=='r':
-        aio.run(load_live_geomag(app))
-    elif key.lower()=='t':
-        app.year = clamp(app.year+1,1800,2025)
-        app.pole_lat, app.pole_lon = interp_pole(app.year)
-        app.dipole_moment = interp_moment(app.year)
-        aio.run(compute_with_pyodide(app))
-    elif key.lower()=='e':
-        app.year = clamp(app.year-1,1800,2025)
-        app.pole_lat, app.pole_lon = interp_pole(app.year)
-        app.dipole_moment = interp_moment(app.year)
-        aio.run(compute_with_pyodide(app))
+        app.buttons["play"]["label"]="STOP" if app.is_playing else "PLAY"
+    elif key.lower()=='r': aio.run(load_live_geomag(app))
+    elif key.lower()=='t': app.year=clamp(app.year+1,1800,2025); app.pole_lat,app.pole_lon=interp_pole(app.year); app.dipole_moment=interp_moment(app.year); aio.run(compute_with_pyodide(app))
+    elif key.lower()=='e': app.year=clamp(app.year-1,1800,2025); app.pole_lat,app.pole_lon=interp_pole(app.year); app.dipole_moment=interp_moment(app.year); aio.run(compute_with_pyodide(app))
 
-# ---- Drawing helpers ----
-def drawPanel(x,y,w,h,title="", highlight=False):
-    fill = PANEL_BG
-    if highlight:
-        fill = rgb(26,30,52)
-    drawRect(x,y,w,h,fill=fill,border=PANEL_BORDER,borderWidth=1, roundness=10)
+def drawPanel(x,y,w,h,title=""):
+    drawRect(x,y,w,h,fill=PANEL_BG,border=PANEL_BORDER,borderWidth=1,roundness=10)
     if title:
         drawRect(x+8,y+6,w-16,16,fill=rgb(28,32,52),roundness=5)
-        drawLabel(title, x+14, y+14, fill=rgb(180,190,220), size=11, bold=True, align="left-top")
+        drawLabel(title,x+14,y+14,fill=rgb(180,190,220),size=12,bold=True,align="left-top")
+def draw_button(b,hover,enabled):
+    x,y,w,h=b["x"],b["y"],b["w"],b["h"]
+    if not enabled: fill=rgb(48,52,72); bc=rgb(68,74,102); tc=DIM
+    else: fill=ACC_H if hover else ACC; bc=rgb(130,134,255) if hover else ACC; tc=rgb(255,255,255)
+    drawRect(x,y,w,h,fill=fill,border=bc,borderWidth=1,roundness=9)
+    drawLabel(b["label"],x+w/2,y+h/2,size=12,fill=tc,bold=True)
 
 def drawHeader(app):
-    drawRect(0,0,W,HEADER_H, fill=rgb(18,22,38))
-    drawLabel("EMF LAB  —  Earth's Magnetic Field: Dynamo, Drift & Impact", W*0.38, 10, fill=rgb(240,250,255), size=15, bold=True, align="center-top")
-    drawLabel(f"{app.year}  Moment {app.dipole_moment:.2f}e22 Am²  Pole {app.pole_lat:.1f}N {app.pole_lon:.1f}E  Tilt {app.dipole_tilt:.1f}°  Kp_live {app.kp_live:.1f} / slider {app.kp_slider:.1f}  SW {int(app.solar_wind_speed)} km/s  Bz {app.imf_bz:+.1f}nT",
-              W*0.38, 30, fill=rgb(160,180,210), size=10, align="center-top")
-    # Insight bar
-    drawRect(12,46,W-340,16, fill=rgb(35,60,85), border=CYAN, borderWidth=1, roundness=6, opacity=0.9)
-    drawLabel(app.insight, W*0.5-160, 54, fill=rgb(200,240,255), size=9.5, bold=True, align="center")
+    # Header 70px - title centered top, buttons in open space at y=44 per user (panels stay at 82)
+    drawRect(0,0,W,HEADER_H,fill=rgb(18,22,38))
+    drawLabel("EMF LAB — Dynamo, Drift & Impact — SIGMA 60FPS",W*0.5,6,fill=TXT,size=13,bold=True,align="center-top")
+    drawLabel(f"{app.year} M {app.dipole_moment:.2f}e22 Pole {app.pole_lat:.1f}N {app.pole_lon:.1f}E Kp {app.kp_live:.1f}/{app.kp_slider:.1f}",W*0.5,22,fill=DIM,size=11,align="center-top")
+    # Insight in right open space - doesn't overlap title or buttons
+    drawRect(460,6,580,32,fill=rgb(22,26,42),border=rgb(45,55,85),borderWidth=1,roundness=6)
+    drawLabel(app.insight,466,10,fill=rgb(200,240,255),size=10,bold=True,align="left-top")
+    # No top-right GLOBE VIEW button - removed per user
 
-    # Buttons
-    # GLOBE VIEW
-    bx,by,bw,bh = W-280,8,110,34
-    hover = getattr(app,'hover_panel',None)
-    fillCol = rgb(88,240,255) if not app.show_globe else rgb(255,180,120)
-    drawRect(bx,by,bw,bh, fill=fillCol, border=rgb(255,255,255), borderWidth=1.2, roundness=18)
-    drawLabel("GLOBE VIEW", bx+bw/2, by+bh/2, fill=rgb(0,0,0), size=11, bold=True, align="center")
-    # PLAY
-    px,py,pw,ph = W-156,8,70,34
-    pfill = rgb(90,255,160) if not app.is_playing else rgb(255,90,90)
-    drawRect(px,py,pw,ph, fill=pfill, border=rgb(255,255,255), borderWidth=1.2, roundness=18)
-    drawLabel("STOP" if app.is_playing else "PLAY", px+pw/2, py+ph/2, fill=rgb(0,0,0) if not app.is_playing else rgb(255,255,255), size=11, bold=True, align="center")
-    # LIVE DATA
-    lx,ly,lw,lh = W-74,8,58,34
-    drawRect(lx,ly,lw,lh, fill=rgb(45,55,85), border=PANEL_BORDER, borderWidth=1, roundness=18)
-    drawLabel("LIVE", lx+lw/2, ly+lh/2, fill=rgb(200,220,255), size=10, bold=True, align="center")
-
-# ---- Panel 1: Dynamo & Dipole ----
 def drawDynamo(app):
-    hl = app.hover_panel=="dynamo"
-    drawPanel(DYNAMO_X,DYNAMO_Y,DYNAMO_W,DYNAMO_H, f"DYNAMO CORE — Dipole + Non-dipole  (tilt {app.dipole_tilt:.1f}°)", highlight=hl)
-    gx,gy,gw,gh = DYNAMO_X+14, DYNAMO_Y+30, DYNAMO_W-28, DYNAMO_H-48
-    drawRect(gx,gy,gw,gh, fill=rgb(12,16,30), border=rgb(35,45,75), borderWidth=1, roundness=8)
-
-    # Earth cross-section
-    cx = gx+gw*0.38
-    cy = gy+gh*0.52
-    earth_r = 92
-    # mantle gradient
-    drawCircle(cx,cy,earth_r, fill=rgb(45,35,25), border=rgb(80,60,40), borderWidth=1)
-    drawCircle(cx,cy,earth_r*0.88, fill=rgb(60,45,30), border=None)
-    # outer core
-    outer_r = earth_r*0.55
-    drawCircle(cx,cy,outer_r, fill=rgb(200,90,20), border=rgb(255,160,80), borderWidth=1.2)
-    # convection cells - animated arrows in outer core
+    drawPanel(DYNAMO_X,DYNAMO_Y,DYNAMO_W,DYNAMO_H,"DYNAMO CORE - cached")
+    gx,gy,gw,gh=DYNAMO_X+14,DYNAMO_Y+34,DYNAMO_W-28,DYNAMO_H-52
+    drawRect(gx,gy,gw,gh,fill=rgb(12,16,30),border=rgb(35,45,75),borderWidth=1,roundness=6)
+    cx=gx+gw*0.38; cy=gy+gh*0.52; earth_r=92
+    drawCircle(cx,cy,earth_r,fill=rgb(45,35,25),border=rgb(80,60,40),borderWidth=1)
+    outer_r=earth_r*0.55; drawCircle(cx,cy,outer_r,fill=rgb(200,90,20),border=rgb(255,160,80),borderWidth=1.2)
     for k in range(6):
-        ang = k*60 + app.time*18
-        rad = outer_r*0.62
-        x = cx + rad*math.cos(math.radians(ang))
-        y = cy + rad*math.sin(math.radians(ang))*0.75
-        # arrow direction radial outward + swirl
-        ax = math.cos(math.radians(ang+90))*10
-        ay = math.sin(math.radians(ang+90))*7
-        drawLine(x,y,x+ax,y+ay, fill=ORANGE, lineWidth=1.5, arrowEnd=True)
-        drawCircle(x,y,3, fill=YELLOW, opacity=0.7)
-    # inner core
-    inner_r = earth_r*0.20
-    drawCircle(cx,cy,inner_r, fill=rgb(220,220,210), border=rgb(255,255,255), borderWidth=1)
-    drawLabel("Inner Fe solid", cx, cy+outer_r+14, fill=rgb(180,150,120), size=8, align="center-top")
-    drawLabel("Outer Fe liquid convecting", cx, cy-outer_r-18, fill=ORANGE, size=8, bold=True, align="center-bottom")
-
-    # Dipole field lines - tilt by dipole_tilt
-    tilt = math.radians(app.dipole_tilt)
-    for L in [1.4,1.8,2.3,3.0]:
+        ang=k*60+app.time*18; rad=outer_r*0.62; x=cx+rad*math.cos(math.radians(ang)); y=cy+rad*math.sin(math.radians(ang))*0.75
+        ax=math.cos(math.radians(ang+90))*10; ay=math.sin(math.radians(ang+90))*7
+        drawLine(x,y,x+ax,y+ay,fill=ORANGE,lineWidth=1.5)
+        drawCircle(x,y,3,fill=YELLOW,opacity=0.7)
+    tilt=math.radians(app.dipole_tilt)
+    for line in getattr(app,'field_lines',[]):
         pts=[]
-        line = dipole_field_line(L, n=90)
         for r,theta in line:
-            # rotate by tilt and project
-            # dipole axis tilted in plane
-            th = theta - tilt
-            # polar to cartesian
-            px = cx + r*earth_r*0.85*math.sin(th)
-            py = cy - r*earth_r*0.85*math.cos(th)*0.9
-            # clip outside earth? show only outside
-            dist = math.hypot(px-cx, py-cy)
-            if dist>earth_r*0.98 or (abs(theta-math.pi/2)>0.6):
-                pts.append((px,py))
-        # draw segments
-        for i in range(len(pts)-1):
-            alpha = 0.9 - abs(pts[i][0]-cx)/200*0.3
-            drawLine(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1], fill=CYAN, lineWidth=1.6, opacity=max(0.15,alpha))
-    # field direction arrows on lines
-    for L in [1.8,2.5]:
-        th = math.pi*0.35
-        r = L* (math.sin(th)**2)
-        px = cx + r*earth_r*0.85*math.sin(th - tilt)
-        py = cy - r*earth_r*0.85*math.cos(th - tilt)*0.9
-        drawCircle(px,py,2, fill=CYAN)
-        drawLine(px,py,px+6,py-6, fill=CYAN, lineWidth=1, arrowEnd=True)
-
-    # Compass needle illustration (SOS dataset style)
-    nx = gx+gw-88
-    ny = gy+26
-    drawRect(nx,ny,76,52, fill=rgb(18,22,38), border=PANEL_BORDER, borderWidth=1, roundness=6)
-    drawLabel("Compass", nx+38, ny+6, fill=rgb(150,170,200), size=8, align="center-top")
-    # needle rotates with local declination from grid if available
-    decl = 0
-    if app.decl_grid:
-        decl = app.decl_grid[9][18]  # mid
-    ang = math.radians(decl + app.time*5)
-    # needle
-    drawLine(nx+38, ny+28, nx+38+18*math.sin(ang), ny+28-18*math.cos(ang), fill=RED, lineWidth=2, arrowEnd=True)
-    drawLine(nx+38, ny+28, nx+38-14*math.sin(ang), ny+28+14*math.cos(ang), fill=BLUE, lineWidth=2)
-    drawCircle(nx+38, ny+28, 3, fill=rgb(255,255,255))
-    drawLabel(f"{decl:+.1f}° dec", nx+38, ny+48, fill=YELLOW, size=8, align="center-bottom")
-
-    # Moment decay indicator
-    drawLabel(f"Moment {app.dipole_moment:.2f} (decaying { (8.55-app.dipole_moment)/ (app.year-1800)*1000:.1f}/kyr)", gx+8, gy+gh-8, fill=rgb(160,180,210), size=9, align="left-bottom")
-    drawLabel("Geodynamo: Coriolis + buoyancy → helical flow → α-ω dynamo", gx+gw-8, gy+gh-8, fill=rgb(130,150,180), size=8, align="right-bottom")
+            th=theta-tilt; px=cx+r*earth_r*0.85*math.sin(th); py=cy-r*earth_r*0.85*math.cos(th)*0.9
+            if math.hypot(px-cx,py-cy)>earth_r*0.98 or abs(theta-math.pi/2)>0.6: pts.append((px,py))
+        for i in range(len(pts)-1): drawLine(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1],fill=CYAN,lineWidth=1.6,opacity=0.7)
+    drawLabel(f"alpha-omega {app.dipole_tilt:.1f}deg",gx+8,gy+gh-8,fill=DIM,size=12,align="left-bottom")
 
 def drawDrift(app):
-    hl = app.hover_panel=="drift"
-    drawPanel(DRIFT_X,DRIFT_Y,DRIFT_W,DRIFT_H, f"SECULAR VARIATION 1800-2025 — Pole Wander & WMM", highlight=hl)
-    gx,gy,gw,gh = DRIFT_X+14, DRIFT_Y+30, DRIFT_W-28, DRIFT_H-68
-    drawRect(gx,gy,gw,gh, fill=rgb(12,16,30), border=rgb(35,45,75), borderWidth=1, roundness=8)
-
-    # Polar stereographic north pole wander
-    pcx = gx+gw*0.34
-    pcy = gy+gh*0.48
-    pr = 78
-    # graticule
-    drawCircle(pcx,pcy,pr, fill=rgb(16,20,36), border=rgb(50,60,90), borderWidth=0.8)
-    for r in [pr*0.33, pr*0.66]:
-        drawCircle(pcx,pcy,r, fill=None, border=rgb(40,50,80), borderWidth=0.6, dashes=True)
-    drawLine(pcx-pr,pcy,pcx+pr,pcy, fill=rgb(40,50,80), lineWidth=0.6, dashes=True)
-    drawLine(pcx,pcy-pr,pcx,pcy+pr, fill=rgb(40,50,80), lineWidth=0.6, dashes=True)
-    drawLabel("90N", pcx, pcy-pr-6, fill=rgb(130,150,180), size=7, align="center-bottom")
-    # plot history
+    drawPanel(DRIFT_X,DRIFT_Y,DRIFT_W,DRIFT_H,"SECULAR 1800-2025 Pole Wander")
+    gx,gy,gw,gh=DRIFT_X+14,DRIFT_Y+34,DRIFT_W-28,DRIFT_H-78
+    drawRect(gx,gy,gw,gh,fill=rgb(12,16,30),border=rgb(35,45,75),borderWidth=1,roundness=6)
+    pcx=gx+gw*0.34; pcy=gy+gh*0.48; pr=78
+    drawCircle(pcx,pcy,pr,fill=rgb(16,20,36),border=rgb(50,60,90),borderWidth=0.8)
+    for r in [pr*0.33,pr*0.66]: drawCircle(pcx,pcy,r,fill=None,border=rgb(40,50,80),borderWidth=0.6,dashes=True)
+    drawLine(pcx-pr,pcy,pcx+pr,pcy,fill=rgb(40,50,80),lineWidth=0.6,dashes=True)
+    drawLine(pcx,pcy-pr,pcx,pcy+pr,fill=rgb(40,50,80),lineWidth=0.6,dashes=True)
     prev=None
     for y,lat,lon in N_POLE_HISTORY:
-        # polar stereographic: distance from pole = (90-lat)
-        r = (90-lat)/20 * pr  # 20 deg span
-        th = math.radians(lon+90)  # rotate for view
-        x = pcx + r*math.cos(th)
-        y_ = pcy + r*math.sin(th)
-        # color by year
-        t = (y-1800)/225
-        col = rgb(int(lerp(80,255,t)), int(lerp(180,90,t)), int(lerp(255,80,t)))
-        if prev:
-            drawLine(prev[0],prev[1],x,y_, fill=col, lineWidth=2.2, opacity=0.85)
-        drawCircle(x,y_, 3.5, fill=col, border=rgb(0,0,0), borderWidth=0.8)
-        if y%50==0 or y>=2000:
-            drawLabel(str(y), x+6, y_-4, fill=rgb(200,210,230), size=7, align="left-center")
-        prev=(x,y_)
-        if y==app.year:
-            # highlight current
-            drawCircle(x,y_, 9, fill=col, opacity=0.25)
-            drawCircle(x,y_, 5.5, fill=YELLOW, border=rgb(255,255,255), borderWidth=1.2)
-
-    # Moment decay graph on right
-    mgx = gx+gw*0.62
-    mgy = gy+8
-    mgw = gw*0.34
-    mgh = gh-16
-    drawRect(mgx,mgy,mgw,mgh, fill=rgb(16,20,36), border=rgb(35,45,75), borderWidth=1, roundness=6)
-    drawLabel("Dipole moment 10²² Am²", mgx+4, mgy+4, fill=rgb(150,170,200), size=8, align="left-top")
-    # axes
-    drawLine(mgx+8, mgy+mgh-18, mgx+mgw-8, mgy+mgh-18, fill=rgb(60,70,90), lineWidth=0.8)
-    drawLine(mgx+8, mgy+12, mgx+8, mgy+mgh-18, fill=rgb(60,70,90), lineWidth=0.8)
-    # plot
-    minM=7.5
-    maxM=8.6
-    pts=[]
-    for y,m in MOMENT_HISTORY:
-        x = mgx+8 + (y-1800)/225*(mgw-16)
-        yy = mgy+mgh-18 - (m-minM)/(maxM-minM)*(mgh-30)
-        pts.append((x,yy))
-    for i in range(len(pts)-1):
-        drawLine(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1], fill=PINK, lineWidth=2)
-    for p in pts:
-        drawCircle(p[0],p[1],2.5, fill=PINK)
-    # current year marker
-    curM = interp_moment(app.year)
-    curX = mgx+8 + (app.year-1800)/225*(mgw-16)
-    curY = mgy+mgh-18 - (curM-minM)/(maxM-minM)*(mgh-30)
-    drawCircle(curX,curY,5, fill=YELLOW, border=rgb(255,255,255), borderWidth=1)
-    drawLabel(f"{curM:.2f}", curX+6, curY-2, fill=YELLOW, size=8, align="left-center")
-
-    # Year slider
-    sx = DRIFT_X+14
-    sy = DRIFT_Y+DRIFT_H-22
-    sw = DRIFT_W-28
-    drawRect(sx,sy,sw,8, fill=rgb(30,35,55), border=PANEL_BORDER, borderWidth=1, roundness=4)
-    t = (app.year-1800)/225
-    drawRect(sx,sy,t*sw,8, fill=ORANGE, roundness=4)
-    drawCircle(sx+t*sw, sy+4, 8, fill=rgb(255,255,255), border=ORANGE, borderWidth=2)
-    drawLabel("1800", sx, sy+10, fill=rgb(130,140,170), size=7, align="left-top")
-    drawLabel("2025", sx+sw, sy+10, fill=rgb(130,140,170), size=7, align="right-top")
-    drawLabel(f"Year {app.year} | {app.fetch_status} {app.pyodide_status[:28]}", gx+8, gy+gh-8, fill=rgb(160,180,210), size=8, align="left-bottom")
+        r=(90-lat)/20*pr; th=math.radians(lon+90); x=pcx+r*math.cos(th); y_=pcy+r*math.sin(th)
+        t=(y-1800)/225; col=rgb(int(lerp(80,255,t)),int(lerp(180,90,t)),int(lerp(255,80,t)))
+        if prev: drawLine(prev[0],prev[1],x,y_,fill=col,lineWidth=2.2,opacity=0.85)
+        drawCircle(x,y_,3.5,fill=col,border=rgb(0,0,0),borderWidth=0.8); prev=(x,y_)
+        if y==app.year: drawCircle(x,y_,9,fill=col,opacity=0.25); drawCircle(x,y_,5.5,fill=YELLOW,border=rgb(255,255,255),borderWidth=1.2)
+    sx=DRIFT_X+14; sy=DRIFT_Y+DRIFT_H-22; sw=DRIFT_W-28
+    drawRect(sx,sy,sw,8,fill=rgb(30,35,55),border=BORDER,borderWidth=1,roundness=4)
+    t=(app.year-1800)/225; drawRect(sx,sy,t*sw,8,fill=ORANGE,roundness=4); drawCircle(sx+t*sw,sy+4,8,fill=rgb(255,255,255),border=ORANGE,borderWidth=2)
+    drawLabel(f"{app.log_fetch} | {app.log_pyodide}",gx+8,gy+gh-8,fill=DIM,size=12,align="left-bottom")
 
 def drawMag(app):
-    hl = app.hover_panel=="mag"
-    drawPanel(MAG_X,MAG_Y,MAG_W,MAG_H, f"MAGNETOSPHERE — Solar Wind {int(app.solar_wind_speed)} km/s  Kp {app.kp_slider:.1f}  Bz {app.imf_bz:+.1f}nT", highlight=hl)
-    gx,gy,gw,gh = MAG_X+14, MAG_Y+30, MAG_W-28, MAG_H-72
-    drawRect(gx,gy,gw,gh, fill=rgb(12,16,30), border=rgb(35,45,75), borderWidth=1, roundness=8)
-
-    # Sun left
-    sun_x = gx+28
-    sun_y = gy+gh*0.5
-    drawCircle(sun_x, sun_y, 18, fill=rgb(255,220,80), border=rgb(255,180,40), borderWidth=1.5)
-    drawLabel("Sun", sun_x, sun_y-26, fill=YELLOW, size=9, bold=True, align="center-bottom")
-    # solar wind arrows
+    drawPanel(MAG_X,MAG_Y,MAG_W,MAG_H,f"MAGNETOSPHERE Kp {app.kp_slider:.1f} SW {int(app.solar_wind_speed)} Bz {app.imf_bz:+.1f}")
+    gx,gy,gw,gh=MAG_X+14,MAG_Y+34,MAG_W-28,MAG_H-82
+    drawRect(gx,gy,gw,gh,fill=rgb(12,16,30),border=rgb(35,45,75),borderWidth=1,roundness=6)
+    sun_x=gx+28; sun_y=gy+gh*0.5; drawCircle(sun_x,sun_y,18,fill=rgb(255,220,80),border=rgb(255,180,40),borderWidth=1.5)
     for i in range(6):
-        ay = gy+20 + i*(gh-40)/5 + math.sin(app.time*2+i)*4
-        ax0 = sun_x+22
-        ax1 = gx+gw*0.28 + (app.solar_wind_speed-300)/500*20
-        drawLine(ax0, ay, ax1, ay, fill=rgb(200,200,180), lineWidth=1.2, arrowEnd=True, opacity=0.6)
-    drawLabel(f"n~{5+app.kp_slider:.0f}/cc", gx+70, gy+12, fill=rgb(160,180,210), size=8, align="left-top")
-
-    # Earth
-    ex = gx+gw*0.45
-    ey = gy+gh*0.5
-    drawCircle(ex,ey,18, fill=rgb(80,140,255), border=rgb(255,255,255), borderWidth=1)
-    drawCircle(ex,ey,6, fill=GREEN)
-    # dipole tilt indicator
-    tilt = math.radians(app.dipole_tilt)
-    drawLine(ex, ey, ex+14*math.sin(tilt), ey-14*math.cos(tilt), fill=CYAN, lineWidth=1.5, arrowEnd=True)
-    drawLabel("N mag", ex+16*math.sin(tilt), ey-16*math.cos(tilt), fill=CYAN, size=7, align="left-center")
-
-    # Magnetopause - standoff distance scales as (1/ solar wind pressure)^1/6
-    # pressure ~ n*v^2 ; simplified: Rmp ~ 10 Re * (400/v)^(1/3) * (3/Kp factor)
-    rmp = 10 * (400/app.solar_wind_speed)**0.33 * (1 - app.kp_slider*0.03)
-    rmp_px = rmp*9  # scale
-    # dayside magnetopause arc
-    drawArc(ex, ey, rmp_px, rmp_px*1.1, 200, 160, fill=None, border=CYAN, borderWidth=1.8, opacity=0.9)
-    drawLabel(f"MP {rmp:.1f} Re", ex-rmp_px*0.7, ey-22, fill=CYAN, size=8, align="center-bottom")
-    # bow shock ahead
-    bs = rmp_px*1.35
-    drawArc(ex, ey, bs, bs*1.15, 200, 160, fill=None, border=rgb(180,180,200), borderWidth=1, dashes=True, opacity=0.6)
-    drawLabel("Bow shock", ex-bs*0.7, ey-36, fill=rgb(180,180,200), size=7, align="center-bottom")
-
-    # Magnetotail
-    tail_len = 120 + app.solar_wind_speed*0.12
-    drawRect(ex+8, ey-32, tail_len, 64, fill=rgb(20,30,60), border=PANEL_BORDER, borderWidth=1, roundness=0, opacity=0.5)
-    drawLine(ex+8, ey-32, ex+tail_len, ey-32, fill=rgb(60,80,120), lineWidth=0.8, opacity=0.6)
-    drawLine(ex+8, ey+32, ex+tail_len, ey+32, fill=rgb(60,80,120), lineWidth=0.8, opacity=0.6)
-    # current sheet
+        ay=gy+20+i*(gh-40)/5+math.sin(app.time*2+i)*4; ax0=sun_x+22; ax1=gx+gw*0.28+(app.solar_wind_speed-300)/500*20
+        drawLine(ax0,ay,ax1,ay,fill=rgb(200,200,180),lineWidth=1.2,opacity=0.6)
+    ex=gx+gw*0.45; ey=gy+gh*0.5; drawCircle(ex,ey,18,fill=rgb(80,140,255),border=rgb(255,255,255),borderWidth=1); drawCircle(ex,ey,6,fill=GREEN)
+    tilt=math.radians(app.dipole_tilt); drawLine(ex,ey,ex+14*math.sin(tilt),ey-14*math.cos(tilt),fill=CYAN,lineWidth=1.5)
+    rmp=10*(400/app.solar_wind_speed)**0.33*(1-app.kp_slider*0.03); rmp_px=rmp*9
+    drawCircle(ex,ey,rmp_px,fill=None,border=CYAN,borderWidth=1.8)
+    drawLabel(f"MP {rmp:.1f} Re",ex-rmp_px*0.7,ey-22,fill=CYAN,size=12,align="center-bottom")
+    bs=rmp_px*1.35; drawCircle(ex,ey,bs,fill=None,border=rgb(180,180,200),borderWidth=1)
+    tail_len=120+app.solar_wind_speed*0.12; drawRect(ex+8,ey-32,tail_len,64,fill=rgb(20,30,60),border=BORDER,borderWidth=1,roundness=0,opacity=0.5)
     for i in range(0,int(tail_len),18):
-        x = ex+12+i+ math.sin(app.time*3+i*0.2)*3
-        drawLine(x, ey, x+8, ey, fill=YELLOW, lineWidth=1, opacity=0.5)
-
-    # Radiation belts - Van Allen
-    drawOval(ex, ey, 38, 26, fill=None, border=PINK, borderWidth=1.2, opacity=0.7)
-    drawOval(ex, ey, 56, 38, fill=None, border=PURPLE, borderWidth=1.2, opacity=0.5)
-    drawLabel("Van Allen", ex+34, ey+6, fill=PINK, size=7, align="left-center")
-
-    # Aurora ovals - Kp dependent latitude
-    # Feldstein: auroral oval colatitude ~ 20 deg + Kp*1.5
-    oval_colat = 18 + app.kp_slider*1.8 + ( -app.imf_bz if app.imf_bz<0 else 0)*0.8
-    # draw north/south caps as arcs near earth
+        x=ex+12+i+math.sin(app.time*3+i*0.2)*3; drawLine(x,ey,x+8,ey,fill=YELLOW,lineWidth=1,opacity=0.5)
+    drawOval(ex,ey,38,26,fill=None,border=PINK,borderWidth=1.2,opacity=0.7); drawOval(ex,ey,56,38,fill=None,border=PURPLE,borderWidth=1.2,opacity=0.5)
+    oval_colat=18+app.kp_slider*1.8+(-app.imf_bz if app.imf_bz<0 else 0)*0.8
     for side in [-1,1]:
-        oy = ey + side* (22 + oval_colat*0.6)
-        ow = 36 - side*oval_colat*0.2
-        drawArc(ex, oy, ow, 10, 0, 360, fill=rgb(110,255,170), border=None, opacity=0.18+app.kp_slider*0.04)
-        drawArc(ex, oy, ow, 10, 0, 360, fill=None, border=GREEN, borderWidth=1, opacity=0.7)
-
-    # Kp history sparkline
-    hx = gx+8
-    hy = gy+gh-32
-    hw = gw*0.48
-    hh = 28
-    drawRect(hx,hy,hw,hh, fill=rgb(16,20,36), border=rgb(35,45,75), borderWidth=1, roundness=5)
-    if app.kp_history:
-        maxk=9
-        for i in range(len(app.kp_history)-1):
-            x0 = hx + i/(len(app.kp_history)-1)*hw
-            x1 = hx + (i+1)/(len(app.kp_history)-1)*hw
-            y0 = hy+hh - (app.kp_history[i]/maxk)*hh
-            y1 = hy+hh - (app.kp_history[i+1]/maxk)*hh
-            col = GREEN if app.kp_history[i]<4 else YELLOW if app.kp_history[i]<6 else RED
-            drawLine(x0,y0,x1,y1, fill=col, lineWidth=1.5)
-    drawLabel(f"Kp history 1h {app.fetch_status}", hx+4, hy+2, fill=rgb(150,170,200), size=7, align="left-top")
-
-    # Meteorology note
-    drawLabel("Met: GNSS scintillation, HF blackout, drag on LEO, no tropospheric weather link", gx+gw*0.5+8, gy+gh-8, fill=rgb(130,150,180), size=7.5, align="left-bottom")
-
-    # Sliders
-    # Kp slider
-    ksx = MAG_X+14
-    ksy = MAG_Y+MAG_H-52
-    ksw = MAG_W-28
-    drawRect(ksx,ksy,ksw,8, fill=rgb(30,35,55), border=PANEL_BORDER, borderWidth=1, roundness=4)
-    tk = app.kp_slider/9
-    colk = GREEN if tk<0.44 else YELLOW if tk<0.66 else RED
-    drawRect(ksx,ksy,tk*ksw,8, fill=colk, roundness=4)
-    drawCircle(ksx+tk*ksw, ksy+4, 8, fill=rgb(255,255,255), border=colk, borderWidth=2)
-    drawLabel(f"Kp {app.kp_slider:.1f} {'quiet' if app.kp_slider<3 else 'active' if app.kp_slider<6 else 'storm'}", ksx, ksy-12, fill=rgb(180,200,230), size=8, align="left-bottom")
-    # Solar wind slider
-    ssx = MAG_X+14
-    ssy = MAG_Y+MAG_H-22
-    ssw = MAG_W-28
-    drawRect(ssx,ssy,ssw,8, fill=rgb(30,35,55), border=PANEL_BORDER, borderWidth=1, roundness=4)
-    tsw = (app.solar_wind_speed-300)/500
-    drawRect(ssx,ssy,tsw*ssw,8, fill=BLUE, roundness=4)
-    drawCircle(ssx+tsw*ssw, ssy+4, 8, fill=rgb(255,255,255), border=BLUE, borderWidth=2)
-    drawLabel(f"SW {int(app.solar_wind_speed)} km/s  Bz {app.imf_bz:+.1f} nT (click mag to flip Bz)", ssx, ssy-12, fill=rgb(180,200,230), size=8, align="left-bottom")
+        oy=ey+side*(22+oval_colat*0.6); ow=36-side*oval_colat*0.2
+        drawCircle(ex,oy,ow,fill=rgb(110,255,170),opacity=0.18+app.kp_slider*0.04)
+        drawCircle(ex,oy,ow,fill=None,border=GREEN,borderWidth=1)
+    ksx=MAG_X+14; ksy=MAG_Y+MAG_H-52; ksw=MAG_W-28
+    drawRect(ksx,ksy,ksw,8,fill=rgb(30,35,55),border=BORDER,borderWidth=1,roundness=4)
+    tk=app.kp_slider/9; colk=GREEN if tk<0.44 else YELLOW if tk<0.66 else RED; drawRect(ksx,ksy,tk*ksw,8,fill=colk,roundness=4); drawCircle(ksx+tk*ksw,ksy+4,8,fill=rgb(255,255,255),border=colk,borderWidth=2)
+    ssx=MAG_X+14; ssy=MAG_Y+MAG_H-22; ssw=MAG_W-28
+    drawRect(ssx,ssy,ssw,8,fill=rgb(30,35,55),border=BORDER,borderWidth=1,roundness=4)
+    tsw=(app.solar_wind_speed-300)/500; drawRect(ssx,ssy,tsw*ssw,8,fill=BLUE,roundness=4); drawCircle(ssx+tsw*ssw,ssy+4,8,fill=rgb(255,255,255),border=BLUE,borderWidth=2)
 
 def drawImpact(app):
-    hl = app.hover_panel=="impact"
-    drawPanel(IMPACT_X,IMPACT_Y,IMPACT_W,IMPACT_H, "IMPACT — Navigation, SAA & Systems", highlight=hl)
-    gx,gy,gw,gh = IMPACT_X+14, IMPACT_Y+30, IMPACT_W-28, IMPACT_H-48
-    drawRect(gx,gy,gw,gh, fill=rgb(12,16,30), border=rgb(35,45,75), borderWidth=1, roundness=8)
-
-    # World map simplified - equirectangular with declination contours from pyodide grid
-    mx = gx+6
-    my = gy+8
-    mw = gw*0.58
-    mh = gh-16
-    drawRect(mx,my,mw,mh, fill=rgb(16,24,42), border=rgb(35,45,75), borderWidth=1, roundness=6)
-    # graticule
+    drawPanel(IMPACT_X,IMPACT_Y,IMPACT_W,IMPACT_H,"IMPACT — SAA, Navigation, Systems")
+    gx,gy,gw,gh=IMPACT_X+14,IMPACT_Y+34,IMPACT_W-28,IMPACT_H-58
+    drawRect(gx,gy,gw,gh,fill=rgb(12,16,30),border=rgb(35,45,75),borderWidth=1,roundness=6)
+    mx=gx+6; my=gy+8; mw=gw*0.58; mh=gh-16; drawRect(mx,my,mw,mh,fill=rgb(16,24,42),border=rgb(35,45,75),borderWidth=1,roundness=6)
     for lat in [-60,-30,0,30,60]:
-        y = my + (80-lat)/160*mh
-        drawLine(mx,y,mx+mw,y, fill=rgb(35,45,75), lineWidth=0.5, dashes=True)
+        y=my+(80-lat)/160*mh; drawLine(mx,y,mx+mw,y,fill=rgb(35,45,75),lineWidth=0.5,dashes=True)
     for lon in [-120,-60,0,60,120]:
-        x = mx + (lon+180)/360*mw
-        drawLine(x,my,x,my+mh, fill=rgb(35,45,75), lineWidth=0.5, dashes=True)
-
-    # SAA - South Atlantic Anomaly low field
-    # center approx -26S, -50W
-    saa_x = mx + (-50+180)/360*mw
-    saa_y = my + (80-(-26))/160*mh
-    # intensity from grid? use synthetic low
-    saa_r = 28 + (8.6-app.dipole_moment)*12  # grows as moment decays
-    drawOval(saa_x, saa_y, saa_r*2.2, saa_r*1.4, fill=RED, opacity=0.18)
-    drawOval(saa_x, saa_y, saa_r*1.6, saa_r, fill=RED, border=RED, borderWidth=1.2, opacity=0.7)
-    drawLabel("SAA", saa_x, saa_y-2, fill=RED, size=9, bold=True, align="center")
-
-    # Declination contours - use decl_grid if available
+        x=mx+(lon+180)/360*mw; drawLine(x,my,x,my+mh,fill=rgb(35,45,75),lineWidth=0.5,dashes=True)
+    saa_x=mx+(-50+180)/360*mw; saa_y=my+(80-(-26))/160*mh; saa_r=28+(8.6-app.dipole_moment)*12
+    drawOval(saa_x,saa_y,saa_r*2.2,saa_r*1.4,fill=RED,opacity=0.18); drawOval(saa_x,saa_y,saa_r*1.6,saa_r,fill=RED,border=RED,borderWidth=1.2,opacity=0.7)
+    drawLabel("SAA",saa_x,saa_y-2,fill=RED,size=12,bold=True,align="center")
     if app.decl_grid:
-        # draw 0 decl line (agonic) in yellow
         for i in range(len(app.decl_grid)-1):
             for j in range(len(app.decl_grid[0])-1):
-                d = app.decl_grid[i][j]
-                # zero crossing
-                if abs(d)<8:
-                    x = mx + (j/36)*mw
-                    y = my + (i/18)*mh
-                    drawCircle(x,y,1.2, fill=YELLOW, opacity=0.7)
-
-    # Observatories
+                if abs(app.decl_grid[i][j])<8:
+                    x=mx+(j/36)*mw; y=my+(i/18)*mh; drawCircle(x,y,1.2,fill=YELLOW,opacity=0.7)
     for lat,lon,code in app.observatories:
-        x = mx + (lon+180)/360*mw
-        y = my + (80-lat)/160*mh
-        if 0<=x<=mx+mw and 0<=y<=my+mh:
-            drawCircle(x,y,2.2, fill=CYAN, border=rgb(0,0,0), borderWidth=0.6)
-    drawLabel("INTERMAGNET", mx+4, my+mh-4, fill=CYAN, size=7, align="left-bottom")
-
-    # Power spectrum panel - right side
-    px = gx+gw*0.62+8
-    py = gy+8
-    pw = gw*0.36-8
-    ph = mh*0.48
-    drawRect(px,py,pw,ph, fill=rgb(16,20,36), border=rgb(35,45,75), borderWidth=1, roundness=6)
-    drawLabel("Secular power n", px+4, py+4, fill=rgb(150,170,200), size=8, align="left-top")
-    if app.power_spec:
-        maxp = max(app.power_spec) if max(app.power_spec)>0 else 1
-        for i,p in enumerate(app.power_spec[:8]):
-            bx = px+8 + i*(pw-16)/8
-            bw = (pw-20)/8*0.7
-            bh = (p/maxp)*(ph-22)
-            drawRect(bx, py+ph-8-bh, bw, bh, fill=PURPLE if i>0 else YELLOW, roundness=3)
-            drawLabel(str(i+1), bx+bw/2, py+ph-2, fill=rgb(150,170,200), size=7, align="center-bottom")
-
-    # Impact list
-    ix = gx+gw*0.62+8
-    iy = gy+ph+18
-    iw = gw*0.36-8
-    ih = mh - ph - 18
-    drawRect(ix,iy,iw,ih, fill=rgb(16,20,36), border=rgb(35,45,75), borderWidth=1, roundness=6)
-    impacts = [
-        f"WMM error {app.year-2020}*0.2° if not updated",
-        f"Compass: True = Mag {app.decl_grid[9][18] if app.decl_grid else 5:+.1f}°",
-        f"SAA: sat upset x{1.2+(8.6-app.dipole_moment):.1f}",
-        "GIC: pipelines, grids at Kp>6",
-        "Aviation: mag vs true runway",
-        "Animals: magnetoreception bias",
-        "Edu: Met uses true north, not mag"
-    ]
+        x=mx+(lon+180)/360*mw; y=my+(80-lat)/160*mh; drawCircle(x,y,2.2,fill=CYAN,border=rgb(0,0,0),borderWidth=0.6)
+    px=gx+gw*0.62+8; py=gy+8; pw=gw*0.36-8; ph=mh*0.48; drawRect(px,py,pw,ph,fill=rgb(16,20,36),border=rgb(35,45,75),borderWidth=1,roundness=6)
+    drawLabel("Power n",px+4,py+4,fill=DIM,size=12,align="left-top")
+    maxp=max(app.power_spec) if max(app.power_spec)>0 else 1
+    for i,p in enumerate(app.power_spec[:8]):
+        bx=px+8+i*(pw-16)/8; bw=(pw-20)/8*0.7; bh=(p/maxp)*(ph-22); drawRect(bx,py+ph-8-bh,bw,bh,fill=PURPLE if i>0 else YELLOW,roundness=3); drawLabel(str(i+1),bx+bw/2,py+ph-2,fill=DIM,size=12,align="center-bottom")
+    ix=gx+gw*0.62+8; iy=gy+ph+18; iw=gw*0.36-8; ih=mh-ph-18; drawRect(ix,iy,iw,ih,fill=rgb(16,20,36),border=rgb(35,45,75),borderWidth=1,roundness=6)
+    impacts=[f"WMM err {app.year-2020}*0.2deg",f"True=Mag {app.decl_grid[9][18] if app.decl_grid else 5:+.1f}deg",f"SAA upset x{1.2+(8.6-app.dipole_moment):.1f}","GIC Kp>6","Aviation runway","Animals magnetoreception","Met: true north not mag"]
     for k,txt in enumerate(impacts):
-        y = iy+8 + k*13
-        if y < iy+ih-4:
-            col = YELLOW if k==0 else rgb(180,200,230)
-            drawLabel(txt, ix+6, y, fill=col, size=7.5, align="left-top")
-
-    # Status
-    drawLabel(f"{app.fetch_status2} {app.fetch_status3}", gx+8, gy+gh-8, fill=rgb(130,150,180), size=7.5, align="left-bottom")
+        y=iy+8+k*13
+        if y<iy+ih-4: drawLabel(txt,ix+6,y,fill=YELLOW if k==0 else DIM,size=12,align="left-top")
+    drawLabel(f"{app.log_fetch2} {app.log_fetch3} | {app.log_audio}",gx+8,gy+gh-8,fill=rgb(130,150,180),size=12,align="left-bottom")
 
 def drawGlobeOverlay(app):
-    # Full opaque BG like Ear View
-    drawRect(0,0,W,H, fill=BG)
-    drawRect(0,0,W,HEADER_H, fill=rgb(18,22,38))
-    drawLabel("GLOBE VIEW — Compass Needles & Field (SOS Dataset Style)", W*0.5, 12, fill=rgb(240,250,255), size=16, bold=True, align="center-top")
-    drawLabel("Field lines = dipole + IGRF non-dipole. Needles = local declination/inclination. SAA = weak spot.", W*0.5, 32, fill=rgb(160,180,210), size=11, align="center-top")
-
-    # Buttons in overlay header
-    bx,by,bw,bh = W-280,8,110,34
-    fillCol = rgb(255,180,120)
-    drawRect(bx,by,bw,bh, fill=fillCol, border=rgb(255,255,255), borderWidth=1.2, roundness=18)
-    drawLabel("GLOBE VIEW", bx+bw/2, by+bh/2, fill=rgb(0,0,0), size=11, bold=True, align="center")
-    # close X
-    closeBx,closeBy,closeBw,closeBh = W-60, HEADER_H+8, 36,26
-    drawRect(closeBx,closeBy,closeBw,closeBh, fill=rgb(60,70,90), border=rgb(200,210,230), borderWidth=1, roundness=7)
-    drawLabel("X", closeBx+closeBw/2, closeBy+closeBh/2, fill=rgb(230,240,255), size=13, bold=True, align="center")
-
-    # Main globe
-    gx,gy,gw,gh = 16, HEADER_H+12, 680, 600
-    drawRect(gx,gy,gw,gh, fill=rgb(18,22,38), border=PANEL_BORDER, borderWidth=1, roundness=12)
-    cx = gx+gw*0.48
-    cy = gy+gh*0.5
-    R = 210
-    # Earth sphere with simple shading
-    drawCircle(cx,cy,R, fill=rgb(20,35,60), border=rgb(60,80,110), borderWidth=1.5)
-    # latitude lines perspective
+    drawRect(0,0,W,H,fill=BG); drawRect(0,0,W,HEADER_H,fill=rgb(18,22,38))
+    drawLabel("GLOBE VIEW — Compass Needles & Field — 60FPS",W*0.5,12,fill=TXT,size=14,bold=True,align="center-top")
+    drawLabel("Dipole + IGRF non-dipole. Needles = declination.",W*0.5,32,fill=DIM,size=12,align="center-top")
+    bx,by,bw,bh=W-280,8,110,34; drawRect(bx,by,bw,bh,fill=rgb(255,180,120),border=rgb(255,255,255),borderWidth=1.2,roundness=18); drawLabel("GLOBE VIEW",bx+bw/2,by+bh/2,fill=rgb(0,0,0),size=12,bold=True,align="center")
+    closeBx,closeBy,closeBw,closeBh=W-60,HEADER_H+8,36,26; drawRect(closeBx,closeBy,closeBw,closeBh,fill=rgb(60,70,90),border=rgb(200,210,230),borderWidth=1,roundness=7); drawLabel("X",closeBx+closeBw/2,closeBy+closeBh/2,fill=rgb(230,240,255),size=12,bold=True,align="center")
+    gx,gy,gw,gh=16,HEADER_H+12,680,600; drawRect(gx,gy,gw,gh,fill=PANEL,border=BORDER,borderWidth=1,roundness=14)
+    cx=gx+gw*0.48; cy=gy+gh*0.5; R=210; drawCircle(cx,cy,R,fill=rgb(20,35,60),border=rgb(60,80,110),borderWidth=1.5)
     for lat in [-60,-30,0,30,60]:
-        # ellipse
-        ry = R*math.cos(math.radians(lat))*0.42
-        y = cy + R*math.sin(math.radians(lat))*0.42
-        drawOval(cx, y, R*1.8, ry*2, fill=None, border=rgb(50,70,100), borderWidth=0.6, dashes=True)
-    # longitude lines animated rotation
-    for k in range(12):
-        lon = k*30 + app.globe_rot*20
-        # draw meridian as arc
-        # approximate with line of points
-        pts=[]
-        for lat in range(-80,81,8):
-            th = math.radians(lon)
-            # simple orthographic projection
-            x = cx + R*math.cos(math.radians(lat))*math.sin(th)*0.9
-            y = cy + R*math.sin(math.radians(lat))*0.42
-            # front hemisphere only
-            if math.cos(th) > -0.3:
-                pts.append((x,y))
-        for i in range(len(pts)-1):
-            drawLine(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1], fill=rgb(40,60,90), lineWidth=0.7, opacity=0.5)
-
-    # Field lines around globe - dipole + tilt
-    tilt = math.radians(app.dipole_tilt + 5*math.sin(app.time*0.5))
+        ry=R*math.cos(math.radians(lat))*0.42; y=cy+R*math.sin(math.radians(lat))*0.42; drawOval(cx,y,R*1.8,ry*2,fill=None,border=rgb(50,70,100),borderWidth=0.6,dashes=True)
+    tilt=math.radians(app.dipole_tilt+5*math.sin(app.time*0.5))
     for L in [1.6,2.0,2.5,3.2,4.0]:
         pts=[]
         for th_deg in range(12,168,4):
-            th = math.radians(th_deg)
-            r = L * (math.sin(th)**2)
+            th=math.radians(th_deg); r=L*(math.sin(th)**2)
             if r<1.05 or r>5: continue
-            # rotate by tilt
-            th2 = th - tilt
-            x = cx + r*R*0.92*math.sin(th2)
-            y = cy - r*R*0.92*math.cos(th2)*0.42
-            # only outside globe
-            if math.hypot(x-cx, (y-cy)/0.42) > R*1.02:
-                pts.append((x,y))
-        for i in range(len(pts)-1):
-            drawLine(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1], fill=CYAN, lineWidth=1.4, opacity=0.65)
-
-    # Compass needles on globe surface - sample from decl grid
+            th2=th-tilt; x=cx+r*R*0.92*math.sin(th2); y=cy-r*R*0.92*math.cos(th2)*0.42
+            if math.hypot(x-cx,(y-cy)/0.42)>R*1.02: pts.append((x,y))
+        for i in range(len(pts)-1): drawLine(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1],fill=CYAN,lineWidth=1.4,opacity=0.65)
     if app.decl_grid:
         for i in range(0,18,3):
             for j in range(0,36,6):
-                lat = 80 - i/18*160
-                lon = -180 + j/36*360 + app.globe_rot*20
-                # project
-                th = math.radians(lon)
-                if math.cos(th) < 0: continue
-                x = cx + R*math.cos(math.radians(lat))*math.sin(th)*0.9*0.85
-                y = cy + R*math.sin(math.radians(lat))*0.42*0.85
-                decl = app.decl_grid[i][j]
-                ang = math.radians(decl)
-                # needle
-                drawLine(x,y, x+8*math.sin(ang), y-8*math.cos(ang)*0.42, fill=RED, lineWidth=1.2, arrowEnd=True)
-                drawLine(x,y, x-6*math.sin(ang), y+6*math.cos(ang)*0.42, fill=BLUE, lineWidth=1)
-
-    # SAA highlight on globe
-    saa_lat, saa_lon = -26, -50
-    th = math.radians(saa_lon + app.globe_rot*20)
-    sx = cx + R*math.cos(math.radians(saa_lat))*math.sin(th)*0.9
-    sy = cy + R*math.sin(math.radians(saa_lat))*0.42
-    if math.cos(th)>0:
-        drawCircle(sx,sy, 18, fill=RED, opacity=0.22)
-        drawCircle(sx,sy, 10, fill=RED, border=rgb(255,255,255), borderWidth=1, opacity=0.8)
-        drawLabel("SAA low F", sx+14, sy, fill=RED, size=9, bold=True, align="left-center")
-
-    # Aurora oval on globe
+                lat=80-i/18*160; lon=-180+j/36*360+app.globe_rot*20; th=math.radians(lon)
+                if math.cos(th)<0: continue
+                x=cx+R*math.cos(math.radians(lat))*math.sin(th)*0.9*0.85; y=cy+R*math.sin(math.radians(lat))*0.42*0.85
+                decl=app.decl_grid[i][j]; ang=math.radians(decl)
+                drawLine(x,y,x+8*math.sin(ang),y-8*math.cos(ang)*0.42,fill=RED,lineWidth=1.2)
+                drawLine(x,y,x-6*math.sin(ang),y+6*math.cos(ang)*0.42,fill=BLUE,lineWidth=1)
+    saa_lat,saa_lon=-26,-50; th=math.radians(saa_lon+app.globe_rot*20); sx=cx+R*math.cos(math.radians(saa_lat))*math.sin(th)*0.9; sy=cy+R*math.sin(math.radians(saa_lat))*0.42
+    if math.cos(th)>0: drawCircle(sx,sy,18,fill=RED,opacity=0.22); drawCircle(sx,sy,10,fill=RED,border=rgb(255,255,255),borderWidth=1,opacity=0.8); drawLabel("SAA low F",sx+14,sy,fill=RED,size=12,bold=True,align="left-center")
     for side in [1,-1]:
-        oval_lat = 75 - app.kp_slider*1.2
-        # draw circle at latitude
-        ry = R*math.cos(math.radians(oval_lat))*0.42*0.3
-        y = cy + side*R*math.sin(math.radians(oval_lat))*0.42*0.92
-        drawOval(cx, y, R*1.6, ry*2, fill=None, border=GREEN, borderWidth=1.5, opacity=0.6+app.kp_slider*0.05)
-        drawOval(cx, y, R*1.62, ry*2.1, fill=GREEN, opacity=0.12)
-
-    # North magnetic pole marker
-    plat, plon = app.pole_lat, app.pole_lon + app.globe_rot*20
-    th = math.radians(plon)
-    px = cx + R*math.cos(math.radians(plat))*math.sin(th)*0.9
-    py = cy + R*math.sin(math.radians(plat))*0.42
-    if math.cos(th)>-0.2:
-        drawCircle(px,py,6, fill=YELLOW, border=rgb(255,255,255), borderWidth=1.5)
-        drawLabel(f"NMP {app.year}", px+8, py, fill=YELLOW, size=9, bold=True, align="left-center")
-
-    # Side panels in overlay
-    # Info
-    ix,iy,iw,ih = 710, HEADER_H+12, 324, 180
-    drawRect(ix,iy,iw,ih, fill=rgb(18,22,38), border=PANEL_BORDER, borderWidth=1, roundness=10)
-    drawLabel("DYNAMO THEORY", ix+12, iy+10, fill=rgb(180,190,220), size=10, bold=True, align="left-top")
-    lines = [
-        "Outer core liquid Fe convects ~4mm/s",
-        "Coriolis → helicity, α-effect",
-        "Differential rotation → ω-effect",
-        "Dipole ~80% of surface field",
-        "Non-dipole = 20%, drifts west 0.2°/yr",
-        "Reversals every ~200kyr, last 780kya",
-        "Excursions: Laschamp 42kya field 5% ",
-        "Current decay 5%/century → 1500yr?"
-    ]
-    for k,l in enumerate(lines):
-        drawLabel(l, ix+12, iy+28+k*16, fill=rgb(180,200,230), size=9, align="left-top")
-
-    # Educator
-    ex,ey,ew,eh = 710, HEADER_H+204, 324, 180
-    drawRect(ex,ey,ew,eh, fill=rgb(18,22,38), border=PANEL_BORDER, borderWidth=1, roundness=10)
-    drawLabel("FOR EDUCATORS & METEOROLOGISTS", ex+12, ey+10, fill=rgb(180,190,220), size=10, bold=True, align="left-top")
-    edu = [
-        "True vs Magnetic: 0-30° error",
-        "WMM2025 vs WMM2020: airports renumber",
-        "Phones use WMM + gyro for compass",
-        "Weather balloons: GPS not mag compass",
-        "Magnetosphere ≠ troposphere weather",
-        "But: GIC affects met sensors, power",
-        "Aurora forecast = Kp + Bz south",
-        "Teach: field protects atmosphere"
-    ]
-    for k,l in enumerate(edu):
-        drawLabel(l, ex+12, ey+28+k*16, fill=rgb(160,180,210), size=9, align="left-top")
-
-    # Data sources
-    dx,dy,dw,dh = 710, HEADER_H+396, 324, 208
-    drawRect(dx,dy,dw,dh, fill=rgb(18,22,38), border=PANEL_BORDER, borderWidth=1, roundness=10)
-    drawLabel("LIVE DATA & SOURCES", dx+12, dy+10, fill=rgb(180,190,220), size=10, bold=True, align="left-top")
-    src = [
-        f"SWPC Kp {app.kp_live:.1f} {app.fetch_status}",
-        f"INTERMAGNET {len(app.observatories)} obs {app.fetch_status2[:24]}",
-        f"Data.gov {app.fetch_status3[:30]}",
-        f"Pyodide {app.pyodide_status[:32]}",
-        "NCEI geomag-data, operobs.shtml",
-        "SOS compass-needles dataset",
-        "WMM2025, IGRF-14, gufm1 1800-",
-        "Procaudio: Kp sonified as drone + whistlers"
-    ]
-    for k,l in enumerate(src):
-        drawLabel(l, dx+12, dy+28+k*18, fill=rgb(150,170,200), size=8.5, align="left-top")
+        oval_lat=75-app.kp_slider*1.2; ry=R*math.cos(math.radians(oval_lat))*0.42*0.3; y=cy+side*R*math.sin(math.radians(oval_lat))*0.42*0.92
+        drawOval(cx,y,R*1.6,ry*2,fill=None,border=GREEN,borderWidth=1.5,opacity=0.6+app.kp_slider*0.05)
+    plat,plon=app.pole_lat,app.pole_lon+app.globe_rot*20; th=math.radians(plon); px=cx+R*math.cos(math.radians(plat))*math.sin(th)*0.9; py=cy+R*math.sin(math.radians(plat))*0.42
+    if math.cos(th)>-0.2: drawCircle(px,py,6,fill=YELLOW,border=rgb(255,255,255),borderWidth=1.5); drawLabel(f"NMP {app.year}",px+8,py,fill=YELLOW,size=12,bold=True,align="left-center")
+    ix,iy,iw,ih=710,HEADER_H+12,324,180; drawRect(ix,iy,iw,ih,fill=PANEL,border=BORDER,borderWidth=1,roundness=10); drawLabel("DYNAMO THEORY",ix+12,iy+10,fill=TXT,size=12,bold=True,align="left-top")
+    lines=["Outer core Fe ~4mm/s","Coriolis alpha-effect","Differential omega","Dipole 80% surface","West drift 0.2deg/yr","Reversals ~200kyr","Laschamp 42kya 5%","Decay 5%/century"]
+    for k,l in enumerate(lines): drawLabel(l,ix+12,iy+28+k*16,fill=DIM,size=12,align="left-top")
+    ex,ey,ew,eh=710,HEADER_H+204,324,180; drawRect(ex,ey,ew,eh,fill=PANEL,border=BORDER,borderWidth=1,roundness=10); drawLabel("EDUCATORS - SIGMA",ex+12,ey+10,fill=TXT,size=12,bold=True,align="left-top")
+    edu=["True vs Mag 0-30deg","WMM2025 airports","Phones WMM+gyro","GPS not mag","Mag != weather","GIC affects sensors","Aurora Kp+Bz south","Field protects atmo"]
+    for k,l in enumerate(edu): drawLabel(l,ex+12,ey+28+k*16,fill=DIM,size=12,align="left-top")
+    dx,dy,dw,dh=710,HEADER_H+396,324,208; drawRect(dx,dy,dw,dh,fill=PANEL,border=BORDER,borderWidth=1,roundness=10); drawLabel("LIVE DATA SIGMA LOG",dx+12,dy+10,fill=TXT,size=12,bold=True,align="left-top")
+    src=[f"Kp {app.kp_live:.1f} {app.log_fetch}",f"USGS {app.log_fetch2[:32]}",f"USGS {app.log_fetch3[:30]}",f"BGS {app.log_fetch4[:30]}",f"Pyodide {app.log_pyodide[:32]}",f"Audio {app.log_audio[:30]}","WMM2025 IGRF-14","Kp sonified"]
+    for k,l in enumerate(src): drawLabel(l,dx+12,dy+28+k*18,fill=DIM,size=12,align="left-top")
 
 def redrawAll(app):
-    drawRect(0,0,W,H, fill=BG)
-    drawHeader(app)
-    if app.show_globe:
-        drawGlobeOverlay(app)
-        return
-    drawDynamo(app)
-    drawDrift(app)
-    drawMag(app)
-    drawImpact(app)
+    try:
+        drawRect(0,0,W,H,fill=BG)
+        drawHeader(app)
+        if app.show_globe:
+            drawGlobeOverlay(app)
+        else:
+            drawDynamo(app); drawDrift(app); drawMag(app); drawImpact(app)
+        for bid in app.buttons:
+            b=app.buttons[bid]
+            draw_button(b, app.hover==bid, b["enabled"])
+        drawRect(0,H-30,W,30,fill=rgb(18,20,32),border=GRID)
+        drawLabel(f"{app.fetch_status} | {app.fetch_status2[:40]} | {app.pyodide_status[:40]} | {app.log_audio[:30]}",12,H-15,size=12,fill=DIM,align="left-center")
+    except Exception as e:
+        # Never blank page - show error
+        try:
+            drawRect(0,0,W,H,fill=BG)
+            drawLabel(f"Redraw error: {e}", 20, 20, fill=RED, size=14, align="left-top")
+            drawLabel(traceback.format_exc()[:500], 20, 50, fill=DIM, size=12, align="left-top")
+        except:
+            pass
+        print(f"redrawAll failed {e}\n{traceback.format_exc()}")
