@@ -106,14 +106,11 @@ def dipole_field_line(L,n=72):
 SOURCES={
     "kp":["https://services.swpc.noaa.gov/json/planetary_k_index_1m.json"],
     "usgs_obs":["https://geomag.usgs.gov/ws/observatories/?format=json"],
-    "usgs_data":[
-        "https://geomag.usgs.gov/ws/data/?id=BOU&elements=X,Y,Z&format=json&start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z",
-        "https://geomag.usgs.gov/ws/data/?id=BOU&elements=X,Y,Z,F&format=json&start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z",
-    ],
-    "bgs_gin":[
-        "https://imag-data.bgs.ac.uk/GIN_V1/obs?format=json",
-    ],
+    # USGS DATA endpoint has no ACAO header (500 + CORS blocked) per logs, so disabled - OBS is live INTERMAGNET with CORS *
+    # "usgs_data" disabled to avoid console spam - use OBS only
+    # BGS GIN /obs?format=json 404 per logs - disabled, static used
 }
+
 
 def _to_py(o):
     try:
@@ -262,28 +259,10 @@ async def load_live_geomag(app):
     except Exception as e:
         app.log_fetch2=f"USGS OBS {e}"; app.fetch_status2=app.log_fetch2; print(app.log_fetch2)
 
-    try:
-        data=await fetch_json_popular(SOURCES["usgs_data"],"usgs_data")
-        data=_to_py(data)
-        vals=0
-        if isinstance(data, dict):
-            if "values" in data: vals=len(data["values"])
-            elif "data" in data: 
-                try: vals=len(data["data"])
-                except: vals=1
-            else: vals=1
-        elif isinstance(data, list): vals=len(data)
-        app.log_fetch3=f"USGS DATA OK {vals} BOU X,Y,Z start/end CORS *"; app.fetch_status3=app.log_fetch3; print(app.log_fetch3)
-    except Exception as e:
-        app.log_fetch3=f"USGS DATA no CORS {e}"; app.fetch_status3=app.log_fetch3; print(app.log_fetch3)
-
-    try:
-        bgs=await fetch_json_popular(SOURCES["bgs_gin"],"bgs_gin")
-        bgs=_to_py(bgs)
-        count=len(bgs) if isinstance(bgs, (list, dict)) else 0
-        app.log_fetch4=f"BGS GIN OK {count}"; app.fetch_status4=app.log_fetch4; print(app.log_fetch4)
-    except Exception as e:
-        app.log_fetch4=f"BGS GIN static {e}"; app.fetch_status4=app.log_fetch4; print(app.log_fetch4)
+    # USGS DATA disabled - endpoint returns 500 + No ACAO header per logs, causes CORS spam
+    app.log_fetch3="USGS DATA disabled - OBS is live INTERMAGNET CORS *"; app.fetch_status3=app.log_fetch3; print(app.log_fetch3)
+    # BGS GIN disabled - /obs?format=json 404 per logs, needs proxy/pre-download per user note
+    app.log_fetch4="BGS GIN disabled 404 - static used per note"; app.fetch_status4=app.log_fetch4; print(app.log_fetch4)
 
     aio.run(compute_with_pyodide(app))
 
@@ -517,7 +496,7 @@ def drawDynamo(app):
     for k in range(6):
         ang=k*60+app.time*18; rad=outer_r*0.62; x=cx+rad*math.cos(math.radians(ang)); y=cy+rad*math.sin(math.radians(ang))*0.75
         ax=math.cos(math.radians(ang+90))*10; ay=math.sin(math.radians(ang+90))*7
-        drawLine(x,y,x+ax,y+ay,fill=ORANGE,lineWidth=1.5,arrowEnd=True)
+        drawLine(x,y,x+ax,y+ay,fill=ORANGE,lineWidth=1.5)
         drawCircle(x,y,3,fill=YELLOW,opacity=0.7)
     tilt=math.radians(app.dipole_tilt)
     for line in getattr(app,'field_lines',[]):
@@ -556,9 +535,9 @@ def drawMag(app):
     sun_x=gx+28; sun_y=gy+gh*0.5; drawCircle(sun_x,sun_y,18,fill=rgb(255,220,80),border=rgb(255,180,40),borderWidth=1.5)
     for i in range(6):
         ay=gy+20+i*(gh-40)/5+math.sin(app.time*2+i)*4; ax0=sun_x+22; ax1=gx+gw*0.28+(app.solar_wind_speed-300)/500*20
-        drawLine(ax0,ay,ax1,ay,fill=rgb(200,200,180),lineWidth=1.2,arrowEnd=True,opacity=0.6)
+        drawLine(ax0,ay,ax1,ay,fill=rgb(200,200,180),lineWidth=1.2,opacity=0.6)
     ex=gx+gw*0.45; ey=gy+gh*0.5; drawCircle(ex,ey,18,fill=rgb(80,140,255),border=rgb(255,255,255),borderWidth=1); drawCircle(ex,ey,6,fill=GREEN)
-    tilt=math.radians(app.dipole_tilt); drawLine(ex,ey,ex+14*math.sin(tilt),ey-14*math.cos(tilt),fill=CYAN,lineWidth=1.5,arrowEnd=True)
+    tilt=math.radians(app.dipole_tilt); drawLine(ex,ey,ex+14*math.sin(tilt),ey-14*math.cos(tilt),fill=CYAN,lineWidth=1.5)
     rmp=10*(400/app.solar_wind_speed)**0.33*(1-app.kp_slider*0.03); rmp_px=rmp*9
     drawCircle(ex,ey,rmp_px,fill=None,border=CYAN,borderWidth=1.8)
     drawLabel(f"MP {rmp:.1f} Re",ex-rmp_px*0.7,ey-22,fill=CYAN,size=12,align="center-bottom")
@@ -636,7 +615,7 @@ def drawGlobeOverlay(app):
                 if math.cos(th)<0: continue
                 x=cx+R*math.cos(math.radians(lat))*math.sin(th)*0.9*0.85; y=cy+R*math.sin(math.radians(lat))*0.42*0.85
                 decl=app.decl_grid[i][j]; ang=math.radians(decl)
-                drawLine(x,y,x+8*math.sin(ang),y-8*math.cos(ang)*0.42,fill=RED,lineWidth=1.2,arrowEnd=True)
+                drawLine(x,y,x+8*math.sin(ang),y-8*math.cos(ang)*0.42,fill=RED,lineWidth=1.2)
                 drawLine(x,y,x-6*math.sin(ang),y+6*math.cos(ang)*0.42,fill=BLUE,lineWidth=1)
     saa_lat,saa_lon=-26,-50; th=math.radians(saa_lon+app.globe_rot*20); sx=cx+R*math.cos(math.radians(saa_lat))*math.sin(th)*0.9; sy=cy+R*math.sin(math.radians(saa_lat))*0.42
     if math.cos(th)>0: drawCircle(sx,sy,18,fill=RED,opacity=0.22); drawCircle(sx,sy,10,fill=RED,border=rgb(255,255,255),borderWidth=1,opacity=0.8); drawLabel("SAA low F",sx+14,sy,fill=RED,size=12,bold=True,align="left-center")
