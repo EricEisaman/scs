@@ -1,14 +1,14 @@
 
 """
-EMF Lab - Earth's Magnetic Field Dynamics v7 - Fourier Ear Lab parity
-Layout: 1050x700, header 70, 4 panels like Ear Lab, 60fps, cached geometry, min font 12
-Audio: window.AudioContext + AudioEngine dual, like Ear Lab
-Fetch: window.fetch multi-source with to_py, like Ear Lab
-Pyodide: loadPackage numpy directly, no micropip - fixed lame shit
+EMF Lab - Earth's Magnetic Field Dynamics v11 - Fourier Ear Lab parity + USGS/BGS CORS fix
+Layout: 1050x700, header 70, 4 panels, 60fps, cached geometry, min font 12
+Audio: window.AudioContext + AudioEngine dual
+Fetch: USGS + SWPC CORS-enabled, no more allorigins/raw or proxy.cors.sh which are 522/NXDOMAIN
+Pyodide: only pyodide_js.loadPackage, no pyodide.loadPackage error
 """
 from scs import *
 from browser import window, aio, document
-import math, random, traceback
+import math, random, traceback, json
 
 try:
     from extensions.proc_audio import AudioEngine
@@ -83,87 +83,19 @@ def dipole_field_line(L,n=72):
         if 0.25<r<2.1: pts.append((r,theta))
     return pts
 
-# SCS pattern: SOURCES multi-mirror, but only CORS-enabled endpoints to avoid console spam
-# Direct SWPC works (CORS *), others use allorigins/get which itself has CORS * and proxy.cors.sh which has CORS *
+# --- DATA SOURCE CANDIDATES per user suggestion: USGS + BGS GIN, both should have CORS ---
 SOURCES={
-    "kp":[
-        "https://services.swpc.noaa.gov/json/planetary_k_index_1m.json",
+    "kp":["https://services.swpc.noaa.gov/json/planetary_k_index_1m.json"],
+    "usgs_obs":["https://geomag.usgs.gov/ws/observatories/?format=json"],
+    "usgs_data":[
+        "https://geomag.usgs.gov/ws/data/?id=BOU&starttime=2025-10-31T00:00:00Z&endtime=2025-11-01T00:00:00Z&format=json&sampling_period=60&type=variation",
+        "https://geomag.usgs.gov/ws/data/?id=BOU&starttime=2025-10-31T00:00:00Z&endtime=2025-11-01T00:00:00Z&format=json",
     ],
-    "intermagnet":[
-        "https://api.allorigins.win/get?url=https://www.intermagnet.org/data_download.html",
-        "https://proxy.cors.sh/https://www.intermagnet.org/data_download.html",
-    ],
-    "datagov":[
-        "https://api.allorigins.win/get?url=https://catalog.data.gov/api/3/action/package_show?id=data-on-the-earths-magnetic-field-and-its-secular-change-since-1800",
-        "https://proxy.cors.sh/https://catalog.data.gov/api/3/action/package_show?id=data-on-the-earths-magnetic-field-and-its-secular-change-since-1800",
-    ],
-    "ncei":[
-        "https://api.allorigins.win/get?url=https://www.ncei.noaa.gov/products/geomagnetic-data",
-        "https://proxy.cors.sh/https://www.ncei.noaa.gov/products/geomagnetic-data",
+    "bgs_gin":[
+        "https://imag-data.bgs.ac.uk/GIN_V1/obs?format=json",
+        "https://imag-data.bgs.ac.uk/GIN_V1/hapi/info",
     ],
 }
-
-def _decode_allorigins_response(resp_json):
-    # allorigins/get returns {contents: "<html>...", status: {...}}
-    # contents may be JSON string or HTML
-    try:
-        r=_to_py(resp_json)
-        if isinstance(r, dict):
-            c=r.get('contents','')
-            if c:
-                return c
-            # sometimes nested?
-            return str(r)[:2000]
-        return str(r)
-    except Exception as e:
-        print(f"_decode_allorigins {e}")
-        return ""
-
-async def fetch_text_via_allorigins_or_proxy(url):
-    # url is already allorigins/get?url=... or proxy.cors.sh/...
-    # For allorigins/get we need to parse JSON then contents
-    try:
-        if "api.allorigins.win/get" in url:
-            # Use extensions.fetch for JSON
-            if HAS_FETCH and fetch_json:
-                try:
-                    j=await fetch_json(url)
-                    txt=_decode_allorigins_response(j)
-                    if txt and len(txt)>=10:
-                        print(f"fetch_text allorigins/get OK {url[:80]} len {len(txt)}")
-                        return txt
-                except Exception as e:
-                    print(f"allorigins/get fetch_json failed {e}")
-            # window.fetch fallback
-            r=await window.fetch(url)
-            if not r.ok: raise Exception(f"allorigins status {r.status}")
-            j=await r.json()
-            txt=_decode_allorigins_response(j)
-            if txt and len(txt)>=10:
-                print(f"fetch_text allorigins/get via window.fetch OK len {len(txt)}")
-                return txt
-            raise Exception("empty allorigins contents")
-        else:
-            # proxy.cors.sh returns raw text directly
-            if HAS_FETCH and fetch_text:
-                try:
-                    txt=await fetch_text(url)
-                    if txt and len(str(txt))>=10:
-                        print(f"fetch_text proxy.cors.sh OK via extensions.fetch {url[:80]}")
-                        return str(txt)
-                except Exception as e:
-                    print(f"proxy.cors.sh fetch_text failed {e}")
-            r=await window.fetch(url)
-            if not r.ok: raise Exception(f"proxy status {r.status}")
-            txt=await r.text()
-            if txt and len(str(txt))>=10:
-                print(f"fetch_text proxy.cors.sh via window.fetch OK len {len(str(txt))}")
-                return str(txt)
-            raise Exception("empty proxy contents")
-    except Exception as e:
-        print(f"fetch_text_via_allorigins_or_proxy {url[:80]} failed {e}")
-        raise
-
 
 def _to_py(o):
     try:
@@ -185,109 +117,53 @@ def _js_get(o,k,d=None):
         return d
     except: return d
 
-async def fetch_json_popular(urls,label):
-    # Kp only - direct SWPC has CORS *, no proxy needed
-    last=None
-    if HAS_FETCH and fetch_json:
-        for url in urls:
-            # Skip allorigins wrapper for Kp - direct fetch
-            if "planetary_k_index" in url:
-                try:
-                    data=await fetch_json(url)
-                    data=_to_py(data)
-                    if data:
-                        print(f"fetch_json {label} OK via extensions.fetch {url[:60]}")
-                        return data
-                except Exception as e:
-                    last=e
-                    print(f"extensions.fetch_json {label} failed {e}")
-                    continue
-    # For Kp, also try window.fetch direct
-    for url in urls:
-        if "planetary_k_index" in url:
-            try:
-                resp=await window.fetch(url)
-                if not resp.ok: raise Exception(f"HTTP {resp.status}")
-                data=await resp.json()
-                print(f"fetch_json {label} OK via window.fetch")
-                return _to_py(data)
-            except Exception as e:
-                last=e
-                print(f"window.fetch_json {label} failed {e}")
-                continue
-    raise Exception(f"All failed {label}: {last}")
-
-async def fetch_text_popular(urls,label):
-    # For intermagnet/datagov/ncei - only try ONE proxy that has CORS * to avoid console spam
-    # Use allorigins/get helper
-    last=None
-    for url in urls:
-        try:
-            txt=await fetch_text_via_allorigins_or_proxy(url)
-            if txt and len(str(txt))>=10:
-                return str(txt)
-        except Exception as e:
-            last=e
-            continue
-    raise Exception(f"All failed {label}: {last}")
-
-async def fetch_json_via_allorigins(url):
-    # url is direct data.gov url, we wrap it in allorigins/get and parse contents as JSON
-    api=f"https://api.allorigins.win/get?url={window.encodeURIComponent(url)}"
+async def fetch_json_cors(url):
+    # Like Fourier Ear: extensions.fetch first, then window.fetch, both with CORS mode
     try:
         if HAS_FETCH and fetch_json:
             try:
-                j=await fetch_json(api)
-                c=_decode_allorigins_response(j)
-                if c:
-                    import json as _jsjson
-                    try:
-                        return _jsjson.loads(c)
-                    except:
-                        # c may already be dict?
-                        return _to_py(c)
+                data=await fetch_json(url)
+                print(f"fetch_json_cors OK via extensions.fetch {url[:80]}")
+                return _to_py(data)
             except Exception as e:
-                print(f"fetch_json_via_allorigins extensions.fetch failed {e}")
-        r=await window.fetch(api)
-        if not r.ok: raise Exception(f"allorigins status {r.status}")
-        j=await r.json()
-        c=_decode_allorigins_response(j)
-        import json as _jsjson
-        return _jsjson.loads(c)
+                print(f"extensions.fetch_json_cors {url[:60]} failed {e}")
+        r=await window.fetch(url)
+        if not r.ok: raise Exception(f"HTTP {r.status}")
+        data=await r.json()
+        print(f"fetch_json_cors OK via window.fetch {url[:60]}")
+        return _to_py(data)
     except Exception as e:
-        print(f"fetch_json_via_allorigins {url[:60]} failed {e}")
+        print(f"fetch_json_cors {url[:60]} failed {e}")
         raise
 
-
-async def fetch_text_popular(urls,label):
+async def fetch_json_popular(urls,label):
     last=None
     for url in urls:
         try:
-            resp=await window.fetch(url)
-            if not resp.ok: raise Exception(f"HTTP {resp.status}")
-            txt=await resp.text()
-            txt=str(txt)
-            if len(txt)<10: raise Exception("short")
-            return txt
+            data=await fetch_json_cors(url)
+            if data:
+                return data
         except Exception as e:
             last=e
-            print(f"fetch_text_popular {label} {url} {e}")
             continue
     raise Exception(f"All failed {label}: {last}")
 
-# Fixed pyodide - no micropip import at top level, load numpy via loadPackage
+# Fixed pyodide v11 - NO import pyodide (has no loadPackage), only pyodide_js which works
 PYODIDE_CODE = """
-# Fourier Ear Lab parity: no micropip crash, use loadPackage numpy directly
+# SIGMA v11 fix: pyodide module has no loadPackage, use only pyodide_js / js.pyodide
 try:
-    import pyodide
-    await pyodide.loadPackage("numpy")
+    import pyodide_js
+    await pyodide_js.loadPackage("numpy")
+    print("pyodide_js loadPackage numpy OK - fixed no pyodide.loadPackage error")
 except Exception as e:
-    print(f"pyodide load numpy failed {e}")
+    print(f"pyodide_js load failed {e}, trying js.pyodide")
     try:
-        import pyodide_js
-        await pyodide_js.loadPackage("numpy")
+        import js
+        await js.pyodide.loadPackage("numpy")
+        print("js.pyodide loadPackage numpy OK")
     except Exception as e2:
-        print(f"pyodide_js load numpy failed {e2}")
+        print(f"js.pyodide load failed {e2} - trying direct import numpy (may already be loaded)")
+        pass
 
 import numpy as np
 year=globals().get('year',2025); moment=globals().get('moment',7.7)
@@ -305,7 +181,7 @@ F=30+25*np.abs(np.sin(lats)[:,None]); degrees=np.arange(1,9); power=moment**2*(0
 
 async def compute_with_pyodide(app):
     if not HAS_PYODIDE:
-        app.pyodide_status="pyodide not available - Fourier Ear pattern no pyodide"; app.log_pyodide=app.pyodide_status; return
+        app.pyodide_status="pyodide not available"; app.log_pyodide=app.pyodide_status; return
     try:
         app.pyodide_status="Pyodide computing..."
         code=f"year={app.year}\nmoment={app.dipole_moment}\npole_lat={app.pole_lat}\npole_lon={app.pole_lon}\n"+PYODIDE_CODE
@@ -314,7 +190,7 @@ async def compute_with_pyodide(app):
         if isinstance(res,dict):
             app.decl_grid=res.get('declination')
             app.power_spec=res.get('power_spectrum',[1,0.7,0.5,0.35,0.22,0.15,0.1,0.06])
-            app.pyodide_status=f"pyodide OK {len(app.decl_grid)}x{len(app.decl_grid[0])} via loadPackage - fixed"
+            app.pyodide_status=f"pyodide OK {len(app.decl_grid)}x{len(app.decl_grid[0])} via pyodide_js - fixed"
             app.log_pyodide=app.pyodide_status
             app.buttons["cache"]["enabled"]=True
         else:
@@ -324,7 +200,7 @@ async def compute_with_pyodide(app):
         print(f"run_python failed: {e}\n{traceback.format_exc()}")
 
 async def load_live_geomag(app):
-    # Kp - direct, CORS *, should always work like Fourier Ear fetch_text from raw github
+    # Kp - direct SWPC CORS * - like Fourier Ear raw github
     try:
         app.fetch_status="Fetching Kp..."
         data=await fetch_json_popular(SOURCES["kp"],"kp")
@@ -343,47 +219,68 @@ async def load_live_geomag(app):
                     v=_js_get(data[i],'Kp',0); s=str(v); num=''.join([c for c in s if c.isdigit() or c=='.']); hist.append(float(num) if num else 0.0)
                 if hist: app.kp_history=hist
             except Exception as e2: print(f"hist parse {e2}")
-            app.log_fetch=f"Kp OK {app.kp_live:.1f} via extensions.fetch - like Ear Lab"; app.fetch_status=app.log_fetch
+            app.log_fetch=f"Kp OK {app.kp_live:.1f} via extensions.fetch - Ear pattern"; app.fetch_status=app.log_fetch
             print(app.log_fetch)
-        else:
-            raise Exception("Kp not list")
     except Exception as e:
         app.log_fetch=f"Kp fetch failed: {e}"; app.fetch_status=app.log_fetch; print(app.log_fetch)
 
-    # INTERMAGNET - has no CORS, use allorigins/get which HAS CORS *, avoid direct fetch to intermagnet.org (would cause browser CORS error)
+    # USGS observatories - CORS enabled per https://www.usgs.gov/tools/web-service-geomagnetism-data
     try:
-        txt=await fetch_text_popular(SOURCES["intermagnet"],"intermagnet")
-        app.log_fetch2=f"INTERMAGNET OK {len(txt)} via allorigins/get - no CORS spam"; app.fetch_status2=app.log_fetch2
+        obs=await fetch_json_popular(SOURCES["usgs_obs"],"usgs_obs")
+        obs=_to_py(obs)
+        count=len(obs) if isinstance(obs, (list, dict)) else 0
+        if isinstance(obs, dict):
+            # may be {"observatories": [...]}
+            if "observatories" in obs: count=len(obs["observatories"])
+        app.log_fetch2=f"USGS OBS OK {count} via geomag.usgs.gov/ws/observatories - CORS *"
+        app.fetch_status2=app.log_fetch2
         print(app.log_fetch2)
+        # Update observatories list from USGS if possible
+        try:
+            if isinstance(obs, list) and len(obs)>0:
+                # obs entries have code, location etc
+                new_obs=[]
+                for entry in obs[:20]:
+                    entry=_to_py(entry)
+                    if isinstance(entry, dict):
+                        code=_js_get(entry,'code',None) or _js_get(entry,'id',None)
+                        lat=_js_get(entry,'latitude',None); lon=_js_get(entry,'longitude',None)
+                        if code and lat is not None and lon is not None:
+                            try: new_obs.append((float(lat), float(lon), str(code)))
+                            except: pass
+                if len(new_obs)>=5:
+                    app.observatories=new_obs
+                    print(f"Updated observatories from USGS {len(new_obs)}")
+        except Exception as e: print(f"USGS obs parse {e}")
     except Exception as e:
-        app.log_fetch2=f"INTERMAGNET CORS blocked, static data used - {e}"; app.fetch_status2=app.log_fetch2; print(app.log_fetch2)
+        app.log_fetch2=f"USGS OBS CORS? {e} - static used"; app.fetch_status2=app.log_fetch2; print(app.log_fetch2)
 
-    # Data.gov - same, use allorigins/get
+    # USGS data sample - BOU Boulder
     try:
-        # Try via allorigins/get helper that parses contents
-        direct_url="https://catalog.data.gov/api/3/action/package_show?id=data-on-the-earths-magnetic-field-and-its-secular-change-since-1800"
-        meta=await fetch_json_via_allorigins(direct_url)
-        meta=_to_py(meta); title=""
-        if isinstance(meta,dict):
-            if "result" in meta: title=_js_get(_to_py(meta.get("result",{})),'title','')
-            else: title=_js_get(meta,'title','')
-        app.log_fetch3=f"Data.gov OK {str(title)[:24]} via allorigins/get"; app.fetch_status3=app.log_fetch3
+        data=await fetch_json_popular(SOURCES["usgs_data"],"usgs_data")
+        data=_to_py(data)
+        # data may be dict with values
+        vals=0
+        if isinstance(data, dict):
+            if "values" in data: vals=len(data["values"])
+            elif "data" in data: vals=len(str(data["data"]))
+        elif isinstance(data, list): vals=len(data)
+        app.log_fetch3=f"USGS DATA OK {vals} pts BOU via geomag.usgs.gov/ws/data - CORS *"
+        app.fetch_status3=app.log_fetch3
         print(app.log_fetch3)
     except Exception as e:
-        # Fallback try text popular (proxy.cors.sh)
-        try:
-            txt=await fetch_text_popular(SOURCES["datagov"],"datagov")
-            app.log_fetch3=f"Data.gov OK {len(txt)} via proxy.cors.sh"; app.fetch_status3=app.log_fetch3
-            print(app.log_fetch3)
-        except Exception as e2:
-            app.log_fetch3=f"Data.gov CORS blocked, static - {e2}"; app.fetch_status3=app.log_fetch3; print(app.log_fetch3)
+        app.log_fetch3=f"USGS DATA failed {e} - static"; app.fetch_status3=app.log_fetch3; print(app.log_fetch3)
 
+    # BGS GIN V1 - try direct, may need proxy or pre-downloaded files per user note
     try:
-        t=await fetch_text_popular(SOURCES["ncei"],"ncei")
-        app.log_fetch4=f"NCEI OK {len(t)} via allorigins/get"; app.fetch_status4=app.log_fetch4
+        bgs=await fetch_json_popular(SOURCES["bgs_gin"],"bgs_gin")
+        bgs=_to_py(bgs)
+        count=len(bgs) if isinstance(bgs, (list, dict)) else 0
+        app.log_fetch4=f"BGS GIN OK {count} via imag-data.bgs.ac.uk/GIN_V1 - CORS? {count}"
+        app.fetch_status4=app.log_fetch4
         print(app.log_fetch4)
     except Exception as e:
-        app.log_fetch4=f"NCEI CORS blocked, static - {e}"; app.fetch_status4=app.log_fetch4; print(app.log_fetch4)
+        app.log_fetch4=f"BGS GIN CORS blocked or needs proxy - static used per note, {e}"; app.fetch_status4=app.log_fetch4; print(app.log_fetch4)
 
     aio.run(compute_with_pyodide(app))
 
@@ -444,7 +341,7 @@ def stop_sonification(app):
     except Exception as e:
         app.log_audio=f"Audio stop failed {e}"; print(f"stop failed {e}")
 
-CACHE_KEY="emf_sigma_v7_ear_parity"
+CACHE_KEY="emf_sigma_v11_usgs_bgs"
 
 def try_load_cached(app):
     try:
@@ -472,14 +369,13 @@ def onAppStart(app):
     app.width=W; app.height=H; app.stepsPerSecond=60; app.background=BG
     app.year=2025; app.dipole_tilt=10.5; app.dipole_moment=interp_moment(2025); app.pole_lat,app.pole_lon=interp_pole(2025)
     app.kp_live=3.2; app.kp_slider=3.0; app.solar_wind_speed=420; app.imf_bz=-2.0
-    app.log_fetch="Idle"; app.log_fetch2=""; app.log_fetch3=""; app.log_fetch4=""; app.log_pyodide="Init loadPackage numpy - no micropip"; app.log_audio="Idle"
-    app.fetch_status="Ready - LIVE (Ear pattern)"; app.fetch_status2=""; app.fetch_status3=""; app.fetch_status4=""; app.pyodide_status="Init"
+    app.log_fetch="Idle"; app.log_fetch2=""; app.log_fetch3=""; app.log_fetch4=""; app.log_pyodide="Init pyodide_js only - no pyodide.loadPackage"; app.log_audio="Idle"
+    app.fetch_status="Ready - LIVE USGS+SWPC (Ear pattern)"; app.fetch_status2=""; app.fetch_status3=""; app.fetch_status4=""; app.pyodide_status="Init"
     app.decl_grid=None; app.power_spec=[1,0.7,0.5,0.35,0.22,0.15,0.1,0.06]; app.kp_history=[random.uniform(0,4) for _ in range(60)]
     app.dragging_year=False; app.dragging_kp=False; app.dragging_sw=False; app.hover_panel=None; app.show_globe=False; app.globe_rot=0; app.is_playing=False; app.time=0
-    app.insight="SIGMA LAB - 60fps parity with Fourier Ear - cached field lines, min 12pt"
+    app.insight="SIGMA LAB - 60fps Ear parity - USGS CORS * + SWPC Kp, no failing proxies"
     app.audioCtx=None; app.oscNodes=[]; app.gainNodes=[]; app.masterGain=None; app.analyser=None
     app.procAudio=AudioEngine(quality="high",seed=90210) if HAS_PROC_AUDIO else None
-    # cached geometry like Ear Lab caches samples
     app.field_lines=[dipole_field_line(L,72) for L in [1.4,1.8,2.3,3.0]]
     app.observatories=[(65.1,-19.6,"LRV"),(60.4,5.3,"DOB"),(58.7,-3.7,"LER"),(55.3,-3.2,"ESK"),(50.3,4.6,"DOU"),(52.0,-4.5,"ABK"),(40.3,-4.3,"SPT"),(36.9,-2.0,"SFS"),(28.0,-16.5,"GUI"),(64.7,-147.8,"CMO"),(47.6,-122.3,"NEW"),(38.2,-122.3,"FRN"),(-33.3,26.5,"HER"),(-23.2,-45.0,"VSS"),(-31.4,115.9,"GNG"),(35.6,140.2,"KAK"),(-43.7,172.3,"EYR")]
     app.buttons={
@@ -738,7 +634,7 @@ def drawGlobeOverlay(app):
     edu=["True vs Mag 0-30deg","WMM2025 airports","Phones WMM+gyro","GPS not mag","Mag != weather","GIC affects sensors","Aurora Kp+Bz south","Field protects atmo"]
     for k,l in enumerate(edu): drawLabel(l,ex+12,ey+28+k*16,fill=DIM,size=12,align="left-top")
     dx,dy,dw,dh=710,HEADER_H+396,324,208; drawRect(dx,dy,dw,dh,fill=PANEL,border=BORDER,borderWidth=1,roundness=10); drawLabel("LIVE DATA SIGMA LOG",dx+12,dy+10,fill=TXT,size=12,bold=True,align="left-top")
-    src=[f"Kp {app.kp_live:.1f} {app.log_fetch}",f"INTERMAG {app.log_fetch2[:32]}",f"Data.gov {app.log_fetch3[:30]}",f"Pyodide {app.log_pyodide[:32]}",f"NCEI {app.log_fetch4[:30]}",f"Audio {app.log_audio[:30]}","WMM2025 IGRF-14","Kp sonified"]
+    src=[f"Kp {app.kp_live:.1f} {app.log_fetch}",f"USGS {app.log_fetch2[:32]}",f"USGS {app.log_fetch3[:30]}",f"BGS {app.log_fetch4[:30]}",f"Pyodide {app.log_pyodide[:32]}",f"Audio {app.log_audio[:30]}","WMM2025 IGRF-14","Kp sonified"]
     for k,l in enumerate(src): drawLabel(l,dx+12,dy+28+k*18,fill=DIM,size=12,align="left-top")
 
 def redrawAll(app):
