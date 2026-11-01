@@ -83,29 +83,87 @@ def dipole_field_line(L,n=72):
         if 0.25<r<2.1: pts.append((r,theta))
     return pts
 
+# SCS pattern: SOURCES multi-mirror, but only CORS-enabled endpoints to avoid console spam
+# Direct SWPC works (CORS *), others use allorigins/get which itself has CORS * and proxy.cors.sh which has CORS *
 SOURCES={
-    # SWPC supports CORS directly, no proxy needed
     "kp":[
         "https://services.swpc.noaa.gov/json/planetary_k_index_1m.json",
-        "https://api.codetabs.com/v1/proxy?quest=https://services.swpc.noaa.gov/json/planetary_k_index_1m.json",
     ],
-    # INTERMAGNET has no CORS, need proxy that sends ACAO *
     "intermagnet":[
-        "https://api.codetabs.com/v1/proxy?quest=https://www.intermagnet.org/data_download.html",
-        "https://thingproxy.freeboard.io/fetch/https://www.intermagnet.org/data_download.html",
-        "https://api.cors.lol/?url=https://www.intermagnet.org/data_download.html",
+        "https://api.allorigins.win/get?url=https://www.intermagnet.org/data_download.html",
+        "https://proxy.cors.sh/https://www.intermagnet.org/data_download.html",
     ],
     "datagov":[
-        "https://api.codetabs.com/v1/proxy?quest=https://catalog.data.gov/api/3/action/package_show?id=data-on-the-earths-magnetic-field-and-its-secular-change-since-1800",
-        "https://thingproxy.freeboard.io/fetch/https://catalog.data.gov/api/3/action/package_show?id=data-on-the-earths-magnetic-field-and-its-secular-change-since-1800",
-        "https://api.cors.lol/?url=https://catalog.data.gov/api/3/action/package_show?id=data-on-the-earths-magnetic-field-and-its-secular-change-since-1800",
+        "https://api.allorigins.win/get?url=https://catalog.data.gov/api/3/action/package_show?id=data-on-the-earths-magnetic-field-and-its-secular-change-since-1800",
+        "https://proxy.cors.sh/https://catalog.data.gov/api/3/action/package_show?id=data-on-the-earths-magnetic-field-and-its-secular-change-since-1800",
     ],
     "ncei":[
-        "https://www.ncei.noaa.gov/products/geomagnetic-data",
-        "https://api.codetabs.com/v1/proxy?quest=https://www.ncei.noaa.gov/products/geomagnetic-data",
-        "https://thingproxy.freeboard.io/fetch/https://www.ncei.noaa.gov/products/geomagnetic-data",
+        "https://api.allorigins.win/get?url=https://www.ncei.noaa.gov/products/geomagnetic-data",
+        "https://proxy.cors.sh/https://www.ncei.noaa.gov/products/geomagnetic-data",
     ],
 }
+
+def _decode_allorigins_response(resp_json):
+    # allorigins/get returns {contents: "<html>...", status: {...}}
+    # contents may be JSON string or HTML
+    try:
+        r=_to_py(resp_json)
+        if isinstance(r, dict):
+            c=r.get('contents','')
+            if c:
+                return c
+            # sometimes nested?
+            return str(r)[:2000]
+        return str(r)
+    except Exception as e:
+        print(f"_decode_allorigins {e}")
+        return ""
+
+async def fetch_text_via_allorigins_or_proxy(url):
+    # url is already allorigins/get?url=... or proxy.cors.sh/...
+    # For allorigins/get we need to parse JSON then contents
+    try:
+        if "api.allorigins.win/get" in url:
+            # Use extensions.fetch for JSON
+            if HAS_FETCH and fetch_json:
+                try:
+                    j=await fetch_json(url)
+                    txt=_decode_allorigins_response(j)
+                    if txt and len(txt)>=10:
+                        print(f"fetch_text allorigins/get OK {url[:80]} len {len(txt)}")
+                        return txt
+                except Exception as e:
+                    print(f"allorigins/get fetch_json failed {e}")
+            # window.fetch fallback
+            r=await window.fetch(url)
+            if not r.ok: raise Exception(f"allorigins status {r.status}")
+            j=await r.json()
+            txt=_decode_allorigins_response(j)
+            if txt and len(txt)>=10:
+                print(f"fetch_text allorigins/get via window.fetch OK len {len(txt)}")
+                return txt
+            raise Exception("empty allorigins contents")
+        else:
+            # proxy.cors.sh returns raw text directly
+            if HAS_FETCH and fetch_text:
+                try:
+                    txt=await fetch_text(url)
+                    if txt and len(str(txt))>=10:
+                        print(f"fetch_text proxy.cors.sh OK via extensions.fetch {url[:80]}")
+                        return str(txt)
+                except Exception as e:
+                    print(f"proxy.cors.sh fetch_text failed {e}")
+            r=await window.fetch(url)
+            if not r.ok: raise Exception(f"proxy status {r.status}")
+            txt=await r.text()
+            if txt and len(str(txt))>=10:
+                print(f"fetch_text proxy.cors.sh via window.fetch OK len {len(str(txt))}")
+                return str(txt)
+            raise Exception("empty proxy contents")
+    except Exception as e:
+        print(f"fetch_text_via_allorigins_or_proxy {url[:80]} failed {e}")
+        raise
+
 
 def _to_py(o):
     try:
@@ -128,48 +186,81 @@ def _js_get(o,k,d=None):
     except: return d
 
 async def fetch_json_popular(urls,label):
+    # Kp only - direct SWPC has CORS *, no proxy needed
     last=None
-    # Try extensions.fetch first like Fourier Ear Lab - it has better CORS handling
     if HAS_FETCH and fetch_json:
         for url in urls:
+            # Skip allorigins wrapper for Kp - direct fetch
+            if "planetary_k_index" in url:
+                try:
+                    data=await fetch_json(url)
+                    data=_to_py(data)
+                    if data:
+                        print(f"fetch_json {label} OK via extensions.fetch {url[:60]}")
+                        return data
+                except Exception as e:
+                    last=e
+                    print(f"extensions.fetch_json {label} failed {e}")
+                    continue
+    # For Kp, also try window.fetch direct
+    for url in urls:
+        if "planetary_k_index" in url:
             try:
-                data=await fetch_json(url)
-                data=_to_py(data)
-                if data:
-                    print(f"fetch_json {label} OK via extensions.fetch {url[:60]}")
-                    return data
+                resp=await window.fetch(url)
+                if not resp.ok: raise Exception(f"HTTP {resp.status}")
+                data=await resp.json()
+                print(f"fetch_json {label} OK via window.fetch")
+                return _to_py(data)
             except Exception as e:
                 last=e
-                print(f"extensions.fetch_json {label} {url[:60]} failed {e}")
+                print(f"window.fetch_json {label} failed {e}")
                 continue
-    # Fallback to window.fetch with proxies
-    for url in urls:
-        try:
-            resp=await window.fetch(url)
-            if not resp.ok: raise Exception(f"HTTP {resp.status}")
-            data=await resp.json()
-            print(f"fetch_json {label} OK via window.fetch {url[:60]}")
-            return _to_py(data)
-        except Exception as e:
-            last=e
-            print(f"window.fetch_json {label} {url[:60]} failed {e}")
-            continue
     raise Exception(f"All failed {label}: {last}")
 
 async def fetch_text_popular(urls,label):
+    # For intermagnet/datagov/ncei - only try ONE proxy that has CORS * to avoid console spam
+    # Use allorigins/get helper
     last=None
-    if HAS_FETCH and fetch_text:
-        for url in urls:
+    for url in urls:
+        try:
+            txt=await fetch_text_via_allorigins_or_proxy(url)
+            if txt and len(str(txt))>=10:
+                return str(txt)
+        except Exception as e:
+            last=e
+            continue
+    raise Exception(f"All failed {label}: {last}")
+
+async def fetch_json_via_allorigins(url):
+    # url is direct data.gov url, we wrap it in allorigins/get and parse contents as JSON
+    api=f"https://api.allorigins.win/get?url={window.encodeURIComponent(url)}"
+    try:
+        if HAS_FETCH and fetch_json:
             try:
-                txt=await fetch_text(url)
-                txt=str(txt)
-                if len(txt)>=10:
-                    print(f"fetch_text {label} OK via extensions.fetch {url[:60]} len {len(txt)}")
-                    return txt
+                j=await fetch_json(api)
+                c=_decode_allorigins_response(j)
+                if c:
+                    import json as _jsjson
+                    try:
+                        return _jsjson.loads(c)
+                    except:
+                        # c may already be dict?
+                        return _to_py(c)
             except Exception as e:
-                last=e
-                print(f"extensions.fetch_text {label} {url[:60]} failed {e}")
-                continue
+                print(f"fetch_json_via_allorigins extensions.fetch failed {e}")
+        r=await window.fetch(api)
+        if not r.ok: raise Exception(f"allorigins status {r.status}")
+        j=await r.json()
+        c=_decode_allorigins_response(j)
+        import json as _jsjson
+        return _jsjson.loads(c)
+    except Exception as e:
+        print(f"fetch_json_via_allorigins {url[:60]} failed {e}")
+        raise
+
+
+async def fetch_text_popular(urls,label):
+    last=None
     for url in urls:
         try:
             resp=await window.fetch(url)
@@ -177,39 +268,26 @@ async def fetch_text_popular(urls,label):
             txt=await resp.text()
             txt=str(txt)
             if len(txt)<10: raise Exception("short")
-            print(f"fetch_text {label} OK via window.fetch {url[:60]} len {len(txt)}")
             return txt
         except Exception as e:
             last=e
-            print(f"window.fetch_text {label} {url[:60]} failed {e}")
+            print(f"fetch_text_popular {label} {url} {e}")
             continue
     raise Exception(f"All failed {label}: {last}")
 
-# Fixed pyodide - no micropip import, load via js global which has loadPackage
+# Fixed pyodide - no micropip import at top level, load numpy via loadPackage
 PYODIDE_CODE = """
-# SIGMA fix: pyodide Python module has no loadPackage, use pyodide_js / js.pyodide
+# Fourier Ear Lab parity: no micropip crash, use loadPackage numpy directly
 try:
-    import pyodide_js
-    await pyodide_js.loadPackage("numpy")
-    print("pyodide_js loadPackage numpy OK")
+    import pyodide
+    await pyodide.loadPackage("numpy")
 except Exception as e:
-    print(f"pyodide_js loadPackage numpy failed {e}, trying js.pyodide")
+    print(f"pyodide load numpy failed {e}")
     try:
-        import js
-        await js.pyodide.loadPackage("numpy")
-        print("js.pyodide loadPackage numpy OK")
+        import pyodide_js
+        await pyodide_js.loadPackage("numpy")
     except Exception as e2:
-        print(f"js.pyodide load failed {e2}, trying pyodide module")
-        try:
-            import pyodide
-            await pyodide.loadPackage("numpy")
-        except Exception as e3:
-            print(f"pyodide load failed {e3} - maybe numpy already loaded")
-            try:
-                import pyodide
-                # some versions expose loadPackage via pyodide_js only
-            except:
-                pass
+        print(f"pyodide_js load numpy failed {e2}")
 
 import numpy as np
 year=globals().get('year',2025); moment=globals().get('moment',7.7)
@@ -246,8 +324,9 @@ async def compute_with_pyodide(app):
         print(f"run_python failed: {e}\n{traceback.format_exc()}")
 
 async def load_live_geomag(app):
+    # Kp - direct, CORS *, should always work like Fourier Ear fetch_text from raw github
     try:
-        app.fetch_status="Fetching Kp window.fetch..."
+        app.fetch_status="Fetching Kp..."
         data=await fetch_json_popular(SOURCES["kp"],"kp")
         data=_to_py(data)
         if isinstance(data,list) and len(data)>0:
@@ -264,28 +343,48 @@ async def load_live_geomag(app):
                     v=_js_get(data[i],'Kp',0); s=str(v); num=''.join([c for c in s if c.isdigit() or c=='.']); hist.append(float(num) if num else 0.0)
                 if hist: app.kp_history=hist
             except Exception as e2: print(f"hist parse {e2}")
-            app.log_fetch=f"Kp OK {app.kp_live:.1f} window.fetch"; app.fetch_status=app.log_fetch
+            app.log_fetch=f"Kp OK {app.kp_live:.1f} via extensions.fetch - like Ear Lab"; app.fetch_status=app.log_fetch
+            print(app.log_fetch)
+        else:
+            raise Exception("Kp not list")
     except Exception as e:
         app.log_fetch=f"Kp fetch failed: {e}"; app.fetch_status=app.log_fetch; print(app.log_fetch)
+
+    # INTERMAGNET - has no CORS, use allorigins/get which HAS CORS *, avoid direct fetch to intermagnet.org (would cause browser CORS error)
     try:
         txt=await fetch_text_popular(SOURCES["intermagnet"],"intermagnet")
-        app.log_fetch2=f"INTERMAGNET OK {len(txt)}"; app.fetch_status2=app.log_fetch2
+        app.log_fetch2=f"INTERMAGNET OK {len(txt)} via allorigins/get - no CORS spam"; app.fetch_status2=app.log_fetch2
+        print(app.log_fetch2)
     except Exception as e:
-        app.log_fetch2=f"INTERMAGNET failed: {e}"; app.fetch_status2=app.log_fetch2; print(app.log_fetch2)
+        app.log_fetch2=f"INTERMAGNET CORS blocked, static data used - {e}"; app.fetch_status2=app.log_fetch2; print(app.log_fetch2)
+
+    # Data.gov - same, use allorigins/get
     try:
-        meta=await fetch_json_popular(SOURCES["datagov"],"datagov")
+        # Try via allorigins/get helper that parses contents
+        direct_url="https://catalog.data.gov/api/3/action/package_show?id=data-on-the-earths-magnetic-field-and-its-secular-change-since-1800"
+        meta=await fetch_json_via_allorigins(direct_url)
         meta=_to_py(meta); title=""
         if isinstance(meta,dict):
             if "result" in meta: title=_js_get(_to_py(meta.get("result",{})),'title','')
             else: title=_js_get(meta,'title','')
-        app.log_fetch3=f"Data.gov OK {str(title)[:24]}"; app.fetch_status3=app.log_fetch3
+        app.log_fetch3=f"Data.gov OK {str(title)[:24]} via allorigins/get"; app.fetch_status3=app.log_fetch3
+        print(app.log_fetch3)
     except Exception as e:
-        app.log_fetch3=f"Data.gov failed: {e}"; app.fetch_status3=app.log_fetch3; print(app.log_fetch3)
+        # Fallback try text popular (proxy.cors.sh)
+        try:
+            txt=await fetch_text_popular(SOURCES["datagov"],"datagov")
+            app.log_fetch3=f"Data.gov OK {len(txt)} via proxy.cors.sh"; app.fetch_status3=app.log_fetch3
+            print(app.log_fetch3)
+        except Exception as e2:
+            app.log_fetch3=f"Data.gov CORS blocked, static - {e2}"; app.fetch_status3=app.log_fetch3; print(app.log_fetch3)
+
     try:
         t=await fetch_text_popular(SOURCES["ncei"],"ncei")
-        app.log_fetch4=f"NCEI OK {len(t)}"; app.fetch_status4=app.log_fetch4
+        app.log_fetch4=f"NCEI OK {len(t)} via allorigins/get"; app.fetch_status4=app.log_fetch4
+        print(app.log_fetch4)
     except Exception as e:
-        app.log_fetch4=f"NCEI failed: {e}"; app.fetch_status4=app.log_fetch4; print(app.log_fetch4)
+        app.log_fetch4=f"NCEI CORS blocked, static - {e}"; app.fetch_status4=app.log_fetch4; print(app.log_fetch4)
+
     aio.run(compute_with_pyodide(app))
 
 def ensureAudioContext(app):
