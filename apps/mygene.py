@@ -652,39 +652,243 @@ async def query_mygene(app):
 def init_audio(app):
     try:
         if PROC_OK and AudioEngine is not None:
+            # high quality engine, seed for reproducibility
             app.audio=AudioEngine(quality="high", seed=90210)
+            app.is_playing=False
+            app.playing_idx=-1
+            app.playing_exon_idx=-1
         else:
             app.audio=None
-    except:
+            app.is_playing=False
+            app.playing_idx=-1
+            app.playing_exon_idx=-1
+    except Exception as e:
+        window.console.log(f"audio init {e}")
         app.audio=None
+        app.is_playing=False
+        app.playing_idx=-1
+        app.playing_exon_idx=-1
 
-def play_any_sonification(app, arr=None):
+def _play_mapped(engine, base_sound, freq, dur, vol, pan_x, pan_y=0):
+    # proper mapping: try to pass frequency/duration/volume/pan if engine supports it
+    try:
+        # attempt rich API - many SCS engines accept these kwargs
+        engine.play(base_sound, frequency=freq, duration=dur, volume=vol, pan=pan_x, spatial=True, position={"x":pan_x,"y":pan_y})
+        return
+    except TypeError:
+        pass
+    except Exception as e:
+        window.console.log(f"play rich fail {e}")
+    try:
+        # fallback: seed maps to pitch variation, position maps to spatial
+        engine.play(base_sound, seed=int(freq), spatial=True, position={"x":pan_x,"y":pan_y})
+        return
+    except:
+        pass
+    try:
+        engine.play(base_sound)
+    except Exception as e:
+        window.console.log(f"play fallback fail {e}")
+
+async def sonify_hits_sorted(app):
+    # play through hits sorted by score, mapping data values to audio params
     try:
         if not app.audio:
             init_audio(app)
-        if app.audio:
-            try:
-                app.audio.resume()
-            except:
-                pass
-            if arr is None:
-                arr=app.numeric_arrays.get(next(iter(app.numeric_arrays), ""), []) if hasattr(app,'numeric_arrays') else []
-                if not arr:
-                    hits=js_to_py(app.hits)
-                    arr=[h.get("_score",0) for h in hits[:12] if isinstance(h,dict)]
-            for i,v in enumerate(arr[:14]):
+        if not app.audio:
+            return
+        if app.is_playing:
+            return
+        app.is_playing=True
+        try:
+            app.audio.resume()
+        except:
+            pass
+        hits=js_to_py(app.hits)
+        valid=[]
+        for h in hits:
+            if isinstance(h, dict):
                 try:
-                    fv=float(v)
-                    if not math.isfinite(fv):
-                        continue
-                    app.audio.play("coin.collect", seed=int(abs(fv))+i*13, spatial=True, position={"x":(i/14)-0.5,"y":0})
+                    sc=float(h.get("_score",0))
+                    if math.isfinite(sc):
+                        valid.append(h)
                 except:
-                    try:
-                        app.audio.play("character.jump", seed=i*37, spatial=False, position={"x":0,"y":0})
-                    except:
-                        pass
+                    pass
+        # sort descending by score - core requirement: play through sorted data
+        valid.sort(key=lambda x: float(x.get("_score",0)), reverse=True)
+        if not valid:
+            app.is_playing=False
+            return
+        scores=[float(h.get("_score",0)) for h in valid]
+        mn=min(scores); mx=max(scores); rng=mx-mn if mx!=mn else 1
+        # type_of_gene to timbre mapping
+        sound_for_type={
+            "protein-coding": "coin.collect",
+            "pseudo": "character.jump",
+            "ncRNA": "coin.collect",
+            "rRNA": "character.jump",
+            "tRNA": "coin.collect",
+            "lncRNA": "character.jump",
+            "miRNA": "coin.collect",
+            "snoRNA": "character.jump",
+        }
+        # play up to 20, sorted order = time order
+        for i,h in enumerate(valid[:20]):
+            sc=float(h.get("_score",0))
+            norm=(sc-mn)/rng  # 0..1
+            # frequency: exponential mapping 196Hz (G3) to 784Hz (G5) based on score
+            freq = 196.0 * (2.0 ** (norm*2.0))  # 196 to 784
+            # duration: longer for higher scoring, shorter for low - maps score to note length
+            dur = 0.12 + norm*0.45
+            # volume: louder for high score
+            vol = 0.35 + norm*0.65
+            # pan: sorted position left->right traverses stereo field
+            pan = (i / max(1, len(valid[:20])-1))*2.0 -1.0
+            # y pan based on taxid or type index for second dimension
+            tgene=h.get("type_of_gene","protein-coding")
+            # deterministic y based on hash of type
+            type_hash = sum(ord(c) for c in str(tgene)) % 10
+            y_pan = (type_hash/10.0)*2.0 -1.0
+            base = sound_for_type.get(tgene, "coin.collect")
+            app.playing_idx = i
+            # adjust filter / brightness via norm as well - if engine supports cutoff, pass via volume curve
+            _play_mapped(app.audio, base, freq, dur, vol, pan, y_pan)
+            # wait for note + small gap, data-driven rhythm: gap inversely proportional to score
+            gap = 0.06 + (1.0-norm)*0.12
+            await aio.sleep(dur*0.6 + gap)
+        app.playing_idx=-1
+        app.is_playing=False
     except Exception as e:
-        window.console.log(f"sonify {e}")
+        window.console.log(f"sonify_hits_sorted {e}")
+        app.is_playing=False
+        app.playing_idx=-1
+
+async def sonify_genomic_sorted(app):
+    # play through exons sorted by genomic start, mapping exon length to duration, position to pitch
+    try:
+        if not app.audio:
+            init_audio(app)
+        if not app.audio or app.is_playing:
+            return
+        app.is_playing=True
+        try:
+            app.audio.resume()
+        except:
+            pass
+        gene=js_to_py(app.selectedGene)
+        if not isinstance(gene, dict):
+            app.is_playing=False
+            return
+        exons=gene.get("exons",[])
+        if not exons:
+            # no exons: sonify genomic_pos length as single tone
+            gpos=gene.get("genomic_pos")
+            if isinstance(gpos, list):
+                gpos=gpos[0] if gpos else {}
+            if isinstance(gpos, dict):
+                try:
+                    s=int(gpos.get("start",0)); e=int(gpos.get("end",0))
+                    length=e-s
+                    norm = min(1.0, math.log10(max(1,length))/6.0)
+                    freq=120 + norm*600
+                    dur=0.4 + norm*0.8
+                    _play_mapped(app.audio, "coin.collect", freq, dur, 0.7, 0.0, 0.0)
+                    await aio.sleep(dur+0.1)
+                except Exception as ee:
+                    window.console.log(f"genomic single {ee}")
+            app.is_playing=False
+            return
+        # flatten all exon intervals and sort by start - sorted data requirement
+        flat=[]
+        for tr in exons:
+            if not isinstance(tr, dict):
+                continue
+            tname=tr.get("transcript","")
+            for p in tr.get("position",[]):
+                try:
+                    s=int(p[0]); ee=int(p[1])
+                    flat.append((s,ee,tname))
+                except:
+                    pass
+        flat.sort(key=lambda x: x[0])
+        if not flat:
+            app.is_playing=False
+            return
+        starts=[s for s,e,_ in flat]
+        gmin=min(starts); gmax=max([e for s,e,_ in flat]); span=gmax-gmin if gmax!=gmin else 1
+        lens=[e-s for s,e,_ in flat]
+        mnL=min(lens); mxL=max(lens); rngL=mxL-mnL if mxL!=mnL else 1
+        # play through sorted exons: position -> pitch, length -> duration, intron gap -> silence length
+        prev_end=None
+        for i,(s,e,tname) in enumerate(flat[:32]):
+            pos_norm=(s-gmin)/span
+            len_norm=(e-s-mnL)/rngL if rngL else 0.5
+            # intron gap sonification: if gap large, add silence
+            if prev_end is not None:
+                gap_bp=s-prev_end
+                if gap_bp>0:
+                    gap_norm=min(1.0, math.log10(max(1,gap_bp))/5.0)
+                    await aio.sleep(0.05 + gap_norm*0.25)
+            freq = 150 + pos_norm*750  # low to high along chromosome
+            dur = 0.10 + len_norm*0.6
+            pan = pos_norm*2.0 -1.0
+            vol = 0.4 + len_norm*0.6
+            app.playing_exon_idx=i
+            base = "coin.collect" if i%2==0 else "character.jump"
+            _play_mapped(app.audio, base, freq, dur, vol, pan, len_norm*2-1)
+            await aio.sleep(dur*0.7 + 0.04)
+            prev_end=e
+        app.playing_exon_idx=-1
+        app.is_playing=False
+    except Exception as e:
+        window.console.log(f"sonify_genomic {e}")
+        app.is_playing=False
+        app.playing_exon_idx=-1
+        app.playing_idx=-1
+
+async def sonify_facets_sorted(app):
+    # play through facet terms sorted by count, mapping count to pitch/volume
+    try:
+        if not app.audio:
+            init_audio(app)
+        if not app.audio or app.is_playing:
+            return
+        app.is_playing=True
+        try:
+            app.audio.resume()
+        except:
+            pass
+        facets=js_to_py(app.facets_simple)
+        if not facets:
+            app.is_playing=False
+            return
+        # pick first facet
+        first_key=next(iter(facets))
+        data=facets[first_key]
+        if not isinstance(data, dict) or not data:
+            app.is_playing=False
+            return
+        # sort by count descending - sorted data
+        items=sorted(data.items(), key=lambda x: float(x[1]), reverse=True)
+        counts=[float(c) for _,c in items]
+        mn=min(counts); mx=max(counts); rng=mx-mn if mx!=mn else 1
+        for i,(term,cnt) in enumerate(items[:12]):
+            norm=(float(cnt)-mn)/rng if rng else 0.5
+            freq=220 + norm*500
+            dur=0.15 + norm*0.35
+            vol=0.3 + norm*0.7
+            pan=(i/max(1,len(items)-1))*2-1
+            _play_mapped(app.audio, "coin.collect", freq, dur, vol, pan, 0)
+            await aio.sleep(dur+0.08)
+        app.is_playing=False
+    except Exception as e:
+        window.console.log(f"sonify_facets {e}")
+        app.is_playing=False
+
+def play_any_sonification(app, arr=None):
+    # legacy entry, now delegates to proper sorted sonification
+    aio.run(sonify_hits_sorted(app))
+
 
 def onAppStart(app):
     app.width=W; app.height=H; app.stepsPerSecond=30; app.background=BG
@@ -811,12 +1015,15 @@ def onMousePress(app,mx,my):
         app.vizMode="list"; return
 
     if pointInRect(mx,my,TYPES_X+8, TYPES_Y+28, 48, 18):
-        play_any_sonification(app); return
+        aio.run(sonify_hits_sorted(app)); return
     if pointInRect(mx,my,TYPES_X+60, TYPES_Y+28, 48, 18):
         aio.run(compute_dynamic_stats(app)); return
 
     if pointInRect(mx,my,ARCH_X+8, ARCH_Y+28, 48, 18):
-        play_any_sonification(app); return
+        aio.run(sonify_genomic_sorted(app)); return
+
+    if pointInRect(mx,my,FACET_X+8, FACET_Y+48, FACET_W-16, FACET_H-56):
+        aio.run(sonify_facets_sorted(app)); return
     if pointInRect(mx,my,DETAIL_X+8, DETAIL_Y+28, 40, 18):
         # back
         if app.inspector_stack:
@@ -915,7 +1122,11 @@ def onKeyPress(app,key):
                     if gid:
                         aio.run(fetch_gene_detail(app,str(gid)))
         elif key.lower()=="s":
-            play_any_sonification(app)
+            aio.run(sonify_hits_sorted(app))
+        elif key.lower()=="g":
+            aio.run(sonify_genomic_sorted(app))
+        elif key.lower()=="f":
+            aio.run(sonify_facets_sorted(app))
         elif key.lower()=="b":
             if app.inspector_stack:
                 prev_obj, prev_scroll = app.inspector_stack.pop()
@@ -975,8 +1186,10 @@ def redrawAll(app):
             if by>RESULTS_Y+RESULTS_H-8:
                 break
             sel=i==app.selectedIdx
-            fillc=rgb(34,42,68) if sel else rgb(18,24,42)
-            drawRect(RESULTS_X+8, by, RESULTS_W-16, 14, fill=fillc, border=CYAN if sel else PANEL_BORDER, borderWidth=1 if sel else 0.6, roundness=4)
+            playing=i==app.playing_idx and app.is_playing
+            fillc=rgb(34,42,68) if sel else (rgb(60,50,20) if playing else rgb(18,24,42))
+            borderc=YELLOW if playing else (CYAN if sel else PANEL_BORDER)
+            drawRect(RESULTS_X+8, by, RESULTS_W-16, 14, fill=fillc, border=borderc, borderWidth=1.5 if (sel or playing) else 0.6, roundness=4)
             if isinstance(hit, dict):
                 sym=hit.get("symbol","-"); score=hit.get("_score",0)
                 tax=hit.get("taxid","")
