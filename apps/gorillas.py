@@ -7,6 +7,7 @@ import random
 # GORILLAS - SCS 1050x700 - No Wind - Lazy Deferred Destruction
 # Turn-based logic faithful to QBasic original
 # MIN FONT 13
+# Sigma Scholar Alliance
 # ============================================================
 
 WIDTH = 1050
