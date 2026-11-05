@@ -1,7 +1,7 @@
-
 from scs import *
 import math
 import random
+import importlib
 
 WIDTH = 1050
 HEIGHT = 700
@@ -19,6 +19,39 @@ SUN_COLOR = rgb(255,255,0)
 
 GRAVITY = 0.185
 BLAST_R = 36
+
+# ---- 8bit audio integration - built ON TOP of proc_audio.py ----
+try:
+    eightbit = importlib.import_module('extensions.8bit')
+    EightBitAudioEngine = eightbit.EightBitAudioEngine
+    HAS_8BIT = True
+except Exception as e:
+    print(f"8bit load failed: {e}")
+    HAS_8BIT = False
+    EightBitAudioEngine = None
+    eightbit = None
+
+def play_sound(app, name, on_complete=None):
+    """Event-driven sound - currentTime scheduling + onended, no timeouts"""
+    if not hasattr(app, 'engine') or app.engine is None:
+        return
+    try:
+        app.engine.resume()
+    except:
+        pass
+    try:
+        # resume player ctx if present
+        if hasattr(app, 'player') and app.player:
+            try:
+                app.player.resume()
+            except:
+                pass
+    except:
+        pass
+    try:
+        app.engine.play(name, on_complete=on_complete)
+    except Exception as e:
+        print(f"play {name} failed {e}")
 
 def Scl(n):
     return n * (HEIGHT / 350.0)
@@ -222,6 +255,17 @@ def onAppStart(app):
     app.angle=[45,135]; app.power=[18,18]
     app.awaiting='angle'; app.victoryTimer=0; app.winner=None
 
+    # --- Audio engine init (does not touch graphics) ---
+    app.engine = None
+    app.player = None
+    if HAS_8BIT and EightBitAudioEngine:
+        try:
+            app.engine = EightBitAudioEngine(quality="high")
+            app.player = app.engine.player
+            print("[gorillas] 8bit engine ready")
+        except Exception as e:
+            print(f"[gorillas] audio init {e}")
+
 def startNewRound(app):
     app.buildings=generateCity()
     g1,g2=placeGorillas(app.buildings)
@@ -235,20 +279,18 @@ def startNewRound(app):
 def fireBanana(app):
     if app.state!='aiming': return
     idx=app.currentPlayer; gx,gy,bld=app.gorillaPos[idx]
-    # Fix self-damage: spawn banana OUTSIDE own hitbox and ABOVE gorilla like original
-    # Original: StartYPos = StartY - Scl(4) -3, StartX offset Scl(25) for P2
-    # Hitbox is gx-Scl(5) to gx+Scl(25), gy-Scl(5) to gy+Scl(30)
-    # Spawn well clear: 28px beyond leading edge and 8px above head
     if idx==0:
-        sx=gx+Scl(28)  # beyond right edge (25)
-        sy=gy - Scl(6)  # above head
+        sx=gx+Scl(28)
+        sy=gy - Scl(6)
     else:
-        sx=gx - Scl(10)  # beyond left edge (-5)
+        sx=gx - Scl(10)
         sy=gy - Scl(6)
     ang=math.radians(app.angle[idx]); p=app.power[idx]
     vx=math.cos(ang)*p*0.38; vy=-math.sin(ang)*p*0.38
     app.banana={'x':sx,'y':sy,'vx':vx,'vy':vy,'rot':0,'trail':[],'age':0}
     app.state='flying'
+    # SOUND: throw MBo0L32A-L64CL16BL64A+ - ascending throw
+    play_sound(app, 'throw')
 
 def createExplosion(app,x,y,gorilla=False):
     maxR=BLAST_R + (14 if gorilla else 0)
@@ -256,6 +298,11 @@ def createExplosion(app,x,y,gorilla=False):
     for _ in range(30 if gorilla else 18):
         ang=random.uniform(0,2*math.pi); sp=random.uniform(1.5,6.5)
         app.particles.append({'x':x,'y':y,'vx':math.cos(ang)*sp,'vy':math.sin(ang)*sp-1,'r':random.uniform(2,4.5),'life':1.0,'col':random.choice([rgb(255,120,20),rgb(255,210,60),rgb(255,80,20)])})
+    # SOUND: explosion differs for building vs gorilla
+    if gorilla:
+        play_sound(app, 'gorilla_explosion')
+    else:
+        play_sound(app, 'building_explosion')
 
 def checkGorillaHit(app,bx,by):
     for i,(gx,gy,bld) in enumerate(app.gorillaPos):
@@ -283,7 +330,6 @@ def onStep(app):
         if (x-SUN_X)**2 + (y-SUN_Y)**2 < (Scl(12)+9)**2 and y < SUN_Y+Scl(12)+18:
             if not app.sunShocked: app.sunShocked=True; app.sunTimer=90
         hg=checkGorillaHit(app,x,y)
-        # Fix self-damage: ignore self-collision for first 10 frames after launch
         if hg!=-1 and hg==app.currentPlayer and b.get('age',0) < 10:
             hg=-1
         if hg!=-1:
@@ -303,7 +349,10 @@ def onStep(app):
                 e['r']-=2.8
                 if e['r']<=0:
                     app.explosion=None
-                    if app.winner is not None: app.state='dancing'; app.victoryTimer=100
+                    if app.winner is not None:
+                        app.state='dancing'; app.victoryTimer=100
+                        # SOUND: victory dance MFO0L32EFGEFDC x8
+                        play_sound(app, 'victory_dance')
                     else: app.state='aiming'; app.J=1-app.J; app.currentPlayer=app.J; app.sunShocked=False; app.awaiting='angle'; app.inputText=""
         np=[]
         for p in app.particles:
@@ -317,6 +366,12 @@ def onStep(app):
             else: startNewRound(app)
 
 def onKeyPress(app, key):
+    # Resume audio on any key (gesture)
+    try:
+        if hasattr(app, 'engine') and app.engine:
+            app.engine.resume()
+    except:
+        pass
     if key is None: return
     low=str(key).lower()
     if 'shift' in low:
@@ -327,6 +382,8 @@ def onKeyPress(app, key):
         return
     ret=isReturnKey(key)
     if app.state=='intro':
+        # SOUND: title 1812 MBT160O1L8CDEDCDL4ECC on intro -> game start
+        play_sound(app, 'title')
         app.state='getInputs'; app.inputStage=0; app.inputText=""; app.background=BLACK_BG
         return
     if app.state=='getInputs':
@@ -345,6 +402,8 @@ def onKeyPress(app, key):
                 try: g=float(app.inputText.strip()); app.gravity=g*0.018 if g>0 else GRAVITY
                 except: app.gravity=GRAVITY
                 app.scores=[0,0]; app.totalWins=[0,0,0]; app.J=1; startNewRound(app)
+                # SOUND: intro fanfare after setup
+                play_sound(app, 'intro_fanfare_8x')
             return
         if key=='Backspace': app.inputText=app.inputText[:-1]; return
         if key=='Escape': app.inputText=""; return
@@ -366,6 +425,7 @@ def onKeyPress(app, key):
     if app.state=='gameOver':
         if low=='y' or ret:
             app.state='getInputs'; app.inputStage=0; app.inputText=""; app.background=BLACK_BG
+            play_sound(app, 'title')
         elif low=='n':
             app.state='intro'; app.background=BLACK_BG
         return
@@ -393,7 +453,13 @@ def onKeyRelease(app, key):
     if key and 'shift' in str(key).lower(): app.shiftDown=False
 
 def onMousePress(app,mx,my):
+    try:
+        if hasattr(app, 'engine') and app.engine:
+            app.engine.resume()
+    except:
+        pass
     if app.state=='intro':
+        play_sound(app, 'title')
         app.state='getInputs'; app.inputStage=0; app.inputText=""; app.background=BLACK_BG
     elif app.state=='gameOver':
         app.state='getInputs'; app.inputStage=0; app.inputText=""; app.background=BLACK_BG
@@ -450,14 +516,12 @@ def redrawAll(app):
     for p in app.particles: drawCircle(p['x'],p['y'],p['r']*p['life'],fill=p['col'])
     # HUD - fixed layout: names at top, angle/velocity BELOW names to avoid overlap
     if app.state in ('aiming','flying','exploding','dancing'):
-        # Names at very top - pure white Orbitron 22
         try:
             drawLabel(app.playerNames[0], 24, 20, fill=rgb(255,255,255), size=24, align='left', bold=True, font='Orbitron')
             drawLabel(app.playerNames[1], WIDTH-24, 20, fill=rgb(255,255,255), size=24, align='right', bold=True, font='Orbitron')
         except:
             drawLabel(app.playerNames[0], 24, 20, fill=rgb(255,255,255), size=24, align='left', bold=True)
             drawLabel(app.playerNames[1], WIDTH-24, 20, fill=rgb(255,255,255), size=24, align='right', bold=True)
-        # Angle/Velocity BELOW names, not overlapping
         if app.currentPlayer==0:
             ax=24; ay=60
         else:
