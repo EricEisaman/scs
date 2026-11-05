@@ -285,7 +285,7 @@ def fireBanana(app):
     else:
         sx=gx - Scl(10)
         sy=gy - Scl(6)
-    ang=math.radians(app.angle[idx]); p=app.power[idx]
+    ang=math.radians(app.angle[idx] if idx==0 else 180 - app.angle[idx]); p=app.power[idx]
     vx=math.cos(ang)*p*0.38; vy=-math.sin(ang)*p*0.38
     app.banana={'x':sx,'y':sy,'vx':vx,'vy':vy,'rot':0,'trail':[],'age':0}
     app.state='flying'
