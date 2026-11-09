@@ -615,7 +615,7 @@ def apply_mp(app, mp):
 
 
 async def do_publish_character(app):
-    if app.client is None:
+    if app.client is None or app.client_id is None:
         return
     if app.publishing:
         return
@@ -641,6 +641,8 @@ async def do_publish_character(app):
 async def do_collect(app, item_id):
     item = app.items.get(item_id)
     if item is None or item['collected']:
+        return
+    if app.client is not None and app.client_id is None:
         return
     if item_id in app.collecting:
         return
@@ -751,7 +753,9 @@ async def do_join(app):
                          on_item=_on_item, on_signal=_on_signal,
                          on_stream_open=_on_open,
                          on_stream_close=_on_close)
-    app.client = client
+    # Do NOT set app.client yet: onStep publishes whenever app.client is not
+    # None, and client_id is still None until join_realtime returns -> server
+    # 400s 'Missing X-Client-ID'. Assign only after join succeeds below.
     try:
         data = await client.join_realtime(
             environment_name=ENVIRONMENT_NAME,
@@ -768,6 +772,7 @@ async def do_join(app):
         app.room_id = client.room_id
         app.match_status = client.match_status
         app.queue_position = client.queue_position
+        app.client = client
         app.my_color = _color_for_id(app.client_id, 0)
         # KEEP EXACT POSITION: do NOT teleport to _spawn_for_id on join.
         # Where you are when you press Join IS your join position. The next
@@ -1053,6 +1058,11 @@ def redrawAll(app):
         if not is_self:
             drawRect(sx - PLAYER_R - 2, sy - PLAYER_R - 2, (PLAYER_R + 2) * 2, (PLAYER_R + 2) * 2, fill=_to_rgb(color), border='white', borderWidth=1)
         drawRect(sx - PLAYER_R, sy - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=_to_rgb(color), border='white', borderWidth=3)
+        if not is_self:
+            # PROBE: tiny red centre dot. If the square's fill is transparent
+            # the dot still shows. If neither shows, the loop is not running.
+            # fill='red' is a named color, not a rgb() string — cannot fail on fill.
+            drawCircle(sx, sy, 3, fill='red')
         if sy - 30 >= VIEW_Y:
             drawLabel(name, sx + 1, sy - 30 + 1, size=13 if is_self else 12, bold=True, fill='black')
             drawLabel(name, sx, sy - 30, size=13 if is_self else 12, bold=True, fill='white')
@@ -1067,6 +1077,19 @@ def redrawAll(app):
         try:
             sx = int(VIEW_X + float(other['x']) - cam_x)
             sy = int(VIEW_Y + float(other['y']) - cam_y)
+            # Draw-args log, change-detected (not time-throttled): proves the loop
+            # ran and what coords it used. Awe @940,625 self @1060,660 -> scr 405,346.
+            try:
+                _last = getattr(app, '_last_draw', None)
+                if _last is None:
+                    app._last_draw = {}
+                    _last = app._last_draw
+                _key = str(cid) + ':' + str(sx) + ',' + str(sy)
+                if _last.get(cid) != _key:
+                    _last[cid] = _key
+                    add_log(app, 'draw remote ' + str(cid)[:8] + ' scr ' + str(sx) + ',' + str(sy) + ' w ' + str(int(float(other['x']))) + ',' + str(int(float(other['y']))) + ' cam ' + str(int(cam_x)) + ',' + str(int(cam_y)) + ' color ' + str(other['color']))
+            except Exception:
+                pass
             _draw_player_square(sx, sy, other['color'], other['name'], other['score'], False)
         except Exception as _derr:
             add_log(app, 'draw remote ERR ' + str(cid)[:8] + ' ' + str(_derr) + ' entry=' + _shorten(str(other), 120))

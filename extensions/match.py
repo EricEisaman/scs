@@ -376,6 +376,8 @@ class MatchClient(object):
         headers = {'Content-Type': 'application/json'}
         if self.client_id:
             headers['X-Client-ID'] = self.client_id
+        if self.session_id:
+            headers['X-Session-ID'] = self.session_id
         return headers
 
     async def _http(self, method, path, body=None):
