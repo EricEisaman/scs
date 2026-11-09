@@ -176,6 +176,16 @@ def _parse_character(app, entry, fallback_id=None):
     if isinstance(entry, (list, tuple)) and len(entry) == 2:
         entry = {'x': entry[0], 'y': entry[1]}
     if isinstance(entry, str):
+        # clients dict may be {client_id: 'Milo'} — a bare name string, not JSON.
+        # Treat it as the name for this id (position stays where it was).
+        if fallback_id is not None and len(entry) > 0 and len(entry) < 40:
+            _o = app.players.get(fallback_id)
+            if _o is not None:
+                _o['name'] = entry
+            else:
+                sx, sy = _spawn_for_id(fallback_id)
+                app.players[fallback_id] = {'x': float(sx), 'y': float(sy), 'name': entry, 'score': 0, 'color': _color_for_id(fallback_id, len(app.players))}
+            return
         try:
             import json as _j
             entry = _j.loads(entry)
@@ -253,6 +263,12 @@ def _parse_character(app, entry, fallback_id=None):
         name = src.get('character_name')
     if name is None:
         name = src.get('displayName')
+    if name is None and isinstance(src.get('player'), dict):
+        name = src['player'].get('name') or src['player'].get('display_name') or src['player'].get('character_name')
+    if name is None and isinstance(src.get('user'), dict):
+        name = src['user'].get('name') or src['user'].get('display_name')
+    if name is None and isinstance(src.get('character'), dict):
+        name = src['character'].get('name') or src['character'].get('character_name') or src['character'].get('display_name')
     if name is None:
         name = src.get('player_name')
     # color from metadata too
@@ -267,8 +283,9 @@ def _parse_character(app, entry, fallback_id=None):
     if old is None:
         sx, sy = _spawn_for_id(cid)
         old = {'x': float(sx), 'y': float(sy), 'name': str(name) if has_name else 'player',
-               'score': 0, 'color': _color_for_id(cid, len(app.players))}
+               'score': 0, 'color': _color_for_id(cid, len(app.players)), 'last_seen': app.step}
         app.players[cid] = old
+    old['last_seen'] = app.step
     if isinstance(x, (int, float)):
         old['x'] = float(x)
     if isinstance(y, (int, float)):
@@ -812,6 +829,12 @@ def redrawAll(app):
             continue
         drawCircle(sx, sy, ITEM_R, fill=item['color'], border='white', borderWidth=2)
         drawLabel('*', sx, sy, size=14, bold=True, fill='white')
+    # Prune stale: dead tabs never send 'left', so without this Players: only grows.
+    # Keep only players seen in the last 900 steps (~30s). This is what makes
+    # Players:10 with max 8 look broken — most of those 10 are dead tabs.
+    for _cid in list(app.players.keys()):
+        if app.step - app.players[_cid].get('last_seen', app.step) > 900:
+            del app.players[_cid]
     for cid in sorted(app.players.keys()):
         other = app.players[cid]
         sx = VIEW_X + other['x'] - cam_x
@@ -828,7 +851,11 @@ def redrawAll(app):
             sx = sx + 35
         # Players are SQUARES, gems are circles with '*'. Deliberately different
         # shapes so a gold gem (gem-3) can never be mistaken for a player again.
-        drawRect(sx - PLAYER_R, sy - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=other.get('color') or 'red', border='white', borderWidth=3)
+        # Square (center-corrected: SCS drawRect uses center, not top-left)
+        drawRect(sx, sy, PLAYER_R * 2, PLAYER_R * 2, fill=other.get('color') or 'red', border='white', borderWidth=3)
+        # Plus a circle at the exact sx,sy (same API as gems, which DO show) —
+        # if the square was the problem, this circle will show.
+        drawCircle(sx, sy, PLAYER_R + 4, fill='yellow', border='black', borderWidth=2)
         if sy - 24 >= VIEW_Y:
             drawLabel(other['name'], sx, sy - 24, size=12, bold=True, fill='white')
         if sy + 26 <= VIEW_Y + VIEW_H:
@@ -839,11 +866,11 @@ def redrawAll(app):
         _o = app.players[_cid]
         _hx = 20 + _i * 44
         _hy = 125
-        drawRect(_hx, _hy, 28, 28, fill=_o.get('color') or 'red', border='white', borderWidth=2)
+        drawRect(_hx + 14, _hy + 14, 28, 28, fill=_o.get('color') or 'red', border='white', borderWidth=2)
         drawLabel(str(_o.get('name') or 'player') + '@' + str(int(_o['x'])) + ',' + str(int(_o['y'])), _hx + 14, _hy + 38, size=9, bold=True, fill='white')
     me_x = VIEW_X + app.x - cam_x
     me_y = VIEW_Y + app.y - cam_y
-    drawRect(me_x - PLAYER_R, me_y - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=app.my_color, border='white', borderWidth=3)
+    drawRect(me_x, me_y, PLAYER_R * 2, PLAYER_R * 2, fill=app.my_color, border='white', borderWidth=3)
     if me_y - 24 >= VIEW_Y:
         drawLabel(app.name, me_x, me_y - 24, size=13, bold=True, fill='white')
     if me_y + 26 <= VIEW_Y + VIEW_H:
