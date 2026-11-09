@@ -73,6 +73,16 @@ __all__ = [
 ]
 
 
+def _generate_client_id():
+    # Unique per MatchClient instance — per app/tab, not shared.
+    try:
+        stamp = int(time.time() * 1000)
+    except Exception:
+        stamp = 0
+    rand = str(int(random.random() * 1000000000))
+    return 'client-' + str(stamp) + '-' + rand
+
+
 def make_player_id(name):
     clean = ''
     for ch in str(name).lower():
@@ -292,7 +302,9 @@ class MatchClient(object):
         self.base_url = base_url or BASE_URL
         if self.base_url.endswith('/'):
             self.base_url = self.base_url[:-1]
-        self.client_id = None
+        # Each app instance gets its own clientId up front, so publish
+        # never sends an empty one even if join doesn't return one.
+        self.client_id = _generate_client_id()
         self.session_id = None
         self.room_id = None
         self.match_status = None
@@ -445,6 +457,10 @@ class MatchClient(object):
                 'player_id': player_id,
                 'display_name': display_name,
                 'config': config}
+        # Identify this app instance to the server from the start.
+        if self.client_id:
+            body['client_id'] = self.client_id
+            body['clientId'] = self.client_id
         if skill is not None:
             body['skill'] = {'rating': skill}
         return body
@@ -476,9 +492,10 @@ class MatchClient(object):
         if not isinstance(data, dict):
             data = {}
         fields = _extract_join_fields(data)
-        if fields.get('client_id') is not None:
+        # Don't let an empty server value wipe our per-app generated ID.
+        if fields.get('client_id'):
             self.client_id = fields['client_id']
-        if fields.get('session_id') is not None:
+        if fields.get('session_id'):
             self.session_id = fields['session_id']
         if fields.get('room_id') is not None:
             self.room_id = fields['room_id']
@@ -631,6 +648,14 @@ class MatchClient(object):
         for key in ('client_id', 'session_id', 'character_id'):
             if key in state:
                 body[key] = state[key]
+        # Server checks camelCase clientId (custom 422, not Pydantic).
+        # Send both casings so we don't round-trip again on sessionId/characterId.
+        if 'client_id' in state:
+            body['clientId'] = state['client_id']
+        if 'session_id' in state:
+            body['sessionId'] = state['session_id']
+        if 'character_id' in state:
+            body['characterId'] = state['character_id']
         body['updates'] = updates
         if isinstance(character_state, dict) and character_state.get('timestamp') is not None:
             body['timestamp'] = character_state['timestamp']
@@ -661,6 +686,12 @@ class MatchClient(object):
         for key in ('client_id', 'session_id', 'item_id'):
             if key in state:
                 body[key] = state[key]
+        if 'client_id' in state:
+            body['clientId'] = state['client_id']
+        if 'session_id' in state:
+            body['sessionId'] = state['session_id']
+        if 'item_id' in state:
+            body['itemId'] = state['item_id']
         body['updates'] = updates
         if isinstance(item_state, dict) and item_state.get('timestamp') is not None:
             body['timestamp'] = item_state['timestamp']
