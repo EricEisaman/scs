@@ -220,6 +220,10 @@ def _extract_join_fields(data):
     out = {}
     if not isinstance(data, dict):
         return out
+    # Server wraps JoinResponse as {ok, data: {client_id...}} — unwrap first.
+    inner = data.get('data')
+    if isinstance(inner, dict) and (_pick(inner, ['client_id','clientId']) is not None or _pick(inner, ['session_id','sessionId']) is not None):
+        data = inner
     out['client_id'] = _pick(data, ['client_id', 'clientId'])
     out['session_id'] = _pick(data, ['session_id', 'sessionId'])
     out['room_id'] = _pick(data, ['room_id', 'roomId'])
@@ -295,6 +299,14 @@ def _parse_stream_data(raw):
     if text.startswith('signals '):
         text = text[len('signals '):].strip()
     parsed = _loads(text)
+    if parsed is None and text.startswith('{'):
+        # Datastar sends JS literal {mp: {...}} with unquoted keys — quote them.
+        try:
+            import re as _re
+            fixed = _re.sub(r'([{,]\s*)([A-Za-z_][A-Za-z0-9_\-]*)\s*:', r'\1"\2":', text)
+            parsed = _loads(fixed)
+        except Exception:
+            parsed = None
     if isinstance(parsed, dict):
         inner = parsed.get('signals')
         if isinstance(inner, dict):
@@ -948,6 +960,14 @@ class MatchClient(object):
             pass
         try:
             stream.addEventListener('datastar-patch-signals', _on_patch)
+        except Exception:
+            pass
+        try:
+            stream.addEventListener('datastar-merge-signals', _on_patch)
+        except Exception:
+            pass
+        try:
+            stream.addEventListener('datastar-patch-elements', _on_patch)
         except Exception:
             pass
         try:

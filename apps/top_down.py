@@ -819,8 +819,8 @@ def redrawAll(app):
         offscreen = sx < VIEW_X or sx > VIEW_X + VIEW_W or sy < VIEW_Y or sy > VIEW_Y + VIEW_H
         if offscreen:
             ex = _clamp(sx, VIEW_X + 20, VIEW_X + VIEW_W - 20)
-            ey = _clamp(sy, VIEW_Y + 20, VIEW_Y + VIEW_H - 20)
-            drawCircle(ex, ey, 10, fill=other['color'], border='white', borderWidth=2)
+            ey = _clamp(sy, VIEW_Y + 20, VIEW_Y + VIEW_H - 60)
+            drawRect(ex - 10, ey - 10, 20, 20, fill=other['color'], border='white', borderWidth=3)
             drawLabel(other['name'] + ' >', ex, ey - 18, size=11, bold=True, fill='white')
             continue
         # Stacked remotes hide under self — nudge them aside so Players: 3
@@ -829,14 +829,16 @@ def redrawAll(app):
         dy = sy - (VIEW_Y + app.y - cam_y)
         if dx * dx + dy * dy < 36:
             sx = sx + 35
-        drawCircle(sx, sy, PLAYER_R, fill=other['color'], border='white', borderWidth=2)
+        # Players are SQUARES, gems are circles with '*'. Deliberately different
+        # shapes so a gold gem (gem-3) can never be mistaken for a player again.
+        drawRect(sx - PLAYER_R, sy - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=other['color'], border='white', borderWidth=3)
         if sy - 24 >= VIEW_Y:
             drawLabel(other['name'], sx, sy - 24, size=12, bold=True, fill='white')
         if sy + 26 <= VIEW_Y + VIEW_H:
             drawLabel(str(other['score']), sx, sy + 26, size=11, fill=rgb(214, 224, 255))
     me_x = VIEW_X + app.x - cam_x
     me_y = VIEW_Y + app.y - cam_y
-    drawCircle(me_x, me_y, PLAYER_R, fill=app.my_color, border='white', borderWidth=3)
+    drawRect(me_x - PLAYER_R, me_y - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=app.my_color, border='white', borderWidth=3)
     if me_y - 24 >= VIEW_Y:
         drawLabel(app.name, me_x, me_y - 24, size=13, bold=True, fill='white')
     if me_y + 26 <= VIEW_Y + VIEW_H:
@@ -846,7 +848,8 @@ def redrawAll(app):
     drawRect(0, APP_HEIGHT - 48, APP_WIDTH, 48, fill=rgb(18, 18, 20))
     drawLabel('WASD / arrows to move. Touch a gem. Camera follows you.',
               40, APP_HEIGHT - 18, size=12, fill=rgb(214, 224, 255), align='left')
-    drawLabel('Log: ' + (' | '.join(app.log[-2:]) if len(app.log) > 0 else ''),
+    _dbg = ' | '.join([str(o['name']) + '@' + str(int(o['x'])) + ',' + str(int(o['y'])) for o in [app.players[k] for k in sorted(app.players.keys())]])
+    drawLabel('Log: ' + (' | '.join(app.log[-2:]) if len(app.log) > 0 else '') + (' | P: ' + _dbg if _dbg else ''),
               40, APP_HEIGHT - 36, size=11, fill=rgb(180, 190, 210), align='left')
     # Header redrawn last — header was drawn first, so map elements at the
     # top edge could paint over it. Redrawing it here guarantees it stays on top.
