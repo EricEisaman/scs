@@ -236,10 +236,14 @@ def _parse_character(app, entry, fallback_id=None):
             x = _to_num(parts[0])
         if y is None and len(parts) > 1:
             y = _to_num(parts[1])
-    # Name is NOT in position updates (server rejects it), so an update
-    # with no name must NOT overwrite a name we already learned from a
-    # join event. Only use a name if this packet actually carries one.
-    name = src.get('name')
+    # Protocol CharacterState has no name/color — they live in metadata
+    # (if the server echoes them) or in the join event. Check metadata first.
+    name = None
+    meta = src.get('metadata')
+    if isinstance(meta, dict):
+        name = meta.get('name') or meta.get('display_name') or meta.get('character_name') or meta.get('displayName')
+    if name is None:
+        name = src.get('name')
     if name is None:
         name = src.get('display_name')
     if name is None:
@@ -248,6 +252,9 @@ def _parse_character(app, entry, fallback_id=None):
         name = src.get('displayName')
     if name is None:
         name = src.get('player_name')
+    # color from metadata too
+    if isinstance(meta, dict) and meta.get('color') is not None:
+        color = meta.get('color')
     has_name = name is not None
     score = src.get('score')
     if score is None and isinstance(src.get('stats'), dict):
@@ -289,7 +296,12 @@ def _parse_item(app, entry, fallback_id=None):
                 merged.update(entry)
                 src = merged
                 break
-    iid = src.get('item_id')
+    # Protocol: ItemInstanceState = {instanceId, pos, isCollected, collectedByClientId}
+    iid = src.get('instanceId')
+    if iid is None:
+        iid = src.get('instance_id')
+    if iid is None:
+        iid = src.get('item_id')
     if iid is None:
         iid = src.get('itemId')
     if iid is None:
@@ -298,7 +310,11 @@ def _parse_item(app, entry, fallback_id=None):
         iid = fallback_id
     if iid is None or iid not in app.items:
         return
-    collected = src.get('collected')
+    collected = src.get('isCollected')
+    if collected is None:
+        collected = src.get('is_collected')
+    if collected is None:
+        collected = src.get('collected')
     if collected is None:
         collected = src.get('taken')
     if collected is None and src.get('state') in ('collected', 'taken', 'gone'):
@@ -308,7 +324,11 @@ def _parse_item(app, entry, fallback_id=None):
     if collected is None:
         return
     app.items[iid]['collected'] = bool(collected)
-    taken_by = src.get('taken_by')
+    taken_by = src.get('collectedByClientId')
+    if taken_by is None:
+        taken_by = src.get('collected_by_client_id')
+    if taken_by is None:
+        taken_by = src.get('taken_by')
     if taken_by is None:
         taken_by = src.get('takenBy')
     if taken_by is None:
@@ -321,6 +341,14 @@ def _parse_item(app, entry, fallback_id=None):
         taken_by = src.get('clientId')
     if taken_by is not None:
         app.items[iid]['taken_by'] = str(taken_by)
+    # Protocol also carries the item's pos — keep our local gem in sync if server moves it.
+    pos = src.get('pos')
+    if isinstance(pos, (list, tuple)) and len(pos) == 2:
+        try:
+            app.items[iid]['x'] = float(pos[0])
+            app.items[iid]['y'] = float(pos[1])
+        except Exception:
+            pass
 
 
 def apply_realtime(app, signals):
@@ -795,6 +823,12 @@ def redrawAll(app):
             drawCircle(ex, ey, 10, fill=other['color'], border='white', borderWidth=2)
             drawLabel(other['name'] + ' >', ex, ey - 18, size=11, bold=True, fill='white')
             continue
+        # Stacked remotes hide under self — nudge them aside so Players: 3
+        # actually shows 2 dots, not 1.
+        dx = sx - (VIEW_X + app.x - cam_x)
+        dy = sy - (VIEW_Y + app.y - cam_y)
+        if dx * dx + dy * dy < 36:
+            sx = sx + 35
         drawCircle(sx, sy, PLAYER_R, fill=other['color'], border='white', borderWidth=2)
         if sy - 24 >= VIEW_Y:
             drawLabel(other['name'], sx, sy - 24, size=12, bold=True, fill='white')

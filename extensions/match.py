@@ -692,22 +692,35 @@ class MatchClient(object):
         if isinstance(item_state, dict) and isinstance(item_state.get('updates'), list):
             updates = item_state['updates']
         else:
+            # Protocol: ItemInstanceState = {instanceId, pos, isCollected,
+            # collectedByClientId, ...}. NOT position/collected/clientId.
+            # Server rejects unknown fields, so map exactly.
             one = {}
-            if 'client_id' in state:
-                one['clientId'] = state['client_id']
-            # NOTE: itemId is NOT allowed inside updates — only top-level.
+            iid = state.get('item_id') or state.get('itemId') or state.get('instanceId') or state.get('instance_id')
+            if iid is not None:
+                one['instanceId'] = iid
             if 'position' in state:
-                one['position'] = _to_vec2(state['position'], state.get('x'), state.get('y'))
+                one['pos'] = _to_vec2(state['position'], state.get('x'), state.get('y'))
+            elif 'pos' in state:
+                one['pos'] = _to_vec2(state['pos'], state.get('x'), state.get('y'))
             elif 'x' in state or 'y' in state:
-                one['position'] = [state.get('x'), state.get('y')]
-            for key in state:
-                # taken_by / collected_by are NOT allowed inside updates —
-                # same pattern as characterId (server 422s unsupported fields).
-                # Server can infer who took it from top-level clientId.
-                if key in ('client_id', 'session_id', 'item_id', 'updates', 'timestamp', 'x', 'y', 'position',
-                           'taken_by', 'takenBy', 'collected_by', 'collectedBy'):
-                    continue
-                one[key] = state[key]
+                one['pos'] = [state.get('x'), state.get('y')]
+            # collected -> isCollected, taken_by -> collectedByClientId
+            coll = state.get('collected')
+            if coll is None:
+                coll = state.get('isCollected')
+            if coll is not None:
+                one['isCollected'] = bool(coll)
+            taker = state.get('taken_by') or state.get('takenBy') or state.get('collectedByClientId') or state.get('collected_by') or state.get('collectedBy')
+            if taker is None and 'client_id' in state:
+                taker = state['client_id']
+            if taker is not None:
+                one['collectedByClientId'] = taker
+            # Pass through only protocol-allowed item fields.
+            for key in ('itemName', 'item_name', 'rot', 'ownerClientId', 'owner_client_id'):
+                if key in state:
+                    out_key = 'itemName' if key in ('itemName','item_name') else ('ownerClientId' if key in ('ownerClientId','owner_client_id') else key)
+                    one[out_key] = state[key]
             updates = [one]
         body = {}
         for key in ('client_id', 'session_id', 'item_id'):
@@ -719,6 +732,7 @@ class MatchClient(object):
             body['sessionId'] = state['session_id']
         if 'item_id' in state:
             body['itemId'] = state['item_id']
+            body['instanceId'] = state['item_id']
         body['updates'] = updates
         if isinstance(item_state, dict) and item_state.get('timestamp') is not None:
             body['timestamp'] = item_state['timestamp']
@@ -739,6 +753,7 @@ class MatchClient(object):
         if 'session_id' in body:
             body['sessionId'] = body['session_id']
         body['itemId'] = item_id
+        body['instanceId'] = item_id
         result = await self._http(
             'PATCH', '/api/multiplayer/item-authority-claim', body)
         data = _unwrap_action_data(result.get('data'))
@@ -754,6 +769,7 @@ class MatchClient(object):
         if 'session_id' in body:
             body['sessionId'] = body['session_id']
         body['itemId'] = item_id
+        body['instanceId'] = item_id
         result = await self._http(
             'PATCH', '/api/multiplayer/item-authority-release', body)
         data = _unwrap_action_data(result.get('data'))
