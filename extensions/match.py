@@ -609,6 +609,12 @@ class MatchClient(object):
 
     # -- realtime / non-turn-based ----------------------------------------
 
+    def _now(self):
+        try:
+            return time.time()
+        except Exception:
+            return 0
+
     def _with_identity(self, state):
         out = {}
         if isinstance(state, dict):
@@ -622,38 +628,180 @@ class MatchClient(object):
 
     async def publish_character_state(self, character_state,
                                       character_id=None):
-        """PATCH character-state. character_state holds x, y, vx, vy...
+        """PATCH character-state.
 
-        The server validates finite 2D vectors, broadcasts to the
-        room, and handles synchronizer failover. character_id
-        defaults to this client's id.
+        Server requires {updates: [...], timestamp: ...} — flat
+        {position, x, y, ...} 422s with 'missing updates/timestamp'.
+        Each update is {clientId, position: [x, y], velocity,
+        score, animationState, metadata}. x/y/name/color are NOT
+        allowed inside an update; name/color ride in metadata.
         """
-        state = self._with_identity(character_state)
-        if character_id is not None:
-            state['character_id'] = character_id
-        elif 'character_id' not in state and self.client_id:
-            state['character_id'] = self.client_id
-        result = await self._http(
-            'PATCH', '/api/multiplayer/character-state', state)
+        src = character_state if isinstance(character_state, dict) else {}
+        # Caller already wrapped? Pass through + fill timestamp/identity.
+        if isinstance(src.get('updates'), list):
+            updates = src.get('updates')
+            ts = src.get('timestamp')
+            if ts is None:
+                ts = self._now()
+            body = {
+                'updates': updates, 'timestamp': ts,
+                'clientId': self.client_id, 'client_id': self.client_id,
+                'sessionId': self.session_id, 'session_id': self.session_id,
+                'characterId': character_id or src.get('characterId') or src.get('character_id') or self.client_id,
+                'character_id': character_id or src.get('character_id') or src.get('characterId') or self.client_id,
+            }
+            result = await self._http('PATCH', '/api/multiplayer/character-state', body)
+            if not result.get('ok'):
+                return {'_status': result.get('status'), 'detail': result.get('data')}
+            return result.get('data')
+        # Flat -> updates[0]
+        cid = character_id or src.get('characterId') or src.get('character_id') or src.get('clientId') or src.get('client_id') or self.client_id
+        # position from position / pos / x+y
+        pos = src.get('position')
+        if pos is None:
+            pos = src.get('pos')
+        x = None; y = None
+        if isinstance(pos, (list, tuple)) and len(pos) == 2:
+            try:
+                x = float(pos[0]); y = float(pos[1])
+            except Exception:
+                x = None; y = None
+        elif isinstance(pos, dict):
+            try:
+                x = float(pos.get('x') if pos.get('x') is not None else pos.get('0'))
+                y = float(pos.get('y') if pos.get('y') is not None else pos.get('1'))
+            except Exception:
+                x = None; y = None
+        if x is None:
+            try:
+                x = float(src.get('x'))
+            except Exception:
+                x = 0
+        if y is None:
+            try:
+                y = float(src.get('y'))
+            except Exception:
+                y = 0
+        vel = src.get('velocity')
+        if not (isinstance(vel, (list, tuple)) and len(vel) == 2):
+            vel = [0, 0]
+        else:
+            try:
+                vel = [float(vel[0]), float(vel[1])]
+            except Exception:
+                vel = [0, 0]
+        score = src.get('score')
+        if not isinstance(score, (int, float)):
+            score = 0
+        meta = src.get('metadata')
+        if not isinstance(meta, dict):
+            # name/color are NOT top-level CharacterState fields — fold into metadata
+            meta = {}
+            if src.get('name') is not None:
+                meta['name'] = src.get('name')
+                meta['display_name'] = src.get('name')
+            if src.get('display_name') is not None:
+                meta['display_name'] = src.get('display_name')
+            if src.get('color') is not None:
+                meta['color'] = src.get('color')
+            meta['score'] = score
+        upd = {'clientId': cid, 'position': [x, y], 'velocity': vel, 'score': score, 'metadata': meta}
+        anim = src.get('animationState') or src.get('animation_state')
+        if anim is not None:
+            upd['animationState'] = anim
+        # characterModelId / animationFrame pass through if caller sent them
+        if src.get('characterModelId') is not None:
+            upd['characterModelId'] = src.get('characterModelId')
+        if isinstance(src.get('animationFrame'), (int, float)):
+            upd['animationFrame'] = src.get('animationFrame')
+        body = {
+            'updates': [upd], 'timestamp': self._now(),
+            'clientId': cid, 'client_id': cid,
+            'sessionId': self.session_id, 'session_id': self.session_id,
+            'characterId': cid, 'character_id': cid,
+        }
+        result = await self._http('PATCH', '/api/multiplayer/character-state', body)
+        if not result.get('ok'):
+            return {'_status': result.get('status'), 'detail': result.get('data')}
         return result.get('data')
 
     async def publish_item_state(self, item_state, item_id=None):
-        """PATCH item-state. item_state holds item pose / collected..."""
-        state = self._with_identity(item_state)
-        if item_id is not None:
-            state['item_id'] = item_id
-        result = await self._http(
-            'PATCH', '/api/multiplayer/item-state', state)
+        """PATCH item-state. Server requires {updates, timestamp} like
+        character-state. Each update is ItemInstanceState
+        {instanceId, pos, isCollected, collectedByClientId}.
+        Collected items also go in `collections` for the collect event.
+        """
+        src = item_state if isinstance(item_state, dict) else {}
+        if isinstance(src.get('updates'), list):
+            body = {
+                'updates': src.get('updates'),
+                'collections': src.get('collections') or [],
+                'timestamp': src.get('timestamp') or self._now(),
+                'clientId': self.client_id, 'client_id': self.client_id,
+                'sessionId': self.session_id, 'session_id': self.session_id,
+            }
+            result = await self._http('PATCH', '/api/multiplayer/item-state', body)
+            if not result.get('ok'):
+                return {'_status': result.get('status'), 'detail': result.get('data')}
+            return result.get('data')
+        iid = item_id or src.get('instanceId') or src.get('instance_id') or src.get('item_id') or src.get('itemId') or src.get('id')
+        pos = src.get('pos')
+        if pos is None:
+            pos = src.get('position')
+        x = None; y = None
+        if isinstance(pos, (list, tuple)) and len(pos) == 2:
+            try:
+                x = float(pos[0]); y = float(pos[1])
+            except Exception:
+                x = None; y = None
+        elif isinstance(pos, dict):
+            try:
+                x = float(pos.get('x') if pos.get('x') is not None else pos.get('0'))
+                y = float(pos.get('y') if pos.get('y') is not None else pos.get('1'))
+            except Exception:
+                x = None; y = None
+        if x is None:
+            try:
+                x = float(src.get('x'))
+            except Exception:
+                x = 0
+        if y is None:
+            try:
+                y = float(src.get('y'))
+            except Exception:
+                y = 0
+        collected = src.get('isCollected')
+        if collected is None:
+            collected = src.get('is_collected')
+        if collected is None:
+            collected = src.get('collected')
+        if collected is None:
+            collected = src.get('taken')
+        if collected is None:
+            collected = False
+        by = src.get('collectedByClientId') or src.get('collected_by_client_id') or src.get('taken_by') or src.get('takenBy') or src.get('collectedBy') or src.get('clientId') or src.get('client_id') or self.client_id
+        upd = {'instanceId': iid, 'pos': [x, y], 'isCollected': bool(collected), 'collectedByClientId': by}
+        colls = []
+        if bool(collected):
+            colls = [{'instanceId': iid, 'collectedByClientId': by}]
+        body = {
+            'updates': [upd], 'collections': colls, 'timestamp': self._now(),
+            'clientId': self.client_id, 'client_id': self.client_id,
+            'sessionId': self.session_id, 'session_id': self.session_id,
+        }
+        result = await self._http('PATCH', '/api/multiplayer/item-state', body)
+        if not result.get('ok'):
+            return {'_status': result.get('status'), 'detail': result.get('data')}
         return result.get('data')
 
     async def claim_item_authority(self, item_id):
-        body = self._with_identity({'item_id': item_id, 'instanceId': item_id, 'instance_id': item_id})
+        body = self._with_identity({'item_id': item_id, 'instanceId': item_id, 'instance_id': item_id, 'timestamp': self._now(), 'reason': 'collect'})
         result = await self._http(
             'PATCH', '/api/multiplayer/item-authority-claim', body)
         return result.get('data')
 
     async def release_item_authority(self, item_id):
-        body = self._with_identity({'item_id': item_id, 'instanceId': item_id, 'instance_id': item_id})
+        body = self._with_identity({'item_id': item_id, 'instanceId': item_id, 'instance_id': item_id, 'timestamp': self._now(), 'reason': 'collect'})
         result = await self._http(
             'PATCH', '/api/multiplayer/item-authority-release', body)
         return result.get('data')
