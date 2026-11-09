@@ -610,10 +610,26 @@ class MatchClient(object):
     # -- realtime / non-turn-based ----------------------------------------
 
     def _now(self):
+        # Server validates timestamp as int (int_from_float on 1794264366.368).
+        # Use int milliseconds, never a float.
         try:
-            return time.time()
+            return int(time.time() * 1000)
         except Exception:
             return 0
+
+    def _int_ts(self, v):
+        # Coerce any caller-supplied timestamp to int ms.
+        # Float seconds (1794264366.368) -> int ms; int seconds -> int ms; int ms passes through.
+        if v is None:
+            return self._now()
+        try:
+            f = float(v)
+        except Exception:
+            return self._now()
+        if f < 1e12:
+            # seconds (float or int) -> ms
+            return int(f * 1000)
+        return int(f)
 
     def _with_identity(self, state):
         out = {}
@@ -640,9 +656,7 @@ class MatchClient(object):
         # Caller already wrapped? Pass through + fill timestamp/identity.
         if isinstance(src.get('updates'), list):
             updates = src.get('updates')
-            ts = src.get('timestamp')
-            if ts is None:
-                ts = self._now()
+            ts = self._int_ts(src.get('timestamp'))
             body = {
                 'updates': updates, 'timestamp': ts,
                 'clientId': self.client_id, 'client_id': self.client_id,
@@ -736,7 +750,7 @@ class MatchClient(object):
             body = {
                 'updates': src.get('updates'),
                 'collections': src.get('collections') or [],
-                'timestamp': src.get('timestamp') or self._now(),
+                'timestamp': self._int_ts(src.get('timestamp')),
                 'clientId': self.client_id, 'client_id': self.client_id,
                 'sessionId': self.session_id, 'session_id': self.session_id,
             }
