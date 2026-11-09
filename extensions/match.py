@@ -635,6 +635,12 @@ class MatchClient(object):
             # score passed last round (not listed as unsupported).
             # name/color are client-side only — don't send them.
             one = {}
+            # Each update must carry its own app's clientId — server
+            # validates clientId inside updates, not just top-level body.
+            if 'client_id' in state:
+                one['clientId'] = state['client_id']
+            if 'character_id' in state:
+                one['characterId'] = state['character_id']
             if 'position' in state:
                 one['position'] = state['position']
             elif 'x' in state or 'y' in state:
@@ -673,6 +679,10 @@ class MatchClient(object):
             updates = item_state['updates']
         else:
             one = {}
+            if 'client_id' in state:
+                one['clientId'] = state['client_id']
+            if 'item_id' in state:
+                one['itemId'] = state['item_id']
             if 'position' in state:
                 one['position'] = state['position']
             elif 'x' in state or 'y' in state:
