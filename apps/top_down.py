@@ -171,21 +171,52 @@ def _camera(app):
     return cam_x, cam_y
 
 
+
+def _parse_client_name(app, entry, fallback_id=None):
+    """Clients carry NAMES only. Never create a player, never touch x/y/last_seen.
+    Only rename a player that already exists from a real characters update."""
+    if isinstance(entry, str):
+        if fallback_id is not None and entry and len(entry) < 40 and fallback_id in app.players:
+            app.players[fallback_id]['name'] = entry
+        return
+    if isinstance(entry, (list, tuple)) and len(entry) == 2 and isinstance(entry[0], (int, float)):
+        return  # bare [x,y] is a character, not a client — handled elsewhere
+    if not isinstance(entry, dict):
+        return
+    # Unwrap one level if nested
+    src = entry
+    for nest in ('player', 'user', 'character', 'data', 'state'):
+        if isinstance(entry.get(nest), dict) and (entry.get(nest).get('name') or entry.get(nest).get('display_name')):
+            src = entry[nest]
+            break
+    cid = src.get('character_id') or src.get('characterId') or src.get('client_id') or src.get('clientId') or src.get('id') or src.get('player_id') or src.get('playerId') or fallback_id
+    if cid is None or cid == app.client_id:
+        return
+    name = None
+    meta = src.get('metadata')
+    if isinstance(meta, dict):
+        name = meta.get('name') or meta.get('display_name') or meta.get('character_name') or meta.get('displayName')
+    if name is None:
+        name = src.get('name') or src.get('display_name') or src.get('character_name') or src.get('displayName') or src.get('player_name') or src.get('displayName')
+    if name is not None and cid in app.players:
+        app.players[cid]['name'] = str(name)
+
+
 def _parse_character(app, entry, fallback_id=None):
+
     # Characters value may be a bare [x, y] or a JSON string, not a dict.
     if isinstance(entry, (list, tuple)) and len(entry) == 2:
         entry = {'x': entry[0], 'y': entry[1]}
     if isinstance(entry, str):
-        # clients dict may be {client_id: 'Milo'} — a bare name string, not JSON.
-        # Treat it as the name for this id (position stays where it was).
+        # Bare string from clients: {client_id: 'Milo'} — name only, NOT a character.
+        # Never create a player from this (that was the spawn-phantom bug).
+        # Only rename if the player already exists from a real characters update.
         if fallback_id is not None and len(entry) > 0 and len(entry) < 40:
             _o = app.players.get(fallback_id)
             if _o is not None:
                 _o['name'] = entry
-            else:
-                sx, sy = _spawn_for_id(fallback_id)
-                app.players[fallback_id] = {'x': float(sx), 'y': float(sy), 'name': entry, 'score': 0, 'color': _color_for_id(fallback_id, len(app.players))}
             return
+        # Otherwise it might be a JSON character string.
         try:
             import json as _j
             entry = _j.loads(entry)
@@ -249,6 +280,22 @@ def _parse_character(app, entry, fallback_id=None):
             x = _to_num(parts[0])
         if y is None and len(parts) > 1:
             y = _to_num(parts[1])
+    # NO POSITION = NOT A CHARACTER UPDATE. This is a clients/metadata entry
+    # (name only). Never create a spawn phantom from it. If the player already
+    # exists from a real characters update, rename it; otherwise ignore.
+    # This is the fix for 'all players clustered at spawn'.
+    if x is None and y is None:
+        _cid0 = src.get('character_id') or src.get('characterId') or src.get('client_id') or src.get('clientId') or src.get('id') or src.get('player_id') or fallback_id
+        if _cid0 is not None and _cid0 != app.client_id:
+            _nm0 = None
+            _m0 = src.get('metadata')
+            if isinstance(_m0, dict):
+                _nm0 = _m0.get('name') or _m0.get('display_name') or _m0.get('character_name') or _m0.get('displayName')
+            if _nm0 is None:
+                _nm0 = src.get('name') or src.get('display_name') or src.get('character_name') or src.get('displayName') or src.get('player_name')
+            if _nm0 is not None and _cid0 in app.players:
+                app.players[_cid0]['name'] = str(_nm0)
+        return
     # Protocol CharacterState has no name/color — they live in metadata
     # (if the server echoes them) or in the join event. Check metadata first.
     name = None
@@ -394,8 +441,9 @@ def apply_realtime(app, signals):
                 _parse_character(app, entry)
         if isinstance(cand.get('character'), dict):
             _parse_character(app, cand['character'])
-        # Some servers send players/clients instead of characters.
-        for alt in ('players', 'clients', 'character_states'):
+        # character_states IS characters (positions). 'players' is ambiguous:
+        # if an entry has a position, treat as character, else as name-only.
+        for alt in ('character_states',):
             alt_chars = cand.get(alt)
             if isinstance(alt_chars, dict):
                 for key in alt_chars:
@@ -403,6 +451,29 @@ def apply_realtime(app, signals):
             elif isinstance(alt_chars, list):
                 for entry in alt_chars:
                     _parse_character(app, entry)
+        # 'clients' is NAMES ONLY — never positions, never create a player.
+        # Parsing it as characters was creating a spawn phantom per client.
+        _clients = cand.get('clients')
+        if isinstance(_clients, dict):
+            for _k, _v in _clients.items():
+                _parse_client_name(app, _v, fallback_id=_k)
+        elif isinstance(_clients, list):
+            for _e in _clients:
+                _parse_client_name(app, _e, fallback_id=None)
+        # 'players' — check each entry: position? -> character, else name-only.
+        _players = cand.get('players')
+        if isinstance(_players, dict):
+            for _k, _v in _players.items():
+                if isinstance(_v, dict) and (_v.get('x') is not None or _v.get('y') is not None or _v.get('position') is not None):
+                    _parse_character(app, _v, fallback_id=_k)
+                else:
+                    _parse_client_name(app, _v, fallback_id=_k)
+        elif isinstance(_players, list):
+            for _e in _players:
+                if isinstance(_e, dict) and (_e.get('x') is not None or _e.get('y') is not None or _e.get('position') is not None):
+                    _parse_character(app, _e)
+                else:
+                    _parse_client_name(app, _e, fallback_id=None)
         items = cand.get('items')
         if isinstance(items, dict):
             for key in items:
@@ -853,21 +924,11 @@ def redrawAll(app):
         # shapes so a gold gem (gem-3) can never be mistaken for a player again.
         # Square (center-corrected: SCS drawRect uses center, not top-left)
         drawRect(sx, sy, PLAYER_R * 2, PLAYER_R * 2, fill=other.get('color') or 'red', border='white', borderWidth=3)
-        # Plus a circle at the exact sx,sy (same API as gems, which DO show) —
-        # if the square was the problem, this circle will show.
-        drawCircle(sx, sy, PLAYER_R + 4, fill='yellow', border='black', borderWidth=2)
+
         if sy - 24 >= VIEW_Y:
             drawLabel(other['name'], sx, sy - 24, size=12, bold=True, fill='white')
         if sy + 26 <= VIEW_Y + VIEW_H:
             drawLabel(str(other['score']), sx, sy + 26, size=11, fill=rgb(214, 224, 255))
-    # HUD: camera-independent remote list — if world draw is buggy, this still shows them.
-    # Row of small squares at y=125, one per remote, with name below.
-    for _i, _cid in enumerate(sorted(app.players.keys())):
-        _o = app.players[_cid]
-        _hx = 20 + _i * 44
-        _hy = 125
-        drawRect(_hx + 14, _hy + 14, 28, 28, fill=_o.get('color') or 'red', border='white', borderWidth=2)
-        drawLabel(str(_o.get('name') or 'player') + '@' + str(int(_o['x'])) + ',' + str(int(_o['y'])), _hx + 14, _hy + 38, size=9, bold=True, fill='white')
     me_x = VIEW_X + app.x - cam_x
     me_y = VIEW_Y + app.y - cam_y
     drawRect(me_x, me_y, PLAYER_R * 2, PLAYER_R * 2, fill=app.my_color, border='white', borderWidth=3)
