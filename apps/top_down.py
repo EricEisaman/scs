@@ -125,15 +125,26 @@ def _dir_for_key(key):
 
 
 def _spawn_for_id(client_id):
-    # Spread spawns around the centre by a hash of the id — ±100px.
-    # Without this, everyone spawns at (1000, 700) and the remote dot is
-    # drawn exactly under your own dot, so it looks like "no remote players".
     total = 0
     for ch in str(client_id or ''):
         total = total + ord(ch)
     ox = (total % 200) - 100
     oy = ((total // 200) % 200) - 100
     return (WORLD_W // 2 + ox, WORLD_H // 2 + oy)
+
+
+def _to_num(v):
+    # Server may send positions as strings ("1000") — coerce, don't drop.
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        try:
+            return float(v.strip())
+        except Exception:
+            return None
+    return None
 
 
 def _color_for_id(client_id, index):
@@ -158,6 +169,15 @@ def _camera(app):
 
 
 def _parse_character(app, entry, fallback_id=None):
+    # Characters value may be a bare [x, y] or a JSON string, not a dict.
+    if isinstance(entry, (list, tuple)) and len(entry) == 2:
+        entry = {'x': entry[0], 'y': entry[1]}
+    if isinstance(entry, str):
+        try:
+            import json as _j
+            entry = _j.loads(entry)
+        except Exception:
+            return
     if not isinstance(entry, dict):
         return
     # Server may nest the state: {state: {x, y, ...}} / {data: {...}}
@@ -196,19 +216,26 @@ def _parse_character(app, entry, fallback_id=None):
         cid = fallback_id
     if cid is None or cid == app.client_id:
         return
-    x = src.get('x')
-    y = src.get('y')
+    x = _to_num(src.get('x'))
+    y = _to_num(src.get('y'))
     pos = src.get('position')
     if isinstance(pos, dict):
         if x is None:
-            x = pos.get('x')
+            x = _to_num(pos.get('x'))
         if y is None:
-            y = pos.get('y')
+            y = _to_num(pos.get('y'))
     elif isinstance(pos, (list, tuple)) and len(pos) == 2:
         if x is None:
-            x = pos[0]
+            x = _to_num(pos[0])
         if y is None:
-            y = pos[1]
+            y = _to_num(pos[1])
+    # Also handle position as "1000,700" string or {0: 1000, 1: 700}
+    if isinstance(pos, str) and ',' in pos:
+        parts = pos.split(',')
+        if x is None:
+            x = _to_num(parts[0])
+        if y is None and len(parts) > 1:
+            y = _to_num(parts[1])
     # Name is NOT in position updates (server rejects it), so an update
     # with no name must NOT overwrite a name we already learned from a
     # join event. Only use a name if this packet actually carries one.
@@ -449,12 +476,12 @@ async def do_join(app):
                 add_log(app, 'signal keys: ' + _shorten(str(list(signals.keys())), 60))
                 if isinstance(signals.get('mp'), dict):
                     add_log(app, 'mp keys: ' + _shorten(str(list(signals['mp'].keys())), 60))
-                    # Show the actual characters payload once — keys, id, pos, self-filter.
-                    # This is what tells us if the remote is at 0,0, off-screen, or filtered as self.
+                    # Show the real characters payload once — key, id vs self, and position.
                     chars = signals['mp'].get('characters')
-                    if isinstance(chars, dict):
-                        for k, v in list(chars.items())[:3]:
-                            add_log(app, 'char ' + _shorten(str(k), 20) + ' self=' + str(k == app.client_id) + ' val=' + _shorten(str(v), 80))
+                    if isinstance(chars, dict) and len(chars) > 0:
+                        k0 = list(chars.keys())[0]
+                        v0 = chars[k0]
+                        add_log(app, 'chars: key=' + _shorten(str(k0), 30) + ' self=' + _shorten(str(app.client_id), 30) + ' val=' + _shorten(str(v0), 120))
             if 'characters' in signals or 'items' in signals or 'mp' in signals:
                 apply_realtime(app, signals)
 
@@ -490,7 +517,6 @@ async def do_join(app):
         app.match_status = client.match_status
         app.queue_position = client.queue_position
         app.my_color = _color_for_id(app.client_id, 0)
-        # Don't all spawn on the same pixel — offset by our id, then tell the room.
         app.x, app.y = _spawn_for_id(app.client_id)
         if client.match_status == 'queued':
             app.status = 'Queued (position ' + str(client.queue_position) + ') - waiting...'
@@ -603,10 +629,6 @@ def onStep(app):
             if dx * dx + dy * dy < (PLAYER_R + ITEM_R + 4) * (PLAYER_R + ITEM_R + 4):
                 aio.run(do_collect(app, iid))
     if app.client is not None and moved and app.step % 3 == 0:
-        aio.run(do_publish_character(app))
-    # Heartbeat: publish every 60 steps (~2s) even when idle, so the other side
-    # always has a fresh position for us, not just the join-time snapshot.
-    if app.client is not None and not moved and app.step % 60 == 0:
         aio.run(do_publish_character(app))
 
 
@@ -763,9 +785,15 @@ def redrawAll(app):
         other = app.players[cid]
         sx = VIEW_X + other['x'] - cam_x
         sy = VIEW_Y + other['y'] - cam_y
-        if sx < VIEW_X or sx > VIEW_X + VIEW_W:
-            continue
-        if sy < VIEW_Y or sy > VIEW_Y + VIEW_H:
+        # If the remote is off-screen, draw it clamped to the view edge so it
+        # still shows up — otherwise "moved but remote doesn't show" is just
+        # "remote is 800px away and the camera doesn't follow them".
+        offscreen = sx < VIEW_X or sx > VIEW_X + VIEW_W or sy < VIEW_Y or sy > VIEW_Y + VIEW_H
+        if offscreen:
+            ex = _clamp(sx, VIEW_X + 20, VIEW_X + VIEW_W - 20)
+            ey = _clamp(sy, VIEW_Y + 20, VIEW_Y + VIEW_H - 20)
+            drawCircle(ex, ey, 10, fill=other['color'], border='white', borderWidth=2)
+            drawLabel(other['name'] + ' >', ex, ey - 18, size=11, bold=True, fill='white')
             continue
         drawCircle(sx, sy, PLAYER_R, fill=other['color'], border='white', borderWidth=2)
         if sy - 24 >= VIEW_Y:
