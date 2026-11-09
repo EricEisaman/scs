@@ -175,7 +175,7 @@ def _camera(app):
 
 
 def _parse_client_name(app, entry, fallback_id=None):
-    """Clients carry NAMES only. Never create a player, never touch x/y/last_seen.
+    """Clients carry NAMES only. Never create a player, never touch x/y.
     Only rename a player that already exists from a real characters update."""
     if isinstance(entry, str):
         if fallback_id is not None and entry and len(entry) < 40 and fallback_id in app.players:
@@ -206,8 +206,9 @@ def _parse_client_name(app, entry, fallback_id=None):
         name = entry.get('character')
     if name is None:
         name = src.get('name') or src.get('display_name') or src.get('character_name') or src.get('displayName') or src.get('player_name') or src.get('displayName')
-    if name is not None and cid in app.players:
-        app.players[cid]['name'] = str(name)
+    if cid in app.players:
+        if name is not None:
+            app.players[cid]['name'] = str(name)
 
 
 def _parse_character(app, entry, fallback_id=None):
@@ -276,18 +277,37 @@ def _parse_character(app, entry, fallback_id=None):
             x = _to_num(pos.get('x'))
         if y is None:
             y = _to_num(pos.get('y'))
+        # Datastar/JSON can send a vec2 as {0: x, 1: y} (JS array -> object).
+        if x is None:
+            x = _to_num(pos.get('0')) if pos.get('0') is not None else _to_num(pos.get(0))
+        if y is None:
+            y = _to_num(pos.get('1')) if pos.get('1') is not None else _to_num(pos.get(1))
     elif isinstance(pos, (list, tuple)) and len(pos) == 2:
         if x is None:
             x = _to_num(pos[0])
         if y is None:
             y = _to_num(pos[1])
-    # Also handle position as "1000,700" string or {0: 1000, 1: 700}
+    # Also handle position as "1000,700" or "[1000, 700]" string.
     if isinstance(pos, str) and ',' in pos:
-        parts = pos.split(',')
-        if x is None:
+        cleaned = pos.strip().strip('[]()').strip()
+        parts = cleaned.split(',')
+        if x is None and len(parts) > 0:
             x = _to_num(parts[0])
         if y is None and len(parts) > 1:
             y = _to_num(parts[1])
+    # Top-level pos as {0: x, 1: y} dict under 'pos' key (ItemInstance style)
+    if x is None or y is None:
+        _p2 = src.get('pos')
+        if isinstance(_p2, dict):
+            if x is None:
+                x = _to_num(_p2.get('x')) or _to_num(_p2.get('0'))
+            if y is None:
+                y = _to_num(_p2.get('y')) or _to_num(_p2.get('1'))
+        elif isinstance(_p2, (list, tuple)) and len(_p2) == 2:
+            if x is None:
+                x = _to_num(_p2[0])
+            if y is None:
+                y = _to_num(_p2[1])
     # NO POSITION = NOT A CHARACTER UPDATE. This is a clients/metadata entry
     # (name only). Never create a spawn phantom from it. If the player already
     # exists from a real characters update, rename it; otherwise ignore.
@@ -342,9 +362,8 @@ def _parse_character(app, entry, fallback_id=None):
     if old is None:
         sx, sy = _spawn_for_id(cid)
         old = {'x': float(sx), 'y': float(sy), 'name': str(name) if has_name else 'player',
-               'score': 0, 'color': _color_for_id(cid, len(app.players)), 'last_seen': app.step}
+               'score': 0, 'color': _color_for_id(cid, len(app.players))}
         app.players[cid] = old
-    old['last_seen'] = app.step
     if isinstance(x, (int, float)):
         old['x'] = float(x)
     if isinstance(y, (int, float)):
@@ -612,7 +631,12 @@ async def do_join(app):
                     if isinstance(chars, dict) and len(chars) > 0:
                         k0 = list(chars.keys())[0]
                         v0 = chars[k0]
-                        add_log(app, 'chars: key=' + _shorten(str(k0), 30) + ' self=' + _shorten(str(app.client_id), 30) + ' val=' + _shorten(str(v0), 120))
+                        add_log(app, 'chars: dict key=' + _shorten(str(k0), 30) + ' self=' + _shorten(str(app.client_id), 30) + ' val=' + _shorten(str(v0), 120))
+                    elif isinstance(chars, list) and len(chars) > 0:
+                        add_log(app, 'chars: list n=' + str(len(chars)) + ' self=' + _shorten(str(app.client_id), 30) + ' first=' + _shorten(str(chars[0]), 160))
+                        _cl = signals['mp'].get('clients')
+                        if isinstance(_cl, list) and len(_cl) > 0:
+                            add_log(app, 'clients: list n=' + str(len(_cl)) + ' first=' + _shorten(str(_cl[0]), 120))
             if 'characters' in signals or 'items' in signals or 'mp' in signals:
                 apply_realtime(app, signals)
 
@@ -912,12 +936,10 @@ def redrawAll(app):
             continue
         drawCircle(sx, sy, ITEM_R, fill=item['color'], border='white', borderWidth=2)
         drawLabel('*', sx, sy, size=14, bold=True, fill='white')
-    # Prune stale: dead tabs never send 'left', so without this Players: only grows.
-    # Keep only players seen in the last 900 steps (~30s). This is what makes
-    # Players:10 with max 8 look broken — most of those 10 are dead tabs.
-    for _cid in list(app.players.keys()):
-        if app.step - app.players[_cid].get('last_seen', app.step) > 900:
-            del app.players[_cid]
+    # NO TIMEOUTS — no prune. A remote stays until the server says it left.
+    # Idle players don't publish when not moving, so any time-based prune
+    # deletes live players (that's why Ling showed Players:1). Dead tabs
+    # staying in the list is better than live players vanishing.
     for cid in sorted(app.players.keys()):
         other = app.players[cid]
         sx = VIEW_X + other['x'] - cam_x
@@ -930,24 +952,39 @@ def redrawAll(app):
         # actually shows 2 dots, not 1.
         dx = sx - (VIEW_X + app.x - cam_x)
         dy = sy - (VIEW_Y + app.y - cam_y)
+        # Stacked remotes: spread them on a small ring around self instead
+        # of all nudging to the same +35 x (they still stacked).
         if dx * dx + dy * dy < 36:
-            sx = sx + 35
+            _h = 0
+            for _ch in str(cid):
+                _h = _h + ord(_ch)
+            _ang = (_h % 8) * 0.785398
+            import math as _m
+            sx = sx + int(38 * _m.cos(_ang))
+            sy = sy + int(38 * _m.sin(_ang))
         # Players are SQUARES, gems are circles with '*'. Deliberately different
         # shapes so a gold gem (gem-3) can never be mistaken for a player again.
-        # Square (center-corrected: SCS drawRect uses center, not top-left)
-        drawRect(sx, sy, PLAYER_R * 2, PLAYER_R * 2, fill=other.get('color') or 'red', border='white', borderWidth=3)
-
-        if sy - 24 >= VIEW_Y:
-            drawLabel(other['name'], sx, sy - 24, size=12, bold=True, fill='white')
-        if sy + 26 <= VIEW_Y + VIEW_H:
-            drawLabel(str(other['score']), sx, sy + 26, size=11, fill=rgb(214, 224, 255))
+        # drawRect is TOP-LEFT (header/footer/buttons prove it) — centre the
+        # square on (sx,sy) by offsetting by -PLAYER_R, otherwise the square's
+        # centre is (sx+14,sy+14) and labels look 14px left + score lands
+        # inside the square (the white speck in the screenshots).
+        drawRect(sx - PLAYER_R, sy - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=other.get('color') or 'red', border='white', borderWidth=3)
+        # Name above, score below, both centred on sx. Shadow first for readability.
+        if sy - 30 >= VIEW_Y:
+            drawLabel(other['name'], sx + 1, sy - 30 + 1, size=12, bold=True, fill='black')
+            drawLabel(other['name'], sx, sy - 30, size=12, bold=True, fill='white')
+        if sy + 32 <= VIEW_Y + VIEW_H:
+            drawLabel(str(other['score']), sx + 1, sy + 32 + 1, size=11, fill='black')
+            drawLabel(str(other['score']), sx, sy + 32, size=11, fill=rgb(214, 224, 255))
     me_x = VIEW_X + app.x - cam_x
     me_y = VIEW_Y + app.y - cam_y
-    drawRect(me_x, me_y, PLAYER_R * 2, PLAYER_R * 2, fill=app.my_color, border='white', borderWidth=3)
-    if me_y - 24 >= VIEW_Y:
-        drawLabel(app.name, me_x, me_y - 24, size=13, bold=True, fill='white')
-    if me_y + 26 <= VIEW_Y + VIEW_H:
-        drawLabel(str(app.score), me_x, me_y + 26, size=12, bold=True, fill='white')
+    drawRect(me_x - PLAYER_R, me_y - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=app.my_color, border='white', borderWidth=3)
+    if me_y - 30 >= VIEW_Y:
+        drawLabel(app.name, me_x + 1, me_y - 30 + 1, size=13, bold=True, fill='black')
+        drawLabel(app.name, me_x, me_y - 30, size=13, bold=True, fill='white')
+    if me_y + 32 <= VIEW_Y + VIEW_H:
+        drawLabel(str(app.score), me_x + 1, me_y + 32 + 1, size=12, bold=True, fill='black')
+        drawLabel(str(app.score), me_x, me_y + 32, size=12, bold=True, fill='white')
     # Footer on a solid strip — keeps WASD hint readable over the map.
     drawRect(0, APP_HEIGHT - 48, APP_WIDTH, 48, fill=rgb(18, 18, 20))
     drawLabel('WASD / arrows to move. Touch a gem. Camera follows you.',
