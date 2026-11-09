@@ -373,8 +373,12 @@ def _parse_character(app, entry, fallback_id=None):
     color = src.get('color')
     old = app.players.get(cid)
     if old is None:
-        sx, sy = _spawn_for_id(cid)
-        old = {'x': float(sx), 'y': float(sy), 'name': str(name) if has_name else 'player',
+        # No spawn placeholder: a new remote starts exactly at the position
+        # in THIS packet. _spawn_for_id would offset it if this packet ever
+        # carries only x or only y.
+        _ix = float(x) if isinstance(x, (int, float)) else 0.0
+        _iy = float(y) if isinstance(y, (int, float)) else 0.0
+        old = {'x': _ix, 'y': _iy, 'name': str(name) if has_name else 'player',
                'score': 0, 'color': _color_for_id(cid, len(app.players))}
         app.players[cid] = old
     if isinstance(x, (int, float)):
@@ -552,8 +556,19 @@ def apply_realtime(app, signals):
         for _ik in ('items', 'itemStates', 'item_states', 'itemStatesMap', 'collections'):
             _items = cand.get(_ik)
             if isinstance(_items, dict):
-                for key in _items:
-                    _parse_item(app, _items[key], fallback_id=key)
+                # Server shape: items = {updates: [...], collections: [...]}
+                # — NOT {item_id: entry}. Unwrap those lists first, else every
+                # remote collection is dropped and gems never disappear.
+                _unwrapped = False
+                for _sub in ('updates', 'collections'):
+                    _lst = _items.get(_sub)
+                    if isinstance(_lst, list):
+                        _unwrapped = True
+                        for entry in _lst:
+                            _parse_item(app, entry)
+                if not _unwrapped:
+                    for key in _items:
+                        _parse_item(app, _items[key], fallback_id=key)
             elif isinstance(_items, list):
                 for entry in _items:
                     _parse_item(app, entry)
@@ -754,7 +769,12 @@ async def do_join(app):
         app.match_status = client.match_status
         app.queue_position = client.queue_position
         app.my_color = _color_for_id(app.client_id, 0)
-        app.x, app.y = _spawn_for_id(app.client_id)
+        # KEEP EXACT POSITION: do NOT teleport to _spawn_for_id on join.
+        # Where you are when you press Join IS your join position. The next
+        # publish sends this exact app.x/app.y. Old line overwrote it with
+        # _spawn_for_id(client_id) — e.g. (914,603) for c93eb64f — so you
+        # jumped even if you had walked elsewhere before joining.
+        add_log(app, 'join keep pos: ' + str(int(app.x)) + ',' + str(int(app.y)))
         if client.match_status == 'queued':
             app.status = 'Queued (position ' + str(client.queue_position) + ') - waiting...'
         else:
@@ -1026,29 +1046,30 @@ def redrawAll(app):
     # Previous spread theory was wrong: they were not drawn at all, not hidden.
     # No silent skip: if a remote fails to draw, log it to console (no throttling).
     # No throttling anywhere in this block.
+    def _draw_player_square(sx, sy, color, name, score, is_self):
+        # Single path for self + remotes — no divergent fill/border code.
+        # Halo first: a remote stacked exactly on self still shows a white rim
+        # instead of vanishing under self (the white speck in screenshots).
+        if not is_self:
+            drawRect(sx - PLAYER_R - 2, sy - PLAYER_R - 2, (PLAYER_R + 2) * 2, (PLAYER_R + 2) * 2, fill=_to_rgb(color), border='white', borderWidth=1)
+        drawRect(sx - PLAYER_R, sy - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=_to_rgb(color), border='white', borderWidth=3)
+        if sy - 30 >= VIEW_Y:
+            drawLabel(name, sx + 1, sy - 30 + 1, size=13 if is_self else 12, bold=True, fill='black')
+            drawLabel(name, sx, sy - 30, size=13 if is_self else 12, bold=True, fill='white')
+        if sy + 32 <= VIEW_Y + VIEW_H:
+            drawLabel(str(score), sx + 1, sy + 32 + 1, size=12 if is_self else 11, bold=True, fill='black')
+            drawLabel(str(score), sx, sy + 32, size=12 if is_self else 11, bold=True, fill=rgb(214, 224, 255))
+    me_x = VIEW_X + app.x - cam_x
+    me_y = VIEW_Y + app.y - cam_y
+    _draw_player_square(me_x, me_y, app.my_color, app.name, app.score, True)
     for cid in sorted(app.players.keys()):
         other = app.players[cid]
         try:
             sx = int(VIEW_X + float(other['x']) - cam_x)
             sy = int(VIEW_Y + float(other['y']) - cam_y)
-            drawRect(sx - PLAYER_R, sy - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=_to_rgb(other['color']), border='white', borderWidth=3)
-            if sy - 30 >= VIEW_Y:
-                drawLabel(other['name'], sx + 1, sy - 30 + 1, size=12, bold=True, fill='black')
-                drawLabel(other['name'], sx, sy - 30, size=12, bold=True, fill='white')
-            if sy + 32 <= VIEW_Y + VIEW_H:
-                drawLabel(str(other['score']), sx + 1, sy + 32 + 1, size=11, fill='black')
-                drawLabel(str(other['score']), sx, sy + 32, size=11, fill=rgb(214, 224, 255))
+            _draw_player_square(sx, sy, other['color'], other['name'], other['score'], False)
         except Exception as _derr:
             add_log(app, 'draw remote ERR ' + str(cid)[:8] + ' ' + str(_derr) + ' entry=' + _shorten(str(other), 120))
-    me_x = VIEW_X + app.x - cam_x
-    me_y = VIEW_Y + app.y - cam_y
-    drawRect(me_x - PLAYER_R, me_y - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=_to_rgb(app.my_color), border='white', borderWidth=3)
-    if me_y - 30 >= VIEW_Y:
-        drawLabel(app.name, me_x + 1, me_y - 30 + 1, size=13, bold=True, fill='black')
-        drawLabel(app.name, me_x, me_y - 30, size=13, bold=True, fill='white')
-    if me_y + 32 <= VIEW_Y + VIEW_H:
-        drawLabel(str(app.score), me_x + 1, me_y + 32 + 1, size=12, bold=True, fill='black')
-        drawLabel(str(app.score), me_x, me_y + 32, size=12, bold=True, fill='white')
     # Footer on a solid strip — keeps WASD hint readable over the map.
     drawRect(0, APP_HEIGHT - 48, APP_WIDTH, 48, fill=rgb(18, 18, 20))
     drawLabel('WASD / arrows to move. Touch a gem. Camera follows you.',
