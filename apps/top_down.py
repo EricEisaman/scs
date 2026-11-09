@@ -764,7 +764,7 @@ def redrawAll(app):
     # Header redrawn last — header was drawn first, so map elements at the
     # top edge could paint over it. Redrawing it here guarantees it stays on top.
     drawRect(0, 0, APP_WIDTH, VIEW_Y, fill=rgb(18, 18, 20))
-    drawLabel('Top-Down Realtime 4-Way Scroller Integrating MatchGod', APP_WIDTH // 2, 24, size=24, bold=True, fill='white')
+    drawLabel('Realtime 4-Way Scroller Integrating MatchGod', APP_WIDTH // 2, 24, size=24, bold=True, fill='white')
     _draw_field(NAME_RECT, 'Name', app.name, app.focus == 'name')
     _draw_button(JOIN_RECT, 'Join', not joined and not app.joining)
     _draw_button(LEAVE_RECT, 'Leave', joined)
