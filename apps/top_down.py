@@ -124,6 +124,18 @@ def _dir_for_key(key):
     return None
 
 
+def _spawn_for_id(client_id):
+    # Spread spawns around the centre by a hash of the id — ±100px.
+    # Without this, everyone spawns at (1000, 700) and the remote dot is
+    # drawn exactly under your own dot, so it looks like "no remote players".
+    total = 0
+    for ch in str(client_id or ''):
+        total = total + ord(ch)
+    ox = (total % 200) - 100
+    oy = ((total // 200) % 200) - 100
+    return (WORLD_W // 2 + ox, WORLD_H // 2 + oy)
+
+
 def _color_for_id(client_id, index):
     if client_id is None:
         return PLAYER_COLORS[0]
@@ -216,7 +228,8 @@ def _parse_character(app, entry, fallback_id=None):
     color = src.get('color')
     old = app.players.get(cid)
     if old is None:
-        old = {'x': app.x, 'y': app.y, 'name': str(name),
+        sx, sy = _spawn_for_id(cid)
+        old = {'x': float(sx), 'y': float(sy), 'name': str(name) if has_name else 'player',
                'score': 0, 'color': _color_for_id(cid, len(app.players))}
         app.players[cid] = old
     if isinstance(x, (int, float)):
@@ -436,6 +449,12 @@ async def do_join(app):
                 add_log(app, 'signal keys: ' + _shorten(str(list(signals.keys())), 60))
                 if isinstance(signals.get('mp'), dict):
                     add_log(app, 'mp keys: ' + _shorten(str(list(signals['mp'].keys())), 60))
+                    # Show the actual characters payload once — keys, id, pos, self-filter.
+                    # This is what tells us if the remote is at 0,0, off-screen, or filtered as self.
+                    chars = signals['mp'].get('characters')
+                    if isinstance(chars, dict):
+                        for k, v in list(chars.items())[:3]:
+                            add_log(app, 'char ' + _shorten(str(k), 20) + ' self=' + str(k == app.client_id) + ' val=' + _shorten(str(v), 80))
             if 'characters' in signals or 'items' in signals or 'mp' in signals:
                 apply_realtime(app, signals)
 
@@ -471,6 +490,8 @@ async def do_join(app):
         app.match_status = client.match_status
         app.queue_position = client.queue_position
         app.my_color = _color_for_id(app.client_id, 0)
+        # Don't all spawn on the same pixel — offset by our id, then tell the room.
+        app.x, app.y = _spawn_for_id(app.client_id)
         if client.match_status == 'queued':
             app.status = 'Queued (position ' + str(client.queue_position) + ') - waiting...'
         else:
@@ -582,6 +603,10 @@ def onStep(app):
             if dx * dx + dy * dy < (PLAYER_R + ITEM_R + 4) * (PLAYER_R + ITEM_R + 4):
                 aio.run(do_collect(app, iid))
     if app.client is not None and moved and app.step % 3 == 0:
+        aio.run(do_publish_character(app))
+    # Heartbeat: publish every 60 steps (~2s) even when idle, so the other side
+    # always has a fresh position for us, not just the join-time snapshot.
+    if app.client is not None and not moved and app.step % 60 == 0:
         aio.run(do_publish_character(app))
 
 
@@ -764,7 +789,7 @@ def redrawAll(app):
     # Header redrawn last — header was drawn first, so map elements at the
     # top edge could paint over it. Redrawing it here guarantees it stays on top.
     drawRect(0, 0, APP_WIDTH, VIEW_Y, fill=rgb(18, 18, 20))
-    drawLabel('Realtime 4-Way Scroller Integrating MatchGod', APP_WIDTH // 2, 24, size=24, bold=True, fill='white')
+    drawLabel('Top-Down - Realtime - MatchGod', APP_WIDTH // 2, 24, size=24, bold=True, fill='white')
     _draw_field(NAME_RECT, 'Name', app.name, app.focus == 'name')
     _draw_button(JOIN_RECT, 'Join', not joined and not app.joining)
     _draw_button(LEAVE_RECT, 'Leave', joined)

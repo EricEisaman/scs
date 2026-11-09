@@ -292,6 +292,31 @@ def _parse_stream_data(raw):
                     value = value[1:]
                 lines.append(value)
         text = '\n'.join(lines).strip()
+    # Datastar can batch several "signals {...}" blocks in one SSE event.
+    # Old code stripped only the first "signals " and json.loads failed on
+    # the rest, dropping the whole event — so position updates after the
+    # first snapshot never applied and the remote stayed at spawn / 0,0.
+    # Parse every block and merge them, last block wins per key.
+    if 'signals ' in text:
+        merged = {}
+        parts = text.split('signals ')
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            parsed = _loads(part)
+            if isinstance(parsed, dict):
+                inner = parsed.get('signals')
+                if isinstance(inner, dict):
+                    parsed = inner
+                for k, v in parsed.items():
+                    if isinstance(v, dict) and isinstance(merged.get(k), dict):
+                        merged[k].update(v)
+                    else:
+                        merged[k] = v
+        if merged:
+            return merged
+        # Fall through to single-block parse if split produced nothing.
     if text.startswith('signals '):
         text = text[len('signals '):].strip()
     parsed = _loads(text)
