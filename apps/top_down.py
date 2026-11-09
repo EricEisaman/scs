@@ -419,9 +419,8 @@ def _parse_item(app, entry, fallback_id=None):
         collected = True
     if collected is None and src.get('state') in ('available', 'active'):
         collected = False
-    if collected is None:
-        return
-    app.items[iid]['collected'] = bool(collected)
+    if collected is not None:
+        app.items[iid]['collected'] = bool(collected)
     taken_by = src.get('collectedByClientId')
     if taken_by is None:
         taken_by = src.get('collected_by_client_id')
@@ -440,11 +439,30 @@ def _parse_item(app, entry, fallback_id=None):
     if taken_by is not None:
         app.items[iid]['taken_by'] = str(taken_by)
     # Protocol also carries the item's pos — keep our local gem in sync if server moves it.
+    # Accept pos as [x,y], {x,y}, {0,1}, or 'position' key.
     pos = src.get('pos')
-    if isinstance(pos, (list, tuple)) and len(pos) == 2:
+    if pos is None:
+        pos = src.get('position')
+    if isinstance(pos, dict):
+        _px = pos.get('x') if pos.get('x') is not None else pos.get('0')
+        _py = pos.get('y') if pos.get('y') is not None else pos.get('1')
+        if _px is not None and _py is not None:
+            try:
+                app.items[iid]['x'] = float(_px)
+                app.items[iid]['y'] = float(_py)
+            except Exception:
+                pass
+    elif isinstance(pos, (list, tuple)) and len(pos) == 2:
         try:
             app.items[iid]['x'] = float(pos[0])
             app.items[iid]['y'] = float(pos[1])
+        except Exception:
+            pass
+    # Also accept top-level x/y on the item entry itself.
+    if src.get('x') is not None and src.get('y') is not None:
+        try:
+            app.items[iid]['x'] = float(src.get('x'))
+            app.items[iid]['y'] = float(src.get('y'))
         except Exception:
             pass
 
@@ -470,8 +488,12 @@ def apply_realtime(app, signals):
         elif isinstance(chars, list):
             for entry in chars:
                 _parse_character(app, entry)
-        if isinstance(cand.get('character'), dict):
-            _parse_character(app, cand['character'])
+        _ch = cand.get('character')
+        if isinstance(_ch, dict):
+            _parse_character(app, _ch)
+        elif isinstance(_ch, list):
+            for _e in _ch:
+                _parse_character(app, _e)
         # character_states IS characters (positions). 'players' is ambiguous:
         # if an entry has a position, treat as character, else as name-only.
         for alt in ('character_states',):
@@ -512,8 +534,12 @@ def apply_realtime(app, signals):
         elif isinstance(items, list):
             for entry in items:
                 _parse_item(app, entry)
-        if isinstance(cand.get('item'), dict):
-            _parse_item(app, cand['item'])
+        _it = cand.get('item')
+        if isinstance(_it, dict):
+            _parse_item(app, _it)
+        elif isinstance(_it, list):
+            for _e in _it:
+                _parse_item(app, _e)
 
 
 def apply_mp(app, mp):
@@ -558,9 +584,13 @@ async def do_publish_character(app):
     app.publishing = True
     try:
         result = await app.client.publish_character_state({
+            # Send every alias — server reads position/velocity/metadata, older code sent only x/y/name/score.
+            'position': [int(app.x), int(app.y)], 'pos': [int(app.x), int(app.y)],
             'x': int(app.x), 'y': int(app.y),
-            'name': app.name, 'score': app.score,
-            'color': app.my_color})
+            'velocity': [0, 0],
+            'name': app.name, 'score': app.score, 'color': app.my_color,
+            'metadata': {'name': app.name, 'display_name': app.name, 'score': app.score, 'color': app.my_color},
+            'animationState': 'stand'})
         if isinstance(result, dict) and result.get('_status'):
             add_log(app, 'publish ' + str(result.get('_status')) + ': ' + _shorten(str(result), 60))
         else:
@@ -587,8 +617,13 @@ async def do_collect(app, item_id):
             if isinstance(claim, dict) and claim.get('_status'):
                 add_log(app, 'claim ' + str(claim.get('_status')) + ': ' + _shorten(str(claim), 60))
             res = await app.client.publish_item_state({
-                'item_id': item_id, 'x': int(item['x']), 'y': int(item['y']),
-                'collected': True, 'taken_by': app.client_id})
+                # Send every alias — server validates instanceId/pos/isCollected, older code sent only item_id/x/y/collected.
+                'instanceId': item_id, 'instance_id': item_id, 'item_id': item_id, 'itemId': item_id, 'id': item_id,
+                'pos': [int(item['x']), int(item['y'])], 'position': [int(item['x']), int(item['y'])],
+                'x': int(item['x']), 'y': int(item['y']),
+                'isCollected': True, 'is_collected': True, 'collected': True, 'taken': True,
+                'collectedByClientId': app.client_id, 'collected_by_client_id': app.client_id,
+                'taken_by': app.client_id, 'takenBy': app.client_id})
             if isinstance(res, dict) and res.get('_status'):
                 add_log(app, 'item publish ' + str(res.get('_status')) + ': ' + _shorten(str(res), 60))
             else:
@@ -614,10 +649,16 @@ async def do_join(app):
         apply_mp(app, mp)
 
     def _on_character(signals):
-        apply_realtime(app, signals)
+        try:
+            apply_realtime(app, signals)
+        except Exception as _err:
+            add_log(app, 'on_character ERR: ' + str(_err))
 
     def _on_item(signals):
-        apply_realtime(app, signals)
+        try:
+            apply_realtime(app, signals)
+        except Exception as _err:
+            add_log(app, 'on_item ERR: ' + str(_err))
 
     def _on_signal(signals):
         if isinstance(signals, dict):
@@ -638,7 +679,15 @@ async def do_join(app):
                         if isinstance(_cl, list) and len(_cl) > 0:
                             add_log(app, 'clients: list n=' + str(len(_cl)) + ' first=' + _shorten(str(_cl[0]), 120))
             if 'characters' in signals or 'items' in signals or 'mp' in signals:
-                apply_realtime(app, signals)
+                try:
+                    apply_realtime(app, signals)
+                except Exception as _err:
+                    add_log(app, 'on_signal ERR: ' + str(_err))
+                # Proof parse ran: players + collected gems AFTER this patch (first 10 only).
+                if app.debug_signals <= 10:
+                    _pc = sorted(app.players.keys())
+                    _cc = [k for k, v in app.items.items() if v.get('collected')]
+                    add_log(app, 'after patch: players=' + _shorten(str(_pc), 120) + ' collected=' + _shorten(str(_cc), 120))
 
     def _on_open():
         app.stream_open = True
@@ -942,8 +991,8 @@ def redrawAll(app):
     # staying in the list is better than live players vanishing.
     for cid in sorted(app.players.keys()):
         other = app.players[cid]
-        sx = VIEW_X + other['x'] - cam_x
-        sy = VIEW_Y + other['y'] - cam_y
+        sx = int(VIEW_X + other['x'] - cam_x)
+        sy = int(VIEW_Y + other['y'] - cam_y)
         # NO edge clamping — it was shoving in-view remotes to the bottom
         # edge with a 'player >' label. Draw where they actually are; SCS
         # clips off-screen draws. If a remote is in-view it will show here.

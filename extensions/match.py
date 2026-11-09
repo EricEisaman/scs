@@ -1,51 +1,73 @@
 """
-extensions.match -- SCS Extension: multiplayer over plain JSON + EventSource.
+extensions.match -- SCS Extension: MatchGod multiplayer (Model-only).
 
-Generic. No game in this file is named, no game shape is assumed,
-no game default is baked in. Each app passes its own game_id,
-environment_name, player counts, game_mode, and config. When the
-caller passes config, it is used verbatim. When the caller does not,
-a config is built only from the values the caller actually passed;
-values the caller left out are left out, so the server decides.
+Works for BOTH kinds of app:
 
-Transport:
-  * join, turn/state, turn/action, character-state, item-state,
-    item-authority, leave are plain JSON over fetch. Request body
-    is JSON. Response body is JSON. Headers are Content-Type
-    application/json and X-Client-ID once joined.
-  * turn/state is a single GET. It is used once on join when
-    matched, and once when a stream patch reports matched without
-    a turn state. It is not a loop.
-  * stream is EventSource to GET /api/multiplayer/stream with
-    session_id in the query. EventSource carries the connection.
-    It fires datastar-patch-signals events and generic message
-    events. Each event data payload starts with signals and holds
-    JSON. The mp dict is extracted from it and handed to on_mp.
-  * turn/action returns JSON with accepted, reason, and a turn
-    state. The caller applies that turn state. The caller also
-    sets its own move locally when accepted, per the caller
-    contract below.
+  * TURN-BASED apps (tic-tac-toe, chess, card games, ...)
+    join with requires_turn_based=True, then use
+    get_turn_state() / send_turn_action() and the ``mp`` signal
+    on the SSE stream. The server is authoritative: it enforces
+    turns, validates the proposed state, and decides the winner.
 
-Endpoints:
+  * NON-TURN-BASED / REALTIME apps (platformer, shared world, ...)
+    join with requires_turn_based=False, then use
+    publish_character_state() / publish_item_state() and the
+    character / item signals on the same SSE stream. There is no
+    turn_state in this mode; every client publishes its own
+    state and every client receives everyone else's.
+
+Server protocol (matchgod.onrender.com, see
+EricEisaman/match -- server/app/multiplayer):
+
   POST  /api/multiplayer/join
-  GET   /api/multiplayer/turn/state
+        body: environment_name, character_name, game_id,
+              player_id, display_name, skill, config
+        returns: client_id, session_id, room_id,
+                 match_status, queue_position
   GET   /api/multiplayer/stream?session_id=<session_id>
-  POST  /api/multiplayer/turn/action
-  PATCH /api/multiplayer/character-state
-  PATCH /api/multiplayer/item-state
-  PATCH /api/multiplayer/item-authority-claim
-  PATCH /api/multiplayer/item-authority-release
+        SSE / Datastar: ``datastar-patch-signals`` events whose
+        data is ``signals {...}``. Turn apps read signals.mp.
+        Realtime apps read signals.characters / signals.items.
+        The older SCS platformer form ?sid=<session_id> is the
+        same stream; this extension uses session_id, as in the
+        tic-tac-toe demo.
+  GET   /api/multiplayer/turn/state          (turn-based only)
+        header: X-Client-ID. Returns { turn_state: {...} }.
+  POST  /api/multiplayer/turn/action         (turn-based only)
+        header: X-Client-ID. Body: action_type, payload,
+        proposed_state, claimed_winner_id, claimed_is_draw,
+        claimed_end_reason. Returns { accepted, reason, ... }.
+  PATCH /api/multiplayer/character-state     (realtime only)
+  PATCH /api/multiplayer/item-state          (realtime only)
+  PATCH /api/multiplayer/item-authority-claim   (realtime)
+  PATCH /api/multiplayer/item-authority-release (realtime)
+        header: X-Client-ID on every call.
   POST  /api/multiplayer/leave
+        header: X-Client-ID. Body: {}.
 
-Strict MVC: Model-only. No scs import, no drawing, no app.*.
-The server is the authority. The client sends an action and
-applies the server turn state from the action reply or from
-the stream. The client never invents shared state.
+Strict MVC: this file is Model-only. It never imports scs,
+never draws, never touches app.*. It fetches data and calls
+the plain Python callbacks the app gave it. The app (Controller)
+stores results in app.* and its redrawAll (View) renders them.
 
-Brython notes: HTTP APIs are async def. Start them from a user
-gesture with browser.aio. Stream APIs are sync: connect_stream
-creates the EventSource and returns it. Close it with
-disconnect_stream or leave.
+Brython notes: all public APIs are async def. Use browser.aio:
+
+    from extensions.match import MatchClient
+    from browser import aio
+
+    async def join_flow(app):
+        app.client = MatchClient(on_mp=lambda mp: apply_mp(app, mp))
+        await app.client.join_turn_based(
+            environment_name='tic-tac-toe-demo',
+            character_name=app.name, game_id='tic-tac-toe-demo',
+            display_name=app.name, skill=app.skill)
+        app.client.connect_stream()
+
+Polling fallback: if EventSource callbacks do not reach Brython
+in some browser, an app can also poll with
+``await client.refresh_turn_state()`` from onStep. Applying the
+same turn_state twice is harmless -- it just overwrites app.*
+with the same server state.
 """
 
 import json
@@ -53,9 +75,15 @@ import random
 import time
 
 try:
-    from browser import window
+    from browser import window, aio
 except ImportError:
     window = None
+    aio = None
+
+try:
+    import asyncio as _asyncio
+except ImportError:
+    _asyncio = None
 
 
 BASE_URL = 'https://matchgod.onrender.com'
@@ -67,21 +95,15 @@ REALTIME = 'realtime'
 __all__ = [
     'BASE_URL', 'DEFAULT_BASE_URL', 'TURN_BASED', 'REALTIME',
     'MatchClient', 'create_client',
-    'join_match', 'send_turn_action', 'leave_match',
-    'extract_mp', 'extract_turn_state',
+    'join_match', 'get_turn_state', 'send_turn_action', 'leave_match',
+    'parse_stream_text', 'extract_mp', 'extract_turn_state',
     'normalize_signals', 'make_player_id', 'main',
 ]
 
 
-def _generate_client_id():
-    # Unique per MatchClient instance — per app/tab, not shared.
-    try:
-        stamp = int(time.time() * 1000)
-    except Exception:
-        stamp = 0
-    rand = str(int(random.random() * 1000000000))
-    return 'client-' + str(stamp) + '-' + rand
-
+# ---------------------------------------------------------------------------
+# Small pure helpers -- no browser, no network. Testable in CPython too.
+# ---------------------------------------------------------------------------
 
 def make_player_id(name):
     clean = ''
@@ -94,29 +116,7 @@ def make_player_id(name):
     if clean == '':
         clean = 'player'
     suffix = str(int(random.random() * 1000000))
-    return clean + '-' + suffix
-
-
-def _to_vec2(value, x=None, y=None):
-    # Server wants position as exactly [x, y], not {x, y}.
-    if isinstance(value, (list, tuple)) and len(value) == 2:
-        return [value[0], value[1]]
-    if isinstance(value, dict):
-        return [value.get('x'), value.get('y')]
-    return [x, y]
-
-
-def _now_ms():
-    try:
-        return int(time.time() * 1000)
-    except Exception:
-        pass
-    if window is not None:
-        try:
-            return int(window.Date.new().getTime())
-        except Exception:
-            pass
-    return 0
+    return 'demo-' + clean + '-' + suffix
 
 
 def _loads(text):
@@ -130,51 +130,26 @@ def _loads(text):
         return None
 
 
-def _deep_copy(value):
-    if value is None:
+def _strip_signals_prefix(text):
+    text = str(text or '').strip()
+    if text.startswith('signals '):
+        text = text[len('signals '):].strip()
+    return text
+
+
+def parse_stream_text(raw):
+    """Parse one SSE data payload into a signals dict (or None)."""
+    text = _strip_signals_prefix(raw)
+    if text == '':
         return None
-    try:
-        return json.loads(json.dumps(value))
-    except Exception:
-        return value
-
-
-def _to_py(value):
-    if value is None:
+    data = _loads(text)
+    if data is None:
         return None
-    if isinstance(value, (dict, list, str, int, float, bool)):
-        return value
-    if window is None:
-        return value
-    try:
-        text = window.JSON.stringify(value)
-        return json.loads(str(text))
-    except Exception:
-        return value
-
-
-def _to_js(value):
-    if window is None:
-        return json.dumps(value)
-    try:
-        return window.JSON.parse(json.dumps(value))
-    except Exception:
-        return json.dumps(value)
-
-
-def _quote(text):
-    if window is not None:
-        try:
-            return str(window.encodeURIComponent(str(text)))
-        except Exception:
-            pass
-    out = ''
-    for ch in str(text):
-        if ch.isalnum() or ch in '-_.~':
-            out = out + ch
-        else:
-            out = out + '%' + format(ord(ch), '02X')
-    return out
+    if isinstance(data, dict) and 'signals' in data:
+        data = data['signals']
+    if isinstance(data, dict):
+        return data
+    return None
 
 
 def normalize_signals(signals):
@@ -217,13 +192,10 @@ def _pick(data, names):
 
 
 def _extract_join_fields(data):
+    """Join responses vary a little by server version; accept all."""
     out = {}
     if not isinstance(data, dict):
         return out
-    # Server wraps JoinResponse as {ok, data: {client_id...}} — unwrap first.
-    inner = data.get('data')
-    if isinstance(inner, dict) and (_pick(inner, ['client_id','clientId']) is not None or _pick(inner, ['session_id','sessionId']) is not None):
-        data = inner
     out['client_id'] = _pick(data, ['client_id', 'clientId'])
     out['session_id'] = _pick(data, ['session_id', 'sessionId'])
     out['room_id'] = _pick(data, ['room_id', 'roomId'])
@@ -258,74 +230,78 @@ def _extract_turn_state_response(data):
             return data['turn_state']
         if isinstance(data.get('turnState'), dict):
             return data['turnState']
-        inner = data.get('data')
-        if isinstance(inner, dict):
-            if isinstance(inner.get('turn_state'), dict):
-                return inner['turn_state']
-            if isinstance(inner.get('turnState'), dict):
-                return inner['turnState']
+        if isinstance(data.get('turn_state'), dict) is False and 'turn_order' in data:
+            return data
         if 'turn_order' in data or 'current_player_id' in data:
             return data
     return None
 
 
-def _unwrap_action_data(data):
-    if isinstance(data, dict):
-        inner = data.get('data')
-        if isinstance(inner, dict) and 'accepted' not in data and 'ok' not in data:
-            return inner
-    return data
+def _to_py(value):
+    """Convert a JS value from window.fetch into plain Python."""
+    if value is None:
+        return None
+    if isinstance(value, (dict, list, str, int, float, bool)):
+        return value
+    if window is None:
+        return value
+    try:
+        text = window.JSON.stringify(value)
+        return json.loads(str(text))
+    except Exception:
+        return value
 
 
-def _parse_stream_data(raw):
-    """Parse one EventSource event data payload into a signals dict.
+def _to_js(value):
+    """Convert a Python dict/list into a real JS object for fetch()."""
+    if window is None:
+        return json.dumps(value)
+    try:
+        return window.JSON.parse(json.dumps(value))
+    except Exception:
+        return json.dumps(value)
 
-    Event data looks like: signals {...}
-    A bare JSON object is also accepted.
-    """
-    text = str(raw or '').strip()
-    if text == '':
-        return {}
-    if 'data:' in text:
-        lines = []
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith('data:'):
-                value = line[len('data:'):]
-                if value.startswith(' '):
-                    value = value[1:]
-                lines.append(value)
-        text = '\n'.join(lines).strip()
-    if text.startswith('signals '):
-        text = text[len('signals '):].strip()
-    parsed = _loads(text)
-    if parsed is None and text.startswith('{'):
-        # Datastar sends JS literal {mp: {...}} with unquoted keys — quote them.
+
+def _quote(text):
+    if window is not None:
         try:
-            import re as _re
-            fixed = _re.sub(r'([{,]\s*)([A-Za-z_][A-Za-z0-9_\-]*)\s*:', r'\1"\2":', text)
-            parsed = _loads(fixed)
+            return str(window.encodeURIComponent(str(text)))
         except Exception:
-            parsed = None
-    if isinstance(parsed, dict):
-        inner = parsed.get('signals')
-        if isinstance(inner, dict):
-            return inner
-        return parsed
-    return {}
+            pass
+    out = ''
+    for ch in str(text):
+        if ch.isalnum() or ch in '-_.~':
+            out = out + ch
+        else:
+            out = out + '%' + format(ord(ch), '02X')
+    return out
 
+
+async def _sleep(seconds):
+    if aio is not None:
+        try:
+            await aio.sleep(seconds)
+            return
+        except Exception:
+            pass
+    if _asyncio is not None:
+        await _asyncio.sleep(seconds)
+        return
+    if window is not None:
+        await window.Promise.new(lambda resolve, reject: window.setTimeout(resolve, int(seconds * 1000)))
+
+
+# ---------------------------------------------------------------------------
+# MatchClient -- one joined player. One client per app.
+# ---------------------------------------------------------------------------
 
 class MatchClient(object):
     def __init__(self, base_url=None, on_mp=None, on_signal=None,
-                 on_character=None, on_item=None, on_match=None,
-                 on_elements=None, on_stream_open=None,
-                 on_stream_close=None):
+                 on_character=None, on_item=None, on_match=None):
         self.base_url = base_url or BASE_URL
         if self.base_url.endswith('/'):
             self.base_url = self.base_url[:-1]
-        # Each app instance gets its own clientId up front, so publish
-        # never sends an empty one even if join doesn't return one.
-        self.client_id = _generate_client_id()
+        self.client_id = None
         self.session_id = None
         self.room_id = None
         self.match_status = None
@@ -334,17 +310,16 @@ class MatchClient(object):
         self.characters = {}
         self.items = {}
         self.requires_turn_based = None
-        self.stream_open = False
-        self.last_error = None
         self._stream = None
+        self.stream_connected = False
         self.on_mp = on_mp
         self.on_signal = on_signal
         self.on_character = on_character
         self.on_item = on_item
         self.on_match = on_match
-        self.on_elements = on_elements
-        self.on_stream_open = on_stream_open
-        self.on_stream_close = on_stream_close
+        self.last_error = None
+
+    # -- identity helpers -------------------------------------------------
 
     @property
     def is_joined(self):
@@ -385,9 +360,7 @@ class MatchClient(object):
             return self.turn_state.get('current_player_id')
         return None
 
-    @property
-    def stream_connected(self):
-        return self.stream_open
+    # -- low-level HTTP ---------------------------------------------------
 
     def _headers(self):
         headers = {'Content-Type': 'application/json'}
@@ -427,96 +400,88 @@ class MatchClient(object):
                 data = None
         return {'ok': ok, 'status': status, 'data': data}
 
-    def build_join_signals(self, environment_name, character_name,
-                           game_id, player_id=None, display_name=None,
-                           skill=None, config=None,
-                           requires_turn_based=None,
-                           max_players_per_room=None,
-                           min_players_per_room=None,
-                           game_mode=None, allow_pass=None,
-                           allow_resign=None,
-                           requires_matchmaking=None):
-        """Build the join body. Nothing is assumed.
+    # -- join -------------------------------------------------------------
 
-        Pass config to use it verbatim. Otherwise a config is built
-        only from the values actually passed; values left out are
-        left out, so the server decides them.
+    def build_join_body(self, environment_name, character_name, game_id,
+                        player_id=None, display_name=None, skill=1000,
+                        config=None, requires_turn_based=None,
+                        max_players_per_room=None, min_players_per_room=None,
+                        game_mode='default', allow_pass=True,
+                        allow_resign=True):
+        """Build the exact join body the demo sends.
+
+        Pass config=... to override everything. Otherwise config is
+        derived from requires_turn_based so one call serves both
+        turn-based and realtime apps.
         """
+        if requires_turn_based is None:
+            requires_turn_based = True
         if player_id is None:
             player_id = make_player_id(character_name)
         if display_name is None:
             display_name = character_name
         if config is None:
-            config = {}
-            config['game_id'] = game_id
-            if requires_matchmaking is not None:
-                config['requires_matchmaking'] = bool(requires_matchmaking)
-            if requires_turn_based is not None:
-                config['requires_turn_based'] = bool(requires_turn_based)
-            if max_players_per_room is not None:
-                config['max_players_per_room'] = max_players_per_room
-            if min_players_per_room is not None:
-                config['min_players_per_room'] = min_players_per_room
-            if game_mode is not None:
-                config['matchmaking'] = {'game_mode': game_mode}
-            if allow_pass is not None or allow_resign is not None:
-                turn_cfg = {}
-                if allow_pass is not None:
-                    turn_cfg['allow_pass'] = bool(allow_pass)
-                if allow_resign is not None:
-                    turn_cfg['allow_resign'] = bool(allow_resign)
-                config['turn'] = turn_cfg
-            if requires_turn_based is True:
-                config['authority'] = {'scopes': ['turns'],
-                                       'resource_types': ['*']}
-            elif requires_turn_based is False:
-                config['authority'] = {'scopes': ['characters', 'items'],
-                                       'resource_types': ['*']}
-        body = {'environment_name': environment_name,
-                'character_name': character_name,
+            if requires_turn_based:
+                max_players = max_players_per_room
+                if max_players is None:
+                    max_players = 2
+                min_players = min_players_per_room
+                if min_players is None:
+                    min_players = 2
+                scopes = ['turns']
+            else:
+                max_players = max_players_per_room
+                if max_players is None:
+                    max_players = 4
+                min_players = min_players_per_room
+                if min_players is None:
+                    min_players = 1
+                scopes = ['characters', 'items']
+            config = {
                 'game_id': game_id,
-                'player_id': player_id,
-                'display_name': display_name,
-                'config': config}
-        # Identify this app instance to the server from the start.
-        if self.client_id:
-            body['client_id'] = self.client_id
-            body['clientId'] = self.client_id
-        if skill is not None:
-            body['skill'] = {'rating': skill}
-        return body
-
-    build_join_body = build_join_signals
+                'requires_matchmaking': True,
+                'requires_turn_based': bool(requires_turn_based),
+                'max_players_per_room': max_players,
+                'min_players_per_room': min_players,
+                'matchmaking': {'game_mode': game_mode},
+                'turn': {'allow_pass': bool(allow_pass),
+                         'allow_resign': bool(allow_resign)},
+                'authority': {'scopes': scopes, 'resource_types': ['*']},
+            }
+        return {
+            'environment_name': environment_name,
+            'character_name': character_name,
+            'game_id': game_id,
+            'player_id': player_id,
+            'display_name': display_name,
+            'skill': {'rating': skill},
+            'config': config,
+        }
 
     async def join(self, environment_name, character_name, game_id,
-                   player_id=None, display_name=None, skill=None,
+                   player_id=None, display_name=None, skill=1000,
                    config=None, requires_turn_based=None,
                    max_players_per_room=None, min_players_per_room=None,
-                   game_mode=None, allow_pass=None, allow_resign=None,
-                   requires_matchmaking=None):
-        if requires_turn_based is not None:
-            self.requires_turn_based = bool(requires_turn_based)
-        elif isinstance(config, dict) and config.get('requires_turn_based') is not None:
-            self.requires_turn_based = bool(config['requires_turn_based'])
-        body = self.build_join_signals(
+                   game_mode='default', allow_pass=True, allow_resign=True):
+        if requires_turn_based is None:
+            requires_turn_based = True
+        self.requires_turn_based = bool(requires_turn_based)
+        body = self.build_join_body(
             environment_name, character_name, game_id,
             player_id=player_id, display_name=display_name, skill=skill,
             config=config, requires_turn_based=requires_turn_based,
             max_players_per_room=max_players_per_room,
             min_players_per_room=min_players_per_room,
             game_mode=game_mode, allow_pass=allow_pass,
-            allow_resign=allow_resign,
-            requires_matchmaking=requires_matchmaking)
-        self.last_error = None
+            allow_resign=allow_resign)
         result = await self._http('POST', '/api/multiplayer/join', body)
         data = result.get('data')
         if not isinstance(data, dict):
             data = {}
         fields = _extract_join_fields(data)
-        # Don't let an empty server value wipe our per-app generated ID.
-        if fields.get('client_id'):
+        if fields.get('client_id') is not None:
             self.client_id = fields['client_id']
-        if fields.get('session_id'):
+        if fields.get('session_id') is not None:
             self.session_id = fields['session_id']
         if fields.get('room_id') is not None:
             self.room_id = fields['room_id']
@@ -524,18 +489,19 @@ class MatchClient(object):
             self.match_status = fields['match_status']
         if fields.get('queue_position') is not None:
             self.queue_position = fields['queue_position']
+        self.last_error = None
         if not result.get('ok'):
             self.last_error = str(data)
         return data
 
     async def join_turn_based(self, environment_name, character_name,
                               game_id, player_id=None, display_name=None,
-                              skill=None, config=None,
-                              max_players_per_room=None,
-                              min_players_per_room=None,
-                              game_mode=None, allow_pass=None,
-                              allow_resign=None,
-                              requires_matchmaking=None):
+                              skill=1000, config=None,
+                              max_players_per_room=2,
+                              min_players_per_room=2,
+                              game_mode='default', allow_pass=True,
+                              allow_resign=True):
+        """Convenience: join a turn-based game (tic-tac-toe style)."""
         return await self.join(
             environment_name, character_name, game_id,
             player_id=player_id, display_name=display_name, skill=skill,
@@ -543,21 +509,19 @@ class MatchClient(object):
             max_players_per_room=max_players_per_room,
             min_players_per_room=min_players_per_room,
             game_mode=game_mode, allow_pass=allow_pass,
-            allow_resign=allow_resign,
-            requires_matchmaking=requires_matchmaking)
+            allow_resign=allow_resign)
 
     async def join_realtime(self, environment_name, character_name,
                             game_id, player_id=None, display_name=None,
-                            skill=None, config=None,
-                            max_players_per_room=None,
-                            min_players_per_room=None,
-                            game_mode=None,
-                            requires_matchmaking=None):
-        """Join without turns. Caller passes its own counts and mode.
+                            skill=1000, config=None,
+                            max_players_per_room=4,
+                            min_players_per_room=1,
+                            game_mode='default'):
+        """Convenience: join a non-turn-based game (platformer style).
 
-        No turn state exists in this mode. Use the character and
-        item actions to send state and the character and item
-        signals to receive it.
+        No turn_state exists in this mode. Use
+        publish_character_state / publish_item_state to send your
+        state and on_character / on_item to receive others'.
         """
         return await self.join(
             environment_name, character_name, game_id,
@@ -565,24 +529,21 @@ class MatchClient(object):
             config=config, requires_turn_based=False,
             max_players_per_room=max_players_per_room,
             min_players_per_room=min_players_per_room,
-            game_mode=game_mode, allow_pass=None, allow_resign=None,
-            requires_matchmaking=requires_matchmaking)
+            game_mode=game_mode, allow_pass=False, allow_resign=False)
+
+    # -- turn-based -------------------------------------------------------
 
     async def refresh_turn_state(self):
-        """GET turn/state and apply it. Single fetch, not a loop.
-
-        Called once on join when matched, and once when a stream
-        patch reports matched without a turn state.
-        """
+        """GET turn/state and apply it. Safe to call repeatedly."""
         if self.client_id is None:
             return None
         result = await self._http('GET', '/api/multiplayer/turn/state')
         state = _extract_turn_state_response(result.get('data'))
         if state is not None:
-            self.turn_state = _deep_copy(state)
+            self.turn_state = state
             if self.on_mp is not None:
                 try:
-                    self.on_mp({'turnState': _deep_copy(state)})
+                    self.on_mp({'turnState': state})
                 except Exception:
                     pass
         return state
@@ -594,12 +555,7 @@ class MatchClient(object):
                                claimed_winner_id=None,
                                claimed_is_draw=False,
                                claimed_end_reason=None):
-        """POST turn/action. Returns the server JSON reply.
-
-        The reply holds accepted, reason, and a turn state. The
-        caller applies that turn state. The server decides
-        acceptance, winner, and draw.
-        """
+        """POST turn/action. Server decides accepted / winner / draw."""
         if payload is None:
             payload = {}
         body = {'action_type': action_type, 'payload': payload}
@@ -611,7 +567,7 @@ class MatchClient(object):
         if claimed_end_reason is not None:
             body['claimed_end_reason'] = claimed_end_reason
         result = await self._http('POST', '/api/multiplayer/turn/action', body)
-        return _unwrap_action_data(result.get('data'))
+        return result.get('data')
 
     async def send_move(self, payload, proposed_state=None,
                         claimed_winner_id=None, claimed_is_draw=False,
@@ -628,6 +584,8 @@ class MatchClient(object):
     async def resign(self):
         return await self.send_turn_action('resign', payload={})
 
+    # -- realtime / non-turn-based ----------------------------------------
+
     def _with_identity(self, state):
         out = {}
         if isinstance(state, dict):
@@ -641,159 +599,54 @@ class MatchClient(object):
 
     async def publish_character_state(self, character_state,
                                       character_id=None):
-        # Server requires {updates, timestamp} — flat x/y 422s.
-        # Caller passes flat {x, y, name, ...}, we wrap it.
+        """PATCH character-state. character_state holds x, y, vx, vy...
+
+        The server validates finite 2D vectors, broadcasts to the
+        room, and handles synchronizer failover. character_id
+        defaults to this client's id.
+        """
         state = self._with_identity(character_state)
         if character_id is not None:
             state['character_id'] = character_id
         elif 'character_id' not in state and self.client_id:
             state['character_id'] = self.client_id
-        if isinstance(character_state, dict) and isinstance(character_state.get('updates'), list):
-            updates = character_state['updates']
-        else:
-            # Server rejects flat x/y/name/color. It wants vectors:
-            # updates=[{position:{x,y}, score:...}]
-            # score passed last round (not listed as unsupported).
-            # name/color are client-side only — don't send them.
-            one = {}
-            # Each update must carry its own app's clientId — server
-            # validates clientId inside updates, not just top-level body.
-            if 'client_id' in state:
-                one['clientId'] = state['client_id']
-            # NOTE: characterId is NOT allowed inside updates — only top-level.
-            # Server 422s with "unsupported character fields: characterId" if we put it here.
-            if 'position' in state:
-                one['position'] = _to_vec2(state['position'], state.get('x'), state.get('y'))
-            elif 'x' in state or 'y' in state:
-                one['position'] = [state.get('x'), state.get('y')]
-            for key in state:
-                if key in ('client_id', 'session_id', 'character_id', 'updates', 'timestamp', 'x', 'y', 'name', 'color', 'position'):
-                    continue
-                one[key] = state[key]
-            updates = [one]
-        body = {}
-        for key in ('client_id', 'session_id', 'character_id'):
-            if key in state:
-                body[key] = state[key]
-        # Server checks camelCase clientId (custom 422, not Pydantic).
-        # Send both casings so we don't round-trip again on sessionId/characterId.
-        if 'client_id' in state:
-            body['clientId'] = state['client_id']
-        if 'session_id' in state:
-            body['sessionId'] = state['session_id']
-        if 'character_id' in state:
-            body['characterId'] = state['character_id']
-        body['updates'] = updates
-        if isinstance(character_state, dict) and character_state.get('timestamp') is not None:
-            body['timestamp'] = character_state['timestamp']
-        else:
-            body['timestamp'] = _now_ms()
         result = await self._http(
-            'PATCH', '/api/multiplayer/character-state', body)
-        data = _unwrap_action_data(result.get('data'))
-        # Don't hide 403/422 as "pub ok" — attach status so the app can log the real detail.
-        if not result.get('ok') and isinstance(data, dict):
-            data = dict(data)
-            data['_status'] = result.get('status')
-        return data
+            'PATCH', '/api/multiplayer/character-state', state)
+        return result.get('data')
 
     async def publish_item_state(self, item_state, item_id=None):
+        """PATCH item-state. item_state holds item pose / collected..."""
         state = self._with_identity(item_state)
         if item_id is not None:
             state['item_id'] = item_id
-        if isinstance(item_state, dict) and isinstance(item_state.get('updates'), list):
-            updates = item_state['updates']
-        else:
-            # Protocol: ItemInstanceState = {instanceId, pos, isCollected,
-            # collectedByClientId, ...}. NOT position/collected/clientId.
-            # Server rejects unknown fields, so map exactly.
-            one = {}
-            iid = state.get('item_id') or state.get('itemId') or state.get('instanceId') or state.get('instance_id')
-            if iid is not None:
-                one['instanceId'] = iid
-            if 'position' in state:
-                one['pos'] = _to_vec2(state['position'], state.get('x'), state.get('y'))
-            elif 'pos' in state:
-                one['pos'] = _to_vec2(state['pos'], state.get('x'), state.get('y'))
-            elif 'x' in state or 'y' in state:
-                one['pos'] = [state.get('x'), state.get('y')]
-            # collected -> isCollected, taken_by -> collectedByClientId
-            coll = state.get('collected')
-            if coll is None:
-                coll = state.get('isCollected')
-            if coll is not None:
-                one['isCollected'] = bool(coll)
-            taker = state.get('taken_by') or state.get('takenBy') or state.get('collectedByClientId') or state.get('collected_by') or state.get('collectedBy')
-            if taker is None and 'client_id' in state:
-                taker = state['client_id']
-            if taker is not None:
-                one['collectedByClientId'] = taker
-            # Pass through only protocol-allowed item fields.
-            for key in ('itemName', 'item_name', 'rot', 'ownerClientId', 'owner_client_id'):
-                if key in state:
-                    out_key = 'itemName' if key in ('itemName','item_name') else ('ownerClientId' if key in ('ownerClientId','owner_client_id') else key)
-                    one[out_key] = state[key]
-            updates = [one]
-        body = {}
-        for key in ('client_id', 'session_id', 'item_id'):
-            if key in state:
-                body[key] = state[key]
-        if 'client_id' in state:
-            body['clientId'] = state['client_id']
-        if 'session_id' in state:
-            body['sessionId'] = state['session_id']
-        if 'item_id' in state:
-            body['itemId'] = state['item_id']
-            body['instanceId'] = state['item_id']
-        body['updates'] = updates
-        if isinstance(item_state, dict) and item_state.get('timestamp') is not None:
-            body['timestamp'] = item_state['timestamp']
-        else:
-            body['timestamp'] = _now_ms()
         result = await self._http(
-            'PATCH', '/api/multiplayer/item-state', body)
-        data = _unwrap_action_data(result.get('data'))
-        if not result.get('ok') and isinstance(data, dict):
-            data = dict(data)
-            data['_status'] = result.get('status')
-        return data
+            'PATCH', '/api/multiplayer/item-state', state)
+        return result.get('data')
 
     async def claim_item_authority(self, item_id):
-        body = self._with_identity({'item_id': item_id})
-        if 'client_id' in body:
-            body['clientId'] = body['client_id']
-        if 'session_id' in body:
-            body['sessionId'] = body['session_id']
-        body['itemId'] = item_id
-        body['instanceId'] = item_id
+        body = self._with_identity({'item_id': item_id, 'instanceId': item_id, 'instance_id': item_id})
         result = await self._http(
             'PATCH', '/api/multiplayer/item-authority-claim', body)
-        data = _unwrap_action_data(result.get('data'))
-        if not result.get('ok') and isinstance(data, dict):
-            data = dict(data)
-            data['_status'] = result.get('status')
-        return data
+        return result.get('data')
 
     async def release_item_authority(self, item_id):
-        body = self._with_identity({'item_id': item_id})
-        if 'client_id' in body:
-            body['clientId'] = body['client_id']
-        if 'session_id' in body:
-            body['sessionId'] = body['session_id']
-        body['itemId'] = item_id
-        body['instanceId'] = item_id
+        body = self._with_identity({'item_id': item_id, 'instanceId': item_id, 'instance_id': item_id})
         result = await self._http(
             'PATCH', '/api/multiplayer/item-authority-release', body)
-        data = _unwrap_action_data(result.get('data'))
-        if not result.get('ok') and isinstance(data, dict):
-            data = dict(data)
-            data['_status'] = result.get('status')
-        return data
+        return result.get('data')
 
     async def publish(self, state, kind='character'):
+        """Generic realtime publish.
+
+        kind='character' -> character-state, kind='item' -> item-state.
+        Use this when a realtime app has one shared state dict and
+        does not want to care which realtime endpoint it rides on.
+        """
         if kind == 'item':
             return await self.publish_item_state(state)
         return await self.publish_character_state(state)
+
+    # -- stream (both modes share one stream) ------------------------------
 
     def apply_mp(self, mp):
         if not isinstance(mp, dict):
@@ -818,7 +671,7 @@ class MatchClient(object):
                 self.queue_position = match['queue_position']
         state = extract_turn_state(mp)
         if state is not None:
-            self.turn_state = _deep_copy(state)
+            self.turn_state = state
         return mp
 
     def apply_realtime(self, signals):
@@ -830,14 +683,21 @@ class MatchClient(object):
         elif isinstance(characters, list):
             for entry in characters:
                 if isinstance(entry, dict):
-                    key = entry.get('character_id') or entry.get('client_id') or entry.get('id')
+                    # Server sends CharacterState with camelCase clientId — snake_case-only dropped every entry.
+                    key = entry.get('character_id') or entry.get('characterId') or entry.get('client_id') or entry.get('clientId') or entry.get('id')
                     if key is not None:
                         self.characters[key] = entry
         character = signals.get('character')
         if isinstance(character, dict):
-            key = character.get('character_id') or character.get('client_id') or character.get('id')
+            key = character.get('character_id') or character.get('characterId') or character.get('client_id') or character.get('clientId') or character.get('id')
             if key is not None:
                 self.characters[key] = character
+        elif isinstance(character, list):
+            for entry in character:
+                if isinstance(entry, dict):
+                    key = entry.get('character_id') or entry.get('characterId') or entry.get('client_id') or entry.get('clientId') or entry.get('id')
+                    if key is not None:
+                        self.characters[key] = entry
         items = signals.get('items')
         if isinstance(items, dict):
             for key in items:
@@ -845,69 +705,64 @@ class MatchClient(object):
         elif isinstance(items, list):
             for entry in items:
                 if isinstance(entry, dict):
-                    key = entry.get('item_id') or entry.get('id')
+                    # Server sends ItemInstanceState with instanceId — item_id-only dropped every entry.
+                    key = entry.get('instanceId') or entry.get('instance_id') or entry.get('item_id') or entry.get('itemId') or entry.get('id')
                     if key is not None:
                         self.items[key] = entry
         item = signals.get('item')
         if isinstance(item, dict):
-            key = item.get('item_id') or item.get('id')
+            key = item.get('instanceId') or item.get('instance_id') or item.get('item_id') or item.get('itemId') or item.get('id')
             if key is not None:
                 self.items[key] = item
+        elif isinstance(item, list):
+            for entry in item:
+                if isinstance(entry, dict):
+                    key = entry.get('instanceId') or entry.get('instance_id') or entry.get('item_id') or entry.get('itemId') or entry.get('id')
+                    if key is not None:
+                        self.items[key] = entry
         return signals
 
     def handle_stream_text(self, raw):
-        """Parse one EventSource event payload, update client, fire callbacks."""
-        signals = _parse_stream_data(raw)
-        if not isinstance(signals, dict) or not signals:
+        """Parse one SSE payload, update client, fire callbacks."""
+        signals = parse_stream_text(raw)
+        if signals is None:
             return None
         mp = extract_mp(signals)
         if mp is not None:
             self.apply_mp(mp)
             if self.on_mp is not None:
                 try:
-                    self.on_mp(_deep_copy(mp))
+                    self.on_mp(mp)
                 except Exception:
                     pass
-            if self.on_match is not None:
-                try:
-                    self.on_match(_deep_copy(mp))
-                except Exception:
-                    pass
-        # Server sends characters INSIDE mp: signals={mp:{timestamp, characters}}.
-        # Old code only checked top-level 'characters', so mp-nested updates
-        # never hit apply_realtime / on_character here. Top-down's _on_signal
-        # compensated, but fix it at the source so both paths work.
+        # Server sends characters/items INSIDE mp: signals={mp:{timestamp, characters, items}}.
+        # Top-level-only check never fired on_character/on_item for the real payload.
         mp_chars = isinstance(mp, dict) and ('characters' in mp or 'character' in mp or 'items' in mp or 'item' in mp)
         if 'characters' in signals or 'character' in signals or 'items' in signals or 'item' in signals or mp_chars:
-            # Feed apply_realtime the mp payload itself, not just the wrapper.
             if mp_chars:
                 self.apply_realtime(mp)
             self.apply_realtime(signals)
             if self.on_character is not None and ('characters' in signals or 'character' in signals or (isinstance(mp, dict) and ('characters' in mp or 'character' in mp))):
                 try:
-                    self.on_character(_deep_copy(signals))
+                    self.on_character(signals)
                 except Exception:
                     pass
             if self.on_item is not None and ('items' in signals or 'item' in signals or (isinstance(mp, dict) and ('items' in mp or 'item' in mp))):
                 try:
-                    self.on_item(_deep_copy(signals))
+                    self.on_item(signals)
                 except Exception:
                     pass
         if self.on_signal is not None:
             try:
-                self.on_signal(_deep_copy(signals))
+                self.on_signal(signals)
             except Exception:
                 pass
         return signals
 
     def connect_stream(self, on_signal=None, on_mp=None):
-        """Open the stream with EventSource. Sync. Returns the EventSource.
-
-        A previous stream is closed first. EventSource carries the
-        connection and reopens it on an error. on_stream_open fires
-        on open. An error is reported through on_signal so the app
-        can log it; it does not close the stream.
-        """
+        """Open EventSource for this session. Works in both modes."""
+        if window is None:
+            raise RuntimeError('extensions.match needs a browser (EventSource)')
         if self.session_id is None:
             raise RuntimeError('connect_stream needs join() first (no session_id)')
         if on_signal is not None:
@@ -919,89 +774,68 @@ class MatchClient(object):
                 self._stream.close()
             except Exception:
                 pass
-            self._stream = None
-        if window is None:
-            raise RuntimeError('connect_stream needs a browser (EventSource)')
         url = self.base_url + '/api/multiplayer/stream?session_id=' + _quote(self.session_id)
         stream = window.EventSource.new(url)
         self._stream = stream
-        self.stream_open = True
-
-        def _on_open(event):
-            self.stream_open = True
-            if self.on_stream_open is not None:
-                try:
-                    self.on_stream_open()
-                except Exception:
-                    pass
+        self.stream_connected = True
 
         def _on_patch(event):
             try:
-                self.handle_stream_text(event.data)
+                data = event.data
             except Exception:
-                pass
+                data = ''
+            self.handle_stream_text(data)
 
         def _on_message(event):
             try:
-                self.handle_stream_text(event.data)
+                data = event.data
             except Exception:
-                pass
+                data = ''
+            self.handle_stream_text(data)
 
         def _on_error(event):
-            if self.on_signal is not None:
-                try:
-                    self.on_signal({'event': 'stream_error'})
-                except Exception:
-                    pass
+            self.stream_connected = False
 
         try:
-            stream.onopen = _on_open
-        except Exception:
-            pass
-        try:
             stream.addEventListener('datastar-patch-signals', _on_patch)
+            stream.addEventListener('message', _on_message)
+            stream.addEventListener('error', _on_error)
         except Exception:
-            pass
-        try:
-            stream.addEventListener('datastar-merge-signals', _on_patch)
-        except Exception:
-            pass
-        try:
-            stream.addEventListener('datastar-patch-elements', _on_patch)
-        except Exception:
-            pass
-        try:
-            stream.onmessage = _on_message
-        except Exception:
-            pass
-        try:
-            stream.onerror = _on_error
-        except Exception:
-            pass
+            try:
+                stream.onmessage = _on_message
+                stream.onerror = _on_error
+            except Exception:
+                pass
         return stream
 
     def disconnect_stream(self):
-        stream = self._stream
+        if self._stream is not None:
+            try:
+                self._stream.close()
+            except Exception:
+                pass
         self._stream = None
-        if stream is not None:
-            try:
-                stream.close()
-            except Exception:
-                pass
-        was_open = self.stream_open
-        self.stream_open = False
-        if was_open and self.on_stream_close is not None:
-            try:
-                self.on_stream_close()
-            except Exception:
-                pass
+        self.stream_connected = False
+
+    async def poll_turn_state(self, interval_seconds=1.5, max_rounds=None):
+        """Poll turn/state until finished. Turn-based fallback."""
+        rounds = 0
+        while self.client_id is not None:
+            await _sleep(interval_seconds)
+            await self.refresh_turn_state()
+            rounds = rounds + 1
+            if self.is_finished:
+                break
+            if max_rounds is not None and rounds >= max_rounds:
+                break
+
+    # -- leave --------------------------------------------------------------
 
     async def leave(self):
         try:
             result = await self._http('POST', '/api/multiplayer/leave', {})
             data = result.get('data')
-        except Exception as err:
-            self.last_error = str(err)
+        except Exception:
             data = None
         self.disconnect_stream()
         self.client_id = None
@@ -1012,26 +846,26 @@ class MatchClient(object):
         self.turn_state = None
         self.characters = {}
         self.items = {}
-        return _unwrap_action_data(data)
+        return data
 
+
+# ---------------------------------------------------------------------------
+# Functional wrappers -- same calls, without keeping a MatchClient yourself.
+# ---------------------------------------------------------------------------
 
 def create_client(base_url=None, on_mp=None, on_signal=None,
-                  on_character=None, on_item=None, on_match=None,
-                  on_elements=None, on_stream_open=None,
-                  on_stream_close=None):
+                  on_character=None, on_item=None, on_match=None):
     return MatchClient(
         base_url=base_url, on_mp=on_mp, on_signal=on_signal,
-        on_character=on_character, on_item=on_item, on_match=on_match,
-        on_elements=on_elements, on_stream_open=on_stream_open,
-        on_stream_close=on_stream_close)
+        on_character=on_character, on_item=on_item, on_match=on_match)
 
 
 async def join_match(client, environment_name, character_name, game_id,
-                     player_id=None, display_name=None, skill=None,
+                     player_id=None, display_name=None, skill=1000,
                      config=None, requires_turn_based=None,
                      max_players_per_room=None, min_players_per_room=None,
-                     game_mode=None, allow_pass=None,
-                     allow_resign=None, requires_matchmaking=None):
+                     game_mode='default', allow_pass=True,
+                     allow_resign=True):
     return await client.join(
         environment_name, character_name, game_id,
         player_id=player_id, display_name=display_name, skill=skill,
@@ -1039,8 +873,11 @@ async def join_match(client, environment_name, character_name, game_id,
         max_players_per_room=max_players_per_room,
         min_players_per_room=min_players_per_room,
         game_mode=game_mode, allow_pass=allow_pass,
-        allow_resign=allow_resign,
-        requires_matchmaking=requires_matchmaking)
+        allow_resign=allow_resign)
+
+
+async def get_turn_state(client):
+    return await client.refresh_turn_state()
 
 
 async def send_turn_action(client, action_type, payload=None,
@@ -1057,12 +894,17 @@ async def leave_match(client):
     return await client.leave()
 
 
+# ---------------------------------------------------------------------------
+# Entry point -- guarded so importing this extension has no side effects.
+# ---------------------------------------------------------------------------
+
 def main():
+    """Create a client and report the endpoints. No network is used."""
     client = create_client()
     print('extensions.match: MatchClient ready')
     print('extensions.match: base_url=' + client.base_url)
-    print('extensions.match: turn mode = join_turn_based + turn/action')
-    print('extensions.match: realtime mode = join_realtime + character-state + item-state')
+    print('extensions.match: turn-based = join_turn_based + turn/state + turn/action')
+    print('extensions.match: realtime = join_realtime + character-state + item-state')
     return client
 
 
