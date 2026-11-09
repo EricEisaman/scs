@@ -662,8 +662,8 @@ async def do_join(app):
 
     def _on_signal(signals):
         if isinstance(signals, dict):
-            if app.debug_signals < 10:
-                app.debug_signals = app.debug_signals + 1
+            app.debug_signals = app.debug_signals + 1
+            if True:
                 add_log(app, 'signal keys: ' + _shorten(str(list(signals.keys())), 60))
                 if isinstance(signals.get('mp'), dict):
                     add_log(app, 'mp keys: ' + _shorten(str(list(signals['mp'].keys())), 60))
@@ -683,11 +683,18 @@ async def do_join(app):
                     apply_realtime(app, signals)
                 except Exception as _err:
                     add_log(app, 'on_signal ERR: ' + str(_err))
-                # Proof parse ran: players + collected gems AFTER this patch (first 10 only).
-                if app.debug_signals <= 10:
+                # Proof parse ran: players + collected gems AFTER this patch. No throttling.
+                if True:
                     _pc = sorted(app.players.keys())
                     _cc = [k for k, v in app.items.items() if v.get('collected')]
-                    add_log(app, 'after patch: players=' + _shorten(str(_pc), 120) + ' collected=' + _shorten(str(_cc), 120))
+                    _pp = []
+                    for _k in _pc:
+                        _v = app.players.get(_k) or {}
+                        try:
+                            _pp.append(str(_k)[:8] + '@' + str(int(float(_v.get('x', 0)))) + ',' + str(int(float(_v.get('y', 0)))) + ':' + str(_v.get('name')))
+                        except Exception:
+                            _pp.append(str(_k)[:8] + '@?')
+                    add_log(app, 'after patch: players=' + _shorten(str(_pp), 300) + ' collected=' + _shorten(str(_cc), 120))
 
     def _on_open():
         app.stream_open = True
@@ -832,7 +839,7 @@ def onStep(app):
             dy = app.y - item['y']
             if dx * dx + dy * dy < (PLAYER_R + ITEM_R + 4) * (PLAYER_R + ITEM_R + 4):
                 aio.run(do_collect(app, iid))
-    if app.client is not None and moved and app.step % 3 == 0:
+    if app.client is not None and moved:
         aio.run(do_publish_character(app))
 
 
@@ -989,42 +996,24 @@ def redrawAll(app):
     # Idle players don't publish when not moving, so any time-based prune
     # deletes live players (that's why Ling showed Players:1). Dead tabs
     # staying in the list is better than live players vanishing.
+    # Remotes at EXACT positions, no nudge / no ring / no spread.
+    # Previous spread theory was wrong: they were not drawn at all, not hidden.
+    # No silent skip: if a remote fails to draw, log it to console (no throttling).
+    # No throttling anywhere in this block.
     for cid in sorted(app.players.keys()):
         other = app.players[cid]
-        sx = int(VIEW_X + other['x'] - cam_x)
-        sy = int(VIEW_Y + other['y'] - cam_y)
-        # NO edge clamping — it was shoving in-view remotes to the bottom
-        # edge with a 'player >' label. Draw where they actually are; SCS
-        # clips off-screen draws. If a remote is in-view it will show here.
-        # If it is truly off-screen it is correctly invisible.
-        # Stacked remotes hide under self — nudge them aside so Players: 3
-        # actually shows 2 dots, not 1.
-        dx = sx - (VIEW_X + app.x - cam_x)
-        dy = sy - (VIEW_Y + app.y - cam_y)
-        # Stacked remotes: spread them on a small ring around self instead
-        # of all nudging to the same +35 x (they still stacked).
-        if dx * dx + dy * dy < 36:
-            _h = 0
-            for _ch in str(cid):
-                _h = _h + ord(_ch)
-            _ang = (_h % 8) * 0.785398
-            import math as _m
-            sx = sx + int(38 * _m.cos(_ang))
-            sy = sy + int(38 * _m.sin(_ang))
-        # Players are SQUARES, gems are circles with '*'. Deliberately different
-        # shapes so a gold gem (gem-3) can never be mistaken for a player again.
-        # drawRect is TOP-LEFT (header/footer/buttons prove it) — centre the
-        # square on (sx,sy) by offsetting by -PLAYER_R, otherwise the square's
-        # centre is (sx+14,sy+14) and labels look 14px left + score lands
-        # inside the square (the white speck in the screenshots).
-        drawRect(sx - PLAYER_R, sy - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=other.get('color') or 'red', border='white', borderWidth=3)
-        # Name above, score below, both centred on sx. Shadow first for readability.
-        if sy - 30 >= VIEW_Y:
-            drawLabel(other['name'], sx + 1, sy - 30 + 1, size=12, bold=True, fill='black')
-            drawLabel(other['name'], sx, sy - 30, size=12, bold=True, fill='white')
-        if sy + 32 <= VIEW_Y + VIEW_H:
-            drawLabel(str(other['score']), sx + 1, sy + 32 + 1, size=11, fill='black')
-            drawLabel(str(other['score']), sx, sy + 32, size=11, fill=rgb(214, 224, 255))
+        try:
+            sx = int(VIEW_X + float(other['x']) - cam_x)
+            sy = int(VIEW_Y + float(other['y']) - cam_y)
+            drawRect(sx - PLAYER_R, sy - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=other['color'], border='white', borderWidth=3)
+            if sy - 30 >= VIEW_Y:
+                drawLabel(other['name'], sx + 1, sy - 30 + 1, size=12, bold=True, fill='black')
+                drawLabel(other['name'], sx, sy - 30, size=12, bold=True, fill='white')
+            if sy + 32 <= VIEW_Y + VIEW_H:
+                drawLabel(str(other['score']), sx + 1, sy + 32 + 1, size=11, fill='black')
+                drawLabel(str(other['score']), sx, sy + 32, size=11, fill=rgb(214, 224, 255))
+        except Exception as _derr:
+            add_log(app, 'draw remote ERR ' + str(cid)[:8] + ' ' + str(_derr) + ' entry=' + _shorten(str(other), 120))
     me_x = VIEW_X + app.x - cam_x
     me_y = VIEW_Y + app.y - cam_y
     drawRect(me_x - PLAYER_R, me_y - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=app.my_color, border='white', borderWidth=3)
