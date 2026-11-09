@@ -639,8 +639,8 @@ class MatchClient(object):
             # validates clientId inside updates, not just top-level body.
             if 'client_id' in state:
                 one['clientId'] = state['client_id']
-            if 'character_id' in state:
-                one['characterId'] = state['character_id']
+            # NOTE: characterId is NOT allowed inside updates — only top-level.
+            # Server 422s with "unsupported character fields: characterId" if we put it here.
             if 'position' in state:
                 one['position'] = state['position']
             elif 'x' in state or 'y' in state:
@@ -681,8 +681,7 @@ class MatchClient(object):
             one = {}
             if 'client_id' in state:
                 one['clientId'] = state['client_id']
-            if 'item_id' in state:
-                one['itemId'] = state['item_id']
+            # NOTE: itemId is NOT allowed inside updates — only top-level.
             if 'position' in state:
                 one['position'] = state['position']
             elif 'x' in state or 'y' in state:
