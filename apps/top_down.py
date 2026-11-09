@@ -371,7 +371,10 @@ async def do_publish_character(app):
             'x': int(app.x), 'y': int(app.y),
             'name': app.name, 'score': app.score,
             'color': app.my_color})
-        add_log(app, 'pub ok: ' + _shorten(str(result), 60))
+        if isinstance(result, dict) and result.get('_status'):
+            add_log(app, 'publish ' + str(result.get('_status')) + ': ' + _shorten(str(result), 60))
+        else:
+            add_log(app, 'pub ok: ' + _shorten(str(result), 60))
     except Exception as err:
         add_log(app, 'publish: ' + str(err))
     app.publishing = False
@@ -390,9 +393,20 @@ async def do_collect(app, item_id):
     add_log(app, 'collected ' + str(item_id) + ' - score ' + str(app.score))
     if app.client is not None:
         try:
-            await app.client.publish_item_state({
+            claim = await app.client.claim_item_authority(item_id)
+            if isinstance(claim, dict) and claim.get('_status'):
+                add_log(app, 'claim ' + str(claim.get('_status')) + ': ' + _shorten(str(claim), 60))
+            res = await app.client.publish_item_state({
                 'item_id': item_id, 'x': int(item['x']), 'y': int(item['y']),
                 'collected': True, 'taken_by': app.client_id})
+            if isinstance(res, dict) and res.get('_status'):
+                add_log(app, 'item publish ' + str(res.get('_status')) + ': ' + _shorten(str(res), 60))
+            else:
+                add_log(app, 'item pub ok: ' + _shorten(str(res), 60))
+            try:
+                await app.client.release_item_authority(item_id)
+            except Exception:
+                pass
         except Exception as err:
             add_log(app, 'item publish: ' + str(err))
         await do_publish_character(app)

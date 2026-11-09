@@ -678,7 +678,12 @@ class MatchClient(object):
             body['timestamp'] = _now_ms()
         result = await self._http(
             'PATCH', '/api/multiplayer/character-state', body)
-        return _unwrap_action_data(result.get('data'))
+        data = _unwrap_action_data(result.get('data'))
+        # Don't hide 403/422 as "pub ok" — attach status so the app can log the real detail.
+        if not result.get('ok') and isinstance(data, dict):
+            data = dict(data)
+            data['_status'] = result.get('status')
+        return data
 
     async def publish_item_state(self, item_state, item_id=None):
         state = self._with_identity(item_state)
@@ -721,19 +726,41 @@ class MatchClient(object):
             body['timestamp'] = _now_ms()
         result = await self._http(
             'PATCH', '/api/multiplayer/item-state', body)
-        return _unwrap_action_data(result.get('data'))
+        data = _unwrap_action_data(result.get('data'))
+        if not result.get('ok') and isinstance(data, dict):
+            data = dict(data)
+            data['_status'] = result.get('status')
+        return data
 
     async def claim_item_authority(self, item_id):
         body = self._with_identity({'item_id': item_id})
+        if 'client_id' in body:
+            body['clientId'] = body['client_id']
+        if 'session_id' in body:
+            body['sessionId'] = body['session_id']
+        body['itemId'] = item_id
         result = await self._http(
             'PATCH', '/api/multiplayer/item-authority-claim', body)
-        return _unwrap_action_data(result.get('data'))
+        data = _unwrap_action_data(result.get('data'))
+        if not result.get('ok') and isinstance(data, dict):
+            data = dict(data)
+            data['_status'] = result.get('status')
+        return data
 
     async def release_item_authority(self, item_id):
         body = self._with_identity({'item_id': item_id})
+        if 'client_id' in body:
+            body['clientId'] = body['client_id']
+        if 'session_id' in body:
+            body['sessionId'] = body['session_id']
+        body['itemId'] = item_id
         result = await self._http(
             'PATCH', '/api/multiplayer/item-authority-release', body)
-        return _unwrap_action_data(result.get('data'))
+        data = _unwrap_action_data(result.get('data'))
+        if not result.get('ok') and isinstance(data, dict):
+            data = dict(data)
+            data['_status'] = result.get('status')
+        return data
 
     async def publish(self, state, kind='character'):
         if kind == 'item':
