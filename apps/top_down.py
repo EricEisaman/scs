@@ -151,13 +151,20 @@ def _parse_character(app, entry, fallback_id=None):
     # Server may nest the state: {state: {x, y, ...}} / {data: {...}}
     # / {character_state: {...}}. Unwrap so x/y/name still read.
     src = entry
-    for nest in ('updates', 'state', 'data', 'character_state', 'character', 'value'):
-        if isinstance(entry.get(nest), dict):
-            merged = {}
-            merged.update(entry[nest])
-            merged.update(entry)
-            src = merged
-            break
+    # Server broadcasts updates as a LIST: {updates: [{x, y, ...}]}
+    if isinstance(entry.get('updates'), list) and len(entry['updates']) > 0 and isinstance(entry['updates'][0], dict):
+        merged = {}
+        merged.update(entry['updates'][0])
+        merged.update(entry)
+        src = merged
+    else:
+        for nest in ('updates', 'state', 'data', 'character_state', 'character', 'value'):
+            if isinstance(entry.get(nest), dict):
+                merged = {}
+                merged.update(entry[nest])
+                merged.update(entry)
+                src = merged
+                break
     cid = src.get('character_id')
     if cid is None:
         cid = src.get('client_id')
@@ -210,13 +217,19 @@ def _parse_item(app, entry, fallback_id=None):
     if not isinstance(entry, dict):
         return
     src = entry
-    for nest in ('updates', 'state', 'data', 'item_state', 'item', 'value'):
-        if isinstance(entry.get(nest), dict):
-            merged = {}
-            merged.update(entry[nest])
-            merged.update(entry)
-            src = merged
-            break
+    if isinstance(entry.get('updates'), list) and len(entry['updates']) > 0 and isinstance(entry['updates'][0], dict):
+        merged = {}
+        merged.update(entry['updates'][0])
+        merged.update(entry)
+        src = merged
+    else:
+        for nest in ('updates', 'state', 'data', 'item_state', 'item', 'value'):
+            if isinstance(entry.get(nest), dict):
+                merged = {}
+                merged.update(entry[nest])
+                merged.update(entry)
+                src = merged
+                break
     iid = src.get('item_id')
     if iid is None:
         iid = src.get('id')

@@ -613,10 +613,13 @@ class MatchClient(object):
         if isinstance(character_state, dict) and isinstance(character_state.get('updates'), list):
             updates = character_state['updates']
         else:
-            updates = []
+            # Server: updates is a list of character-state dicts.
+            # e.g. updates=[{x, y, name, score, color}]
+            one = {}
             for key in state:
                 if key not in ('client_id', 'session_id', 'character_id', 'updates', 'timestamp'):
-                    updates.append({'field': key, 'key': key, 'path': '/' + str(key), 'op': 'replace', 'value': state[key]})
+                    one[key] = state[key]
+            updates = [one]
         body = {}
         for key in ('client_id', 'session_id', 'character_id'):
             if key in state:
@@ -637,10 +640,11 @@ class MatchClient(object):
         if isinstance(item_state, dict) and isinstance(item_state.get('updates'), list):
             updates = item_state['updates']
         else:
-            updates = []
+            one = {}
             for key in state:
                 if key not in ('client_id', 'session_id', 'item_id', 'updates', 'timestamp'):
-                    updates.append({'field': key, 'key': key, 'path': '/' + str(key), 'op': 'replace', 'value': state[key]})
+                    one[key] = state[key]
+            updates = [one]
         body = {}
         for key in ('client_id', 'session_id', 'item_id'):
             if key in state:
