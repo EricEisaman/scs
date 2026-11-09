@@ -610,13 +610,13 @@ class MatchClient(object):
             state['character_id'] = character_id
         elif 'character_id' not in state and self.client_id:
             state['character_id'] = self.client_id
-        if isinstance(character_state, dict) and isinstance(character_state.get('updates'), dict):
+        if isinstance(character_state, dict) and isinstance(character_state.get('updates'), list):
             updates = character_state['updates']
         else:
-            updates = {}
+            updates = []
             for key in state:
                 if key not in ('client_id', 'session_id', 'character_id', 'updates', 'timestamp'):
-                    updates[key] = state[key]
+                    updates.append({'field': key, 'key': key, 'path': '/' + str(key), 'op': 'replace', 'value': state[key]})
         body = {}
         for key in ('client_id', 'session_id', 'character_id'):
             if key in state:
@@ -634,13 +634,13 @@ class MatchClient(object):
         state = self._with_identity(item_state)
         if item_id is not None:
             state['item_id'] = item_id
-        if isinstance(item_state, dict) and isinstance(item_state.get('updates'), dict):
+        if isinstance(item_state, dict) and isinstance(item_state.get('updates'), list):
             updates = item_state['updates']
         else:
-            updates = {}
+            updates = []
             for key in state:
                 if key not in ('client_id', 'session_id', 'item_id', 'updates', 'timestamp'):
-                    updates[key] = state[key]
+                    updates.append({'field': key, 'key': key, 'path': '/' + str(key), 'op': 'replace', 'value': state[key]})
         body = {}
         for key in ('client_id', 'session_id', 'item_id'):
             if key in state:
