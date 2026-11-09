@@ -403,7 +403,7 @@ async def do_join(app):
             game_mode=GAME_MODE,
             max_players_per_room=8,
             min_players_per_room=1,
-            requires_matchmaking=True)
+            requires_matchmaking=False)
         app.client_id = client.client_id
         app.session_id = client.session_id
         app.room_id = client.room_id
