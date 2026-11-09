@@ -181,8 +181,10 @@ def add_log(app, message):
 
 
 def _camera(app):
-    cam_x = _clamp(app.x - VIEW_W // 2, 0, WORLD_W - VIEW_W)
-    cam_y = _clamp(app.y - VIEW_H // 2, 0, WORLD_H - VIEW_H)
+    # Coerce: VIEW_*/WORLD_* may arrive as JS strings in Brython — float() forces numeric add.
+    _vw = float(VIEW_W); _vh = float(VIEW_H); _ww = float(WORLD_W); _wh = float(WORLD_H)
+    cam_x = _clamp(float(app.x) - _vw / 2, 0, _ww - _vw)
+    cam_y = _clamp(float(app.y) - _vh / 2, 0, _wh - _vh)
     return cam_x, cam_y
 
 
@@ -665,7 +667,7 @@ async def do_collect(app, item_id):
                 'collectedByClientId': app.client_id, 'collected_by_client_id': app.client_id,
                 'taken_by': app.client_id, 'takenBy': app.client_id})
             if isinstance(res, dict) and res.get('_status'):
-                add_log(app, 'item publish ' + str(res.get('_status')) + ': ' + _shorten(str(res), 60))
+                add_log(app, 'item publish ' + str(res.get('_status')) + ': ' + str(res))
             else:
                 add_log(app, 'item pub ok: ' + _shorten(str(res), 60))
             try:
@@ -773,7 +775,9 @@ async def do_join(app):
         app.match_status = client.match_status
         app.queue_position = client.queue_position
         app.client = client
-        app.my_color = _color_for_id(app.client_id, 0)
+        # DO NOT reassign my_color on join — the avatar colour is fixed at
+        # onAppStart (PLAYER_COLORS[0]). Reassigning to _color_for_id(client_id)
+        # made the square change colour the moment you joined.
         # KEEP EXACT POSITION: do NOT teleport to _spawn_for_id on join.
         # Where you are when you press Join IS your join position. The next
         # publish sends this exact app.x/app.y. Old line overwrote it with
@@ -1008,38 +1012,42 @@ def redrawAll(app):
     drawLabel('Score: ' + str(app.score) + '  Players: ' + str(len(app.players) + 1) + '  ' + app.stream_status,
               810, 82, size=12, fill=rgb(214, 224, 255), align='leftTop')
     cam_x, cam_y = _camera(app)
-    drawRect(VIEW_X, VIEW_Y, VIEW_W, VIEW_H, fill=rgb(24, 38, 28))
+    # Coerced locals — never use raw VIEW_X/VIEW_Y in arithmetic below.
+    # Raw globals may be JS strings ("110") in the browser: "110" + 590 = "110590" -> sy 110201.
+    _VX = float(VIEW_X); _VY = float(VIEW_Y); _VW = float(VIEW_W); _VH = float(VIEW_H)
+    _cx = float(cam_x); _cy = float(cam_y)
+    drawRect(_VX, _VY, _VW, _VH, fill=rgb(24, 38, 28))
     for gx in range(0, WORLD_W + 1, 200):
-        sx = VIEW_X + gx - cam_x
-        if VIEW_X <= sx <= VIEW_X + VIEW_W:
-            drawLine(sx, VIEW_Y, sx, VIEW_Y + VIEW_H, fill=rgb(40, 58, 44), lineWidth=1)
+        sx = _VX + gx - _cx
+        if _VX <= sx <= _VX + _VW:
+            drawLine(sx, _VY, sx, _VY + _VH, fill=rgb(40, 58, 44), lineWidth=1)
     for gy in range(0, WORLD_H + 1, 200):
-        sy = VIEW_Y + gy - cam_y
-        if VIEW_Y <= sy <= VIEW_Y + VIEW_H:
-            drawLine(VIEW_X, sy, VIEW_X + VIEW_W, sy, fill=rgb(40, 58, 44), lineWidth=1)
+        sy = _VY + gy - _cy
+        if _VY <= sy <= _VY + _VH:
+            drawLine(_VX, sy, _VX + _VW, sy, fill=rgb(40, 58, 44), lineWidth=1)
     # World border, clipped to view — old full 2000x1400 rect bled into header/footer.
-    wx0 = VIEW_X - cam_x
-    wy0 = VIEW_Y - cam_y
-    wx1 = wx0 + WORLD_W
-    wy1 = wy0 + WORLD_H
-    if VIEW_Y <= wy0 <= VIEW_Y + VIEW_H:
-        drawLine(max(VIEW_X, wx0), wy0, min(VIEW_X + VIEW_W, wx1), wy0, fill=rgb(120, 180, 130), lineWidth=3)
-    if VIEW_Y <= wy1 <= VIEW_Y + VIEW_H:
-        drawLine(max(VIEW_X, wx0), wy1, min(VIEW_X + VIEW_W, wx1), wy1, fill=rgb(120, 180, 130), lineWidth=3)
-    if VIEW_X <= wx0 <= VIEW_X + VIEW_W:
-        drawLine(wx0, max(VIEW_Y, wy0), wx0, min(VIEW_Y + VIEW_H, wy1), fill=rgb(120, 180, 130), lineWidth=3)
-    if VIEW_X <= wx1 <= VIEW_X + VIEW_W:
-        drawLine(wx1, max(VIEW_Y, wy0), wx1, min(VIEW_Y + VIEW_H, wy1), fill=rgb(120, 180, 130), lineWidth=3)
+    wx0 = _VX - _cx
+    wy0 = _VY - _cy
+    wx1 = wx0 + float(WORLD_W)
+    wy1 = wy0 + float(WORLD_H)
+    if _VY <= wy0 <= _VY + _VH:
+        drawLine(max(_VX, wx0), wy0, min(_VX + _VW, wx1), wy0, fill=rgb(120, 180, 130), lineWidth=3)
+    if _VY <= wy1 <= _VY + _VH:
+        drawLine(max(_VX, wx0), wy1, min(_VX + _VW, wx1), wy1, fill=rgb(120, 180, 130), lineWidth=3)
+    if _VX <= wx0 <= _VX + _VW:
+        drawLine(wx0, max(_VY, wy0), wx0, min(_VY + _VH, wy1), fill=rgb(120, 180, 130), lineWidth=3)
+    if _VX <= wx1 <= _VX + _VW:
+        drawLine(wx1, max(_VY, wy0), wx1, min(_VY + _VH, wy1), fill=rgb(120, 180, 130), lineWidth=3)
     for iid in sorted(app.items.keys()):
         item = app.items[iid]
         if item['collected']:
             continue
-        sx = VIEW_X + item['x'] - cam_x
-        sy = VIEW_Y + item['y'] - cam_y
+        sx = _VX + float(item['x']) - _cx
+        sy = _VY + float(item['y']) - _cy
         # Strict view bounds — no 20px slack into header/footer.
-        if sx < VIEW_X or sx > VIEW_X + VIEW_W:
+        if sx < _VX or sx > _VX + _VW:
             continue
-        if sy < VIEW_Y or sy > VIEW_Y + VIEW_H:
+        if sy < _VY or sy > _VY + _VH:
             continue
         drawCircle(sx, sy, ITEM_R, fill=_to_rgb(item['color']), border='white', borderWidth=2)
         drawLabel('*', sx, sy, size=14, bold=True, fill='white')
@@ -1063,20 +1071,20 @@ def redrawAll(app):
             # the dot still shows. If neither shows, the loop is not running.
             # fill='red' is a named color, not a rgb() string — cannot fail on fill.
             drawCircle(sx, sy, 3, fill='red')
-        if sy - 30 >= VIEW_Y:
+        if sy - 30 >= _VY:
             drawLabel(name, sx + 1, sy - 30 + 1, size=13 if is_self else 12, bold=True, fill='black')
             drawLabel(name, sx, sy - 30, size=13 if is_self else 12, bold=True, fill='white')
-        if sy + 32 <= VIEW_Y + VIEW_H:
+        if sy + 32 <= _VY + _VH:
             drawLabel(str(score), sx + 1, sy + 32 + 1, size=12 if is_self else 11, bold=True, fill='black')
             drawLabel(str(score), sx, sy + 32, size=12 if is_self else 11, bold=True, fill=rgb(214, 224, 255))
-    me_x = VIEW_X + app.x - cam_x
-    me_y = VIEW_Y + app.y - cam_y
+    me_x = _VX + float(app.x) - _cx
+    me_y = _VY + float(app.y) - _cy
     _draw_player_square(me_x, me_y, app.my_color, app.name, app.score, True)
     for cid in sorted(app.players.keys()):
         other = app.players[cid]
         try:
-            sx = int(VIEW_X + float(other['x']) - cam_x)
-            sy = int(VIEW_Y + float(other['y']) - cam_y)
+            sx = int(_VX + float(other['x']) - _cx)
+            sy = int(_VY + float(other['y']) - _cy)
             # Draw-args log, change-detected (not time-throttled): proves the loop
             # ran and what coords it used. Awe @940,625 self @1060,660 -> scr 405,346.
             try:
