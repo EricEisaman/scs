@@ -51,7 +51,10 @@ WORLD_H = 1400
 VIEW_X = 0
 VIEW_Y = 110
 VIEW_W = 1050
-VIEW_H = 590
+# View ends where footer starts (652), not at 700 — old 590px view
+# overlapped the 48px footer, so player/gems at the bottom were drawn
+# under the footer rect and looked like they went off-screen.
+VIEW_H = APP_HEIGHT - VIEW_Y - 48
 
 PLAYER_R = 14
 ITEM_R = 11
@@ -813,16 +816,10 @@ def redrawAll(app):
         other = app.players[cid]
         sx = VIEW_X + other['x'] - cam_x
         sy = VIEW_Y + other['y'] - cam_y
-        # If the remote is off-screen, draw it clamped to the view edge so it
-        # still shows up — otherwise "moved but remote doesn't show" is just
-        # "remote is 800px away and the camera doesn't follow them".
-        offscreen = sx < VIEW_X or sx > VIEW_X + VIEW_W or sy < VIEW_Y or sy > VIEW_Y + VIEW_H
-        if offscreen:
-            ex = _clamp(sx, VIEW_X + 20, VIEW_X + VIEW_W - 20)
-            ey = _clamp(sy, VIEW_Y + 20, VIEW_Y + VIEW_H - 60)
-            drawRect(ex - 10, ey - 10, 20, 20, fill=other['color'], border='white', borderWidth=3)
-            drawLabel(other['name'] + ' >', ex, ey - 18, size=11, bold=True, fill='white')
-            continue
+        # NO edge clamping — it was shoving in-view remotes to the bottom
+        # edge with a 'player >' label. Draw where they actually are; SCS
+        # clips off-screen draws. If a remote is in-view it will show here.
+        # If it is truly off-screen it is correctly invisible.
         # Stacked remotes hide under self — nudge them aside so Players: 3
         # actually shows 2 dots, not 1.
         dx = sx - (VIEW_X + app.x - cam_x)
