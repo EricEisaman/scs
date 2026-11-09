@@ -613,12 +613,19 @@ class MatchClient(object):
         if isinstance(character_state, dict) and isinstance(character_state.get('updates'), list):
             updates = character_state['updates']
         else:
-            # Server: updates is a list of character-state dicts.
-            # e.g. updates=[{x, y, name, score, color}]
+            # Server rejects flat x/y/name/color. It wants vectors:
+            # updates=[{position:{x,y}, score:...}]
+            # score passed last round (not listed as unsupported).
+            # name/color are client-side only — don't send them.
             one = {}
+            if 'position' in state:
+                one['position'] = state['position']
+            elif 'x' in state or 'y' in state:
+                one['position'] = {'x': state.get('x'), 'y': state.get('y')}
             for key in state:
-                if key not in ('client_id', 'session_id', 'character_id', 'updates', 'timestamp'):
-                    one[key] = state[key]
+                if key in ('client_id', 'session_id', 'character_id', 'updates', 'timestamp', 'x', 'y', 'name', 'color', 'position'):
+                    continue
+                one[key] = state[key]
             updates = [one]
         body = {}
         for key in ('client_id', 'session_id', 'character_id'):
@@ -641,9 +648,14 @@ class MatchClient(object):
             updates = item_state['updates']
         else:
             one = {}
+            if 'position' in state:
+                one['position'] = state['position']
+            elif 'x' in state or 'y' in state:
+                one['position'] = {'x': state.get('x'), 'y': state.get('y')}
             for key in state:
-                if key not in ('client_id', 'session_id', 'item_id', 'updates', 'timestamp'):
-                    one[key] = state[key]
+                if key in ('client_id', 'session_id', 'item_id', 'updates', 'timestamp', 'x', 'y', 'position'):
+                    continue
+                one[key] = state[key]
             updates = [one]
         body = {}
         for key in ('client_id', 'session_id', 'item_id'):
