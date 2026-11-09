@@ -102,6 +102,19 @@ def _shorten(text, limit):
     return text[:limit - 3] + '...'
 
 
+def _to_rgb(c):
+    if not isinstance(c, str):
+        return c
+    s = c.strip()
+    if s.startswith('rgb(') and s.endswith(')'):
+        try:
+            parts = s[4:-1].split(',')
+            return rgb(int(float(parts[0])), int(float(parts[1])), int(float(parts[2])))
+        except Exception:
+            return c
+    return c
+
+
 def _clamp(value, low, high):
     if value < low:
         return low
@@ -406,7 +419,15 @@ def _parse_item(app, entry, fallback_id=None):
         iid = src.get('id')
     if iid is None:
         iid = fallback_id
+    _raw_iid = iid
+    if isinstance(iid, int):
+        iid = 'gem-' + str(iid)
+    elif isinstance(iid, str) and iid.isdigit():
+        iid = 'gem-' + iid
+    elif isinstance(iid, str) and iid.startswith('item-'):
+        iid = 'gem-' + iid[5:]
     if iid is None or iid not in app.items:
+        add_log(app, 'item patch DROPPED raw=' + _shorten(str(_raw_iid), 30) + ' mapped=' + _shorten(str(iid), 30))
         return
     collected = src.get('isCollected')
     if collected is None:
@@ -421,6 +442,7 @@ def _parse_item(app, entry, fallback_id=None):
         collected = False
     if collected is not None:
         app.items[iid]['collected'] = bool(collected)
+        add_log(app, 'item applied: ' + str(iid) + ' collected=' + str(bool(collected)) + ' taken_by=' + _shorten(str(app.items[iid].get('taken_by')), 20))
     taken_by = src.get('collectedByClientId')
     if taken_by is None:
         taken_by = src.get('collected_by_client_id')
@@ -527,13 +549,14 @@ def apply_realtime(app, signals):
                     _parse_character(app, _e)
                 else:
                     _parse_client_name(app, _e, fallback_id=None)
-        items = cand.get('items')
-        if isinstance(items, dict):
-            for key in items:
-                _parse_item(app, items[key], fallback_id=key)
-        elif isinstance(items, list):
-            for entry in items:
-                _parse_item(app, entry)
+        for _ik in ('items', 'itemStates', 'item_states', 'itemStatesMap', 'collections'):
+            _items = cand.get(_ik)
+            if isinstance(_items, dict):
+                for key in _items:
+                    _parse_item(app, _items[key], fallback_id=key)
+            elif isinstance(_items, list):
+                for entry in _items:
+                    _parse_item(app, entry)
         _it = cand.get('item')
         if isinstance(_it, dict):
             _parse_item(app, _it)
@@ -678,6 +701,9 @@ async def do_join(app):
                         _cl = signals['mp'].get('clients')
                         if isinstance(_cl, list) and len(_cl) > 0:
                             add_log(app, 'clients: list n=' + str(len(_cl)) + ' first=' + _shorten(str(_cl[0]), 120))
+                    _itkeys = [k for k in ('items', 'item', 'itemStates', 'item_states', 'collections') if k in signals['mp']]
+                    if _itkeys:
+                        add_log(app, 'mp item keys: ' + str(_itkeys) + ' val=' + _shorten(str(signals['mp'].get(_itkeys[0])), 160))
             if 'characters' in signals or 'items' in signals or 'mp' in signals:
                 try:
                     apply_realtime(app, signals)
@@ -990,7 +1016,7 @@ def redrawAll(app):
             continue
         if sy < VIEW_Y or sy > VIEW_Y + VIEW_H:
             continue
-        drawCircle(sx, sy, ITEM_R, fill=item['color'], border='white', borderWidth=2)
+        drawCircle(sx, sy, ITEM_R, fill=_to_rgb(item['color']), border='white', borderWidth=2)
         drawLabel('*', sx, sy, size=14, bold=True, fill='white')
     # NO TIMEOUTS — no prune. A remote stays until the server says it left.
     # Idle players don't publish when not moving, so any time-based prune
@@ -1005,7 +1031,7 @@ def redrawAll(app):
         try:
             sx = int(VIEW_X + float(other['x']) - cam_x)
             sy = int(VIEW_Y + float(other['y']) - cam_y)
-            drawRect(sx - PLAYER_R, sy - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=other['color'], border='white', borderWidth=3)
+            drawRect(sx - PLAYER_R, sy - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=_to_rgb(other['color']), border='white', borderWidth=3)
             if sy - 30 >= VIEW_Y:
                 drawLabel(other['name'], sx + 1, sy - 30 + 1, size=12, bold=True, fill='black')
                 drawLabel(other['name'], sx, sy - 30, size=12, bold=True, fill='white')
@@ -1016,7 +1042,7 @@ def redrawAll(app):
             add_log(app, 'draw remote ERR ' + str(cid)[:8] + ' ' + str(_derr) + ' entry=' + _shorten(str(other), 120))
     me_x = VIEW_X + app.x - cam_x
     me_y = VIEW_Y + app.y - cam_y
-    drawRect(me_x - PLAYER_R, me_y - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=app.my_color, border='white', borderWidth=3)
+    drawRect(me_x - PLAYER_R, me_y - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=_to_rgb(app.my_color), border='white', borderWidth=3)
     if me_y - 30 >= VIEW_Y:
         drawLabel(app.name, me_x + 1, me_y - 30 + 1, size=13, bold=True, fill='black')
         drawLabel(app.name, me_x, me_y - 30, size=13, bold=True, fill='white')
