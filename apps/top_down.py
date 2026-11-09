@@ -828,11 +828,19 @@ def redrawAll(app):
             sx = sx + 35
         # Players are SQUARES, gems are circles with '*'. Deliberately different
         # shapes so a gold gem (gem-3) can never be mistaken for a player again.
-        drawRect(sx - PLAYER_R, sy - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=other['color'], border='white', borderWidth=3)
+        drawRect(sx - PLAYER_R, sy - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=other.get('color') or 'red', border='white', borderWidth=3)
         if sy - 24 >= VIEW_Y:
             drawLabel(other['name'], sx, sy - 24, size=12, bold=True, fill='white')
         if sy + 26 <= VIEW_Y + VIEW_H:
             drawLabel(str(other['score']), sx, sy + 26, size=11, fill=rgb(214, 224, 255))
+    # HUD: camera-independent remote list — if world draw is buggy, this still shows them.
+    # Row of small squares at y=125, one per remote, with name below.
+    for _i, _cid in enumerate(sorted(app.players.keys())):
+        _o = app.players[_cid]
+        _hx = 20 + _i * 44
+        _hy = 125
+        drawRect(_hx, _hy, 28, 28, fill=_o.get('color') or 'red', border='white', borderWidth=2)
+        drawLabel(str(_o.get('name') or 'player') + '@' + str(int(_o['x'])) + ',' + str(int(_o['y'])), _hx + 14, _hy + 38, size=9, bold=True, fill='white')
     me_x = VIEW_X + app.x - cam_x
     me_y = VIEW_Y + app.y - cam_y
     drawRect(me_x - PLAYER_R, me_y - PLAYER_R, PLAYER_R * 2, PLAYER_R * 2, fill=app.my_color, border='white', borderWidth=3)
