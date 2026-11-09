@@ -160,9 +160,11 @@ def _color_for_id(client_id, index):
 
 
 def add_log(app, message):
-    app.log.append(_shorten(message, 72))
-    while len(app.log) > 7:
-        app.log.pop(0)
+    # CONSOLE ONLY — never draw logs on screen. SCS print() goes to the console.
+    try:
+        print('[top-down] ' + str(message))
+    except Exception:
+        pass
 
 
 def _camera(app):
@@ -196,6 +198,12 @@ def _parse_client_name(app, entry, fallback_id=None):
     meta = src.get('metadata')
     if isinstance(meta, dict):
         name = meta.get('name') or meta.get('display_name') or meta.get('character_name') or meta.get('displayName')
+    # SERVER: clients = [{"clientId": ..., "character": "<name>", ...}] — `character` IS the name string.
+    # CharacterState has no name field, so this is the ONLY place names come from.
+    if name is None and isinstance(src.get('character'), str) and src.get('character'):
+        name = src.get('character')
+    if name is None and isinstance(entry.get('character'), str) and entry.get('character'):
+        name = entry.get('character')
     if name is None:
         name = src.get('name') or src.get('display_name') or src.get('character_name') or src.get('displayName') or src.get('player_name') or src.get('displayName')
     if name is not None and cid in app.players:
@@ -291,6 +299,8 @@ def _parse_character(app, entry, fallback_id=None):
             _m0 = src.get('metadata')
             if isinstance(_m0, dict):
                 _nm0 = _m0.get('name') or _m0.get('display_name') or _m0.get('character_name') or _m0.get('displayName')
+            if _nm0 is None and isinstance(src.get('character'), str) and src.get('character'):
+                _nm0 = src.get('character')
             if _nm0 is None:
                 _nm0 = src.get('name') or src.get('display_name') or src.get('character_name') or src.get('displayName') or src.get('player_name')
             if _nm0 is not None and _cid0 in app.players:
@@ -302,6 +312,8 @@ def _parse_character(app, entry, fallback_id=None):
     meta = src.get('metadata')
     if isinstance(meta, dict):
         name = meta.get('name') or meta.get('display_name') or meta.get('character_name') or meta.get('displayName')
+    if name is None and isinstance(src.get('character'), str) and src.get('character'):
+        name = src.get('character')
     if name is None:
         name = src.get('name')
     if name is None:
@@ -936,14 +948,11 @@ def redrawAll(app):
         drawLabel(app.name, me_x, me_y - 24, size=13, bold=True, fill='white')
     if me_y + 26 <= VIEW_Y + VIEW_H:
         drawLabel(str(app.score), me_x, me_y + 26, size=12, bold=True, fill='white')
-    # Footer on a solid strip — a gem/player at the bottom edge used to
-    # paint over the log text (the cyan dot over the footer in the screenshot).
+    # Footer on a solid strip — keeps WASD hint readable over the map.
     drawRect(0, APP_HEIGHT - 48, APP_WIDTH, 48, fill=rgb(18, 18, 20))
     drawLabel('WASD / arrows to move. Touch a gem. Camera follows you.',
               40, APP_HEIGHT - 18, size=12, fill=rgb(214, 224, 255), align='left')
-    _dbg = ' | '.join([str(o['name']) + '@' + str(int(o['x'])) + ',' + str(int(o['y'])) for o in [app.players[k] for k in sorted(app.players.keys())]])
-    drawLabel('Log: ' + (' | '.join(app.log[-2:]) if len(app.log) > 0 else '') + (' | P: ' + _dbg if _dbg else ''),
-              40, APP_HEIGHT - 36, size=11, fill=rgb(180, 190, 210), align='left')
+    # No Log: / P: on screen — logs are console-only (see add_log).
     # Header redrawn last — header was drawn first, so map elements at the
     # top edge could paint over it. Redrawing it here guarantees it stays on top.
     drawRect(0, 0, APP_WIDTH, VIEW_Y, fill=rgb(18, 18, 20))
