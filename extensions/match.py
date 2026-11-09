@@ -50,6 +50,7 @@ disconnect_stream or leave.
 
 import json
 import random
+import time
 
 try:
     from browser import window
@@ -84,6 +85,19 @@ def make_player_id(name):
         clean = 'player'
     suffix = str(int(random.random() * 1000000))
     return clean + '-' + suffix
+
+
+def _now_ms():
+    try:
+        return int(time.time() * 1000)
+    except Exception:
+        pass
+    if window is not None:
+        try:
+            return int(window.Date.new().getTime())
+        except Exception:
+            pass
+    return 0
 
 
 def _loads(text):
@@ -589,21 +603,55 @@ class MatchClient(object):
 
     async def publish_character_state(self, character_state,
                                       character_id=None):
+        # Server requires {updates, timestamp} — flat x/y 422s.
+        # Caller passes flat {x, y, name, ...}, we wrap it.
         state = self._with_identity(character_state)
         if character_id is not None:
             state['character_id'] = character_id
         elif 'character_id' not in state and self.client_id:
             state['character_id'] = self.client_id
+        if isinstance(character_state, dict) and isinstance(character_state.get('updates'), dict):
+            updates = character_state['updates']
+        else:
+            updates = {}
+            for key in state:
+                if key not in ('client_id', 'session_id', 'character_id', 'updates', 'timestamp'):
+                    updates[key] = state[key]
+        body = {}
+        for key in ('client_id', 'session_id', 'character_id'):
+            if key in state:
+                body[key] = state[key]
+        body['updates'] = updates
+        if isinstance(character_state, dict) and character_state.get('timestamp') is not None:
+            body['timestamp'] = character_state['timestamp']
+        else:
+            body['timestamp'] = _now_ms()
         result = await self._http(
-            'PATCH', '/api/multiplayer/character-state', state)
+            'PATCH', '/api/multiplayer/character-state', body)
         return _unwrap_action_data(result.get('data'))
 
     async def publish_item_state(self, item_state, item_id=None):
         state = self._with_identity(item_state)
         if item_id is not None:
             state['item_id'] = item_id
+        if isinstance(item_state, dict) and isinstance(item_state.get('updates'), dict):
+            updates = item_state['updates']
+        else:
+            updates = {}
+            for key in state:
+                if key not in ('client_id', 'session_id', 'item_id', 'updates', 'timestamp'):
+                    updates[key] = state[key]
+        body = {}
+        for key in ('client_id', 'session_id', 'item_id'):
+            if key in state:
+                body[key] = state[key]
+        body['updates'] = updates
+        if isinstance(item_state, dict) and item_state.get('timestamp') is not None:
+            body['timestamp'] = item_state['timestamp']
+        else:
+            body['timestamp'] = _now_ms()
         result = await self._http(
-            'PATCH', '/api/multiplayer/item-state', state)
+            'PATCH', '/api/multiplayer/item-state', body)
         return _unwrap_action_data(result.get('data'))
 
     async def claim_item_authority(self, item_id):
