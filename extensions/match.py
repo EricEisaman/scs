@@ -2,8 +2,7 @@
 extensions.match -- SCS Extension: multiplayer over DataStar SSE + patches.
 
 Generic. No game in this file is named, no game shape is assumed,
-no game default is baked in. Dozens of apps can share it: some use
-turns, some do not. Each app passes its own game_id,
+no game default is baked in. Each app passes its own game_id,
 environment_name, player counts, game_mode, and config. When the
 caller passes config, it is used verbatim. When the caller does not,
 a config is built only from the values the caller actually passed;
@@ -32,6 +31,10 @@ Transport -- DataStar, event driven only:
     signals that do not already exist.
   * id: is stored as last_event_id and sent back as Last-Event-ID
     on the next stream the app opens.
+  * A one-shot action returns after its first patch-signals event.
+    The open stream delivers the rest. A one-shot action must not
+    stay open on a stream the server keeps open, or it would
+    block the gesture that sent it.
   * When a long-lived stream ends, it ends. It is not reopened
     here. The app reopens it only on a later user gesture, for
     example a Reconnect click. That keeps all reconnects
@@ -533,14 +536,16 @@ class MatchClient(object):
 
     async def _datastar_action(self, method, path, signals_body=None,
                               query_params=None, signals_for_get=None,
-                              long_lived=False):
+                              long_lived=False, stop_after_first_patch=False):
         """One DataStar action: fetch, read its SSE stream, apply patches.
 
-        The coroutine returns only when the server closes the stream.
-        For a one-shot action that is right away. For the long-lived
-        stream it stays open until the server closes it or the app
-        aborts it. Each patch is applied the moment its event
-        arrives; nothing here waits for the stream to end first.
+        The coroutine returns only when the server closes the stream,
+        unless stop_after_first_patch is set. With that set, it
+        returns after the first patch-signals event is applied and
+        cancels the reader. One-shot actions use that form: the
+        open stream delivers the rest. Each patch is applied the
+        moment its event arrives; nothing here waits for the
+        stream to end first.
         """
         if window is None:
             raise RuntimeError('extensions.match needs a browser (fetch)')
@@ -561,13 +566,13 @@ class MatchClient(object):
             self._abort_controller = controller
         try:
             resp = await window.fetch(url, opts_js)
-            await self._read_response(resp)
+            await self._read_response(resp, stop_after_first_patch)
         finally:
             if long_lived and self._abort_controller is controller:
                 self._abort_controller = None
         return self.signals_snapshot()
 
-    async def _read_response(self, resp):
+    async def _read_response(self, resp, stop_after_first_patch=False):
         content_type = ''
         try:
             content_type = str(resp.headers.get('content-type') or '')
@@ -575,7 +580,7 @@ class MatchClient(object):
             content_type = ''
         content_type = content_type.lower()
         if 'text/event-stream' in content_type:
-            await self._read_sse_body(resp)
+            await self._read_sse_body(resp, stop_after_first_patch)
             return
         text = ''
         try:
@@ -591,7 +596,7 @@ class MatchClient(object):
         if isinstance(patch, dict):
             self.apply_patch_signals(patch, False)
 
-    async def _read_sse_body(self, resp):
+    async def _read_sse_body(self, resp, stop_after_first_patch=False):
         reader = None
         try:
             reader = resp.body.getReader()
@@ -633,8 +638,16 @@ class MatchClient(object):
                 except Exception:
                     chunk = ''
             if chunk != '':
+                stop = False
                 for event in parser.feed(chunk):
-                    self._handle_event(event)
+                    if self._handle_event(event) and stop_after_first_patch:
+                        stop = True
+                if stop:
+                    try:
+                        reader.cancel()
+                    except Exception:
+                        pass
+                    break
         if decoder is not None:
             try:
                 tail = str(decoder.decode())
@@ -655,7 +668,7 @@ class MatchClient(object):
 
     def _handle_event(self, event):
         if not isinstance(event, dict):
-            return
+            return False
         if event.get('id') is not None:
             self.last_event_id = event['id']
         event_type = event.get('event') or 'message'
@@ -664,28 +677,32 @@ class MatchClient(object):
             patch, only_if_missing = parse_patch_signals_data(data)
             if patch is not None:
                 self.apply_patch_signals(patch, only_if_missing)
-            return
+                return True
+            return False
         if event_type == 'datastar-patch-elements':
             elements = parse_patch_elements_data(data)
             self.apply_patch_elements(elements)
-            return
+            return False
         if event_type == 'message':
             text = str(data).strip()
             if text.startswith('signals '):
                 patch, only_if_missing = parse_patch_signals_data(text)
                 if patch is not None:
                     self.apply_patch_signals(patch, only_if_missing)
-                return
+                    return True
+                return False
             if text.startswith('{'):
                 patch = _loads(text)
                 if isinstance(patch, dict):
                     self.apply_patch_signals(patch, False)
-                    return
+                    return True
+                return False
         if self.on_signal is not None:
             try:
                 self.on_signal({'event': event_type, 'data': data})
             except Exception:
                 pass
+        return False
 
     def apply_patch_signals(self, patch, only_if_missing=False):
         if not isinstance(patch, dict):
@@ -870,9 +887,11 @@ class MatchClient(object):
         """Send one turn action. The result arrives as server patches.
 
         The client does not decide acceptance, winner, or draw.
-        It sends the action and waits for the patch stream that
-        carries the server decision. Shared state is only ever
-        changed by those patches.
+        It sends the action and the patch stream carries the
+        server decision. Shared state is only ever changed by
+        those patches. This call returns after the first patch,
+        so a one-shot action never blocks the gesture that
+        sent it; the open stream delivers the rest.
         """
         if payload is None:
             payload = {}
@@ -885,7 +904,8 @@ class MatchClient(object):
         if claimed_end_reason is not None:
             body['claimed_end_reason'] = claimed_end_reason
         await self._datastar_action(
-            'POST', '/api/multiplayer/turn/action', body)
+            'POST', '/api/multiplayer/turn/action', body,
+            stop_after_first_patch=True)
         return self.signals_snapshot()
 
     async def send_move(self, payload, proposed_state=None,
@@ -922,7 +942,8 @@ class MatchClient(object):
         elif 'character_id' not in state and self.client_id:
             state['character_id'] = self.client_id
         await self._datastar_action(
-            'PATCH', '/api/multiplayer/character-state', state)
+            'PATCH', '/api/multiplayer/character-state', state,
+            stop_after_first_patch=True)
         return self.signals_snapshot()
 
     async def publish_item_state(self, item_state, item_id=None):
@@ -930,19 +951,22 @@ class MatchClient(object):
         if item_id is not None:
             state['item_id'] = item_id
         await self._datastar_action(
-            'PATCH', '/api/multiplayer/item-state', state)
+            'PATCH', '/api/multiplayer/item-state', state,
+            stop_after_first_patch=True)
         return self.signals_snapshot()
 
     async def claim_item_authority(self, item_id):
         body = self._with_identity({'item_id': item_id})
         await self._datastar_action(
-            'PATCH', '/api/multiplayer/item-authority-claim', body)
+            'PATCH', '/api/multiplayer/item-authority-claim', body,
+            stop_after_first_patch=True)
         return self.signals_snapshot()
 
     async def release_item_authority(self, item_id):
         body = self._with_identity({'item_id': item_id})
         await self._datastar_action(
-            'PATCH', '/api/multiplayer/item-authority-release', body)
+            'PATCH', '/api/multiplayer/item-authority-release', body,
+            stop_after_first_patch=True)
         return self.signals_snapshot()
 
     async def publish(self, state, kind='character'):
@@ -1007,7 +1031,8 @@ class MatchClient(object):
     async def leave(self):
         try:
             await self._datastar_action(
-                'POST', '/api/multiplayer/leave', {})
+                'POST', '/api/multiplayer/leave', {},
+                stop_after_first_patch=True)
         except Exception as err:
             self.last_error = str(err)
         self.disconnect_stream()

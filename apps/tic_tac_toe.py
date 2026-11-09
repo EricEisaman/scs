@@ -41,7 +41,7 @@ LEAVE_RECT = (690, 82, 120, 36)
 REMATCH_RECT = (820, 82, 140, 36)
 PASS_RECT = (560, 250, 180, 36)
 RESIGN_RECT = (760, 250, 180, 36)
-RECONNECT_RECT = (560, 316, 180, 36)
+RECONNECT_RECT = (760, 316, 180, 36)
 
 PANEL_X = 540
 PANEL_Y = 160
@@ -108,20 +108,23 @@ def _shorten(text, limit):
 
 
 def _cell_at(x, y):
+    x = int(x)
+    y = int(y)
     if x < BOARD_X or y < BOARD_Y:
         return None
     if x >= BOARD_X + BOARD_W or y >= BOARD_Y + BOARD_H:
         return None
-    col = (x - BOARD_X) // (CELL + GAP)
-    row = (y - BOARD_Y) // (CELL + GAP)
+    col = int((x - BOARD_X) // (CELL + GAP))
+    row = int((y - BOARD_Y) // (CELL + GAP))
     local_x = (x - BOARD_X) % (CELL + GAP)
     local_y = (y - BOARD_Y) % (CELL + GAP)
     if local_x >= CELL or local_y >= CELL:
         return None
-    return row * 3 + col
+    return int(row * 3 + col)
 
 
 def _cell_rect(index):
+    index = int(index)
     col = index % 3
     row = index // 3
     x = BOARD_X + col * (CELL + GAP)
@@ -204,7 +207,7 @@ def apply_mp(app, mp):
     if isinstance(state, dict):
         board = state.get('board')
         if isinstance(board, list) and len(board) == 9:
-            app.board = [str(v) for v in board]
+            app.board = ['' if v is None else str(v) for v in board]
     app.current_player_id = ts.get('current_player_id')
     app.turn_number = ts.get('turn_number')
     app.phase = ts.get('phase')
@@ -247,6 +250,18 @@ def _on_stream_close_callback(app):
     app.stream_open = False
     app.stream_status = 'Stream: closed - Reconnect to reopen'
     add_log(app, 'stream closed')
+
+
+def _start_background(app, coro):
+    try:
+        return aio.create_task(coro)
+    except Exception:
+        pass
+    try:
+        aio.run(coro)
+    except Exception as err:
+        add_log(app, 'stream start failed: ' + str(err))
+    return None
 
 
 async def do_join(app):
@@ -298,7 +313,7 @@ async def do_join(app):
         else:
             app.status = 'Matched!'
         add_log(app, 'joined: ' + _shorten(str(data), 100))
-        aio.run(client.connect_stream())
+        _start_background(app, client.connect_stream())
     except Exception as err:
         add_log(app, 'join failed: ' + str(err))
         app.status = 'Join failed - see log.'
@@ -307,30 +322,43 @@ async def do_join(app):
 
 
 async def do_move(app, cell):
+    cell = int(cell)
+    add_log(app, 'cell ' + str(cell) + ' clicked')
     if app.client is None or app.my_mark is None:
         add_log(app, 'not matched yet')
         return
+    if cell < 0 or cell > 8:
+        add_log(app, 'cell out of range: ' + str(cell))
+        return
     if app.board[cell] != '':
+        add_log(app, 'cell ' + str(cell) + ' occupied: ' + str(app.board[cell]))
         return
     if app.sending:
+        add_log(app, 'move already sending')
+        return
+    if app.current_player_id != app.client_id:
+        add_log(app, 'not your turn')
+        return
+    if app.phase == 'finished':
+        add_log(app, 'game finished')
         return
     app.sending = True
-    next_board = list(app.board)
-    next_board[cell] = app.my_mark
-    winner = winner_of(next_board)
-    draw = False
-    if winner is None:
-        draw = is_draw_board(next_board)
-    marks = marks_for(app.turn_order)
-    end_reason = None
-    if winner is not None:
-        end_reason = 'win'
-    elif draw:
-        end_reason = 'draw'
-    claimed_winner = None
-    if winner is not None:
-        claimed_winner = app.client_id
     try:
+        next_board = list(app.board)
+        next_board[cell] = app.my_mark
+        winner = winner_of(next_board)
+        draw = False
+        if winner is None:
+            draw = is_draw_board(next_board)
+        marks = marks_for(app.turn_order)
+        end_reason = None
+        if winner is not None:
+            end_reason = 'win'
+        elif draw:
+            end_reason = 'draw'
+        claimed_winner = None
+        if winner is not None:
+            claimed_winner = app.client_id
         data = await app.client.send_turn_action(
             'move',
             payload={'cell': cell, 'mark': app.my_mark},
@@ -341,7 +369,8 @@ async def do_move(app, cell):
         add_log(app, 'move sent: ' + _shorten(str(data), 100))
     except Exception as err:
         add_log(app, 'move failed: ' + str(err))
-    app.sending = False
+    finally:
+        app.sending = False
 
 
 async def do_pass(app):
@@ -403,7 +432,7 @@ async def do_reconnect(app):
         return
     if app.stream_open:
         return
-    aio.run(app.client.connect_stream())
+    _start_background(app, app.client.connect_stream())
 
 
 def onAppStart(app):
@@ -438,6 +467,8 @@ def onAppStart(app):
 
 
 def onMousePress(app, x, y):
+    x = int(x)
+    y = int(y)
     if _inside(x, y, NAME_RECT):
         app.focus = 'name'
         return
@@ -485,14 +516,6 @@ def onMousePress(app, x, y):
     cell = _cell_at(x, y)
     if cell is not None:
         app.focus = None
-        if app.client is None or app.match_status != 'matched':
-            add_log(app, 'not matched yet')
-            return
-        if app.phase == 'finished':
-            return
-        if app.current_player_id != app.client_id:
-            add_log(app, 'not your turn')
-            return
         aio.run(do_move(app, cell))
         return
     app.focus = None
@@ -634,7 +657,7 @@ def redrawAll(app):
     drawRect(PANEL_X + 16, PANEL_Y + 204, PANEL_W - 32, 200, fill=rgb(10, 10, 10), border=rgb(68, 68, 78), borderWidth=1, roundness=6)
     for i in range(len(app.log)):
         drawLabel(app.log[i], PANEL_X + 26, PANEL_Y + 226 + i * 28, size=12, fill=rgb(214, 255, 214), align='leftTop')
-    drawLabel('Click a cell on your turn. Keys: Enter Join, P Pass, R Rematch, C Reconnect, Esc stop editing.',
+    drawLabel('Click a cell on your turn. Keys: Enter Join, P Pass, R Rematch, C Reconnect.',
               PANEL_X + 16, PANEL_Y + 404, size=12, fill=rgb(214, 224, 255), align='leftTop')
     drawLabel('X goes first. Server decides win / draw / rejected moves.',
               PANEL_X + 16, PANEL_Y + 428, size=12, fill=rgb(214, 224, 255), align='leftTop')
