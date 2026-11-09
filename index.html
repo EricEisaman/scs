@@ -84,6 +84,22 @@ def _mm(ev):
         _call('onMouseDrag', scs._app, x, y)
     _call('onMouseMove', scs._app, x, y)
 
+def _norm_key(raw):
+    if raw == ' ':
+        return 'space'
+    if len(raw) == 1:
+        return raw
+    low = raw.lower()
+    if low == 'arrowleft':
+        return 'left'
+    if low == 'arrowright':
+        return 'right'
+    if low == 'arrowup':
+        return 'up'
+    if low == 'arrowdown':
+        return 'down'
+    return low
+
 def _kp(ev):
     if scs._app is None:
         return
@@ -93,19 +109,7 @@ def _kp(ev):
             return
     except:
         pass
-    k = ev.key
-    if k == ' ':
-        k = 'space'
-    else:
-        k = k.lower()
-        if k == 'arrowleft':
-            k = 'left'
-        elif k == 'arrowright':
-            k = 'right'
-        elif k == 'arrowup':
-            k = 'up'
-        elif k == 'arrowdown':
-            k = 'down'
+    k = _norm_key(ev.key)
     if k not in _pressed_keys:
         _pressed_keys.add(k)
         _call('onKeyPress', scs._app, k)
@@ -113,19 +117,7 @@ def _kp(ev):
 def _kr(ev):
     if scs._app is None:
         return
-    k = ev.key
-    if k == ' ':
-        k = 'space'
-    else:
-        k = k.lower()
-        if k == 'arrowleft':
-            k = 'left'
-        elif k == 'arrowright':
-            k = 'right'
-        elif k == 'arrowup':
-            k = 'up'
-        elif k == 'arrowdown':
-            k = 'down'
+    k = _norm_key(ev.key)
     if k in _pressed_keys:
         _pressed_keys.discard(k)
     _call('onKeyRelease', scs._app, k)
