@@ -696,7 +696,11 @@ class MatchClient(object):
             elif 'x' in state or 'y' in state:
                 one['position'] = [state.get('x'), state.get('y')]
             for key in state:
-                if key in ('client_id', 'session_id', 'item_id', 'updates', 'timestamp', 'x', 'y', 'position'):
+                # taken_by / collected_by are NOT allowed inside updates —
+                # same pattern as characterId (server 422s unsupported fields).
+                # Server can infer who took it from top-level clientId.
+                if key in ('client_id', 'session_id', 'item_id', 'updates', 'timestamp', 'x', 'y', 'position',
+                           'taken_by', 'takenBy', 'collected_by', 'collectedBy'):
                     continue
                 one[key] = state[key]
             updates = [one]

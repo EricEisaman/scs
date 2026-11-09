@@ -153,9 +153,13 @@ def _parse_character(app, entry, fallback_id=None):
     src = entry
     # Server broadcasts updates as a LIST: {updates: [{x, y, ...}]}
     if isinstance(entry.get('updates'), list) and len(entry['updates']) > 0 and isinstance(entry['updates'][0], dict):
+        # Fresh updates win: entry first, then updates[0] on top.
+        # Old order did updates first, then entry — so a stale top-level
+        # position in the broadcast overwrote the fresh update and the
+        # remote player looked stuck at spawn.
         merged = {}
-        merged.update(entry['updates'][0])
         merged.update(entry)
+        merged.update(entry['updates'][0])
         src = merged
     else:
         for nest in ('updates', 'state', 'data', 'character_state', 'character', 'value'):
@@ -193,6 +197,9 @@ def _parse_character(app, entry, fallback_id=None):
             x = pos[0]
         if y is None:
             y = pos[1]
+    # Name is NOT in position updates (server rejects it), so an update
+    # with no name must NOT overwrite a name we already learned from a
+    # join event. Only use a name if this packet actually carries one.
     name = src.get('name')
     if name is None:
         name = src.get('display_name')
@@ -201,7 +208,8 @@ def _parse_character(app, entry, fallback_id=None):
     if name is None:
         name = src.get('displayName')
     if name is None:
-        name = 'player'
+        name = src.get('player_name')
+    has_name = name is not None
     score = src.get('score')
     if score is None and isinstance(src.get('stats'), dict):
         score = src['stats'].get('score')
@@ -215,7 +223,9 @@ def _parse_character(app, entry, fallback_id=None):
         old['x'] = float(x)
     if isinstance(y, (int, float)):
         old['y'] = float(y)
-    old['name'] = str(name)
+    if has_name:
+        old['name'] = str(name)
+    # If this update had no name, keep the one we already have (or 'player' on first sight).
     if isinstance(score, (int, float)):
         old['score'] = int(score)
     if isinstance(color, str) and color != '':
@@ -228,8 +238,8 @@ def _parse_item(app, entry, fallback_id=None):
     src = entry
     if isinstance(entry.get('updates'), list) and len(entry['updates']) > 0 and isinstance(entry['updates'][0], dict):
         merged = {}
-        merged.update(entry['updates'][0])
         merged.update(entry)
+        merged.update(entry['updates'][0])
         src = merged
     else:
         for nest in ('updates', 'state', 'data', 'item_state', 'item', 'value'):
@@ -240,6 +250,8 @@ def _parse_item(app, entry, fallback_id=None):
                 src = merged
                 break
     iid = src.get('item_id')
+    if iid is None:
+        iid = src.get('itemId')
     if iid is None:
         iid = src.get('id')
     if iid is None:
@@ -258,9 +270,15 @@ def _parse_item(app, entry, fallback_id=None):
     app.items[iid]['collected'] = bool(collected)
     taken_by = src.get('taken_by')
     if taken_by is None:
+        taken_by = src.get('takenBy')
+    if taken_by is None:
         taken_by = src.get('collected_by')
     if taken_by is None:
+        taken_by = src.get('collectedBy')
+    if taken_by is None:
         taken_by = src.get('client_id')
+    if taken_by is None:
+        taken_by = src.get('clientId')
     if taken_by is not None:
         app.items[iid]['taken_by'] = str(taken_by)
 
@@ -676,17 +694,29 @@ def redrawAll(app):
         sy = VIEW_Y + gy - cam_y
         if VIEW_Y <= sy <= VIEW_Y + VIEW_H:
             drawLine(VIEW_X, sy, VIEW_X + VIEW_W, sy, fill=rgb(40, 58, 44), lineWidth=1)
-    drawRect(VIEW_X + 0 - cam_x, VIEW_Y + 0 - cam_y, WORLD_W, WORLD_H,
-             fill=None, border=rgb(120, 180, 130), borderWidth=3)
+    # World border, clipped to view — old full 2000x1400 rect bled into header/footer.
+    wx0 = VIEW_X - cam_x
+    wy0 = VIEW_Y - cam_y
+    wx1 = wx0 + WORLD_W
+    wy1 = wy0 + WORLD_H
+    if VIEW_Y <= wy0 <= VIEW_Y + VIEW_H:
+        drawLine(max(VIEW_X, wx0), wy0, min(VIEW_X + VIEW_W, wx1), wy0, fill=rgb(120, 180, 130), lineWidth=3)
+    if VIEW_Y <= wy1 <= VIEW_Y + VIEW_H:
+        drawLine(max(VIEW_X, wx0), wy1, min(VIEW_X + VIEW_W, wx1), wy1, fill=rgb(120, 180, 130), lineWidth=3)
+    if VIEW_X <= wx0 <= VIEW_X + VIEW_W:
+        drawLine(wx0, max(VIEW_Y, wy0), wx0, min(VIEW_Y + VIEW_H, wy1), fill=rgb(120, 180, 130), lineWidth=3)
+    if VIEW_X <= wx1 <= VIEW_X + VIEW_W:
+        drawLine(wx1, max(VIEW_Y, wy0), wx1, min(VIEW_Y + VIEW_H, wy1), fill=rgb(120, 180, 130), lineWidth=3)
     for iid in sorted(app.items.keys()):
         item = app.items[iid]
         if item['collected']:
             continue
         sx = VIEW_X + item['x'] - cam_x
         sy = VIEW_Y + item['y'] - cam_y
-        if sx < VIEW_X - 20 or sx > VIEW_X + VIEW_W + 20:
+        # Strict view bounds — no 20px slack into header/footer.
+        if sx < VIEW_X or sx > VIEW_X + VIEW_W:
             continue
-        if sy < VIEW_Y - 20 or sy > VIEW_Y + VIEW_H + 20:
+        if sy < VIEW_Y or sy > VIEW_Y + VIEW_H:
             continue
         drawCircle(sx, sy, ITEM_R, fill=item['color'], border='white', borderWidth=2)
         drawLabel('*', sx, sy, size=14, bold=True, fill='white')
@@ -694,22 +724,41 @@ def redrawAll(app):
         other = app.players[cid]
         sx = VIEW_X + other['x'] - cam_x
         sy = VIEW_Y + other['y'] - cam_y
-        if sx < VIEW_X - 30 or sx > VIEW_X + VIEW_W + 30:
+        if sx < VIEW_X or sx > VIEW_X + VIEW_W:
             continue
-        if sy < VIEW_Y - 30 or sy > VIEW_Y + VIEW_H + 30:
+        if sy < VIEW_Y or sy > VIEW_Y + VIEW_H:
             continue
         drawCircle(sx, sy, PLAYER_R, fill=other['color'], border='white', borderWidth=2)
-        drawLabel(other['name'], sx, sy - 24, size=12, bold=True, fill='white')
-        drawLabel(str(other['score']), sx, sy + 26, size=11, fill=rgb(214, 224, 255))
+        if sy - 24 >= VIEW_Y:
+            drawLabel(other['name'], sx, sy - 24, size=12, bold=True, fill='white')
+        if sy + 26 <= VIEW_Y + VIEW_H:
+            drawLabel(str(other['score']), sx, sy + 26, size=11, fill=rgb(214, 224, 255))
     me_x = VIEW_X + app.x - cam_x
     me_y = VIEW_Y + app.y - cam_y
     drawCircle(me_x, me_y, PLAYER_R, fill=app.my_color, border='white', borderWidth=3)
-    drawLabel(app.name, me_x, me_y - 24, size=13, bold=True, fill='white')
-    drawLabel(str(app.score), me_x, me_y + 26, size=12, bold=True, fill='white')
+    if me_y - 24 >= VIEW_Y:
+        drawLabel(app.name, me_x, me_y - 24, size=13, bold=True, fill='white')
+    if me_y + 26 <= VIEW_Y + VIEW_H:
+        drawLabel(str(app.score), me_x, me_y + 26, size=12, bold=True, fill='white')
+    # Footer on a solid strip — a gem/player at the bottom edge used to
+    # paint over the log text (the cyan dot over the footer in the screenshot).
+    drawRect(0, APP_HEIGHT - 48, APP_WIDTH, 48, fill=rgb(18, 18, 20))
     drawLabel('WASD / arrows to move. Touch a gem. Camera follows you.',
               40, APP_HEIGHT - 18, size=12, fill=rgb(214, 224, 255), align='left')
     drawLabel('Log: ' + (' | '.join(app.log[-2:]) if len(app.log) > 0 else ''),
               40, APP_HEIGHT - 36, size=11, fill=rgb(180, 190, 210), align='left')
+    # Header redrawn last — header was drawn first, so map elements at the
+    # top edge could paint over it. Redrawing it here guarantees it stays on top.
+    drawRect(0, 0, APP_WIDTH, VIEW_Y, fill=rgb(18, 18, 20))
+    drawLabel('Top-Down - Realtime - MatchGod', APP_WIDTH // 2, 24, size=24, bold=True, fill='white')
+    _draw_field(NAME_RECT, 'Name', app.name, app.focus == 'name')
+    _draw_button(JOIN_RECT, 'Join', not joined and not app.joining)
+    _draw_button(LEAVE_RECT, 'Leave', joined)
+    _draw_button(RESPAWN_RECT, 'Respawn', True)
+    _draw_button(RECONNECT_RECT, 'Reconnect', joined)
+    drawLabel(app.status, 810, 62, size=12, bold=True, fill=rgb(214, 224, 255), align='leftTop')
+    drawLabel('Score: ' + str(app.score) + '  Players: ' + str(len(app.players) + 1) + '  ' + app.stream_status,
+              810, 82, size=12, fill=rgb(214, 224, 255), align='leftTop')
 
 
 _STARTED = False
