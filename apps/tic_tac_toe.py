@@ -4,9 +4,15 @@ apps/tic_tac_toe.py -- SCS app, 1050 x 700, tic-tac-toe over MatchGod.
 Model: extensions.match, generic. Controller: onAppStart, onMousePress,
 onKeyPress, async flows here. View: redrawAll here, and only here.
 
-Transport: DataStar SSE + patches. Join, stream, turn/action, leave
-are DataStar actions. Shared state changes only when a server patch
-arrives. The client never sets the board locally.
+Transport matches the demo client:
+  * join, turn/state, turn/action, leave are plain JSON.
+  * stream is EventSource. The server sends mp patches on it.
+  * On join when matched, the app fetches turn/state once.
+  * When a stream patch reports matched without a turn state,
+    the app fetches turn/state once.
+  * On an accepted move, the app applies the turn state from
+    the action reply when present, and otherwise sets its own
+    move locally and fetches turn/state once.
 
 Layout: top row Name, Skill, -10, +10, Join, Leave, Rematch.
 Status line below. Left: 3x3 board. Right panel: You, Turn, Opponent,
@@ -146,6 +152,16 @@ def update_you_line(app):
         app.you_text = 'You are ' + app.my_mark + ' - Seat ' + str(app.my_index) + ' - Room ' + str(room)
 
 
+def _turn_state_from_reply(app, data):
+    if not isinstance(data, dict):
+        return None
+    if isinstance(data.get('turn_state'), dict):
+        return data['turn_state']
+    if isinstance(data.get('turnState'), dict):
+        return data['turnState']
+    return None
+
+
 def apply_mp(app, mp):
     if mp is None:
         return
@@ -178,6 +194,8 @@ def apply_mp(app, mp):
             app.match_status = 'matched'
             app.status = 'Matched!'
             if mp.get('turnState') is None and mp.get('turn_state') is None:
+                if app.client is not None:
+                    aio.run(do_refresh(app))
                 return
         if status == 'finished' and mp.get('turnState') is None and mp.get('turn_state') is None:
             app.match_status = 'finished'
@@ -236,7 +254,7 @@ def _on_mp_callback(app, mp):
 
 
 def _on_signal_callback(app, signals):
-    if isinstance(signals, dict) and 'mp' not in signals:
+    if isinstance(signals, dict) and 'mp' not in signals and 'turnState' not in signals and 'turn_state' not in signals:
         add_log(app, 'signal: ' + _shorten(str(signals), 60))
 
 
@@ -252,16 +270,15 @@ def _on_stream_close_callback(app):
     add_log(app, 'stream closed')
 
 
-def _start_background(app, coro):
+async def do_refresh(app):
+    if app.client is None:
+        return
     try:
-        return aio.create_task(coro)
-    except Exception:
-        pass
-    try:
-        aio.run(coro)
+        state = await app.client.refresh_turn_state()
+        if state is None:
+            add_log(app, 'turn state: none')
     except Exception as err:
-        add_log(app, 'stream start failed: ' + str(err))
-    return None
+        add_log(app, 'turn state: ' + str(err))
 
 
 async def do_join(app):
@@ -313,7 +330,9 @@ async def do_join(app):
         else:
             app.status = 'Matched!'
         add_log(app, 'joined: ' + _shorten(str(data), 100))
-        _start_background(app, client.connect_stream())
+        client.connect_stream()
+        if client.match_status != 'queued':
+            await do_refresh(app)
     except Exception as err:
         add_log(app, 'join failed: ' + str(err))
         app.status = 'Join failed - see log.'
@@ -366,7 +385,16 @@ async def do_move(app, cell):
             claimed_winner_id=claimed_winner,
             claimed_is_draw=draw,
             claimed_end_reason=end_reason)
-        add_log(app, 'move sent: ' + _shorten(str(data), 100))
+        add_log(app, 'move -> ' + _shorten(str(data), 100))
+        if isinstance(data, dict) and not data.get('accepted') and data.get('accepted') is not None:
+            app.status = 'Move rejected: ' + str(data.get('reason') or 'unknown')
+            return
+        ts = _turn_state_from_reply(app, data)
+        if ts is not None:
+            apply_mp(app, {'turnState': ts})
+        elif isinstance(data, dict) and (data.get('accepted') or data.get('ok')):
+            app.board = next_board
+            await do_refresh(app)
     except Exception as err:
         add_log(app, 'move failed: ' + str(err))
     finally:
@@ -379,6 +407,9 @@ async def do_pass(app):
     try:
         data = await app.client.pass_turn()
         add_log(app, 'pass -> ' + _shorten(str(data), 100))
+        ts = _turn_state_from_reply(app, data)
+        if ts is not None:
+            apply_mp(app, {'turnState': ts})
     except Exception as err:
         add_log(app, 'pass failed: ' + str(err))
 
@@ -389,6 +420,9 @@ async def do_resign(app):
     try:
         data = await app.client.resign()
         add_log(app, 'resign -> ' + _shorten(str(data), 100))
+        ts = _turn_state_from_reply(app, data)
+        if ts is not None:
+            apply_mp(app, {'turnState': ts})
     except Exception as err:
         add_log(app, 'resign failed: ' + str(err))
 
@@ -430,9 +464,12 @@ async def do_rematch(app):
 async def do_reconnect(app):
     if app.client is None:
         return
-    if app.stream_open:
+    try:
+        app.client.connect_stream()
+    except Exception as err:
+        add_log(app, 'reconnect: ' + str(err))
         return
-    _start_background(app, app.client.connect_stream())
+    await do_refresh(app)
 
 
 def onAppStart(app):
@@ -652,7 +689,7 @@ def redrawAll(app):
     _draw_button(PASS_RECT, 'Pass', matched and app.phase != 'finished')
     _draw_button(RESIGN_RECT, 'Resign', matched and app.phase != 'finished')
     drawLabel(app.stream_status, PANEL_X + 16, PANEL_Y + 140, size=13, fill=rgb(214, 224, 255), align='leftTop')
-    _draw_button(RECONNECT_RECT, 'Reconnect', joined and not app.stream_open)
+    _draw_button(RECONNECT_RECT, 'Reconnect', joined)
     drawLabel('Log', PANEL_X + 16, PANEL_Y + 180, size=14, bold=True, fill='white', align='leftTop')
     drawRect(PANEL_X + 16, PANEL_Y + 204, PANEL_W - 32, 200, fill=rgb(10, 10, 10), border=rgb(68, 68, 78), borderWidth=1, roundness=6)
     for i in range(len(app.log)):

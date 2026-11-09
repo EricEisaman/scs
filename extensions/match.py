@@ -1,5 +1,5 @@
 """
-extensions.match -- SCS Extension: multiplayer over DataStar SSE + patches.
+extensions.match -- SCS Extension: multiplayer over plain JSON + EventSource.
 
 Generic. No game in this file is named, no game shape is assumed,
 no game default is baked in. Each app passes its own game_id,
@@ -8,40 +8,27 @@ caller passes config, it is used verbatim. When the caller does not,
 a config is built only from the values the caller actually passed;
 values the caller left out are left out, so the server decides.
 
-Transport -- DataStar, event driven only:
-  * Every request carries Datastar-Request: true and
-    Accept: text/event-stream.
-  * GET: signals travel in the datastar query param.
-  * POST / PATCH: the request body IS the signals object.
-  * Every response is read as a DataStar SSE stream with fetch +
-    a manual reader + a manual SSE parser. State changes only
-    when the server sends a patch, or when a user gesture sends
-    an action.
-  * datastar-patch-signals is applied with JSON Merge Patch
-    (RFC 7396): a key that is present updates, a key set to null
-    removes, a key that is omitted is left alone. Nested objects
-    merge, they are not replaced whole.
-  * datastar-patch-elements is parsed and handed to on_elements.
-    This file never touches the DOM: in an SCS canvas app there
-    is no DOM to morph, so element patches are surfaced, not applied.
-  * A response with Content-Type application/json is treated as
-    one patch-signals payload, per DataStar: its JSON merges into
-    the signals store.
-  * onlyIfMissing is honoured: with it set, a patch only fills in
-    signals that do not already exist.
-  * id: is stored as last_event_id and sent back as Last-Event-ID
-    on the next stream the app opens.
-  * A one-shot action returns after its first patch-signals event.
-    The open stream delivers the rest. A one-shot action must not
-    stay open on a stream the server keeps open, or it would
-    block the gesture that sent it.
-  * When a long-lived stream ends, it ends. It is not reopened
-    here. The app reopens it only on a later user gesture, for
-    example a Reconnect click. That keeps all reconnects
-    event driven.
+Transport:
+  * join, turn/state, turn/action, character-state, item-state,
+    item-authority, leave are plain JSON over fetch. Request body
+    is JSON. Response body is JSON. Headers are Content-Type
+    application/json and X-Client-ID once joined.
+  * turn/state is a single GET. It is used once on join when
+    matched, and once when a stream patch reports matched without
+    a turn state. It is not a loop.
+  * stream is EventSource to GET /api/multiplayer/stream with
+    session_id in the query. EventSource carries the connection.
+    It fires datastar-patch-signals events and generic message
+    events. Each event data payload starts with signals and holds
+    JSON. The mp dict is extracted from it and handed to on_mp.
+  * turn/action returns JSON with accepted, reason, and a turn
+    state. The caller applies that turn state. The caller also
+    sets its own move locally when accepted, per the caller
+    contract below.
 
-Endpoints (matchgod.onrender.com):
+Endpoints:
   POST  /api/multiplayer/join
+  GET   /api/multiplayer/turn/state
   GET   /api/multiplayer/stream?session_id=<session_id>
   POST  /api/multiplayer/turn/action
   PATCH /api/multiplayer/character-state
@@ -49,37 +36,16 @@ Endpoints (matchgod.onrender.com):
   PATCH /api/multiplayer/item-authority-claim
   PATCH /api/multiplayer/item-authority-release
   POST  /api/multiplayer/leave
-  Every call also carries X-Client-ID once joined. That header
-  is the MatchGod session header; Datastar-Request is the
-  DataStar header. Both are sent.
 
 Strict MVC: Model-only. No scs import, no drawing, no app.*.
-The client keeps one signals store. The app reads derived
-fields from it and renders them. The server is the authority:
-the client never mutates shared state locally; it sends an
-action and waits for the server patch that carries the result.
+The server is the authority. The client sends an action and
+applies the server turn state from the action reply or from
+the stream. The client never invents shared state.
 
-Brython notes: all public APIs are async def. Start them from
-a user gesture with browser.aio, for example:
-
-    from extensions.match import MatchClient
-    from browser import aio
-
-    async def join_flow(app):
-        app.client = MatchClient(on_mp=lambda mp: apply_mp(app, mp))
-        await app.client.join_turn_based(
-            environment_name=app.environment_name,
-            character_name=app.name,
-            game_id=app.game_id,
-            display_name=app.name,
-            skill=app.skill,
-            max_players_per_room=app.max_players,
-            min_players_per_room=app.min_players,
-            game_mode=app.game_mode,
-            allow_pass=True,
-            allow_resign=True,
-            requires_matchmaking=True)
-        aio.run(app.client.connect_stream())
+Brython notes: HTTP APIs are async def. Start them from a user
+gesture with browser.aio. Stream APIs are sync: connect_stream
+creates the EventSource and returns it. Close it with
+disconnect_stream or leave.
 """
 
 import json
@@ -97,15 +63,10 @@ DEFAULT_BASE_URL = BASE_URL
 TURN_BASED = 'turn_based'
 REALTIME = 'realtime'
 
-NL = chr(10)
-CR = chr(13)
-
 __all__ = [
     'BASE_URL', 'DEFAULT_BASE_URL', 'TURN_BASED', 'REALTIME',
     'MatchClient', 'create_client',
     'join_match', 'send_turn_action', 'leave_match',
-    'merge_patch', 'parse_patch_signals_data',
-    'parse_patch_elements_data', 'DatastarSSEParser',
     'extract_mp', 'extract_turn_state',
     'normalize_signals', 'make_player_id', 'main',
 ]
@@ -145,6 +106,20 @@ def _deep_copy(value):
         return value
 
 
+def _to_py(value):
+    if value is None:
+        return None
+    if isinstance(value, (dict, list, str, int, float, bool)):
+        return value
+    if window is None:
+        return value
+    try:
+        text = window.JSON.stringify(value)
+        return json.loads(str(text))
+    except Exception:
+        return value
+
+
 def _to_js(value):
     if window is None:
         return json.dumps(value)
@@ -175,141 +150,6 @@ def normalize_signals(signals):
     if isinstance(signals, dict):
         return signals
     return {}
-
-
-def merge_patch(target, patch, only_if_missing=False):
-    """JSON Merge Patch, RFC 7396, in place on target. Returns target.
-
-    A key present in patch updates, a key set to null removes,
-    a key omitted is left alone. Dict values merge recursively.
-    With only_if_missing set, a top-level key that already exists
-    in target is left alone.
-    """
-    if not isinstance(target, dict):
-        target = {}
-    if not isinstance(patch, dict):
-        return target
-    for key in patch:
-        if only_if_missing and key in target:
-            continue
-        value = patch[key]
-        if value is None:
-            if key in target:
-                del target[key]
-        elif isinstance(value, dict) and isinstance(target.get(key), dict):
-            merge_patch(target[key], value, False)
-        else:
-            target[key] = _deep_copy(value)
-    return target
-
-
-def parse_patch_signals_data(data_text):
-    """Parse the data lines of one datastar-patch-signals event.
-
-    Returns (patch_dict_or_None, only_if_missing_bool).
-    Data lines look like:
-      signals {...}
-      onlyIfMissing true
-    """
-    patch = None
-    only_if_missing = False
-    text = str(data_text or '')
-    for line in text.split(NL):
-        line = line.strip()
-        if line.startswith('signals '):
-            parsed = _loads(line[len('signals '):].strip())
-            if isinstance(parsed, dict):
-                patch = parsed
-        elif line.startswith('onlyIfMissing '):
-            value = line[len('onlyIfMissing '):].strip().lower()
-            only_if_missing = value in ('true', '1', 'yes')
-    return (patch, only_if_missing)
-
-
-def parse_patch_elements_data(data_text):
-    """Parse the data lines of one datastar-patch-elements event.
-
-    Returns a dict with selector, mode, namespace,
-    useViewTransition, viewTransitionSelector, elements.
-    Element lines are joined back with NL, per the SSE spec.
-    """
-    out = {'selector': None, 'mode': None, 'namespace': None,
-           'useViewTransition': False, 'viewTransitionSelector': None,
-           'elements': ''}
-    element_lines = []
-    text = str(data_text or '')
-    for line in text.split(NL):
-        line = line.strip()
-        if line.startswith('selector '):
-            out['selector'] = line[len('selector '):].strip()
-        elif line.startswith('mode '):
-            out['mode'] = line[len('mode '):].strip()
-        elif line.startswith('namespace '):
-            out['namespace'] = line[len('namespace '):].strip()
-        elif line.startswith('useViewTransition '):
-            value = line[len('useViewTransition '):].strip().lower()
-            out['useViewTransition'] = value in ('true', '1', 'yes')
-        elif line.startswith('viewTransitionSelector '):
-            out['viewTransitionSelector'] = line[len('viewTransitionSelector '):].strip()
-        elif line.startswith('elements '):
-            element_lines.append(line[len('elements '):])
-        elif line.startswith('elements'):
-            element_lines.append('')
-    out['elements'] = NL.join(element_lines)
-    return out
-
-
-class DatastarSSEParser(object):
-    """Incremental SSE parser. feed() returns complete events.
-
-    Each event is a dict: {event, data, id}.
-    Events end at a blank line. data: lines are joined with NL.
-    A leading single space after data: is stripped, per SSE.
-    """
-
-    def __init__(self):
-        self.buffer = ''
-
-    def feed(self, chunk):
-        text = str(chunk or '')
-        text = text.replace(CR, '')
-        self.buffer = self.buffer + text
-        events = []
-        marker = NL + NL
-        while marker in self.buffer:
-            pos = self.buffer.find(marker)
-            raw = self.buffer[:pos]
-            self.buffer = self.buffer[pos + len(marker):]
-            events.append(self._parse_one(raw))
-        return events
-
-    def flush(self):
-        raw = self.buffer
-        self.buffer = ''
-        if raw.strip() == '':
-            return []
-        return [self._parse_one(raw)]
-
-    def _parse_one(self, raw):
-        event_type = 'message'
-        data_lines = []
-        event_id = None
-        for line in raw.split(NL):
-            if line.startswith('event:'):
-                value = line[len('event:'):].strip()
-                if value != '':
-                    event_type = value
-            elif line.startswith('data:'):
-                value = line[len('data:'):]
-                if value.startswith(' '):
-                    value = value[1:]
-                data_lines.append(value)
-            elif line.startswith('id:'):
-                value = line[len('id:'):].strip()
-                if value != '':
-                    event_id = value
-        return {'event': event_type, 'data': NL.join(data_lines),
-                'id': event_id}
 
 
 def extract_mp(signals):
@@ -343,6 +183,93 @@ def _pick(data, names):
     return None
 
 
+def _extract_join_fields(data):
+    out = {}
+    if not isinstance(data, dict):
+        return out
+    out['client_id'] = _pick(data, ['client_id', 'clientId'])
+    out['session_id'] = _pick(data, ['session_id', 'sessionId'])
+    out['room_id'] = _pick(data, ['room_id', 'roomId'])
+    out['match_status'] = _pick(data, ['match_status', 'matchStatus', 'status'])
+    out['queue_position'] = _pick(data, ['queue_position', 'queuePosition'])
+    client = data.get('client')
+    if isinstance(client, dict):
+        if out['client_id'] is None:
+            out['client_id'] = _pick(client, ['client_id', 'clientId', 'id'])
+        if out['session_id'] is None:
+            out['session_id'] = _pick(client, ['session_id', 'sessionId'])
+    session = data.get('session')
+    if isinstance(session, dict):
+        if out['session_id'] is None:
+            out['session_id'] = _pick(session, ['session_id', 'sessionId', 'id'])
+        if out['room_id'] is None:
+            out['room_id'] = _pick(session, ['room_id', 'roomId'])
+    match = data.get('match')
+    if isinstance(match, dict):
+        if out['match_status'] is None:
+            out['match_status'] = _pick(match, ['status', 'match_status'])
+        if out['room_id'] is None:
+            out['room_id'] = _pick(match, ['room_id', 'roomId'])
+        if out['queue_position'] is None:
+            out['queue_position'] = _pick(match, ['queue_position', 'queuePosition'])
+    return out
+
+
+def _extract_turn_state_response(data):
+    if isinstance(data, dict):
+        if isinstance(data.get('turn_state'), dict):
+            return data['turn_state']
+        if isinstance(data.get('turnState'), dict):
+            return data['turnState']
+        inner = data.get('data')
+        if isinstance(inner, dict):
+            if isinstance(inner.get('turn_state'), dict):
+                return inner['turn_state']
+            if isinstance(inner.get('turnState'), dict):
+                return inner['turnState']
+        if 'turn_order' in data or 'current_player_id' in data:
+            return data
+    return None
+
+
+def _unwrap_action_data(data):
+    if isinstance(data, dict):
+        inner = data.get('data')
+        if isinstance(inner, dict) and 'accepted' not in data and 'ok' not in data:
+            return inner
+    return data
+
+
+def _parse_stream_data(raw):
+    """Parse one EventSource event data payload into a signals dict.
+
+    Event data looks like: signals {...}
+    A bare JSON object is also accepted.
+    """
+    text = str(raw or '').strip()
+    if text == '':
+        return {}
+    if 'data:' in text:
+        lines = []
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith('data:'):
+                value = line[len('data:'):]
+                if value.startswith(' '):
+                    value = value[1:]
+                lines.append(value)
+        text = '\n'.join(lines).strip()
+    if text.startswith('signals '):
+        text = text[len('signals '):].strip()
+    parsed = _loads(text)
+    if isinstance(parsed, dict):
+        inner = parsed.get('signals')
+        if isinstance(inner, dict):
+            return inner
+        return parsed
+    return {}
+
+
 class MatchClient(object):
     def __init__(self, base_url=None, on_mp=None, on_signal=None,
                  on_character=None, on_item=None, on_match=None,
@@ -351,7 +278,6 @@ class MatchClient(object):
         self.base_url = base_url or BASE_URL
         if self.base_url.endswith('/'):
             self.base_url = self.base_url[:-1]
-        self.signals = {}
         self.client_id = None
         self.session_id = None
         self.room_id = None
@@ -362,9 +288,8 @@ class MatchClient(object):
         self.items = {}
         self.requires_turn_based = None
         self.stream_open = False
-        self.last_event_id = None
         self.last_error = None
-        self._abort_controller = None
+        self._stream = None
         self.on_mp = on_mp
         self.on_signal = on_signal
         self.on_character = on_character
@@ -413,347 +338,47 @@ class MatchClient(object):
             return self.turn_state.get('current_player_id')
         return None
 
-    def signals_snapshot(self):
-        return _deep_copy(self.signals)
-
-    def _sync_from_signals(self):
-        signals = self.signals
-        mp = extract_mp(signals)
-        if mp is None:
-            mp = {}
-        top = signals
-        self.client_id = _pick(top, ['client_id', 'clientId'])
-        if self.client_id is None:
-            self.client_id = _pick(mp, ['client_id', 'clientId'])
-        if self.client_id is None:
-            client = mp.get('client')
-            if isinstance(client, dict):
-                self.client_id = _pick(client, ['client_id', 'clientId', 'id'])
-        self.session_id = _pick(top, ['session_id', 'sessionId'])
-        if self.session_id is None:
-            self.session_id = _pick(mp, ['session_id', 'sessionId'])
-        if self.session_id is None:
-            session = mp.get('session')
-            if isinstance(session, dict):
-                self.session_id = _pick(session, ['session_id', 'sessionId', 'id'])
-        self.room_id = _pick(top, ['room_id', 'roomId'])
-        if self.room_id is None:
-            self.room_id = _pick(mp, ['room_id', 'roomId'])
-        if self.room_id is None:
-            room = mp.get('room')
-            if isinstance(room, dict):
-                self.room_id = _pick(room, ['room_id', 'roomId'])
-        match = mp.get('match')
-        if not isinstance(match, dict):
-            match = top.get('match')
-        if isinstance(match, dict):
-            if match.get('roomId') is not None:
-                self.room_id = match['roomId']
-            if match.get('room_id') is not None:
-                self.room_id = match['room_id']
-            if match.get('status') is not None:
-                self.match_status = match['status']
-            if match.get('queuePosition') is not None:
-                self.queue_position = match['queuePosition']
-            if match.get('queue_position') is not None:
-                self.queue_position = match['queue_position']
-        elif top.get('match_status') is not None:
-            self.match_status = top.get('match_status')
-        state = extract_turn_state(mp)
-        if state is None:
-            state = extract_turn_state(top)
-        if state is not None:
-            self.turn_state = _deep_copy(state)
-        self._sync_realtime(top, mp)
-
-    def _sync_realtime(self, top, mp):
-        characters = top.get('characters')
-        if characters is None:
-            characters = mp.get('characters')
-        if isinstance(characters, dict):
-            self.characters = _deep_copy(characters)
-        elif isinstance(characters, list):
-            out = {}
-            for entry in characters:
-                if isinstance(entry, dict):
-                    key = entry.get('character_id') or entry.get('client_id') or entry.get('id')
-                    if key is not None:
-                        out[key] = _deep_copy(entry)
-            self.characters = out
-        character = top.get('character')
-        if character is None:
-            character = mp.get('character')
-        if isinstance(character, dict):
-            key = character.get('character_id') or character.get('client_id') or character.get('id')
-            if key is not None:
-                self.characters[key] = _deep_copy(character)
-        items = top.get('items')
-        if items is None:
-            items = mp.get('items')
-        if isinstance(items, dict):
-            self.items = _deep_copy(items)
-        elif isinstance(items, list):
-            out = {}
-            for entry in items:
-                if isinstance(entry, dict):
-                    key = entry.get('item_id') or entry.get('id')
-                    if key is not None:
-                        out[key] = _deep_copy(entry)
-            self.items = out
-        item = top.get('item')
-        if item is None:
-            item = mp.get('item')
-        if isinstance(item, dict):
-            key = item.get('item_id') or item.get('id')
-            if key is not None:
-                self.items[key] = _deep_copy(item)
+    @property
+    def stream_connected(self):
+        return self.stream_open
 
     def _headers(self):
-        headers = {'Content-Type': 'application/json',
-                   'Datastar-Request': 'true',
-                   'Accept': 'text/event-stream'}
+        headers = {'Content-Type': 'application/json'}
         if self.client_id:
             headers['X-Client-ID'] = self.client_id
-        if self.last_event_id:
-            headers['Last-Event-ID'] = self.last_event_id
         return headers
 
-    def _datastar_url(self, path, query_params=None, signals_for_get=None):
-        url = self.base_url + path
-        parts = []
-        if query_params:
-            for key in query_params:
-                parts.append(_quote(key) + '=' + _quote(query_params[key]))
-        if signals_for_get is not None:
-            parts.append('datastar=' + _quote(json.dumps(signals_for_get)))
-        if parts:
-            sep = '&'.join(parts)
-            if '?' in url:
-                url = url + '&' + sep
-            else:
-                url = url + '?' + sep
-        return url
-
-    async def _datastar_action(self, method, path, signals_body=None,
-                              query_params=None, signals_for_get=None,
-                              long_lived=False, stop_after_first_patch=False):
-        """One DataStar action: fetch, read its SSE stream, apply patches.
-
-        The coroutine returns only when the server closes the stream,
-        unless stop_after_first_patch is set. With that set, it
-        returns after the first patch-signals event is applied and
-        cancels the reader. One-shot actions use that form: the
-        open stream delivers the rest. Each patch is applied the
-        moment its event arrives; nothing here waits for the
-        stream to end first.
-        """
+    async def _http(self, method, path, body=None):
         if window is None:
-            raise RuntimeError('extensions.match needs a browser (fetch)')
-        if signals_body is None:
-            signals_body = {}
-        url = self._datastar_url(path, query_params, signals_for_get)
-        opts_py = {'method': method, 'headers': self._headers()}
-        if method != 'GET':
-            opts_py['body'] = json.dumps(signals_body)
-        opts_js = _to_js(opts_py)
-        controller = None
+            raise RuntimeError('extensions.match needs a browser (window.fetch)')
+        url = self.base_url + path
+        opts = {'method': method, 'headers': self._headers()}
+        if body is not None:
+            opts['body'] = json.dumps(body)
+        resp = await window.fetch(url, _to_js(opts))
+        status = 0
+        ok = False
         try:
-            controller = window.AbortController.new()
-            opts_js.signal = controller.signal
+            status = int(resp.status)
         except Exception:
-            controller = None
-        if long_lived:
-            self._abort_controller = controller
+            status = 0
         try:
-            resp = await window.fetch(url, opts_js)
-            await self._read_response(resp, stop_after_first_patch)
-        finally:
-            if long_lived and self._abort_controller is controller:
-                self._abort_controller = None
-        return self.signals_snapshot()
-
-    async def _read_response(self, resp, stop_after_first_patch=False):
-        content_type = ''
-        try:
-            content_type = str(resp.headers.get('content-type') or '')
+            ok = bool(resp.ok)
         except Exception:
-            content_type = ''
-        content_type = content_type.lower()
-        if 'text/event-stream' in content_type:
-            await self._read_sse_body(resp, stop_after_first_patch)
-            return
-        text = ''
+            ok = False
+        data = None
         try:
-            text = str(await resp.text())
+            raw = await resp.json()
+            data = _to_py(raw)
         except Exception:
-            text = ''
-        if text.strip() == '':
-            return
-        if 'event:' in text or 'data:' in text:
-            self._feed_text(text)
-            return
-        patch = _loads(text)
-        if isinstance(patch, dict):
-            self.apply_patch_signals(patch, False)
-
-    async def _read_sse_body(self, resp, stop_after_first_patch=False):
-        reader = None
-        try:
-            reader = resp.body.getReader()
-        except Exception:
-            reader = None
-        if reader is None:
-            text = ''
             try:
-                text = str(await resp.text())
+                text = await resp.text()
+                data = _loads(text)
+                if data is None:
+                    data = text
             except Exception:
-                text = ''
-            if text != '':
-                self._feed_text(text)
-            return
-        decoder = None
-        try:
-            decoder = window.TextDecoder.new('utf-8')
-        except Exception:
-            decoder = None
-        parser = DatastarSSEParser()
-        while True:
-            try:
-                result = await reader.read()
-            except Exception:
-                break
-            done = False
-            value = None
-            try:
-                done = bool(result.done)
-                value = result.value
-            except Exception:
-                done = True
-            if done:
-                break
-            chunk = ''
-            if decoder is not None and value is not None:
-                try:
-                    chunk = str(decoder.decode(value, _to_js({'stream': True})))
-                except Exception:
-                    chunk = ''
-            if chunk != '':
-                stop = False
-                for event in parser.feed(chunk):
-                    if self._handle_event(event) and stop_after_first_patch:
-                        stop = True
-                if stop:
-                    try:
-                        reader.cancel()
-                    except Exception:
-                        pass
-                    break
-        if decoder is not None:
-            try:
-                tail = str(decoder.decode())
-                if tail != '':
-                    for event in parser.feed(tail):
-                        self._handle_event(event)
-            except Exception:
-                pass
-        for event in parser.flush():
-            self._handle_event(event)
-
-    def _feed_text(self, text):
-        parser = DatastarSSEParser()
-        for event in parser.feed(str(text)):
-            self._handle_event(event)
-        for event in parser.flush():
-            self._handle_event(event)
-
-    def _handle_event(self, event):
-        if not isinstance(event, dict):
-            return False
-        if event.get('id') is not None:
-            self.last_event_id = event['id']
-        event_type = event.get('event') or 'message'
-        data = event.get('data') or ''
-        if event_type == 'datastar-patch-signals':
-            patch, only_if_missing = parse_patch_signals_data(data)
-            if patch is not None:
-                self.apply_patch_signals(patch, only_if_missing)
-                return True
-            return False
-        if event_type == 'datastar-patch-elements':
-            elements = parse_patch_elements_data(data)
-            self.apply_patch_elements(elements)
-            return False
-        if event_type == 'message':
-            text = str(data).strip()
-            if text.startswith('signals '):
-                patch, only_if_missing = parse_patch_signals_data(text)
-                if patch is not None:
-                    self.apply_patch_signals(patch, only_if_missing)
-                    return True
-                return False
-            if text.startswith('{'):
-                patch = _loads(text)
-                if isinstance(patch, dict):
-                    self.apply_patch_signals(patch, False)
-                    return True
-                return False
-        if self.on_signal is not None:
-            try:
-                self.on_signal({'event': event_type, 'data': data})
-            except Exception:
-                pass
-        return False
-
-    def apply_patch_signals(self, patch, only_if_missing=False):
-        if not isinstance(patch, dict):
-            return None
-        merge_patch(self.signals, patch, only_if_missing)
-        self._sync_from_signals()
-        mp = extract_mp(self.signals)
-        if 'mp' in patch or 'match' in patch or 'turnState' in patch or 'turn_state' in patch:
-            if self.on_mp is not None and mp is not None:
-                try:
-                    self.on_mp(_deep_copy(mp))
-                except Exception:
-                    pass
-            if self.on_match is not None:
-                try:
-                    self.on_match(_deep_copy(mp))
-                except Exception:
-                    pass
-        has_character = ('characters' in patch or 'character' in patch or
-                         'characters' in (mp or {}) or 'character' in (mp or {}))
-        if has_character and self.on_character is not None:
-            try:
-                self.on_character(_deep_copy(self.signals))
-            except Exception:
-                pass
-        has_item = ('items' in patch or 'item' in patch or
-                    'items' in (mp or {}) or 'item' in (mp or {}))
-        if has_item and self.on_item is not None:
-            try:
-                self.on_item(_deep_copy(self.signals))
-            except Exception:
-                pass
-        if self.on_signal is not None:
-            try:
-                self.on_signal(_deep_copy(patch))
-            except Exception:
-                pass
-        return _deep_copy(patch)
-
-    def apply_patch_elements(self, elements):
-        if self.on_elements is not None:
-            try:
-                self.on_elements(_deep_copy(elements))
-            except Exception:
-                pass
-        if self.on_signal is not None:
-            try:
-                self.on_signal({'elements': _deep_copy(elements)})
-            except Exception:
-                pass
-        return _deep_copy(elements)
+                data = None
+        return {'ok': ok, 'status': status, 'data': data}
 
     def build_join_signals(self, environment_name, character_name,
                            game_id, player_id=None, display_name=None,
@@ -764,7 +389,7 @@ class MatchClient(object):
                            game_mode=None, allow_pass=None,
                            allow_resign=None,
                            requires_matchmaking=None):
-        """Build the join signals object. Nothing is assumed.
+        """Build the join body. Nothing is assumed.
 
         Pass config to use it verbatim. Otherwise a config is built
         only from the values actually passed; values left out are
@@ -832,12 +457,24 @@ class MatchClient(object):
             allow_resign=allow_resign,
             requires_matchmaking=requires_matchmaking)
         self.last_error = None
-        try:
-            await self._datastar_action('POST', '/api/multiplayer/join', body)
-        except Exception as err:
-            self.last_error = str(err)
-            raise
-        return self.signals_snapshot()
+        result = await self._http('POST', '/api/multiplayer/join', body)
+        data = result.get('data')
+        if not isinstance(data, dict):
+            data = {}
+        fields = _extract_join_fields(data)
+        if fields.get('client_id') is not None:
+            self.client_id = fields['client_id']
+        if fields.get('session_id') is not None:
+            self.session_id = fields['session_id']
+        if fields.get('room_id') is not None:
+            self.room_id = fields['room_id']
+        if fields.get('match_status') is not None:
+            self.match_status = fields['match_status']
+        if fields.get('queue_position') is not None:
+            self.queue_position = fields['queue_position']
+        if not result.get('ok'):
+            self.last_error = str(data)
+        return data
 
     async def join_turn_based(self, environment_name, character_name,
                               game_id, player_id=None, display_name=None,
@@ -879,19 +516,37 @@ class MatchClient(object):
             game_mode=game_mode, allow_pass=None, allow_resign=None,
             requires_matchmaking=requires_matchmaking)
 
+    async def refresh_turn_state(self):
+        """GET turn/state and apply it. Single fetch, not a loop.
+
+        Called once on join when matched, and once when a stream
+        patch reports matched without a turn state.
+        """
+        if self.client_id is None:
+            return None
+        result = await self._http('GET', '/api/multiplayer/turn/state')
+        state = _extract_turn_state_response(result.get('data'))
+        if state is not None:
+            self.turn_state = _deep_copy(state)
+            if self.on_mp is not None:
+                try:
+                    self.on_mp({'turnState': _deep_copy(state)})
+                except Exception:
+                    pass
+        return state
+
+    get_turn_state = refresh_turn_state
+
     async def send_turn_action(self, action_type, payload=None,
                                proposed_state=None,
                                claimed_winner_id=None,
                                claimed_is_draw=False,
                                claimed_end_reason=None):
-        """Send one turn action. The result arrives as server patches.
+        """POST turn/action. Returns the server JSON reply.
 
-        The client does not decide acceptance, winner, or draw.
-        It sends the action and the patch stream carries the
-        server decision. Shared state is only ever changed by
-        those patches. This call returns after the first patch,
-        so a one-shot action never blocks the gesture that
-        sent it; the open stream delivers the rest.
+        The reply holds accepted, reason, and a turn state. The
+        caller applies that turn state. The server decides
+        acceptance, winner, and draw.
         """
         if payload is None:
             payload = {}
@@ -903,10 +558,8 @@ class MatchClient(object):
         body['claimed_is_draw'] = bool(claimed_is_draw)
         if claimed_end_reason is not None:
             body['claimed_end_reason'] = claimed_end_reason
-        await self._datastar_action(
-            'POST', '/api/multiplayer/turn/action', body,
-            stop_after_first_patch=True)
-        return self.signals_snapshot()
+        result = await self._http('POST', '/api/multiplayer/turn/action', body)
+        return _unwrap_action_data(result.get('data'))
 
     async def send_move(self, payload, proposed_state=None,
                         claimed_winner_id=None, claimed_is_draw=False,
@@ -941,46 +594,139 @@ class MatchClient(object):
             state['character_id'] = character_id
         elif 'character_id' not in state and self.client_id:
             state['character_id'] = self.client_id
-        await self._datastar_action(
-            'PATCH', '/api/multiplayer/character-state', state,
-            stop_after_first_patch=True)
-        return self.signals_snapshot()
+        result = await self._http(
+            'PATCH', '/api/multiplayer/character-state', state)
+        return _unwrap_action_data(result.get('data'))
 
     async def publish_item_state(self, item_state, item_id=None):
         state = self._with_identity(item_state)
         if item_id is not None:
             state['item_id'] = item_id
-        await self._datastar_action(
-            'PATCH', '/api/multiplayer/item-state', state,
-            stop_after_first_patch=True)
-        return self.signals_snapshot()
+        result = await self._http(
+            'PATCH', '/api/multiplayer/item-state', state)
+        return _unwrap_action_data(result.get('data'))
 
     async def claim_item_authority(self, item_id):
         body = self._with_identity({'item_id': item_id})
-        await self._datastar_action(
-            'PATCH', '/api/multiplayer/item-authority-claim', body,
-            stop_after_first_patch=True)
-        return self.signals_snapshot()
+        result = await self._http(
+            'PATCH', '/api/multiplayer/item-authority-claim', body)
+        return _unwrap_action_data(result.get('data'))
 
     async def release_item_authority(self, item_id):
         body = self._with_identity({'item_id': item_id})
-        await self._datastar_action(
-            'PATCH', '/api/multiplayer/item-authority-release', body,
-            stop_after_first_patch=True)
-        return self.signals_snapshot()
+        result = await self._http(
+            'PATCH', '/api/multiplayer/item-authority-release', body)
+        return _unwrap_action_data(result.get('data'))
 
     async def publish(self, state, kind='character'):
         if kind == 'item':
             return await self.publish_item_state(state)
         return await self.publish_character_state(state)
 
-    async def connect_stream(self, on_signal=None, on_mp=None):
-        """Open the long-lived stream. Stays open until the server closes it.
+    def apply_mp(self, mp):
+        if not isinstance(mp, dict):
+            return None
+        if isinstance(mp.get('room'), dict):
+            room_id = mp['room'].get('roomId')
+            if room_id is None:
+                room_id = mp['room'].get('room_id')
+            if room_id is not None:
+                self.room_id = room_id
+        match = mp.get('match')
+        if isinstance(match, dict):
+            if match.get('roomId') is not None:
+                self.room_id = match['roomId']
+            if match.get('room_id') is not None:
+                self.room_id = match['room_id']
+            if match.get('status') is not None:
+                self.match_status = match['status']
+            if match.get('queuePosition') is not None:
+                self.queue_position = match['queuePosition']
+            if match.get('queue_position') is not None:
+                self.queue_position = match['queue_position']
+        state = extract_turn_state(mp)
+        if state is not None:
+            self.turn_state = _deep_copy(state)
+        return mp
 
-        Patches arrive through the same reader as every other action.
-        When the stream ends, on_stream_close fires. This method does
-        not reopen the stream. The app reopens it only on a later
-        user gesture.
+    def apply_realtime(self, signals):
+        signals = normalize_signals(signals)
+        characters = signals.get('characters')
+        if isinstance(characters, dict):
+            for key in characters:
+                self.characters[key] = characters[key]
+        elif isinstance(characters, list):
+            for entry in characters:
+                if isinstance(entry, dict):
+                    key = entry.get('character_id') or entry.get('client_id') or entry.get('id')
+                    if key is not None:
+                        self.characters[key] = entry
+        character = signals.get('character')
+        if isinstance(character, dict):
+            key = character.get('character_id') or character.get('client_id') or character.get('id')
+            if key is not None:
+                self.characters[key] = character
+        items = signals.get('items')
+        if isinstance(items, dict):
+            for key in items:
+                self.items[key] = items[key]
+        elif isinstance(items, list):
+            for entry in items:
+                if isinstance(entry, dict):
+                    key = entry.get('item_id') or entry.get('id')
+                    if key is not None:
+                        self.items[key] = entry
+        item = signals.get('item')
+        if isinstance(item, dict):
+            key = item.get('item_id') or item.get('id')
+            if key is not None:
+                self.items[key] = item
+        return signals
+
+    def handle_stream_text(self, raw):
+        """Parse one EventSource event payload, update client, fire callbacks."""
+        signals = _parse_stream_data(raw)
+        if not isinstance(signals, dict) or not signals:
+            return None
+        mp = extract_mp(signals)
+        if mp is not None:
+            self.apply_mp(mp)
+            if self.on_mp is not None:
+                try:
+                    self.on_mp(_deep_copy(mp))
+                except Exception:
+                    pass
+            if self.on_match is not None:
+                try:
+                    self.on_match(_deep_copy(mp))
+                except Exception:
+                    pass
+        if 'characters' in signals or 'character' in signals or 'items' in signals or 'item' in signals:
+            self.apply_realtime(signals)
+            if self.on_character is not None and ('characters' in signals or 'character' in signals):
+                try:
+                    self.on_character(_deep_copy(signals))
+                except Exception:
+                    pass
+            if self.on_item is not None and ('items' in signals or 'item' in signals):
+                try:
+                    self.on_item(_deep_copy(signals))
+                except Exception:
+                    pass
+        if self.on_signal is not None:
+            try:
+                self.on_signal(_deep_copy(signals))
+            except Exception:
+                pass
+        return signals
+
+    def connect_stream(self, on_signal=None, on_mp=None):
+        """Open the stream with EventSource. Sync. Returns the EventSource.
+
+        A previous stream is closed first. EventSource carries the
+        connection and reopens it on an error. on_stream_open fires
+        on open. An error is reported through on_signal so the app
+        can log it; it does not close the stream.
         """
         if self.session_id is None:
             raise RuntimeError('connect_stream needs join() first (no session_id)')
@@ -988,55 +734,88 @@ class MatchClient(object):
             self.on_signal = on_signal
         if on_mp is not None:
             self.on_mp = on_mp
-        if self.stream_open:
-            return self.signals_snapshot()
-        self.stream_open = True
-        if self.on_stream_open is not None:
+        if self._stream is not None:
             try:
-                self.on_stream_open()
+                self._stream.close()
             except Exception:
                 pass
-        signals_for_get = {}
-        if self.client_id:
-            signals_for_get['client_id'] = self.client_id
-        if self.session_id:
-            signals_for_get['session_id'] = self.session_id
-        try:
-            await self._datastar_action(
-                'GET', '/api/multiplayer/stream',
-                query_params={'session_id': self.session_id},
-                signals_for_get=signals_for_get,
-                long_lived=True)
-        except Exception as err:
-            self.last_error = str(err)
-        finally:
-            self.stream_open = False
-            if self.on_stream_close is not None:
+            self._stream = None
+        if window is None:
+            raise RuntimeError('connect_stream needs a browser (EventSource)')
+        url = self.base_url + '/api/multiplayer/stream?session_id=' + _quote(self.session_id)
+        stream = window.EventSource.new(url)
+        self._stream = stream
+        self.stream_open = True
+
+        def _on_open(event):
+            self.stream_open = True
+            if self.on_stream_open is not None:
                 try:
-                    self.on_stream_close()
+                    self.on_stream_open()
                 except Exception:
                     pass
-        return self.signals_snapshot()
 
-    def disconnect_stream(self):
-        controller = self._abort_controller
-        self._abort_controller = None
-        if controller is not None:
+        def _on_patch(event):
             try:
-                controller.abort()
+                self.handle_stream_text(event.data)
             except Exception:
                 pass
+
+        def _on_message(event):
+            try:
+                self.handle_stream_text(event.data)
+            except Exception:
+                pass
+
+        def _on_error(event):
+            if self.on_signal is not None:
+                try:
+                    self.on_signal({'event': 'stream_error'})
+                except Exception:
+                    pass
+
+        try:
+            stream.onopen = _on_open
+        except Exception:
+            pass
+        try:
+            stream.addEventListener('datastar-patch-signals', _on_patch)
+        except Exception:
+            pass
+        try:
+            stream.onmessage = _on_message
+        except Exception:
+            pass
+        try:
+            stream.onerror = _on_error
+        except Exception:
+            pass
+        return stream
+
+    def disconnect_stream(self):
+        stream = self._stream
+        self._stream = None
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
+        was_open = self.stream_open
         self.stream_open = False
+        if was_open and self.on_stream_close is not None:
+            try:
+                self.on_stream_close()
+            except Exception:
+                pass
 
     async def leave(self):
         try:
-            await self._datastar_action(
-                'POST', '/api/multiplayer/leave', {},
-                stop_after_first_patch=True)
+            result = await self._http('POST', '/api/multiplayer/leave', {})
+            data = result.get('data')
         except Exception as err:
             self.last_error = str(err)
+            data = None
         self.disconnect_stream()
-        self.signals = {}
         self.client_id = None
         self.session_id = None
         self.room_id = None
@@ -1045,7 +824,7 @@ class MatchClient(object):
         self.turn_state = None
         self.characters = {}
         self.items = {}
-        return self.signals_snapshot()
+        return _unwrap_action_data(data)
 
 
 def create_client(base_url=None, on_mp=None, on_signal=None,
