@@ -417,7 +417,7 @@ class MatchClient(object):
                         config=None, requires_turn_based=None,
                         max_players_per_room=None, min_players_per_room=None,
                         game_mode='default', allow_pass=True,
-                        allow_resign=True):
+                        allow_resign=True, requires_matchmaking=None, **kwargs):
         """Build the exact join body the demo sends.
 
         Pass config=... to override everything. Otherwise config is
@@ -426,6 +426,12 @@ class MatchClient(object):
         """
         if requires_turn_based is None:
             requires_turn_based = True
+        # Top-down calls join_realtime(..., requires_matchmaking=False) — direct join, no queue.
+        # Was hardcoded True, so the caller's False was silently ignored.
+        if requires_matchmaking is None and 'requires_matchmaking' in kwargs:
+            requires_matchmaking = kwargs.get('requires_matchmaking')
+        if requires_matchmaking is None:
+            requires_matchmaking = True
         if player_id is None:
             player_id = make_player_id(character_name)
         if display_name is None:
@@ -449,7 +455,7 @@ class MatchClient(object):
                 scopes = ['characters', 'items']
             config = {
                 'game_id': game_id,
-                'requires_matchmaking': True,
+                'requires_matchmaking': bool(requires_matchmaking),
                 'requires_turn_based': bool(requires_turn_based),
                 'max_players_per_room': max_players,
                 'min_players_per_room': min_players,
@@ -458,6 +464,11 @@ class MatchClient(object):
                          'allow_resign': bool(allow_resign)},
                 'authority': {'scopes': scopes, 'resource_types': ['*']},
             }
+        if config is not None and requires_matchmaking is not None and 'requires_matchmaking' in kwargs:
+            try:
+                config['requires_matchmaking'] = bool(requires_matchmaking)
+            except Exception:
+                pass
         return {
             'environment_name': environment_name,
             'character_name': character_name,
@@ -472,7 +483,8 @@ class MatchClient(object):
                    player_id=None, display_name=None, skill=1000,
                    config=None, requires_turn_based=None,
                    max_players_per_room=None, min_players_per_room=None,
-                   game_mode='default', allow_pass=True, allow_resign=True):
+                   game_mode='default', allow_pass=True, allow_resign=True,
+                   requires_matchmaking=None, **kwargs):
         if requires_turn_based is None:
             requires_turn_based = True
         self.requires_turn_based = bool(requires_turn_based)
@@ -483,7 +495,7 @@ class MatchClient(object):
             max_players_per_room=max_players_per_room,
             min_players_per_room=min_players_per_room,
             game_mode=game_mode, allow_pass=allow_pass,
-            allow_resign=allow_resign)
+            allow_resign=allow_resign, requires_matchmaking=requires_matchmaking, **kwargs)
         result = await self._http('POST', '/api/multiplayer/join', body)
         data = result.get('data')
         if not isinstance(data, dict):
@@ -510,7 +522,7 @@ class MatchClient(object):
                               max_players_per_room=2,
                               min_players_per_room=2,
                               game_mode='default', allow_pass=True,
-                              allow_resign=True):
+                              allow_resign=True, requires_matchmaking=None, **kwargs):
         """Convenience: join a turn-based game (tic-tac-toe style)."""
         return await self.join(
             environment_name, character_name, game_id,
@@ -519,14 +531,14 @@ class MatchClient(object):
             max_players_per_room=max_players_per_room,
             min_players_per_room=min_players_per_room,
             game_mode=game_mode, allow_pass=allow_pass,
-            allow_resign=allow_resign)
+            allow_resign=allow_resign, requires_matchmaking=requires_matchmaking, **kwargs)
 
     async def join_realtime(self, environment_name, character_name,
                             game_id, player_id=None, display_name=None,
                             skill=1000, config=None,
                             max_players_per_room=4,
                             min_players_per_room=1,
-                            game_mode='default'):
+                            game_mode='default', requires_matchmaking=None, **kwargs):
         """Convenience: join a non-turn-based game (platformer style).
 
         No turn_state exists in this mode. Use
@@ -539,7 +551,8 @@ class MatchClient(object):
             config=config, requires_turn_based=False,
             max_players_per_room=max_players_per_room,
             min_players_per_room=min_players_per_room,
-            game_mode=game_mode, allow_pass=False, allow_resign=False)
+            game_mode=game_mode, allow_pass=False, allow_resign=False,
+            requires_matchmaking=requires_matchmaking, **kwargs)
 
     # -- turn-based -------------------------------------------------------
 
@@ -924,7 +937,7 @@ async def join_match(client, environment_name, character_name, game_id,
                      config=None, requires_turn_based=None,
                      max_players_per_room=None, min_players_per_room=None,
                      game_mode='default', allow_pass=True,
-                     allow_resign=True):
+                     allow_resign=True, requires_matchmaking=None, **kwargs):
     return await client.join(
         environment_name, character_name, game_id,
         player_id=player_id, display_name=display_name, skill=skill,
@@ -932,7 +945,7 @@ async def join_match(client, environment_name, character_name, game_id,
         max_players_per_room=max_players_per_room,
         min_players_per_room=min_players_per_room,
         game_mode=game_mode, allow_pass=allow_pass,
-        allow_resign=allow_resign)
+        allow_resign=allow_resign, requires_matchmaking=requires_matchmaking, **kwargs)
 
 
 async def get_turn_state(client):
