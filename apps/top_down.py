@@ -247,11 +247,11 @@ def apply_realtime(app, signals):
     if not isinstance(signals, dict):
         return
     candidates = [signals]
-    for key in ('mp', 'signals', 'state', 'room', 'data', 'realtime'):
+    for key in ('mp', 'signals', 'state', 'room', 'data', 'realtime', 'turnState', 'turn_state', 'match', 'game_state', 'game'):
         if isinstance(signals.get(key), dict):
             candidates.append(signals[key])
             # mp may itself nest state/room/data
-            for sub in ('state', 'room', 'data', 'realtime'):
+            for sub in ('state', 'room', 'data', 'realtime', 'turnState', 'turn_state', 'match', 'game_state'):
                 if isinstance(signals[key].get(sub), dict):
                     candidates.append(signals[key][sub])
     for cand in candidates:
@@ -327,10 +327,11 @@ async def do_publish_character(app):
         return
     app.publishing = True
     try:
-        await app.client.publish_character_state({
+        result = await app.client.publish_character_state({
             'x': int(app.x), 'y': int(app.y),
             'name': app.name, 'score': app.score,
             'color': app.my_color})
+        add_log(app, 'pub ok: ' + _shorten(str(result), 60))
     except Exception as err:
         add_log(app, 'publish: ' + str(err))
     app.publishing = False
@@ -375,8 +376,14 @@ async def do_join(app):
         apply_realtime(app, signals)
 
     def _on_signal(signals):
-        if isinstance(signals, dict) and ('characters' in signals or 'items' in signals or 'mp' in signals):
-            apply_realtime(app, signals)
+        if isinstance(signals, dict):
+            if app.debug_signals < 10:
+                app.debug_signals = app.debug_signals + 1
+                add_log(app, 'signal keys: ' + _shorten(str(list(signals.keys())), 60))
+                if isinstance(signals.get('mp'), dict):
+                    add_log(app, 'mp keys: ' + _shorten(str(list(signals['mp'].keys())), 60))
+            if 'characters' in signals or 'items' in signals or 'mp' in signals:
+                apply_realtime(app, signals)
 
     def _on_open():
         app.stream_open = True
@@ -492,6 +499,7 @@ def onAppStart(app):
     app.stream_status = 'Stream: closed'
     app.joining = False
     app.publishing = False
+    app.debug_signals = 0
     add_log(app, 'WASD / arrows to move. Touch a gem to collect it.')
 
 
