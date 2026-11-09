@@ -167,7 +167,11 @@ def _parse_character(app, entry, fallback_id=None):
                 break
     cid = src.get('character_id')
     if cid is None:
+        cid = src.get('characterId')
+    if cid is None:
         cid = src.get('client_id')
+    if cid is None:
+        cid = src.get('clientId')
     if cid is None:
         cid = src.get('id')
     if cid is None:
@@ -184,6 +188,11 @@ def _parse_character(app, entry, fallback_id=None):
             x = pos.get('x')
         if y is None:
             y = pos.get('y')
+    elif isinstance(pos, (list, tuple)) and len(pos) == 2:
+        if x is None:
+            x = pos[0]
+        if y is None:
+            y = pos[1]
     name = src.get('name')
     if name is None:
         name = src.get('display_name')

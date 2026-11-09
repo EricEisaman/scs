@@ -97,6 +97,15 @@ def make_player_id(name):
     return clean + '-' + suffix
 
 
+def _to_vec2(value, x=None, y=None):
+    # Server wants position as exactly [x, y], not {x, y}.
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        return [value[0], value[1]]
+    if isinstance(value, dict):
+        return [value.get('x'), value.get('y')]
+    return [x, y]
+
+
 def _now_ms():
     try:
         return int(time.time() * 1000)
@@ -642,9 +651,9 @@ class MatchClient(object):
             # NOTE: characterId is NOT allowed inside updates — only top-level.
             # Server 422s with "unsupported character fields: characterId" if we put it here.
             if 'position' in state:
-                one['position'] = state['position']
+                one['position'] = _to_vec2(state['position'], state.get('x'), state.get('y'))
             elif 'x' in state or 'y' in state:
-                one['position'] = {'x': state.get('x'), 'y': state.get('y')}
+                one['position'] = [state.get('x'), state.get('y')]
             for key in state:
                 if key in ('client_id', 'session_id', 'character_id', 'updates', 'timestamp', 'x', 'y', 'name', 'color', 'position'):
                     continue
@@ -683,9 +692,9 @@ class MatchClient(object):
                 one['clientId'] = state['client_id']
             # NOTE: itemId is NOT allowed inside updates — only top-level.
             if 'position' in state:
-                one['position'] = state['position']
+                one['position'] = _to_vec2(state['position'], state.get('x'), state.get('y'))
             elif 'x' in state or 'y' in state:
-                one['position'] = {'x': state.get('x'), 'y': state.get('y')}
+                one['position'] = [state.get('x'), state.get('y')]
             for key in state:
                 if key in ('client_id', 'session_id', 'item_id', 'updates', 'timestamp', 'x', 'y', 'position'):
                     continue
