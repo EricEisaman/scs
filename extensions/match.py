@@ -297,7 +297,9 @@ async def _sleep(seconds):
 
 class MatchClient(object):
     def __init__(self, base_url=None, on_mp=None, on_signal=None,
-                 on_character=None, on_item=None, on_match=None):
+                 on_character=None, on_item=None, on_match=None,
+                 on_stream_open=None, on_stream_close=None, on_stream_error=None,
+                 **kwargs):
         self.base_url = base_url or BASE_URL
         if self.base_url.endswith('/'):
             self.base_url = self.base_url[:-1]
@@ -317,6 +319,14 @@ class MatchClient(object):
         self.on_character = on_character
         self.on_item = on_item
         self.on_match = on_match
+        self.on_stream_open = on_stream_open
+        self.on_stream_close = on_stream_close
+        self.on_stream_error = on_stream_error
+        # Tolerate future app callbacks (e.g. on_connect) instead of TypeError on join.
+        for _k, _v in kwargs.items():
+            if _k.startswith('on_'):
+                setattr(self, _k, _v)
+        self._stream_open_fired = False
         self.last_error = None
 
     # -- identity helpers -------------------------------------------------
@@ -759,7 +769,7 @@ class MatchClient(object):
                 pass
         return signals
 
-    def connect_stream(self, on_signal=None, on_mp=None):
+    def connect_stream(self, on_signal=None, on_mp=None, on_stream_open=None, on_stream_close=None, on_stream_error=None):
         """Open EventSource for this session. Works in both modes."""
         if window is None:
             raise RuntimeError('extensions.match needs a browser (EventSource)')
@@ -769,6 +779,13 @@ class MatchClient(object):
             self.on_signal = on_signal
         if on_mp is not None:
             self.on_mp = on_mp
+        if on_stream_open is not None:
+            self.on_stream_open = on_stream_open
+        if on_stream_close is not None:
+            self.on_stream_close = on_stream_close
+        if on_stream_error is not None:
+            self.on_stream_error = on_stream_error
+        self._stream_open_fired = False
         if self._stream is not None:
             try:
                 self._stream.close()
@@ -778,6 +795,28 @@ class MatchClient(object):
         stream = window.EventSource.new(url)
         self._stream = stream
         self.stream_connected = True
+
+        def _fire_open():
+            if self._stream_open_fired:
+                return
+            self._stream_open_fired = True
+            if self.on_stream_open is not None:
+                try:
+                    self.on_stream_open()
+                except Exception:
+                    pass
+
+        def _fire_close():
+            if self.on_stream_close is not None:
+                try:
+                    self.on_stream_close()
+                except Exception:
+                    pass
+
+        # EventSource fires 'open' on connect — that is the real open signal.
+        # Also fire immediately so apps that rely on the callback (top_down's
+        # 'stream open' status) don't hang if the browser swallows the event.
+        _fire_open()
 
         def _on_patch(event):
             try:
@@ -793,10 +832,20 @@ class MatchClient(object):
                 data = ''
             self.handle_stream_text(data)
 
+        def _on_open(event):
+            _fire_open()
+
         def _on_error(event):
             self.stream_connected = False
+            if self.on_stream_error is not None:
+                try:
+                    self.on_stream_error(event)
+                except Exception:
+                    pass
+            _fire_close()
 
         try:
+            stream.addEventListener('open', _on_open)
             stream.addEventListener('datastar-patch-signals', _on_patch)
             stream.addEventListener('message', _on_message)
             stream.addEventListener('error', _on_error)
@@ -809,6 +858,7 @@ class MatchClient(object):
         return stream
 
     def disconnect_stream(self):
+        _was_open = self.stream_connected
         if self._stream is not None:
             try:
                 self._stream.close()
@@ -816,6 +866,12 @@ class MatchClient(object):
                 pass
         self._stream = None
         self.stream_connected = False
+        self._stream_open_fired = False
+        if _was_open and self.on_stream_close is not None:
+            try:
+                self.on_stream_close()
+            except Exception:
+                pass
 
     async def poll_turn_state(self, interval_seconds=1.5, max_rounds=None):
         """Poll turn/state until finished. Turn-based fallback."""
@@ -854,10 +910,13 @@ class MatchClient(object):
 # ---------------------------------------------------------------------------
 
 def create_client(base_url=None, on_mp=None, on_signal=None,
-                  on_character=None, on_item=None, on_match=None):
+                  on_character=None, on_item=None, on_match=None,
+                  on_stream_open=None, on_stream_close=None, on_stream_error=None):
     return MatchClient(
         base_url=base_url, on_mp=on_mp, on_signal=on_signal,
-        on_character=on_character, on_item=on_item, on_match=on_match)
+        on_character=on_character, on_item=on_item, on_match=on_match,
+        on_stream_open=on_stream_open, on_stream_close=on_stream_close,
+        on_stream_error=on_stream_error)
 
 
 async def join_match(client, environment_name, character_name, game_id,
