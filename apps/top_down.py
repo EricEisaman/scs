@@ -145,39 +145,51 @@ def _camera(app):
     return cam_x, cam_y
 
 
-def _parse_character(app, entry):
+def _parse_character(app, entry, fallback_id=None):
     if not isinstance(entry, dict):
         return
-    cid = entry.get('character_id')
+    # Server may nest the state: {state: {x, y, ...}} / {data: {...}}
+    # / {character_state: {...}}. Unwrap so x/y/name still read.
+    src = entry
+    for nest in ('state', 'data', 'character_state', 'character', 'value'):
+        if isinstance(entry.get(nest), dict):
+            merged = {}
+            merged.update(entry[nest])
+            merged.update(entry)
+            src = merged
+            break
+    cid = src.get('character_id')
     if cid is None:
-        cid = entry.get('client_id')
+        cid = src.get('client_id')
     if cid is None:
-        cid = entry.get('id')
+        cid = src.get('id')
     if cid is None:
-        cid = entry.get('player_id')
+        cid = src.get('player_id')
+    if cid is None:
+        cid = fallback_id
     if cid is None or cid == app.client_id:
         return
-    x = entry.get('x')
-    y = entry.get('y')
-    pos = entry.get('position')
+    x = src.get('x')
+    y = src.get('y')
+    pos = src.get('position')
     if isinstance(pos, dict):
         if x is None:
             x = pos.get('x')
         if y is None:
             y = pos.get('y')
-    name = entry.get('name')
+    name = src.get('name')
     if name is None:
-        name = entry.get('display_name')
+        name = src.get('display_name')
     if name is None:
-        name = entry.get('character_name')
+        name = src.get('character_name')
     if name is None:
-        name = entry.get('displayName')
+        name = src.get('displayName')
     if name is None:
         name = 'player'
-    score = entry.get('score')
-    if score is None and isinstance(entry.get('stats'), dict):
-        score = entry['stats'].get('score')
-    color = entry.get('color')
+    score = src.get('score')
+    if score is None and isinstance(src.get('stats'), dict):
+        score = src['stats'].get('score')
+    color = src.get('color')
     old = app.players.get(cid)
     if old is None:
         old = {'x': app.x, 'y': app.y, 'name': str(name),
@@ -194,29 +206,39 @@ def _parse_character(app, entry):
         old['color'] = color
 
 
-def _parse_item(app, entry):
+def _parse_item(app, entry, fallback_id=None):
     if not isinstance(entry, dict):
         return
-    iid = entry.get('item_id')
+    src = entry
+    for nest in ('state', 'data', 'item_state', 'item', 'value'):
+        if isinstance(entry.get(nest), dict):
+            merged = {}
+            merged.update(entry[nest])
+            merged.update(entry)
+            src = merged
+            break
+    iid = src.get('item_id')
     if iid is None:
-        iid = entry.get('id')
+        iid = src.get('id')
+    if iid is None:
+        iid = fallback_id
     if iid is None or iid not in app.items:
         return
-    collected = entry.get('collected')
+    collected = src.get('collected')
     if collected is None:
-        collected = entry.get('taken')
-    if collected is None and entry.get('state') in ('collected', 'taken', 'gone'):
+        collected = src.get('taken')
+    if collected is None and src.get('state') in ('collected', 'taken', 'gone'):
         collected = True
-    if collected is None and entry.get('state') in ('available', 'active'):
+    if collected is None and src.get('state') in ('available', 'active'):
         collected = False
     if collected is None:
         return
     app.items[iid]['collected'] = bool(collected)
-    taken_by = entry.get('taken_by')
+    taken_by = src.get('taken_by')
     if taken_by is None:
-        taken_by = entry.get('collected_by')
+        taken_by = src.get('collected_by')
     if taken_by is None:
-        taken_by = entry.get('client_id')
+        taken_by = src.get('client_id')
     if taken_by is not None:
         app.items[iid]['taken_by'] = str(taken_by)
 
@@ -225,24 +247,38 @@ def apply_realtime(app, signals):
     if not isinstance(signals, dict):
         return
     candidates = [signals]
-    if isinstance(signals.get('mp'), dict):
-        candidates.append(signals['mp'])
-    if isinstance(signals.get('signals'), dict):
-        candidates.append(signals['signals'])
+    for key in ('mp', 'signals', 'state', 'room', 'data', 'realtime'):
+        if isinstance(signals.get(key), dict):
+            candidates.append(signals[key])
+            # mp may itself nest state/room/data
+            for sub in ('state', 'room', 'data', 'realtime'):
+                if isinstance(signals[key].get(sub), dict):
+                    candidates.append(signals[key][sub])
     for cand in candidates:
         chars = cand.get('characters')
         if isinstance(chars, dict):
             for key in chars:
-                _parse_character(app, chars[key])
+                # dict-keyed: {client_id: {x, y, ...}} — key IS the id.
+                # Old code ignored the key and dropped these.
+                _parse_character(app, chars[key], fallback_id=key)
         elif isinstance(chars, list):
             for entry in chars:
                 _parse_character(app, entry)
         if isinstance(cand.get('character'), dict):
             _parse_character(app, cand['character'])
+        # Some servers send players/clients instead of characters.
+        for alt in ('players', 'clients', 'character_states'):
+            alt_chars = cand.get(alt)
+            if isinstance(alt_chars, dict):
+                for key in alt_chars:
+                    _parse_character(app, alt_chars[key], fallback_id=key)
+            elif isinstance(alt_chars, list):
+                for entry in alt_chars:
+                    _parse_character(app, entry)
         items = cand.get('items')
         if isinstance(items, dict):
             for key in items:
-                _parse_item(app, items[key])
+                _parse_item(app, items[key], fallback_id=key)
         elif isinstance(items, list):
             for entry in items:
                 _parse_item(app, entry)
@@ -367,7 +403,7 @@ async def do_join(app):
             game_mode=GAME_MODE,
             max_players_per_room=8,
             min_players_per_room=1,
-            requires_matchmaking=False)
+            requires_matchmaking=True)
         app.client_id = client.client_id
         app.session_id = client.session_id
         app.room_id = client.room_id
