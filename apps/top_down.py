@@ -149,6 +149,19 @@ def _spawn_for_id(client_id):
     return (WORLD_W // 2 + ox, WORLD_H // 2 + oy)
 
 
+def _num(v):
+    # Force PYTHON float: float() on a JS value (from window.JSON.parse) can
+    # return the JS value unchanged — 110 + "615" = "110615" in JS, -309 = 110306.
+    # str(v) first gives a Python str, float() then gives a Python float.
+    try:
+        return float(str(v))
+    except Exception:
+        try:
+            return float(v)
+        except Exception:
+            return 0.0
+
+
 def _to_num(v):
     # Server may send positions as strings ("1000") — coerce, don't drop.
     if isinstance(v, bool):
@@ -183,8 +196,8 @@ def add_log(app, message):
 def _camera(app):
     # Literals — VIEW_W/VIEW_H globals may be corrupted in the browser.
     # View 1050x542, world 2000x1400.
-    cam_x = _clamp(float(app.x) - 525.0, 0, 950.0)
-    cam_y = _clamp(float(app.y) - 271.0, 0, 858.0)
+    cam_x = _clamp(_num(app.x) - 525.0, 0, 950.0)
+    cam_y = _clamp(_num(app.y) - 271.0, 0, 858.0)
     return cam_x, cam_y
 
 
@@ -378,8 +391,8 @@ def _parse_character(app, entry, fallback_id=None):
         # No spawn placeholder: a new remote starts exactly at the position
         # in THIS packet. _spawn_for_id would offset it if this packet ever
         # carries only x or only y.
-        _ix = float(x) if isinstance(x, (int, float)) else 0.0
-        _iy = float(y) if isinstance(y, (int, float)) else 0.0
+        _ix = _num(x)
+        _iy = _num(y)
         old = {'x': _ix, 'y': _iy, 'name': str(name) if has_name else 'player',
                'score': 0, 'color': _color_for_id(cid, len(app.players))}
         app.players[cid] = old
@@ -1021,11 +1034,11 @@ def redrawAll(app):
     _cx = float(cam_x); _cy = float(cam_y)
     drawRect(_VX, _VY, _VW, _VH, fill=rgb(24, 38, 28))
     for gx in range(0, WORLD_W + 1, 200):
-        sx = _VX + gx - _cx
+        sx = _VX + _num(gx) - _cx
         if _VX <= sx <= _VX + _VW:
             drawLine(sx, _VY, sx, _VY + _VH, fill=rgb(40, 58, 44), lineWidth=1)
     for gy in range(0, WORLD_H + 1, 200):
-        sy = _VY + gy - _cy
+        sy = _VY + _num(gy) - _cy
         if _VY <= sy <= _VY + _VH:
             drawLine(_VX, sy, _VX + _VW, sy, fill=rgb(40, 58, 44), lineWidth=1)
     # World border, clipped to view — old full 2000x1400 rect bled into header/footer.
@@ -1045,8 +1058,8 @@ def redrawAll(app):
         item = app.items[iid]
         if item['collected']:
             continue
-        sx = _VX + float(item['x']) - _cx
-        sy = _VY + float(item['y']) - _cy
+        sx = _VX + _num(item['x']) - _cx
+        sy = _VY + _num(item['y']) - _cy
         # Strict view bounds — no 20px slack into header/footer.
         if sx < _VX or sx > _VX + _VW:
             continue
@@ -1080,14 +1093,14 @@ def redrawAll(app):
         if sy + 32 <= _VY + _VH:
             drawLabel(str(score), sx + 1, sy + 32 + 1, size=12 if is_self else 11, bold=True, fill='black')
             drawLabel(str(score), sx, sy + 32, size=12 if is_self else 11, bold=True, fill=rgb(214, 224, 255))
-    me_x = _VX + float(app.x) - _cx
-    me_y = _VY + float(app.y) - _cy
+    me_x = _VX + _num(app.x) - _cx
+    me_y = _VY + _num(app.y) - _cy
     _draw_player_square(me_x, me_y, app.my_color, app.name, app.score, True)
     for cid in sorted(app.players.keys()):
         other = app.players[cid]
         try:
-            sx = int(_VX + float(other['x']) - _cx)
-            sy = int(_VY + float(other['y']) - _cy)
+            sx = int(_VX + _num(other['x']) - _cx)
+            sy = int(_VY + _num(other['y']) - _cy)
             # Draw-args log, change-detected (not time-throttled): proves the loop
             # ran and what coords it used. Awe @940,625 self @1060,660 -> scr 405,346.
             try:
@@ -1098,7 +1111,7 @@ def redrawAll(app):
                 _key = str(cid) + ':' + str(sx) + ',' + str(sy)
                 if _last.get(cid) != _key:
                     _last[cid] = _key
-                    add_log(app, 'draw remote ' + str(cid)[:8] + ' scr ' + str(sx) + ',' + str(sy) + ' w ' + str(int(float(other['x']))) + ',' + str(int(float(other['y']))) + ' cam ' + str(int(cam_x)) + ',' + str(int(cam_y)) + ' color ' + str(other['color']) + ' VY=' + str(VIEW_Y) + ' type=' + str(type(VIEW_Y)))
+                    add_log(app, 'draw remote ' + str(cid)[:8] + ' scr ' + str(sx) + ',' + str(sy) + ' w ' + str(int(_num(other['x']))) + ',' + str(int(_num(other['y']))) + ' cam ' + str(int(_num(cam_x))) + ',' + str(int(_num(cam_y))) + ' color ' + str(other['color']) + ' VY=' + str(VIEW_Y) + ' ytype=' + str(type(other['y'])) + ' cytype=' + str(type(cam_y)))
             except Exception:
                 pass
             _draw_player_square(sx, sy, other['color'], other['name'], other['score'], False)
