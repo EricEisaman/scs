@@ -181,10 +181,10 @@ def add_log(app, message):
 
 
 def _camera(app):
-    # Coerce: VIEW_*/WORLD_* may arrive as JS strings in Brython — float() forces numeric add.
-    _vw = float(VIEW_W); _vh = float(VIEW_H); _ww = float(WORLD_W); _wh = float(WORLD_H)
-    cam_x = _clamp(float(app.x) - _vw / 2, 0, _ww - _vw)
-    cam_y = _clamp(float(app.y) - _vh / 2, 0, _wh - _vh)
+    # Literals — VIEW_W/VIEW_H globals may be corrupted in the browser.
+    # View 1050x542, world 2000x1400.
+    cam_x = _clamp(float(app.x) - 525.0, 0, 950.0)
+    cam_y = _clamp(float(app.y) - 271.0, 0, 858.0)
     return cam_x, cam_y
 
 
@@ -1012,9 +1012,12 @@ def redrawAll(app):
     drawLabel('Score: ' + str(app.score) + '  Players: ' + str(len(app.players) + 1) + '  ' + app.stream_status,
               810, 82, size=12, fill=rgb(214, 224, 255), align='leftTop')
     cam_x, cam_y = _camera(app)
-    # Coerced locals — never use raw VIEW_X/VIEW_Y in arithmetic below.
-    # Raw globals may be JS strings ("110") in the browser: "110" + 590 = "110590" -> sy 110201.
-    _VX = float(VIEW_X); _VY = float(VIEW_Y); _VW = float(VIEW_W); _VH = float(VIEW_H)
+    # LITERAL view origin — do NOT use VIEW_X/VIEW_Y globals in world math.
+    # The globals still log as 110231 in the browser even after float() coercion,
+    # so the deployed file is either cached old code or the globals are corrupted
+    # to "110" / 110000 in Brython. Literals cannot be corrupted.
+    # View: x 0..1050, y 110..652 (700 - 110 - 48 = 542 tall).
+    _VX = 0.0; _VY = 110.0; _VW = 1050.0; _VH = 542.0
     _cx = float(cam_x); _cy = float(cam_y)
     drawRect(_VX, _VY, _VW, _VH, fill=rgb(24, 38, 28))
     for gx in range(0, WORLD_W + 1, 200):
@@ -1095,7 +1098,7 @@ def redrawAll(app):
                 _key = str(cid) + ':' + str(sx) + ',' + str(sy)
                 if _last.get(cid) != _key:
                     _last[cid] = _key
-                    add_log(app, 'draw remote ' + str(cid)[:8] + ' scr ' + str(sx) + ',' + str(sy) + ' w ' + str(int(float(other['x']))) + ',' + str(int(float(other['y']))) + ' cam ' + str(int(cam_x)) + ',' + str(int(cam_y)) + ' color ' + str(other['color']))
+                    add_log(app, 'draw remote ' + str(cid)[:8] + ' scr ' + str(sx) + ',' + str(sy) + ' w ' + str(int(float(other['x']))) + ',' + str(int(float(other['y']))) + ' cam ' + str(int(cam_x)) + ',' + str(int(cam_y)) + ' color ' + str(other['color']) + ' VY=' + str(VIEW_Y) + ' type=' + str(type(VIEW_Y)))
             except Exception:
                 pass
             _draw_player_square(sx, sy, other['color'], other['name'], other['score'], False)
