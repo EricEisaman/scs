@@ -4,23 +4,51 @@ apps/top_down.py -- SCS App: realtime top-down scroller, 1050 x 700.
 Realtime mp, not turn-based. Uses extensions.match (MatchGod API).
 Server: https://matchgod.onrender.com
 
-How it works:
+How it works (adapted to the current matchgod server -- see
+EricEisaman/match README, "Client protocol"):
   * join_realtime, not join_turn_based. No turn/state, no turn/action,
     no pass, no resign. min_players_per_room=1, so one player can
     play alone and others can join the same room later.
+    Direct room: requires_matchmaking=False, match_status comes
+    back "ready" (not "matched"). Join also declares
+    disconnection_time_sec=60 / empty_game_ttl_sec=300.
   * Movement is local and optimistic. The client moves on onStep,
     then publishes its character with PATCH character-state.
-  * Collectibles are a fixed layout, shared by definition. Every
-    client starts with the same 12 gems. When you touch one, you
-    mark it collected locally, publish PATCH item-state with
-    collected=True, and publish your new score with your character.
-    The server broadcasts both on the stream, other clients apply
-    them and hide that gem. No claim step: fixed-layout items are
-    not server-registered, so claim would block collection.
-  * Stream is EventSource. on_mp handles queued / matched.
-    on_character / on_item / on_signal all feed apply_realtime,
-    which accepts characters / character / items / item as a
-    dict or a list, and accepts mp-wrapped payloads too.
+    Canonical update is {clientId, pos: [x, y], velocity, score,
+    metadata: {name, display_name, color, score}} -- name/colour
+    live ONLY in metadata, never top-level.
+  * Gems are SERVER-SPAWNED and server-authoritative. The client
+    never invents gems once joined: the stream bootstrap carries
+    the field (24 live gems, instanceId "top-down-demo:gem-N")
+    and every collection is followed by a server respawn
+    ("gem-25", "gem-26", ...). A gem the client has never seen
+    is CREATED on arrival, never dropped -- dropping unknown ids
+    was why respawns never appeared.
+  * Collecting is a COLLECTION, not an update and not a claim.
+    When you touch a gem you mark it collected locally, publish
+    PATCH item-state with updates=[] and
+    collections=[{instanceId, collectedByClientId, environment}],
+    and publish your new score with your character. The server
+    broadcasts the collection (exactly-once: first wins) plus
+    the respawn. No claim/release: server gems are owned by the
+    server, claim would block collection.
+  * Heartbeat: if you stop moving you stop publishing, and the
+    server evicts a client silent for disconnection_time_sec.
+    onStep therefore heartbeats every ~20s (budget / 3) while
+    joined. A 403 "disconnected: timeout" means re-join -- the
+    old client_id is dead.
+  * Stream is EventSource. The first event is a full bootstrap
+    (connection, clients, characters LIST, items {updates,
+    collections}, room, match); later events are single-signal
+    patches (character-state-update, item-state-update,
+    client-joined, client-left, ...). extensions.match
+    normalises both forms to the same canonical shape before
+    the callbacks fire, so apply_realtime only ever sees
+    characters / items / clients / client_left.
+  * Offline (not joined) the app still plays locally against a
+    fixed 12-gem field, so movement/collecting can be tried
+    without a server. Joining clears the offline field and
+    replaces it with the server field; leaving restores it.
 
 Layout, 1050 x 700:
   Top bar (0..110): title, Name field, Join / Leave / Respawn /
@@ -51,7 +79,7 @@ WORLD_H = 1400
 VIEW_X = 0
 VIEW_Y = 110
 VIEW_W = 1050
-# View ends where footer starts (652), not at 700 — old 590px view
+# View ends where footer starts (652), not at 700 -- old 590px view
 # overlapped the 48px footer, so player/gems at the bottom were drawn
 # under the footer rect and looked like they went off-screen.
 VIEW_H = APP_HEIGHT - VIEW_Y - 48
@@ -69,13 +97,21 @@ RECONNECT_RECT = (660, 56, 130, 32)
 ENVIRONMENT_NAME = 'top-down-demo'
 GAME_ID = 'top-down-demo'
 GAME_MODE = 'default'
+# New server budgets, declared on join (see match README,
+# "Disconnect Time" / "Empty-game cleanup").
+DISCONNECTION_TIME_SEC = 60
+EMPTY_GAME_TTL_SEC = 300
+# Heartbeat at budget/3: 20s at 30 steps/sec = 600 steps.
+HEARTBEAT_STEPS = 600
 
 PLAYER_COLORS = ['rgb(90,160,255)', 'rgb(255,120,120)',
                  'rgb(120,220,130)', 'rgb(255,210,90)',
                  'rgb(200,140,255)', 'rgb(90,220,220)',
                  'rgb(255,160,90)', 'rgb(255,120,200)']
 
-ITEM_DEFS = [
+# OFFLINE field only. Once joined, gems come from the server
+# bootstrap / patches -- never from this list.
+OFFLINE_ITEM_DEFS = [
     ('gem-0', 300, 300, 'rgb(255,215,0)'),
     ('gem-1', 700, 250, 'rgb(0,220,220)'),
     ('gem-2', 1100, 350, 'rgb(255,120,200)'),
@@ -89,6 +125,10 @@ ITEM_DEFS = [
     ('gem-10', 1000, 650, 'rgb(0,220,220)'),
     ('gem-11', 650, 600, 'rgb(255,120,200)'),
 ]
+# Back-compat alias: old code imported ITEM_DEFS.
+ITEM_DEFS = OFFLINE_ITEM_DEFS
+
+GEM_PALETTE = ['rgb(255,215,0)', 'rgb(0,220,220)', 'rgb(255,120,200)']
 
 
 def _inside(x, y, rect):
@@ -151,7 +191,7 @@ def _spawn_for_id(client_id):
 
 def _num(v):
     # Force PYTHON float: float() on a JS value (from window.JSON.parse) can
-    # return the JS value unchanged — 110 + "615" = "110615" in JS, -309 = 110306.
+    # return the JS value unchanged -- 110 + "615" = "110615" in JS, -309 = 110306.
     # str(v) first gives a Python str, float() then gives a Python float.
     try:
         return float(str(v))
@@ -163,7 +203,7 @@ def _num(v):
 
 
 def _to_num(v):
-    # Server may send positions as strings ("1000") — coerce, don't drop.
+    # Server may send positions as strings ("1000") -- coerce, don't drop.
     if isinstance(v, bool):
         return None
     if isinstance(v, (int, float)):
@@ -185,8 +225,45 @@ def _color_for_id(client_id, index):
     return PLAYER_COLORS[(total + index) % len(PLAYER_COLORS)]
 
 
+def _gem_color_for_id(iid):
+    # Deterministic colour for server gems, incl. respawns
+    # (gem-25, gem-26, ...) the client has never seen before.
+    total = 0
+    for ch in str(iid):
+        total = total + ord(ch)
+    return GEM_PALETTE[total % len(GEM_PALETTE)]
+
+
+def _local_item_id(iid):
+    """'top-down-demo:gem-1' -> 'gem-1'. Bare ids pass through."""
+    if iid is None:
+        return None
+    s = str(iid)
+    if ':' in s:
+        return s.split(':', 1)[1]
+    return s
+
+
+def _namespaced_item_id(iid):
+    """'gem-1' -> 'top-down-demo:gem-1'. Already-namespaced: unchanged."""
+    if iid is None:
+        return None
+    s = str(iid)
+    if ':' in s:
+        return s
+    return ENVIRONMENT_NAME + ':' + s
+
+
+def _fresh_offline_items():
+    out = {}
+    for iid, ix, iy, icol in OFFLINE_ITEM_DEFS:
+        out[iid] = {'x': ix, 'y': iy, 'color': icol,
+                    'collected': False, 'taken_by': None}
+    return out
+
+
 def add_log(app, message):
-    # CONSOLE ONLY — never draw logs on screen. SCS print() goes to the console.
+    # CONSOLE ONLY -- never draw logs on screen. SCS print() goes to the console.
     try:
         print('[top-down] ' + str(message))
     except Exception:
@@ -194,12 +271,11 @@ def add_log(app, message):
 
 
 def _camera(app):
-    # Literals — VIEW_W/VIEW_H globals may be corrupted in the browser.
+    # Literals -- VIEW_W/VIEW_H globals may be corrupted in the browser.
     # View 1050x542, world 2000x1400.
     cam_x = _clamp(_num(app.x) - 525.0, 0, 950.0)
     cam_y = _clamp(_num(app.y) - 271.0, 0, 858.0)
     return cam_x, cam_y
-
 
 
 def _parse_client_name(app, entry, fallback_id=None):
@@ -210,7 +286,7 @@ def _parse_client_name(app, entry, fallback_id=None):
             app.players[fallback_id]['name'] = entry
         return
     if isinstance(entry, (list, tuple)) and len(entry) == 2 and isinstance(entry[0], (int, float)):
-        return  # bare [x,y] is a character, not a client — handled elsewhere
+        return  # bare [x,y] is a character, not a client -- handled elsewhere
     if not isinstance(entry, dict):
         return
     # Unwrap one level if nested
@@ -226,8 +302,7 @@ def _parse_client_name(app, entry, fallback_id=None):
     meta = src.get('metadata')
     if isinstance(meta, dict):
         name = meta.get('name') or meta.get('display_name') or meta.get('character_name') or meta.get('displayName')
-    # SERVER: clients = [{"clientId": ..., "character": "<name>", ...}] — `character` IS the name string.
-    # CharacterState has no name field, so this is the ONLY place names come from.
+    # SERVER: clients = [{"clientId": ..., "character": "<name>", ...}] -- `character` IS the name string.
     if name is None and isinstance(src.get('character'), str) and src.get('character'):
         name = src.get('character')
     if name is None and isinstance(entry.get('character'), str) and entry.get('character'):
@@ -240,12 +315,11 @@ def _parse_client_name(app, entry, fallback_id=None):
 
 
 def _parse_character(app, entry, fallback_id=None):
-
     # Characters value may be a bare [x, y] or a JSON string, not a dict.
     if isinstance(entry, (list, tuple)) and len(entry) == 2:
         entry = {'x': entry[0], 'y': entry[1]}
     if isinstance(entry, str):
-        # Bare string from clients: {client_id: 'Milo'} — name only, NOT a character.
+        # Bare string from clients: {client_id: 'Milo'} -- name only, NOT a character.
         # Never create a player from this (that was the spawn-phantom bug).
         # Only rename if the player already exists from a real characters update.
         if fallback_id is not None and len(entry) > 0 and len(entry) < 40:
@@ -262,14 +336,11 @@ def _parse_character(app, entry, fallback_id=None):
     if not isinstance(entry, dict):
         return
     # Server may nest the state: {state: {x, y, ...}} / {data: {...}}
-    # / {character_state: {...}}. Unwrap so x/y/name still read.
+    # / {character_state: {...}}. Unwrap so pos/x/y/name still read.
     src = entry
-    # Server broadcasts updates as a LIST: {updates: [{x, y, ...}]}
+    # Server broadcasts updates as a LIST: {updates: [{pos, ...}]}
     if isinstance(entry.get('updates'), list) and len(entry['updates']) > 0 and isinstance(entry['updates'][0], dict):
         # Fresh updates win: entry first, then updates[0] on top.
-        # Old order did updates first, then entry — so a stale top-level
-        # position in the broadcast overwrote the fresh update and the
-        # remote player looked stuck at spawn.
         merged = {}
         merged.update(entry)
         merged.update(entry['updates'][0])
@@ -297,32 +368,32 @@ def _parse_character(app, entry, fallback_id=None):
         cid = fallback_id
     if cid is None or cid == app.client_id:
         return
-    x = _to_num(src.get('x'))
-    y = _to_num(src.get('y'))
-    pos = src.get('position')
-    if isinstance(pos, dict):
+    # Canonical position is pos: [x, y]. Fall back to the older
+    # shapes (position / x+y / "x,y") so old payloads still parse.
+    x = None
+    y = None
+    pos = src.get('pos')
+    if pos is None:
+        pos = src.get('position')
+    if isinstance(pos, (list, tuple)) and len(pos) == 2:
+        x = _to_num(pos[0])
+        y = _to_num(pos[1])
+    elif isinstance(pos, dict):
         if x is None:
-            x = _to_num(pos.get('x'))
+            x = _to_num(pos.get('x')) if pos.get('x') is not None else _to_num(pos.get('0')) if pos.get('0') is not None else _to_num(pos.get(0))
         if y is None:
-            y = _to_num(pos.get('y'))
-        # Datastar/JSON can send a vec2 as {0: x, 1: y} (JS array -> object).
-        if x is None:
-            x = _to_num(pos.get('0')) if pos.get('0') is not None else _to_num(pos.get(0))
-        if y is None:
-            y = _to_num(pos.get('1')) if pos.get('1') is not None else _to_num(pos.get(1))
-    elif isinstance(pos, (list, tuple)) and len(pos) == 2:
-        if x is None:
-            x = _to_num(pos[0])
-        if y is None:
-            y = _to_num(pos[1])
-    # Also handle position as "1000,700" or "[1000, 700]" string.
-    if isinstance(pos, str) and ',' in pos:
+            y = _to_num(pos.get('y')) if pos.get('y') is not None else _to_num(pos.get('1')) if pos.get('1') is not None else _to_num(pos.get(1))
+    elif isinstance(pos, str) and ',' in pos:
         cleaned = pos.strip().strip('[]()').strip()
         parts = cleaned.split(',')
-        if x is None and len(parts) > 0:
+        if len(parts) > 0:
             x = _to_num(parts[0])
-        if y is None and len(parts) > 1:
+        if len(parts) > 1:
             y = _to_num(parts[1])
+    if x is None:
+        x = _to_num(src.get('x'))
+    if y is None:
+        y = _to_num(src.get('y'))
     # Top-level pos as {0: x, 1: y} dict under 'pos' key (ItemInstance style)
     if x is None or y is None:
         _p2 = src.get('pos')
@@ -354,8 +425,8 @@ def _parse_character(app, entry, fallback_id=None):
             if _nm0 is not None and _cid0 in app.players:
                 app.players[_cid0]['name'] = str(_nm0)
         return
-    # Protocol CharacterState has no name/color — they live in metadata
-    # (if the server echoes them) or in the join event. Check metadata first.
+    # Protocol CharacterState has no top-level name/color -- they live
+    # in metadata (if the server echoes them) or in the join event.
     name = None
     meta = src.get('metadata')
     if isinstance(meta, dict):
@@ -379,18 +450,21 @@ def _parse_character(app, entry, fallback_id=None):
     if name is None:
         name = src.get('player_name')
     # color from metadata too
+    color = None
     if isinstance(meta, dict) and meta.get('color') is not None:
         color = meta.get('color')
     has_name = name is not None
     score = src.get('score')
+    if score is None and isinstance(meta, dict):
+        score = meta.get('score')
     if score is None and isinstance(src.get('stats'), dict):
         score = src['stats'].get('score')
-    color = src.get('color')
+    if color is None:
+        color = src.get('color')
     old = app.players.get(cid)
     if old is None:
         # No spawn placeholder: a new remote starts exactly at the position
-        # in THIS packet. _spawn_for_id would offset it if this packet ever
-        # carries only x or only y.
+        # in THIS packet.
         _ix = _num(x)
         _iy = _num(y)
         old = {'x': _ix, 'y': _iy, 'name': str(name) if has_name else 'player',
@@ -409,7 +483,17 @@ def _parse_character(app, entry, fallback_id=None):
         old['color'] = color
 
 
-def _parse_item(app, entry, fallback_id=None):
+def _parse_item(app, entry, fallback_id=None, from_collection=False):
+    """Apply one item update OR one collection to app.items.
+
+    New server: ItemInstanceState = {instanceId ("env:gem-N"),
+    pos, isCollected, collectedByClientId, environment}. A
+    collection entry is {instanceId, collectedByClientId,
+    environment} with NO isCollected -- it means collected=True.
+    Unknown ids are CREATED (server respawns: gem-25, ...),
+    never dropped -- dropping them was why respawns never
+    appeared. from_collection=True forces collected=True.
+    """
     if not isinstance(entry, dict):
         return
     src = entry
@@ -426,7 +510,6 @@ def _parse_item(app, entry, fallback_id=None):
                 merged.update(entry)
                 src = merged
                 break
-    # Protocol: ItemInstanceState = {instanceId, pos, isCollected, collectedByClientId}
     iid = src.get('instanceId')
     if iid is None:
         iid = src.get('instance_id')
@@ -439,29 +522,60 @@ def _parse_item(app, entry, fallback_id=None):
     if iid is None:
         iid = fallback_id
     _raw_iid = iid
+    # Normalise to the local id the app renders with: strip the
+    # "top-down-demo:" namespace, "gem-12" <- 12, "item-3" <- gem-3.
     if isinstance(iid, int):
         iid = 'gem-' + str(iid)
-    elif isinstance(iid, str) and iid.isdigit():
-        iid = 'gem-' + iid
-    elif isinstance(iid, str) and iid.startswith('item-'):
-        iid = 'gem-' + iid[5:]
-    if iid is None or iid not in app.items:
-        add_log(app, 'item patch DROPPED raw=' + _shorten(str(_raw_iid), 30) + ' mapped=' + _shorten(str(iid), 30))
+    elif isinstance(iid, str):
+        iid = _local_item_id(iid)
+        if iid.isdigit():
+            iid = 'gem-' + iid
+        elif iid.startswith('item-'):
+            iid = 'gem-' + iid[5:]
+    if iid is None:
+        add_log(app, 'item patch DROPPED raw=' + _shorten(str(_raw_iid), 30))
         return
-    collected = src.get('isCollected')
-    if collected is None:
-        collected = src.get('is_collected')
-    if collected is None:
-        collected = src.get('collected')
-    if collected is None:
-        collected = src.get('taken')
-    if collected is None and src.get('state') in ('collected', 'taken', 'gone'):
+    # Position: pos is canonical ([x, y] / {x, y}); fall back to
+    # position / top-level x+y.
+    ix = None
+    iy = None
+    pos = src.get('pos')
+    if pos is None:
+        pos = src.get('position')
+    if isinstance(pos, dict):
+        _px = pos.get('x') if pos.get('x') is not None else pos.get('0')
+        _py = pos.get('y') if pos.get('y') is not None else pos.get('1')
+        ix = _to_num(_px)
+        iy = _to_num(_py)
+    elif isinstance(pos, (list, tuple)) and len(pos) == 2:
+        ix = _to_num(pos[0])
+        iy = _to_num(pos[1])
+    elif isinstance(pos, str) and ',' in pos:
+        parts = pos.strip().strip('[]()').split(',')
+        if len(parts) > 0:
+            ix = _to_num(parts[0])
+        if len(parts) > 1:
+            iy = _to_num(parts[1])
+    if ix is None:
+        ix = _to_num(src.get('x'))
+    if iy is None:
+        iy = _to_num(src.get('y'))
+    # Collected: collection entries have no flag -- they ARE collected.
+    collected = None
+    if from_collection:
         collected = True
-    if collected is None and src.get('state') in ('available', 'active'):
-        collected = False
-    if collected is not None:
-        app.items[iid]['collected'] = bool(collected)
-        add_log(app, 'item applied: ' + str(iid) + ' collected=' + str(bool(collected)) + ' taken_by=' + _shorten(str(app.items[iid].get('taken_by')), 20))
+    else:
+        collected = src.get('isCollected')
+        if collected is None:
+            collected = src.get('is_collected')
+        if collected is None:
+            collected = src.get('collected')
+        if collected is None:
+            collected = src.get('taken')
+        if collected is None and src.get('state') in ('collected', 'taken', 'gone'):
+            collected = True
+        if collected is None and src.get('state') in ('available', 'active'):
+            collected = False
     taken_by = src.get('collectedByClientId')
     if taken_by is None:
         taken_by = src.get('collected_by_client_id')
@@ -477,35 +591,33 @@ def _parse_item(app, entry, fallback_id=None):
         taken_by = src.get('client_id')
     if taken_by is None:
         taken_by = src.get('clientId')
+    # CREATE unknown gems (server respawn). Default position is
+    # centre -- overwritten below if the packet carried a pos.
+    if iid not in app.items:
+        app.items[iid] = {'x': ix if ix is not None else WORLD_W // 2,
+                          'y': iy if iy is not None else WORLD_H // 2,
+                          'color': _gem_color_for_id(iid),
+                          'collected': False, 'taken_by': None}
+        add_log(app, 'item created from server: ' + str(iid))
+    if ix is not None and iy is not None:
+        app.items[iid]['x'] = float(ix)
+        app.items[iid]['y'] = float(iy)
+    if collected is not None:
+        app.items[iid]['collected'] = bool(collected)
     if taken_by is not None:
         app.items[iid]['taken_by'] = str(taken_by)
-    # Protocol also carries the item's pos — keep our local gem in sync if server moves it.
-    # Accept pos as [x,y], {x,y}, {0,1}, or 'position' key.
-    pos = src.get('pos')
-    if pos is None:
-        pos = src.get('position')
-    if isinstance(pos, dict):
-        _px = pos.get('x') if pos.get('x') is not None else pos.get('0')
-        _py = pos.get('y') if pos.get('y') is not None else pos.get('1')
-        if _px is not None and _py is not None:
-            try:
-                app.items[iid]['x'] = float(_px)
-                app.items[iid]['y'] = float(_py)
-            except Exception:
-                pass
-    elif isinstance(pos, (list, tuple)) and len(pos) == 2:
-        try:
-            app.items[iid]['x'] = float(pos[0])
-            app.items[iid]['y'] = float(pos[1])
-        except Exception:
-            pass
-    # Also accept top-level x/y on the item entry itself.
-    if src.get('x') is not None and src.get('y') is not None:
-        try:
-            app.items[iid]['x'] = float(src.get('x'))
-            app.items[iid]['y'] = float(src.get('y'))
-        except Exception:
-            pass
+
+
+def _parse_client_left(app, entry):
+    """Remove a player the server says left / timed out."""
+    cid = None
+    if isinstance(entry, str):
+        cid = entry
+    elif isinstance(entry, dict):
+        cid = entry.get('clientId') or entry.get('client_id') or entry.get('characterId') or entry.get('character_id') or entry.get('id') or entry.get('player_id')
+    if cid is not None and cid in app.players:
+        del app.players[cid]
+        add_log(app, 'player left: ' + _shorten(str(cid), 20))
 
 
 def apply_realtime(app, signals):
@@ -520,11 +632,50 @@ def apply_realtime(app, signals):
                 if isinstance(signals[key].get(sub), dict):
                     candidates.append(signals[key][sub])
     for cand in candidates:
+        # --- single-signal patches (already normalised by
+        # extensions.match, but accept the raw names too) ---
+        for _pk in ('character-state-update', 'character_state_update'):
+            _v = cand.get(_pk)
+            if isinstance(_v, dict):
+                _parse_character(app, _v)
+            elif isinstance(_v, list):
+                for _e in _v:
+                    _parse_character(app, _e)
+        for _pk in ('item-state-update', 'item_state_update'):
+            _v = cand.get(_pk)
+            if isinstance(_v, dict):
+                if isinstance(_v.get('updates'), list):
+                    for _e in _v['updates']:
+                        _parse_item(app, _e)
+                if isinstance(_v.get('collections'), list):
+                    for _e in _v['collections']:
+                        _parse_item(app, _e, from_collection=True)
+                elif 'instanceId' in _v or 'instance_id' in _v or 'item_id' in _v or 'id' in _v:
+                    _parse_item(app, _v)
+            elif isinstance(_v, list):
+                for _e in _v:
+                    _parse_item(app, _e)
+        for _pk in ('client-left', 'client_left', 'clientLeft'):
+            _v = cand.get(_pk)
+            if isinstance(_v, dict):
+                _parse_client_left(app, _v)
+            elif isinstance(_v, list):
+                for _e in _v:
+                    _parse_client_left(app, _e)
+            elif isinstance(_v, str):
+                _parse_client_left(app, _v)
+        for _pk in ('client-joined', 'client_joined'):
+            _v = cand.get(_pk)
+            if isinstance(_v, dict):
+                _parse_client_name(app, _v)
+            elif isinstance(_v, list):
+                for _e in _v:
+                    _parse_client_name(app, _e)
+        # --- canonical characters ---
         chars = cand.get('characters')
         if isinstance(chars, dict):
             for key in chars:
-                # dict-keyed: {client_id: {x, y, ...}} — key IS the id.
-                # Old code ignored the key and dropped these.
+                # dict-keyed: {client_id: {pos, ...}} -- key IS the id.
                 _parse_character(app, chars[key], fallback_id=key)
         elif isinstance(chars, list):
             for entry in chars:
@@ -535,8 +686,6 @@ def apply_realtime(app, signals):
         elif isinstance(_ch, list):
             for _e in _ch:
                 _parse_character(app, _e)
-        # character_states IS characters (positions). 'players' is ambiguous:
-        # if an entry has a position, treat as character, else as name-only.
         for alt in ('character_states',):
             alt_chars = cand.get(alt)
             if isinstance(alt_chars, dict):
@@ -545,8 +694,7 @@ def apply_realtime(app, signals):
             elif isinstance(alt_chars, list):
                 for entry in alt_chars:
                     _parse_character(app, entry)
-        # 'clients' is NAMES ONLY — never positions, never create a player.
-        # Parsing it as characters was creating a spawn phantom per client.
+        # 'clients' is NAMES ONLY -- never positions, never create a player.
         _clients = cand.get('clients')
         if isinstance(_clients, dict):
             for _k, _v in _clients.items():
@@ -554,25 +702,26 @@ def apply_realtime(app, signals):
         elif isinstance(_clients, list):
             for _e in _clients:
                 _parse_client_name(app, _e, fallback_id=None)
-        # 'players' — check each entry: position? -> character, else name-only.
+        # 'players' -- check each entry: position? -> character, else name-only.
         _players = cand.get('players')
         if isinstance(_players, dict):
             for _k, _v in _players.items():
-                if isinstance(_v, dict) and (_v.get('x') is not None or _v.get('y') is not None or _v.get('position') is not None):
+                if isinstance(_v, dict) and (_v.get('pos') is not None or _v.get('x') is not None or _v.get('y') is not None or _v.get('position') is not None):
                     _parse_character(app, _v, fallback_id=_k)
                 else:
                     _parse_client_name(app, _v, fallback_id=_k)
         elif isinstance(_players, list):
             for _e in _players:
-                if isinstance(_e, dict) and (_e.get('x') is not None or _e.get('y') is not None or _e.get('position') is not None):
+                if isinstance(_e, dict) and (_e.get('pos') is not None or _e.get('x') is not None or _e.get('y') is not None or _e.get('position') is not None):
                     _parse_character(app, _e)
                 else:
                     _parse_client_name(app, _e, fallback_id=None)
-        for _ik in ('items', 'itemStates', 'item_states', 'itemStatesMap', 'collections'):
+        # --- canonical items ---
+        for _ik in ('items', 'itemStates', 'item_states', 'itemStatesMap'):
             _items = cand.get(_ik)
             if isinstance(_items, dict):
                 # Server shape: items = {updates: [...], collections: [...]}
-                # — NOT {item_id: entry}. Unwrap those lists first, else every
+                # -- NOT {item_id: entry}. Unwrap those lists first, else every
                 # remote collection is dropped and gems never disappear.
                 _unwrapped = False
                 for _sub in ('updates', 'collections'):
@@ -580,7 +729,7 @@ def apply_realtime(app, signals):
                     if isinstance(_lst, list):
                         _unwrapped = True
                         for entry in _lst:
-                            _parse_item(app, entry)
+                            _parse_item(app, entry, from_collection=(_sub == 'collections'))
                 if not _unwrapped:
                     for key in _items:
                         _parse_item(app, _items[key], fallback_id=key)
@@ -593,6 +742,15 @@ def apply_realtime(app, signals):
         elif isinstance(_it, list):
             for _e in _it:
                 _parse_item(app, _e)
+        # Top-level collections list (bootstrap / patch).
+        _colls = cand.get('collections')
+        if isinstance(_colls, list):
+            for _e in _colls:
+                _parse_item(app, _e, from_collection=True)
+        # Game-over / synchronizer are informational here.
+        if isinstance(cand.get('game_over'), dict) or isinstance(cand.get('game-over'), dict):
+            app.match_status = 'finished'
+            app.status = 'Game over.'
 
 
 def apply_mp(app, mp):
@@ -605,9 +763,30 @@ def apply_mp(app, mp):
             room_id = room.get('room_id')
         if room_id is not None:
             app.room_id = room_id
+    if isinstance(mp.get('connection'), dict):
+        conn = mp['connection']
+        if conn.get('disconnectionTimeSec') is not None:
+            try:
+                app.disconnection_time_sec = float(conn['disconnectionTimeSec'])
+            except Exception:
+                pass
+        if conn.get('isSynchronizer') is not None:
+            app.is_synchronizer = bool(conn['isSynchronizer'])
+    if mp.get('synchronizer') is not None:
+        sync = mp['synchronizer']
+        if isinstance(sync, str):
+            app.is_synchronizer = (sync == app.client_id)
+        elif isinstance(sync, dict):
+            _sid = sync.get('clientId') or sync.get('client_id')
+            if _sid is not None:
+                app.is_synchronizer = (_sid == app.client_id)
     match = mp.get('match')
     if not isinstance(match, dict):
-        return
+        # Direct rooms may carry status at mp level.
+        if mp.get('match_status') is not None:
+            match = {'status': mp.get('match_status')}
+        else:
+            return
     if match.get('roomId') is not None:
         app.room_id = match['roomId']
     if match.get('room_id') is not None:
@@ -621,9 +800,11 @@ def apply_mp(app, mp):
         app.queue_position = pos
         app.status = 'Queued (position ' + str(pos) + ') - waiting...'
     elif status in ('matched', 'ready'):
-        if app.match_status != 'matched':
-            app.status = 'Matched! Room ' + str(app.room_id or '')
-        app.match_status = 'matched'
+        # "ready" is what a direct room (requires_matchmaking=False)
+        # returns -- the old code only expected "matched".
+        if app.match_status != 'matched' and app.match_status != 'ready':
+            app.status = 'Ready! Room ' + str(app.room_id or '')
+        app.match_status = status
     elif status == 'finished':
         app.match_status = 'finished'
         app.status = 'Game over.'
@@ -636,13 +817,15 @@ async def do_publish_character(app):
         return
     app.publishing = True
     try:
+        # Canonical CharacterState: pos + metadata only. No
+        # top-level x/y/name/color -- the server rejects those
+        # inside an update.
         result = await app.client.publish_character_state({
-            # Send every alias — server reads position/velocity/metadata, older code sent only x/y/name/score.
-            'position': [int(app.x), int(app.y)], 'pos': [int(app.x), int(app.y)],
-            'x': int(app.x), 'y': int(app.y),
+            'pos': [int(app.x), int(app.y)],
             'velocity': [0, 0],
-            'name': app.name, 'score': app.score, 'color': app.my_color,
-            'metadata': {'name': app.name, 'display_name': app.name, 'score': app.score, 'color': app.my_color},
+            'score': app.score,
+            'metadata': {'name': app.name, 'display_name': app.name,
+                         'score': app.score, 'color': app.my_color},
             'animationState': 'stand'})
         if isinstance(result, dict) and result.get('_status'):
             add_log(app, 'publish ' + str(result.get('_status')) + ': ' + _shorten(str(result), 60))
@@ -651,6 +834,27 @@ async def do_publish_character(app):
     except Exception as err:
         add_log(app, 'publish: ' + str(err))
     app.publishing = False
+
+
+async def do_heartbeat(app):
+    if app.client is None or app.client_id is None:
+        return
+    try:
+        res = await app.client.heartbeat()
+        if isinstance(res, dict) and res.get('_status') == 403:
+            # Already evicted -- the old client_id is dead. Re-join.
+            add_log(app, 'heartbeat 403 disconnected -- re-join needed')
+            app.status = 'Disconnected (silent too long) - press Join to re-join.'
+            app.client = None
+            app.client_id = None
+            app.session_id = None
+            app.room_id = None
+            app.match_status = None
+            app.players = {}
+            app.items = _fresh_offline_items()
+            app.server_items = False
+    except Exception as err:
+        add_log(app, 'heartbeat: ' + str(err))
 
 
 async def do_collect(app, item_id):
@@ -668,25 +872,21 @@ async def do_collect(app, item_id):
     add_log(app, 'collected ' + str(item_id) + ' - score ' + str(app.score))
     if app.client is not None:
         try:
-            claim = await app.client.claim_item_authority(item_id)
-            if isinstance(claim, dict) and claim.get('_status'):
-                add_log(app, 'claim ' + str(claim.get('_status')) + ': ' + _shorten(str(claim), 60))
+            # COLLECTION ONLY. No claim/release (server owns the
+            # gems), no update for the same item (server drops
+            # updates for server-spawned items). extensions.match
+            # turns this single-item form into
+            # {updates: [], collections: [...]}.
             res = await app.client.publish_item_state({
-                # Send every alias — server validates instanceId/pos/isCollected, older code sent only item_id/x/y/collected.
-                'instanceId': item_id, 'instance_id': item_id, 'item_id': item_id, 'itemId': item_id, 'id': item_id,
-                'pos': [int(item['x']), int(item['y'])], 'position': [int(item['x']), int(item['y'])],
-                'x': int(item['x']), 'y': int(item['y']),
-                'isCollected': True, 'is_collected': True, 'collected': True, 'taken': True,
-                'collectedByClientId': app.client_id, 'collected_by_client_id': app.client_id,
-                'taken_by': app.client_id, 'takenBy': app.client_id})
+                'instanceId': _namespaced_item_id(item_id),
+                'pos': [int(item['x']), int(item['y'])],
+                'isCollected': True,
+                'collectedByClientId': app.client_id,
+                'environment': ENVIRONMENT_NAME})
             if isinstance(res, dict) and res.get('_status'):
-                add_log(app, 'item publish ' + str(res.get('_status')) + ': ' + str(res))
+                add_log(app, 'item publish ' + str(res.get('_status')) + ': ' + _shorten(str(res), 60))
             else:
                 add_log(app, 'item pub ok: ' + _shorten(str(res), 60))
-            try:
-                await app.client.release_item_authority(item_id)
-            except Exception:
-                pass
         except Exception as err:
             add_log(app, 'item publish: ' + str(err))
         await do_publish_character(app)
@@ -717,42 +917,16 @@ async def do_join(app):
 
     def _on_signal(signals):
         if isinstance(signals, dict):
-            app.debug_signals = app.debug_signals + 1
-            if True:
-                add_log(app, 'signal keys: ' + _shorten(str(list(signals.keys())), 60))
-                if isinstance(signals.get('mp'), dict):
-                    add_log(app, 'mp keys: ' + _shorten(str(list(signals['mp'].keys())), 60))
-                    # Show the real characters payload once — key, id vs self, and position.
-                    chars = signals['mp'].get('characters')
-                    if isinstance(chars, dict) and len(chars) > 0:
-                        k0 = list(chars.keys())[0]
-                        v0 = chars[k0]
-                        add_log(app, 'chars: dict key=' + _shorten(str(k0), 30) + ' self=' + _shorten(str(app.client_id), 30) + ' val=' + _shorten(str(v0), 120))
-                    elif isinstance(chars, list) and len(chars) > 0:
-                        add_log(app, 'chars: list n=' + str(len(chars)) + ' self=' + _shorten(str(app.client_id), 30) + ' first=' + _shorten(str(chars[0]), 160))
-                        _cl = signals['mp'].get('clients')
-                        if isinstance(_cl, list) and len(_cl) > 0:
-                            add_log(app, 'clients: list n=' + str(len(_cl)) + ' first=' + _shorten(str(_cl[0]), 120))
-                    _itkeys = [k for k in ('items', 'item', 'itemStates', 'item_states', 'collections') if k in signals['mp']]
-                    if _itkeys:
-                        add_log(app, 'mp item keys: ' + str(_itkeys) + ' val=' + _shorten(str(signals['mp'].get(_itkeys[0])), 160))
-            if 'characters' in signals or 'items' in signals or 'mp' in signals:
-                try:
-                    apply_realtime(app, signals)
-                except Exception as _err:
-                    add_log(app, 'on_signal ERR: ' + str(_err))
-                # Proof parse ran: players + collected gems AFTER this patch. No throttling.
-                if True:
-                    _pc = sorted(app.players.keys())
-                    _cc = [k for k, v in app.items.items() if v.get('collected')]
-                    _pp = []
-                    for _k in _pc:
-                        _v = app.players.get(_k) or {}
-                        try:
-                            _pp.append(str(_k)[:8] + '@' + str(int(float(_v.get('x', 0)))) + ',' + str(int(float(_v.get('y', 0)))) + ':' + str(_v.get('name')))
-                        except Exception:
-                            _pp.append(str(_k)[:8] + '@?')
-                    add_log(app, 'after patch: players=' + _shorten(str(_pp), 300) + ' collected=' + _shorten(str(_cc), 120))
+            try:
+                apply_realtime(app, signals)
+            except Exception as _err:
+                add_log(app, 'on_signal ERR: ' + str(_err))
+
+    def _on_client_left(signals):
+        try:
+            apply_realtime(app, signals)
+        except Exception as _err:
+            add_log(app, 'on_client_left ERR: ' + str(_err))
 
     def _on_open():
         app.stream_open = True
@@ -766,6 +940,7 @@ async def do_join(app):
 
     client = MatchClient(on_mp=_on_mp, on_character=_on_character,
                          on_item=_on_item, on_signal=_on_signal,
+                         on_client_left=_on_client_left,
                          on_stream_open=_on_open,
                          on_stream_close=_on_close)
     # Do NOT set app.client yet: onStep publishes whenever app.client is not
@@ -777,30 +952,39 @@ async def do_join(app):
             character_name=name,
             game_id=GAME_ID,
             display_name=name,
-            skill=None,
             game_mode=GAME_MODE,
             max_players_per_room=8,
             min_players_per_room=1,
-            requires_matchmaking=False)
+            requires_matchmaking=False,
+            disconnection_time_sec=DISCONNECTION_TIME_SEC,
+            empty_game_ttl_sec=EMPTY_GAME_TTL_SEC)
         app.client_id = client.client_id
         app.session_id = client.session_id
         app.room_id = client.room_id
         app.match_status = client.match_status
         app.queue_position = client.queue_position
+        app.is_synchronizer = client.is_synchronizer
+        if client.disconnection_time_sec is not None:
+            app.disconnection_time_sec = client.disconnection_time_sec
         app.client = client
-        # DO NOT reassign my_color on join — the avatar colour is fixed at
+        # SERVER FIELD: drop the offline gems. The bootstrap that
+        # arrives on connect_stream() repopulates app.items with
+        # the server's 24 gems. Keeping the offline 12 would draw
+        # phantom gems the server knows nothing about.
+        app.items = {}
+        app.server_items = True
+        app.last_heartbeat_step = app.step
+        # DO NOT reassign my_color on join -- the avatar colour is fixed at
         # onAppStart (PLAYER_COLORS[0]). Reassigning to _color_for_id(client_id)
         # made the square change colour the moment you joined.
         # KEEP EXACT POSITION: do NOT teleport to _spawn_for_id on join.
         # Where you are when you press Join IS your join position. The next
-        # publish sends this exact app.x/app.y. Old line overwrote it with
-        # _spawn_for_id(client_id) — e.g. (914,603) for c93eb64f — so you
-        # jumped even if you had walked elsewhere before joining.
+        # publish sends this exact app.x/app.y.
         add_log(app, 'join keep pos: ' + str(int(app.x)) + ',' + str(int(app.y)))
         if client.match_status == 'queued':
             app.status = 'Queued (position ' + str(client.queue_position) + ') - waiting...'
         else:
-            app.status = 'Matched! Room ' + str(app.room_id or '')
+            app.status = 'Ready! Room ' + str(app.room_id or '')
         add_log(app, 'joined: ' + _shorten(str(data), 100))
         client.connect_stream()
         await do_publish_character(app)
@@ -827,6 +1011,10 @@ async def do_leave(app):
     app.stream_open = False
     app.stream_status = 'Stream: closed'
     app.status = 'Left - still moving locally.'
+    # Back to the offline field.
+    app.items = _fresh_offline_items()
+    app.server_items = False
+    app.is_synchronizer = False
 
 
 async def do_respawn(app):
@@ -860,6 +1048,8 @@ def onAppStart(app):
     app.room_id = None
     app.match_status = None
     app.queue_position = None
+    app.is_synchronizer = False
+    app.disconnection_time_sec = DISCONNECTION_TIME_SEC
     app.x = WORLD_W // 2
     app.y = WORLD_H // 2
     app.held = set()
@@ -867,13 +1057,12 @@ def onAppStart(app):
     app.score = 0
     app.my_color = PLAYER_COLORS[0]
     app.players = {}
-    app.items = {}
-    for iid, ix, iy, icol in ITEM_DEFS:
-        app.items[iid] = {'x': ix, 'y': iy, 'color': icol,
-                          'collected': False, 'taken_by': None}
+    app.items = _fresh_offline_items()
+    app.server_items = False
     app.collecting = set()
     app.log = []
     app.step = 0
+    app.last_heartbeat_step = 0
     app.status = 'Not joined - move locally, Join to play together.'
     app.stream_open = False
     app.stream_status = 'Stream: closed'
@@ -885,6 +1074,12 @@ def onAppStart(app):
 
 def onStep(app):
     app.step = app.step + 1
+    # Heartbeat while joined even when standing still -- otherwise
+    # the server evicts a silent client after disconnection_time_sec.
+    if app.client is not None and app.client_id is not None:
+        if app.step - app.last_heartbeat_step >= HEARTBEAT_STEPS:
+            app.last_heartbeat_step = app.step
+            aio.run(do_heartbeat(app))
     moved = False
     if app.last_dir is not None and app.last_dir in app.held:
         if app.last_dir == 'up':
@@ -1022,10 +1217,15 @@ def redrawAll(app):
     _draw_button(RESPAWN_RECT, 'Respawn', True)
     _draw_button(RECONNECT_RECT, 'Reconnect', joined)
     drawLabel(app.status, 810, 62, size=12, bold=True, fill=rgb(214, 224, 255), align='leftTop')
-    drawLabel('Score: ' + str(app.score) + '  Players: ' + str(len(app.players) + 1) + '  ' + app.stream_status,
+    gems_on_map = 0
+    for _iid in app.items:
+        if not app.items[_iid].get('collected'):
+            gems_on_map = gems_on_map + 1
+    sync_tag = '  Sync' if getattr(app, 'is_synchronizer', False) else ''
+    drawLabel('Score: ' + str(app.score) + '  Players: ' + str(len(app.players) + 1) + '  Gems: ' + str(gems_on_map) + sync_tag + '  ' + app.stream_status,
               810, 82, size=12, fill=rgb(214, 224, 255), align='leftTop')
     cam_x, cam_y = _camera(app)
-    # LITERAL view origin — do NOT use VIEW_X/VIEW_Y globals in world math.
+    # LITERAL view origin -- do NOT use VIEW_X/VIEW_Y globals in world math.
     # The globals still log as 110231 in the browser even after float() coercion,
     # so the deployed file is either cached old code or the globals are corrupted
     # to "110" / 110000 in Brython. Literals cannot be corrupted.
@@ -1041,7 +1241,7 @@ def redrawAll(app):
         sy = _VY + _num(gy) - _cy
         if _VY <= sy <= _VY + _VH:
             drawLine(_VX, sy, _VX + _VW, sy, fill=rgb(40, 58, 44), lineWidth=1)
-    # World border, clipped to view — old full 2000x1400 rect bled into header/footer.
+    # World border, clipped to view -- old full 2000x1400 rect bled into header/footer.
     wx0 = _VX - _cx
     wy0 = _VY - _cy
     wx1 = wx0 + float(WORLD_W)
@@ -1053,30 +1253,29 @@ def redrawAll(app):
     if _VX <= wx0 <= _VX + _VW:
         drawLine(wx0, max(_VY, wy0), wx0, min(_VY + _VH, wy1), fill=rgb(120, 180, 130), lineWidth=3)
     if _VX <= wx1 <= _VX + _VW:
-        drawLine(wx1, max(_VY, wy0), wx1, min(_VY + _VH, wy1), fill=rgb(120, 180, 130), lineWidth=3)
+        drawLine(wx1, max(_VX, wx0), wx1, min(_VY + _VH, wy1), fill=rgb(120, 180, 130), lineWidth=3)
+    if app.server_items and len(app.items) == 0:
+        drawLabel('Waiting for server gems...', _VX + _VW // 2, _VY + _VH // 2, size=16, bold=True, fill='white')
     for iid in sorted(app.items.keys()):
         item = app.items[iid]
         if item['collected']:
             continue
         sx = _VX + _num(item['x']) - _cx
         sy = _VY + _num(item['y']) - _cy
-        # Strict view bounds — no 20px slack into header/footer.
+        # Strict view bounds -- no 20px slack into header/footer.
         if sx < _VX or sx > _VX + _VW:
             continue
         if sy < _VY or sy > _VY + _VH:
             continue
         drawCircle(sx, sy, ITEM_R, fill=_to_rgb(item['color']), border='white', borderWidth=2)
         drawLabel('*', sx, sy, size=14, bold=True, fill='white')
-    # NO TIMEOUTS — no prune. A remote stays until the server says it left.
+    # NO TIMEOUTS -- no prune. A remote stays until the server says it left.
     # Idle players don't publish when not moving, so any time-based prune
     # deletes live players (that's why Ling showed Players:1). Dead tabs
     # staying in the list is better than live players vanishing.
     # Remotes at EXACT positions, no nudge / no ring / no spread.
-    # Previous spread theory was wrong: they were not drawn at all, not hidden.
-    # No silent skip: if a remote fails to draw, log it to console (no throttling).
-    # No throttling anywhere in this block.
     def _draw_player_square(sx, sy, color, name, score, is_self):
-        # Single path for self + remotes — no divergent fill/border code.
+        # Single path for self + remotes -- no divergent fill/border code.
         # Halo first: a remote stacked exactly on self still shows a white rim
         # instead of vanishing under self (the white speck in screenshots).
         if not is_self:
@@ -1085,7 +1284,6 @@ def redrawAll(app):
         if not is_self:
             # PROBE: tiny red centre dot. If the square's fill is transparent
             # the dot still shows. If neither shows, the loop is not running.
-            # fill='red' is a named color, not a rgb() string — cannot fail on fill.
             drawCircle(sx, sy, 3, fill='red')
         if sy - 30 >= _VY:
             drawLabel(name, sx + 1, sy - 30 + 1, size=13 if is_self else 12, bold=True, fill='black')
@@ -1101,28 +1299,15 @@ def redrawAll(app):
         try:
             sx = int(_VX + _num(other['x']) - _cx)
             sy = int(_VY + _num(other['y']) - _cy)
-            # Draw-args log, change-detected (not time-throttled): proves the loop
-            # ran and what coords it used. Awe @940,625 self @1060,660 -> scr 405,346.
-            try:
-                _last = getattr(app, '_last_draw', None)
-                if _last is None:
-                    app._last_draw = {}
-                    _last = app._last_draw
-                _key = str(cid) + ':' + str(sx) + ',' + str(sy)
-                if _last.get(cid) != _key:
-                    _last[cid] = _key
-                    add_log(app, 'draw remote ' + str(cid)[:8] + ' scr ' + str(sx) + ',' + str(sy) + ' w ' + str(int(_num(other['x']))) + ',' + str(int(_num(other['y']))) + ' cam ' + str(int(_num(cam_x))) + ',' + str(int(_num(cam_y))) + ' color ' + str(other['color']) + ' VY=' + str(VIEW_Y) + ' ytype=' + str(type(other['y'])) + ' cytype=' + str(type(cam_y)))
-            except Exception:
-                pass
             _draw_player_square(sx, sy, other['color'], other['name'], other['score'], False)
         except Exception as _derr:
             add_log(app, 'draw remote ERR ' + str(cid)[:8] + ' ' + str(_derr) + ' entry=' + _shorten(str(other), 120))
-    # Footer on a solid strip — keeps WASD hint readable over the map.
+    # Footer on a solid strip -- keeps WASD hint readable over the map.
     drawRect(0, APP_HEIGHT - 48, APP_WIDTH, 48, fill=rgb(18, 18, 20))
     drawLabel('WASD / arrows to move. Touch a gem. Camera follows you.',
               40, APP_HEIGHT - 18, size=12, fill=rgb(214, 224, 255), align='left')
-    # No Log: / P: on screen — logs are console-only (see add_log).
-    # Header redrawn last — header was drawn first, so map elements at the
+    # No Log: / P: on screen -- logs are console-only (see add_log).
+    # Header redrawn last -- header was drawn first, so map elements at the
     # top edge could paint over it. Redrawing it here guarantees it stays on top.
     drawRect(0, 0, APP_WIDTH, VIEW_Y, fill=rgb(18, 18, 20))
     drawLabel('Top-Down - Realtime - MatchGod', APP_WIDTH // 2, 24, size=24, bold=True, fill='white')
@@ -1132,7 +1317,7 @@ def redrawAll(app):
     _draw_button(RESPAWN_RECT, 'Respawn', True)
     _draw_button(RECONNECT_RECT, 'Reconnect', joined)
     drawLabel(app.status, 810, 62, size=12, bold=True, fill=rgb(214, 224, 255), align='leftTop')
-    drawLabel('Score: ' + str(app.score) + '  Players: ' + str(len(app.players) + 1) + '  ' + app.stream_status,
+    drawLabel('Score: ' + str(app.score) + '  Players: ' + str(len(app.players) + 1) + '  Gems: ' + str(gems_on_map) + sync_tag + '  ' + app.stream_status,
               810, 82, size=12, fill=rgb(214, 224, 255), align='leftTop')
 
 
