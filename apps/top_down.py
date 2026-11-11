@@ -14,8 +14,9 @@ EricEisaman/match README, "Client protocol"):
     disconnection_time_sec=60 / empty_game_ttl_sec=300.
   * Movement is local and optimistic. The client moves on onStep,
     then publishes its character with PATCH character-state.
-    Canonical update is {clientId, pos: [x, y], velocity, score,
-    metadata: {name, display_name, color, score}} -- name/colour
+    Canonical update is {clientId, position: [x, y], velocity,
+    score, health, metadata: {health, name, color}} -- characters
+    use position, ITEMS use pos (different fields). Name/colour
     live ONLY in metadata, never top-level.
   * Gems are SERVER-SPAWNED and server-authoritative. The client
     never invents gems once joined: the stream bootstrap carries
@@ -368,8 +369,9 @@ def _parse_character(app, entry, fallback_id=None):
         cid = fallback_id
     if cid is None or cid == app.client_id:
         return
-    # Canonical position is pos: [x, y]. Fall back to the older
-    # shapes (position / x+y / "x,y") so old payloads still parse.
+    # Characters use position: [x, y] (items use pos -- different
+    # field, see working demo). Fall back to the older shapes
+    # (pos / x+y / "x,y") so old payloads still parse.
     x = None
     y = None
     pos = src.get('pos')
@@ -817,16 +819,41 @@ async def do_publish_character(app):
         return
     app.publishing = True
     try:
-        # Canonical CharacterState: pos + metadata only. No
-        # top-level x/y/name/color -- the server rejects those
-        # inside an update.
+        # CharacterState EXACTLY like the working non-SCS demo:
+        # position (NOT pos -- server 422s pos in a character
+        # update), characterModelId, velocity, animationState,
+        # animationFrame, isJumping, facing, score, health,
+        # onGround, metadata {health, name, color}.
+        # Items are the ones that use pos; characters do not.
+        # (Per-update timestamp is left to publish_character_state,
+        # which stamps the body -- the demo's per-update stamp is
+        # optional and the server never required it.)
+        _vx = 0
+        _vy = 0
+        _facing = 1
+        if app.last_dir == 'left':
+            _vx = -SPEED
+            _facing = -1
+        elif app.last_dir == 'right':
+            _vx = SPEED
+            _facing = 1
+        elif app.last_dir == 'up':
+            _vy = -SPEED
+        elif app.last_dir == 'down':
+            _vy = SPEED
         result = await app.client.publish_character_state({
-            'pos': [int(app.x), int(app.y)],
-            'velocity': [0, 0],
+            'position': [int(app.x), int(app.y)],
+            'characterModelId': 'square',
+            'velocity': [_vx, _vy],
+            'animationState': 'run' if (_vx or _vy) else 'stand',
+            'animationFrame': 0,
+            'isJumping': False,
+            'facing': _facing,
             'score': app.score,
-            'metadata': {'name': app.name, 'display_name': app.name,
-                         'score': app.score, 'color': app.my_color},
-            'animationState': 'stand'})
+            'health': 100,
+            'onGround': True,
+            'metadata': {'health': 100, 'name': app.name,
+                         'color': app.my_color}})
         if isinstance(result, dict) and result.get('_status'):
             add_log(app, 'publish ' + str(result.get('_status')) + ': ' + _shorten(str(result), 60))
         else:

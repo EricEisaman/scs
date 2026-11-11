@@ -52,11 +52,20 @@ server/app/multiplayer, README "Client protocol"):
         Fall back to turn/action with action_type pass/resign
         when the dedicated endpoint 404s (older server).
   PATCH /api/multiplayer/character-state     (realtime)
-        Body: {updates: [{clientId, pos: [x, y], velocity,
+        Body: {updates: [{clientId, position: [x, y], velocity,
         health, score, animationState, metadata}], timestamp}.
-        Canonical position field is ``pos``, NOT ``position``.
-        Name / colour live ONLY in metadata, never top-level
-        in an update.
+        CHARACTERS use ``position``; ITEMS use ``pos`` -- they are
+        DIFFERENT fields. The live server (matchgod.onrender.com)
+        rejects ``pos`` in a character update with
+        422 {"detail": "unsupported character fields: pos"}.
+        Proof: the working non-SCS demo (Real-time Demo) sends
+        position + characterModelId + animationFrame + isJumping
+        + facing + onGround + timestamp in every character
+        update, and position is what its bootstrap broadcasts
+        back. The README's character example using ``pos`` is
+        wrong for the deployed server; do NOT "fix" this back
+        to pos. Name / colour live ONLY in metadata, never
+        top-level in an update.
   PATCH /api/multiplayer/item-state          (realtime)
         Body: {updates: [...], collections: [...], timestamp}.
         An update is {instanceId, pos, isCollected,
@@ -123,10 +132,11 @@ except ImportError:
     window = None
     aio = None
 
-try:
-    import asyncio as _asyncio
-except ImportError:
-    _asyncio = None
+# NOTE: do NOT import asyncio here. Brython ships a stub asyncio
+# that implements nothing (browser limitation) and importing it
+# prints "Brython implementation of asyncio is present...".
+# For async programming use browser.aio (imported above) and
+# window.fetch / window.Promise only.
 
 
 BASE_URL = 'https://matchgod.onrender.com'
@@ -332,15 +342,13 @@ def _quote(text):
 
 
 async def _sleep(seconds):
+    # browser.aio is the only working sleep in Brython. No asyncio.
     if aio is not None:
         try:
             await aio.sleep(seconds)
             return
         except Exception:
             pass
-    if _asyncio is not None:
-        await _asyncio.sleep(seconds)
-        return
     if window is not None:
         await window.Promise.new(lambda resolve, reject: window.setTimeout(resolve, int(seconds * 1000)))
 
@@ -414,13 +422,18 @@ def _pos_from(src):
     return None
 
 
-def canonical_character_update(src, default_client_id=None):
-    """Normalise any caller shape to the new CharacterState update.
+def canonical_character_update(src, default_client_id=None, position_field=None):
+    """Normalise any caller shape to a CharacterState update.
 
-    Output: {clientId, pos, velocity, score?, health?, animationState?,
-    metadata}. Name / colour are folded into metadata ONLY -- they
-    are not top-level CharacterState fields and the server
-    rejects them there.
+    Output: {clientId, <position field>, velocity, score?, health?,
+    animationState?, metadata}. Name / colour are folded into
+    metadata ONLY -- they are not top-level CharacterState fields
+    and the server rejects them there.
+
+    position_field: 'position' (live server / working demo --
+    the default), 'pos' (items only, NOT characters),
+    'xy' (flat x/y), 'position_dict' (position: {x, y}) or
+    'pos_dict' (pos: {x, y}). None defaults to 'position'.
     """
     if not isinstance(src, dict):
         src = {}
@@ -436,7 +449,19 @@ def canonical_character_update(src, default_client_id=None):
             vel = [float(vel[0]), float(vel[1])]
         except Exception:
             vel = [0, 0]
-    upd = {'clientId': cid, 'pos': [float(pos[0]), float(pos[1])], 'velocity': vel}
+    upd = {'clientId': cid, 'velocity': vel}
+    field = position_field or 'position'
+    if field == 'position':
+        upd['position'] = [float(pos[0]), float(pos[1])]
+    elif field == 'xy':
+        upd['x'] = float(pos[0])
+        upd['y'] = float(pos[1])
+    elif field == 'position_dict':
+        upd['position'] = {'x': float(pos[0]), 'y': float(pos[1])}
+    elif field == 'pos_dict':
+        upd['pos'] = {'x': float(pos[0]), 'y': float(pos[1])}
+    else:
+        upd['pos'] = [float(pos[0]), float(pos[1])]
     score = src.get('score')
     if isinstance(score, (int, float)) and not isinstance(score, bool):
         upd['score'] = score
@@ -450,6 +475,16 @@ def canonical_character_update(src, default_client_id=None):
         upd['characterModelId'] = src.get('characterModelId')
     if isinstance(src.get('animationFrame'), (int, float)):
         upd['animationFrame'] = src.get('animationFrame')
+    # Demo fields the live server accepts (see working demo):
+    # isJumping / facing / onGround / per-update timestamp.
+    if isinstance(src.get('isJumping'), bool):
+        upd['isJumping'] = src.get('isJumping')
+    if isinstance(src.get('facing'), (int, float)) and not isinstance(src.get('facing'), bool):
+        upd['facing'] = src.get('facing')
+    if isinstance(src.get('onGround'), bool):
+        upd['onGround'] = src.get('onGround')
+    if isinstance(src.get('timestamp'), (int, float)) and not isinstance(src.get('timestamp'), bool):
+        upd['timestamp'] = int(src.get('timestamp'))
     meta = src.get('metadata')
     if isinstance(meta, dict):
         # Copy so we never mutate the caller's dict, and fill in
@@ -468,8 +503,9 @@ def canonical_character_update(src, default_client_id=None):
         meta['displayName'] = src.get('displayName')
     if meta.get('color') is None and src.get('color') is not None:
         meta['color'] = src.get('color')
-    if 'score' in upd and 'score' not in meta:
-        meta['score'] = upd['score']
+    # Do NOT inject score into metadata: the working demo's
+    # metadata is exactly {health, name, color} and score rides
+    # top-level. (Receiving still reads meta.score as a fallback.)
     upd['metadata'] = meta
     return upd
 
@@ -970,6 +1006,7 @@ class MatchClient(object):
                 config['room_code'] = room_code
             if disconnection_time_sec is not None:
                 config['disconnection_time_sec'] = disconnection_time_sec
+                config['disconnectionTime'] = disconnection_time_sec
             if empty_game_ttl_sec is not None:
                 config['empty_game_ttl_sec'] = empty_game_ttl_sec
             if custom_rules is not None:
@@ -1322,16 +1359,17 @@ class MatchClient(object):
         """PATCH character-state.
 
         Body is {updates: [CharacterState], timestamp}. CharacterState
-        is {clientId, pos: [x, y], velocity, score?, health?,
-        animationState?, metadata}. Name / colour ride in metadata
-        only -- never as top-level update fields.
+        is {clientId, position: [x, y], velocity, score?, health?,
+        animationState?, metadata}. CHARACTERS use position;
+        ITEMS use pos. Name / colour ride in metadata only --
+        never as top-level update fields.
         """
         src = character_state if isinstance(character_state, dict) else {}
         env = self._env(src)
         if isinstance(src.get('updates'), list):
             updates = []
             for entry in src['updates']:
-                updates.append(canonical_character_update(entry, default_client_id=character_id or self.client_id))
+                updates.append(canonical_character_update(entry, default_client_id=character_id or self.client_id, position_field='position'))
             body = {
                 'updates': updates, 'timestamp': self._int_ts(src.get('timestamp')),
                 'clientId': self.client_id, 'client_id': self.client_id,
@@ -1343,7 +1381,7 @@ class MatchClient(object):
                 self._note_disconnect(result)
                 return failed
             return result.get('data')
-        upd = canonical_character_update(src, default_client_id=character_id or self.client_id)
+        upd = canonical_character_update(src, default_client_id=character_id or self.client_id, position_field='position')
         body = {
             'updates': [upd], 'timestamp': self._now(),
             'clientId': upd.get('clientId'), 'client_id': upd.get('clientId'),
