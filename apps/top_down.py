@@ -4,20 +4,35 @@ apps/top_down.py -- SCS App: realtime top-down scroller, 1050 x 700.
 Realtime mp, not turn-based. Uses extensions.match (MatchGod API).
 Server: https://matchgod.onrender.com
 
-How it works (adapted to the current matchgod server -- see
-EricEisaman/match README, "Client protocol"):
+How it works (new MATCH protocol -- see EricEisaman/match README,
+"Character state -- schema-declared" and "Client protocol"):
   * join_realtime, not join_turn_based. No turn/state, no turn/action,
     no pass, no resign. min_players_per_room=1, so one player can
     play alone and others can join the same room later.
     Direct room: requires_matchmaking=False, match_status comes
     back "ready" (not "matched"). Join also declares
-    disconnection_time_sec=60 / empty_game_ttl_sec=300.
+    disconnection_time_sec=60 / empty_game_ttl_sec=300, AND the
+    character_schema below. The first join for a game_id stores
+    the schema; a later join with a different schema gets 409
+    + the stored schema, and this app retries once with it.
   * Movement is local and optimistic. The client moves on onStep,
     then publishes its character with PATCH character-state.
-    Canonical update is {clientId, position: [x, y], velocity,
-    score, health, metadata: {health, name, color}} -- characters
-    use position, ITEMS use pos (different fields). Name/colour
-    live ONLY in metadata, never top-level.
+    Canonical update is {clientId, state: {position, health,
+    name, color}} -- characters use position inside state,
+    ITEMS use pos (different fields, different endpoint).
+    Name/colour live in state.name / state.color. There is no
+    legacy wrapper, no top-level position/health/score outside
+    state, no velocity / facing / animation fields. The old
+    shape is rejected with 422.
+  * Score is SERVER-authoritative (authority "server" in the
+    schema). The client NEVER sends it and NEVER increments it
+    locally when online. On collection the server increments
+    it and broadcasts the updated character state with
+    source "server". Own character entries are the score
+    channel: this app applies score (only score) from its own
+    broadcast entries and never overwrites its own position
+    from its own echo. A patch that tries to send score is
+    dropped (dropped_server_fields) and never broadcast.
   * Gems are SERVER-SPAWNED and server-authoritative. The client
     never invents gems once joined: the stream bootstrap carries
     the field (24 live gems, instanceId "top-down-demo:gem-N")
@@ -29,27 +44,47 @@ EricEisaman/match README, "Client protocol"):
     When you touch a gem you mark it collected locally, publish
     PATCH item-state with updates=[] and
     collections=[{instanceId, collectedByClientId, environment}],
-    and publish your new score with your character. The server
-    broadcasts the collection (exactly-once: first wins) plus
-    the respawn. No claim/release: server gems are owned by the
-    server, claim would block collection.
+    and wait for the server broadcast for your new score.
+    No claim/release: server gems are owned by the server,
+    claim would block collection. No publish-character for
+    score: score is not a client field.
   * Heartbeat: if you stop moving you stop publishing, and the
     server evicts a client silent for disconnection_time_sec.
     onStep therefore heartbeats every ~20s (budget / 3) while
     joined. A 403 "disconnected: timeout" means re-join -- the
     old client_id is dead.
   * Stream is EventSource. The first event is a full bootstrap
-    (connection, clients, characters LIST, items {updates,
-    collections}, room, match); later events are single-signal
-    patches (character-state-update, item-state-update,
-    client-joined, client-left, ...). extensions.match
-    normalises both forms to the same canonical shape before
-    the callbacks fire, so apply_realtime only ever sees
-    characters / items / clients / client_left.
+    (connection, clients, characters LIST of {clientId, state,
+    source}, items {updates, collections}, room, match,
+    character_schema); later events are single-signal patches
+    (character-state-update, item-state-update, client-joined,
+    client-left, ...). extensions.match normalises both forms
+    to the same canonical shape before the callbacks fire, so
+    apply_realtime only ever sees characters / items / clients /
+    client_left. Broadcasts are full merged states, but this
+    app still treats them as partial-safe: only fields present
+    overwrite the stored value.
   * Offline (not joined) the app still plays locally against a
     fixed 12-gem field, so movement/collecting can be tried
-    without a server. Joining clears the offline field and
-    replaces it with the server field; leaving restores it.
+    without a server. Offline collecting DOES increment score
+    locally (there is no server). Joining clears the offline
+    field and replaces it with the server field, resets score
+    to the server value (0), and leaving restores the offline
+    field.
+
+  Required extensions.match contract (companion update):
+    - join_realtime(..., character_schema=...) must forward
+      it as config.character_schema on POST /join, and surface
+      a 409 character_schema_mismatch (with the stored schema)
+      instead of swallowing it.
+    - publish_character_state(state_dict) takes the STATE dict
+      itself -- {"position": [...], "health": .., "name": ..,
+      "color": ..} -- and wraps it as
+      {updates: [{clientId, state: state_dict}]} on
+      PATCH /character-state. Do NOT add a second "state" key
+      at this call site.
+    - publish_item_state(...) still takes the item form and
+      wraps it as {updates: [], collections: [...]}.
 
 Layout, 1050 x 700:
   Top bar (0..110): title, Name field, Join / Leave / Respawn /
@@ -104,6 +139,27 @@ DISCONNECTION_TIME_SEC = 60
 EMPTY_GAME_TTL_SEC = 300
 # Heartbeat at budget/3: 20s at 30 steps/sec = 600 steps.
 HEARTBEAT_STEPS = 600
+
+# Character schema for this game_id -- must match the server's
+# stored schema exactly (same fields, same version), or join
+# gets 409. This is the top-down schema from the match README.
+# position/health/name/color are client-authoritative;
+# score is server-authoritative: never send it.
+CHARACTER_SCHEMA = {
+    'version': 1,
+    'fields': {
+        'position': {'type': 'vec2', 'required': True,
+                     'authority': 'client', 'semantic': 'position'},
+        'health': {'type': 'int', 'required': True,
+                   'min': 0, 'max': 100,
+                   'authority': 'client', 'semantic': 'health'},
+        'score': {'type': 'int', 'authority': 'server',
+                  'default': 0, 'min': 0, 'semantic': 'score'},
+        'name': {'type': 'string', 'authority': 'client',
+                 'semantic': 'name'},
+        'color': {'type': 'string', 'authority': 'client'},
+    },
+}
 
 PLAYER_COLORS = ['rgb(90,160,255)', 'rgb(255,120,120)',
                  'rgb(120,220,130)', 'rgb(255,210,90)',
@@ -279,6 +335,42 @@ def _camera(app):
     return cam_x, cam_y
 
 
+def _state_of(entry):
+    """New-protocol character entry -> its state dict.
+
+    Canonical entry: {clientId, state: {position, health, score,
+    name, color}, source, timestamp}. If a caller already
+    normalised to flat state fields, the entry itself IS the
+    state. State wins when both are present.
+    """
+    if isinstance(entry, dict) and isinstance(entry.get('state'), dict):
+        return entry['state']
+    if isinstance(entry, dict):
+        return entry
+    return {}
+
+
+def _client_id_of(entry, fallback_id=None):
+    if not isinstance(entry, dict):
+        return fallback_id
+    cid = entry.get('clientId')
+    if cid is None:
+        cid = entry.get('client_id')
+    if cid is None:
+        cid = entry.get('character_id')
+    if cid is None:
+        cid = entry.get('characterId')
+    if cid is None:
+        cid = entry.get('id')
+    if cid is None:
+        cid = entry.get('player_id')
+    if cid is None:
+        cid = entry.get('playerId')
+    if cid is None:
+        cid = fallback_id
+    return cid
+
+
 def _parse_client_name(app, entry, fallback_id=None):
     """Clients carry NAMES only. Never create a player, never touch x/y.
     Only rename a player that already exists from a real characters update."""
@@ -292,33 +384,54 @@ def _parse_client_name(app, entry, fallback_id=None):
         return
     # Unwrap one level if nested
     src = entry
-    for nest in ('player', 'user', 'character', 'data', 'state'):
+    for nest in ('player', 'user', 'data'):
         if isinstance(entry.get(nest), dict) and (entry.get(nest).get('name') or entry.get(nest).get('display_name')):
             src = entry[nest]
             break
-    cid = src.get('character_id') or src.get('characterId') or src.get('client_id') or src.get('clientId') or src.get('id') or src.get('player_id') or src.get('playerId') or fallback_id
+    cid = _client_id_of(src, fallback_id)
     if cid is None or cid == app.client_id:
         return
-    name = None
-    meta = src.get('metadata')
-    if isinstance(meta, dict):
-        name = meta.get('name') or meta.get('display_name') or meta.get('character_name') or meta.get('displayName')
+    state = _state_of(src)
+    name = state.get('name')
+    if name is None:
+        name = state.get('display_name')
     # SERVER: clients = [{"clientId": ..., "character": "<name>", ...}] -- `character` IS the name string.
     if name is None and isinstance(src.get('character'), str) and src.get('character'):
         name = src.get('character')
     if name is None and isinstance(entry.get('character'), str) and entry.get('character'):
         name = entry.get('character')
     if name is None:
-        name = src.get('name') or src.get('display_name') or src.get('character_name') or src.get('displayName') or src.get('player_name') or src.get('displayName')
+        name = src.get('name') or src.get('display_name') or src.get('character_name') or src.get('displayName') or src.get('player_name')
     if cid in app.players:
         if name is not None:
             app.players[cid]['name'] = str(name)
 
 
+def _parse_self_character(app, state):
+    """Own broadcast entries are the SCORE channel only.
+
+    The server's source="server" broadcast after a collection is
+    the only place our online score changes. Never overwrite our
+    own position from our own echo -- local movement is the
+    source of truth for x/y. Name is ours to send, not to learn.
+    """
+    if not isinstance(state, dict):
+        return
+    score = state.get('score')
+    if isinstance(score, (int, float)) and not isinstance(score, bool):
+        app.score = int(score)
+
+
 def _parse_character(app, entry, fallback_id=None):
+    # A broadcast may bundle several updates: {updates: [{...}, ...]}.
+    # Apply every one -- taking only updates[0] drops the rest.
+    if isinstance(entry, dict) and isinstance(entry.get('updates'), list):
+        for sub in entry['updates']:
+            _parse_character(app, sub, fallback_id=fallback_id)
+        return
     # Characters value may be a bare [x, y] or a JSON string, not a dict.
     if isinstance(entry, (list, tuple)) and len(entry) == 2:
-        entry = {'x': entry[0], 'y': entry[1]}
+        entry = {'state': {'position': [entry[0], entry[1]]}}
     if isinstance(entry, str):
         # Bare string from clients: {client_id: 'Milo'} -- name only, NOT a character.
         # Never create a player from this (that was the spawn-phantom bug).
@@ -336,55 +449,33 @@ def _parse_character(app, entry, fallback_id=None):
             return
     if not isinstance(entry, dict):
         return
-    # Server may nest the state: {state: {x, y, ...}} / {data: {...}}
-    # / {character_state: {...}}. Unwrap so pos/x/y/name still read.
-    src = entry
-    # Server broadcasts updates as a LIST: {updates: [{pos, ...}]}
-    if isinstance(entry.get('updates'), list) and len(entry['updates']) > 0 and isinstance(entry['updates'][0], dict):
-        # Fresh updates win: entry first, then updates[0] on top.
-        merged = {}
-        merged.update(entry)
-        merged.update(entry['updates'][0])
-        src = merged
-    else:
-        for nest in ('updates', 'state', 'data', 'character_state', 'character', 'value'):
-            if isinstance(entry.get(nest), dict):
-                merged = {}
-                merged.update(entry[nest])
-                merged.update(entry)
-                src = merged
-                break
-    cid = src.get('character_id')
+    cid = _client_id_of(entry, fallback_id)
     if cid is None:
-        cid = src.get('characterId')
-    if cid is None:
-        cid = src.get('client_id')
-    if cid is None:
-        cid = src.get('clientId')
-    if cid is None:
-        cid = src.get('id')
-    if cid is None:
-        cid = src.get('player_id')
-    if cid is None:
-        cid = fallback_id
-    if cid is None or cid == app.client_id:
         return
-    # Characters use position: [x, y] (items use pos -- different
-    # field, see working demo). Fall back to the older shapes
-    # (pos / x+y / "x,y") so old payloads still parse.
+    state = _state_of(entry)
+    # OWN entry: score channel only. See _parse_self_character.
+    if cid == app.client_id:
+        _parse_self_character(app, state)
+        return
+    # Characters use position inside state: [x, y] (items use pos --
+    # different field, different endpoint). Accept a flat
+    # position on the entry itself only as a tolerance fallback
+    # for a normaliser that already flattened state.
     x = None
     y = None
-    pos = src.get('pos')
+    pos = state.get('position')
     if pos is None:
-        pos = src.get('position')
+        pos = entry.get('position')
+    if pos is None:
+        pos = state.get('pos')
     if isinstance(pos, (list, tuple)) and len(pos) == 2:
         x = _to_num(pos[0])
         y = _to_num(pos[1])
     elif isinstance(pos, dict):
         if x is None:
-            x = _to_num(pos.get('x')) if pos.get('x') is not None else _to_num(pos.get('0')) if pos.get('0') is not None else _to_num(pos.get(0))
+            x = _to_num(pos.get('x'))
         if y is None:
-            y = _to_num(pos.get('y')) if pos.get('y') is not None else _to_num(pos.get('1')) if pos.get('1') is not None else _to_num(pos.get(1))
+            y = _to_num(pos.get('y'))
     elif isinstance(pos, str) and ',' in pos:
         cleaned = pos.strip().strip('[]()').strip()
         parts = cleaned.split(',')
@@ -393,93 +484,53 @@ def _parse_character(app, entry, fallback_id=None):
         if len(parts) > 1:
             y = _to_num(parts[1])
     if x is None:
-        x = _to_num(src.get('x'))
+        x = _to_num(state.get('x'))
     if y is None:
-        y = _to_num(src.get('y'))
-    # Top-level pos as {0: x, 1: y} dict under 'pos' key (ItemInstance style)
-    if x is None or y is None:
-        _p2 = src.get('pos')
-        if isinstance(_p2, dict):
-            if x is None:
-                x = _to_num(_p2.get('x')) or _to_num(_p2.get('0'))
-            if y is None:
-                y = _to_num(_p2.get('y')) or _to_num(_p2.get('1'))
-        elif isinstance(_p2, (list, tuple)) and len(_p2) == 2:
-            if x is None:
-                x = _to_num(_p2[0])
-            if y is None:
-                y = _to_num(_p2[1])
-    # NO POSITION = NOT A CHARACTER UPDATE. This is a clients/metadata entry
-    # (name only). Never create a spawn phantom from it. If the player already
-    # exists from a real characters update, rename it; otherwise ignore.
-    # This is the fix for 'all players clustered at spawn'.
-    if x is None and y is None:
-        _cid0 = src.get('character_id') or src.get('characterId') or src.get('client_id') or src.get('clientId') or src.get('id') or src.get('player_id') or fallback_id
-        if _cid0 is not None and _cid0 != app.client_id:
-            _nm0 = None
-            _m0 = src.get('metadata')
-            if isinstance(_m0, dict):
-                _nm0 = _m0.get('name') or _m0.get('display_name') or _m0.get('character_name') or _m0.get('displayName')
-            if _nm0 is None and isinstance(src.get('character'), str) and src.get('character'):
-                _nm0 = src.get('character')
-            if _nm0 is None:
-                _nm0 = src.get('name') or src.get('display_name') or src.get('character_name') or src.get('displayName') or src.get('player_name')
-            if _nm0 is not None and _cid0 in app.players:
-                app.players[_cid0]['name'] = str(_nm0)
-        return
-    # Protocol CharacterState has no top-level name/color -- they live
-    # in metadata (if the server echoes them) or in the join event.
-    name = None
-    meta = src.get('metadata')
-    if isinstance(meta, dict):
-        name = meta.get('name') or meta.get('display_name') or meta.get('character_name') or meta.get('displayName')
-    if name is None and isinstance(src.get('character'), str) and src.get('character'):
-        name = src.get('character')
+        y = _to_num(state.get('y'))
+    # Name / colour / score live in state. Partial-safe: only
+    # fields actually present overwrite the stored value.
+    name = state.get('name')
     if name is None:
-        name = src.get('name')
-    if name is None:
-        name = src.get('display_name')
-    if name is None:
-        name = src.get('character_name')
-    if name is None:
-        name = src.get('displayName')
-    if name is None and isinstance(src.get('player'), dict):
-        name = src['player'].get('name') or src['player'].get('display_name') or src['player'].get('character_name')
-    if name is None and isinstance(src.get('user'), dict):
-        name = src['user'].get('name') or src['user'].get('display_name')
-    if name is None and isinstance(src.get('character'), dict):
-        name = src['character'].get('name') or src['character'].get('character_name') or src['character'].get('display_name')
-    if name is None:
-        name = src.get('player_name')
-    # color from metadata too
-    color = None
-    if isinstance(meta, dict) and meta.get('color') is not None:
-        color = meta.get('color')
-    has_name = name is not None
-    score = src.get('score')
-    if score is None and isinstance(meta, dict):
-        score = meta.get('score')
-    if score is None and isinstance(src.get('stats'), dict):
-        score = src['stats'].get('score')
+        name = entry.get('name')
+    if name is None and isinstance(entry.get('character'), str) and entry.get('character'):
+        name = entry.get('character')
+    color = state.get('color')
     if color is None:
-        color = src.get('color')
+        color = entry.get('color')
+    score = state.get('score')
+    if score is None:
+        score = entry.get('score')
+    # NO POSITION = NOT A CHARACTER UPDATE (or a partial update
+    # with no position). If the player already exists, apply the
+    # name/score/colour it did carry; otherwise ignore -- never
+    # create a spawn phantom from a name-only entry. This is the
+    # fix for 'all players clustered at spawn'.
+    if x is None and y is None:
+        if cid in app.players:
+            if name is not None:
+                app.players[cid]['name'] = str(name)
+            if isinstance(score, (int, float)) and not isinstance(score, bool):
+                app.players[cid]['score'] = int(score)
+            if isinstance(color, str) and color != '':
+                app.players[cid]['color'] = color
+        return
     old = app.players.get(cid)
     if old is None:
         # No spawn placeholder: a new remote starts exactly at the position
         # in THIS packet.
         _ix = _num(x)
         _iy = _num(y)
-        old = {'x': _ix, 'y': _iy, 'name': str(name) if has_name else 'player',
+        old = {'x': _ix, 'y': _iy, 'name': str(name) if name is not None else 'player',
                'score': 0, 'color': _color_for_id(cid, len(app.players))}
         app.players[cid] = old
     if isinstance(x, (int, float)):
         old['x'] = float(x)
     if isinstance(y, (int, float)):
         old['y'] = float(y)
-    if has_name:
+    if name is not None:
         old['name'] = str(name)
     # If this update had no name, keep the one we already have (or 'player' on first sight).
-    if isinstance(score, (int, float)):
+    if isinstance(score, (int, float)) and not isinstance(score, bool):
         old['score'] = int(score)
     if isinstance(color, str) and color != '':
         old['color'] = color
@@ -498,20 +549,25 @@ def _parse_item(app, entry, fallback_id=None, from_collection=False):
     """
     if not isinstance(entry, dict):
         return
+    # A bundle: {updates: [...]} / {collections: [...]} -- expand.
+    if isinstance(entry.get('updates'), list) or isinstance(entry.get('collections'), list):
+        for sub in entry.get('updates') or []:
+            _parse_item(app, sub)
+        for sub in entry.get('collections') or []:
+            _parse_item(app, sub, from_collection=True)
+        if isinstance(entry.get('updates'), list) or isinstance(entry.get('collections'), list):
+            # If the bundle ALSO carries a single item, fall through
+            # only when it has its own instanceId.
+            if entry.get('instanceId') is None and entry.get('instance_id') is None and entry.get('id') is None:
+                return
     src = entry
-    if isinstance(entry.get('updates'), list) and len(entry['updates']) > 0 and isinstance(entry['updates'][0], dict):
-        merged = {}
-        merged.update(entry)
-        merged.update(entry['updates'][0])
-        src = merged
-    else:
-        for nest in ('updates', 'state', 'data', 'item_state', 'item', 'value'):
-            if isinstance(entry.get(nest), dict):
-                merged = {}
-                merged.update(entry[nest])
-                merged.update(entry)
-                src = merged
-                break
+    for nest in ('data', 'item_state', 'item', 'value'):
+        if isinstance(entry.get(nest), dict):
+            merged = {}
+            merged.update(entry[nest])
+            merged.update(entry)
+            src = merged
+            break
     iid = src.get('instanceId')
     if iid is None:
         iid = src.get('instance_id')
@@ -622,16 +678,61 @@ def _parse_client_left(app, entry):
         add_log(app, 'player left: ' + _shorten(str(cid), 20))
 
 
+def _schema_from_error(err):
+    """Extract a stored character_schema from a 409 error, if present.
+
+    MatchClient may raise a dict, a stringified dict, or an object
+    with the schema on it. Returns the schema dict or None.
+    """
+    if isinstance(err, dict):
+        if isinstance(err.get('character_schema'), dict):
+            return err['character_schema']
+        detail = err.get('detail')
+        if isinstance(detail, dict) and isinstance(detail.get('character_schema'), dict):
+            return detail['character_schema']
+        return None
+    if hasattr(err, 'character_schema'):
+        try:
+            _s = err.character_schema
+            if isinstance(_s, dict):
+                return _s
+        except Exception:
+            pass
+    try:
+        import json as _j
+        text = str(err)
+        start = text.find('{')
+        if start >= 0:
+            parsed = _j.loads(text[start:])
+            if isinstance(parsed, dict):
+                if isinstance(parsed.get('character_schema'), dict):
+                    return parsed['character_schema']
+                detail = parsed.get('detail')
+                if isinstance(detail, dict) and isinstance(detail.get('character_schema'), dict):
+                    return detail['character_schema']
+    except Exception:
+        pass
+    return None
+
+
 def apply_realtime(app, signals):
     if not isinstance(signals, dict):
         return
+    # Effective schema may arrive in the bootstrap or a patch.
+    # Keep it: it is what the next join must declare.
+    if isinstance(signals.get('character_schema'), dict):
+        app.character_schema = signals['character_schema']
     candidates = [signals]
     for key in ('mp', 'signals', 'state', 'room', 'data', 'realtime', 'turnState', 'turn_state', 'match', 'game_state', 'game'):
         if isinstance(signals.get(key), dict):
+            if isinstance(signals[key].get('character_schema'), dict):
+                app.character_schema = signals[key]['character_schema']
             candidates.append(signals[key])
             # mp may itself nest state/room/data
             for sub in ('state', 'room', 'data', 'realtime', 'turnState', 'turn_state', 'match', 'game_state'):
                 if isinstance(signals[key].get(sub), dict):
+                    if isinstance(signals[key][sub].get('character_schema'), dict):
+                        app.character_schema = signals[key][sub]['character_schema']
                     candidates.append(signals[key][sub])
     for cand in candidates:
         # --- single-signal patches (already normalised by
@@ -639,7 +740,11 @@ def apply_realtime(app, signals):
         for _pk in ('character-state-update', 'character_state_update'):
             _v = cand.get(_pk)
             if isinstance(_v, dict):
-                _parse_character(app, _v)
+                if isinstance(_v.get('updates'), list):
+                    for _e in _v['updates']:
+                        _parse_character(app, _e)
+                else:
+                    _parse_character(app, _v)
             elif isinstance(_v, list):
                 for _e in _v:
                     _parse_character(app, _e)
@@ -677,7 +782,7 @@ def apply_realtime(app, signals):
         chars = cand.get('characters')
         if isinstance(chars, dict):
             for key in chars:
-                # dict-keyed: {client_id: {pos, ...}} -- key IS the id.
+                # dict-keyed: {client_id: {state, ...}} -- key IS the id.
                 _parse_character(app, chars[key], fallback_id=key)
         elif isinstance(chars, list):
             for entry in chars:
@@ -708,13 +813,13 @@ def apply_realtime(app, signals):
         _players = cand.get('players')
         if isinstance(_players, dict):
             for _k, _v in _players.items():
-                if isinstance(_v, dict) and (_v.get('pos') is not None or _v.get('x') is not None or _v.get('y') is not None or _v.get('position') is not None):
+                if isinstance(_v, dict) and (_state_of(_v).get('position') is not None or _v.get('position') is not None or _v.get('pos') is not None or _v.get('x') is not None or _v.get('y') is not None):
                     _parse_character(app, _v, fallback_id=_k)
                 else:
                     _parse_client_name(app, _v, fallback_id=_k)
         elif isinstance(_players, list):
             for _e in _players:
-                if isinstance(_e, dict) and (_e.get('pos') is not None or _e.get('x') is not None or _e.get('y') is not None or _e.get('position') is not None):
+                if isinstance(_e, dict) and (_state_of(_e).get('position') is not None or _e.get('position') is not None or _e.get('pos') is not None or _e.get('x') is not None or _e.get('y') is not None):
                     _parse_character(app, _e)
                 else:
                     _parse_client_name(app, _e, fallback_id=None)
@@ -758,6 +863,8 @@ def apply_realtime(app, signals):
 def apply_mp(app, mp):
     if not isinstance(mp, dict):
         return
+    if isinstance(mp.get('character_schema'), dict):
+        app.character_schema = mp['character_schema']
     room = mp.get('room')
     if isinstance(room, dict):
         room_id = room.get('roomId')
@@ -819,45 +926,28 @@ async def do_publish_character(app):
         return
     app.publishing = True
     try:
-        # CharacterState EXACTLY like the working non-SCS demo:
-        # position (NOT pos -- server 422s pos in a character
-        # update), characterModelId, velocity, animationState,
-        # animationFrame, isJumping, facing, score, health,
-        # onGround, metadata {health, name, color}.
-        # Items are the ones that use pos; characters do not.
-        # (Per-update timestamp is left to publish_character_state,
-        # which stamps the body -- the demo's per-update stamp is
-        # optional and the server never required it.)
-        _vx = 0
-        _vy = 0
-        _facing = 1
-        if app.last_dir == 'left':
-            _vx = -SPEED
-            _facing = -1
-        elif app.last_dir == 'right':
-            _vx = SPEED
-            _facing = 1
-        elif app.last_dir == 'up':
-            _vy = -SPEED
-        elif app.last_dir == 'down':
-            _vy = SPEED
+        # Argument IS the state dict. extensions.match wraps it as
+        # {clientId, state: <this>} on PATCH /character-state.
+        # Do NOT add a second "state" key here, and NEVER send
+        # score: it is server-authoritative and would be dropped
+        # (dropped_server_fields). No velocity / facing /
+        # animation / legacy wrapper fields -- the schema has
+        # only position, health, name, color for clients.
         result = await app.client.publish_character_state({
             'position': [int(app.x), int(app.y)],
-            'characterModelId': 'square',
-            'velocity': [_vx, _vy],
-            'animationState': 'run' if (_vx or _vy) else 'stand',
-            'animationFrame': 0,
-            'isJumping': False,
-            'facing': _facing,
-            'score': app.score,
             'health': 100,
-            'onGround': True,
-            'metadata': {'health': 100, 'name': app.name,
-                         'color': app.my_color}})
-        if isinstance(result, dict) and result.get('_status'):
-            add_log(app, 'publish ' + str(result.get('_status')) + ': ' + _shorten(str(result), 60))
-        else:
-            add_log(app, 'pub ok: ' + _shorten(str(result), 60))
+            'name': app.name,
+            'color': app.my_color})
+        if isinstance(result, dict):
+            dropped = result.get('dropped_server_fields')
+            if dropped is None:
+                dropped = result.get('droppedServerFields')
+            if dropped:
+                # Should not happen now that we never send score --
+                # log it so a future schema change is visible.
+                add_log(app, 'publish dropped server fields: ' + _shorten(str(dropped), 80))
+            if result.get('_status'):
+                add_log(app, 'publish ' + str(result.get('_status')) + ': ' + _shorten(str(result), 80))
     except Exception as err:
         add_log(app, 'publish: ' + str(err))
     app.publishing = False
@@ -895,8 +985,16 @@ async def do_collect(app, item_id):
     app.collecting.add(item_id)
     item['collected'] = True
     item['taken_by'] = app.client_id or 'you'
-    app.score = app.score + 1
-    add_log(app, 'collected ' + str(item_id) + ' - score ' + str(app.score))
+    if app.client is None:
+        # OFFLINE ONLY: no server, so the local increment IS the score.
+        app.score = app.score + 1
+        add_log(app, 'collected (offline) ' + str(item_id) + ' - score ' + str(app.score))
+    else:
+        # ONLINE: do NOT increment locally. The server increments
+        # the server-authoritative score and broadcasts it with
+        # source "server"; _parse_self_character applies it.
+        # Incrementing here would double-count.
+        add_log(app, 'collected ' + str(item_id) + ' - waiting for server score')
     if app.client is not None:
         try:
             # COLLECTION ONLY. No claim/release (server owns the
@@ -904,6 +1002,7 @@ async def do_collect(app, item_id):
             # updates for server-spawned items). extensions.match
             # turns this single-item form into
             # {updates: [], collections: [...]}.
+            # NO publish-character for score: score is not ours to send.
             res = await app.client.publish_item_state({
                 'instanceId': _namespaced_item_id(item_id),
                 'pos': [int(item['x']), int(item['y'])],
@@ -916,7 +1015,6 @@ async def do_collect(app, item_id):
                 add_log(app, 'item pub ok: ' + _shorten(str(res), 60))
         except Exception as err:
             add_log(app, 'item publish: ' + str(err))
-        await do_publish_character(app)
     app.collecting.discard(item_id)
 
 
@@ -974,17 +1072,61 @@ async def do_join(app):
     # None, and client_id is still None until join_realtime returns -> server
     # 400s 'Missing X-Client-ID'. Assign only after join succeeds below.
     try:
-        data = await client.join_realtime(
-            environment_name=ENVIRONMENT_NAME,
-            character_name=name,
-            game_id=GAME_ID,
-            display_name=name,
-            game_mode=GAME_MODE,
-            max_players_per_room=8,
-            min_players_per_room=1,
-            requires_matchmaking=False,
-            disconnection_time_sec=DISCONNECTION_TIME_SEC,
-            empty_game_ttl_sec=EMPTY_GAME_TTL_SEC)
+        data = None
+        schema = CHARACTER_SCHEMA
+        try:
+            data = await client.join_realtime(
+                environment_name=ENVIRONMENT_NAME,
+                character_name=name,
+                game_id=GAME_ID,
+                display_name=name,
+                game_mode=GAME_MODE,
+                max_players_per_room=8,
+                min_players_per_room=1,
+                requires_matchmaking=False,
+                disconnection_time_sec=DISCONNECTION_TIME_SEC,
+                empty_game_ttl_sec=EMPTY_GAME_TTL_SEC,
+                character_schema=schema)
+        except TypeError as _te:
+            # Old extensions.match that does not accept
+            # character_schema yet. Do NOT silently fall back to
+            # an empty schema -- the server would then 422 every
+            # character-state patch. Fail loudly instead.
+            if 'character_schema' in str(_te):
+                add_log(app, 'join needs updated extensions.match: join_realtime must accept character_schema')
+                app.status = 'Join failed - update extensions.match to forward character_schema.'
+                app.client = None
+                app.joining = False
+                return
+            raise
+        except Exception as _err:
+            # 409 character_schema_mismatch: another client already
+            # stored a different schema for this game_id. Retry
+            # ONCE with the stored schema from the error.
+            _text = str(_err)
+            if '409' in _text or 'character_schema_mismatch' in _text or 'schema_mismatch' in _text:
+                stored = _schema_from_error(_err)
+                if stored is None and isinstance(data, dict):
+                    stored = data.get('character_schema')
+                if stored is not None:
+                    add_log(app, 'join 409 schema mismatch -- retrying with stored schema')
+                    app.character_schema = stored
+                    data = await client.join_realtime(
+                        environment_name=ENVIRONMENT_NAME,
+                        character_name=name,
+                        game_id=GAME_ID,
+                        display_name=name,
+                        game_mode=GAME_MODE,
+                        max_players_per_room=8,
+                        min_players_per_room=1,
+                        requires_matchmaking=False,
+                        disconnection_time_sec=DISCONNECTION_TIME_SEC,
+                        empty_game_ttl_sec=EMPTY_GAME_TTL_SEC,
+                        character_schema=stored)
+                else:
+                    raise
+            else:
+                raise
         app.client_id = client.client_id
         app.session_id = client.session_id
         app.room_id = client.room_id
@@ -993,6 +1135,13 @@ async def do_join(app):
         app.is_synchronizer = client.is_synchronizer
         if client.disconnection_time_sec is not None:
             app.disconnection_time_sec = client.disconnection_time_sec
+        # Effective schema: prefer what the server echoed back.
+        if getattr(client, 'character_schema', None) is not None:
+            app.character_schema = client.character_schema
+        elif isinstance(data, dict) and isinstance(data.get('character_schema'), dict):
+            app.character_schema = data['character_schema']
+        else:
+            app.character_schema = schema
         app.client = client
         # SERVER FIELD: drop the offline gems. The bootstrap that
         # arrives on connect_stream() repopulates app.items with
@@ -1001,6 +1150,10 @@ async def do_join(app):
         app.items = {}
         app.server_items = True
         app.last_heartbeat_step = app.step
+        # Score is server-authoritative online: reset to the
+        # server value (0). The next server broadcast (own entry,
+        # source "server") is what moves it after that.
+        app.score = 0
         # DO NOT reassign my_color on join -- the avatar colour is fixed at
         # onAppStart (PLAYER_COLORS[0]). Reassigning to _color_for_id(client_id)
         # made the square change colour the moment you joined.
@@ -1077,6 +1230,7 @@ def onAppStart(app):
     app.queue_position = None
     app.is_synchronizer = False
     app.disconnection_time_sec = DISCONNECTION_TIME_SEC
+    app.character_schema = CHARACTER_SCHEMA
     app.x = WORLD_W // 2
     app.y = WORLD_H // 2
     app.held = set()
