@@ -1,90 +1,67 @@
 """
 apps/top_down.py -- SCS App: realtime top-down scroller, 1050 x 700.
 
-Realtime mp, not turn-based. Uses extensions.match (MatchGod API).
-Server: https://matchgod.onrender.com
+Realtime mp, not turn-based. Talks to MatchGod
+(https://matchgod.onrender.com) through extensions.match
+(MatchClient) -- the same wire bodies the live demo at
+https://matchgod.onrender.com/top-down sends. The extension
+owns the transport: join body, 409 schema retry, character /
+item PATCH bodies, heartbeat, stream (EventSource), and the
+normalised bootstrap / patch shapes. This app owns the game:
+movement, gems, drawing, and how to interpret the normalised
+mp / characters / items the extension hands it.
 
-How it works (new MATCH protocol -- see EricEisaman/match README,
-"Character state -- schema-declared" and "Client protocol"):
-  * join_realtime, not join_turn_based. No turn/state, no turn/action,
-    no pass, no resign. min_players_per_room=1, so one player can
-    play alone and others can join the same room later.
-    Direct room: requires_matchmaking=False, match_status comes
-    back "ready" (not "matched"). Join also declares
-    disconnection_time_sec=60 / empty_game_ttl_sec=300, AND the
-    character_schema below. The first join for a game_id stores
-    the schema; a later join with a different schema gets 409
-    + the stored schema, and this app retries once with it.
-  * Movement is local and optimistic. The client moves on onStep,
-    then publishes its character with PATCH character-state.
-    Canonical update is {clientId, state: {position, health,
-    name, color}} -- characters use position inside state,
-    ITEMS use pos (different fields, different endpoint).
-    Name/colour live in state.name / state.color. There is no
-    legacy wrapper, no top-level position/health/score outside
-    state, no velocity / facing / animation fields. The old
-    shape is rejected with 422.
-  * Score is SERVER-authoritative (authority "server" in the
-    schema). The client NEVER sends it and NEVER increments it
-    locally when online. On collection the server increments
-    it and broadcasts the updated character state with
-    source "server". Own character entries are the score
-    channel: this app applies score (only score) from its own
-    broadcast entries and never overwrites its own position
-    from its own echo. A patch that tries to send score is
-    dropped (dropped_server_fields) and never broadcast.
-  * Gems are SERVER-SPAWNED and server-authoritative. The client
-    never invents gems once joined: the stream bootstrap carries
-    the field (24 live gems, instanceId "top-down-demo:gem-N")
-    and every collection is followed by a server respawn
-    ("gem-25", "gem-26", ...). A gem the client has never seen
-    is CREATED on arrival, never dropped -- dropping unknown ids
-    was why respawns never appeared.
-  * Collecting is a COLLECTION, not an update and not a claim.
-    When you touch a gem you mark it collected locally, publish
-    PATCH item-state with updates=[] and
-    collections=[{instanceId, collectedByClientId, environment}],
-    and wait for the server broadcast for your new score.
-    No claim/release: server gems are owned by the server,
-    claim would block collection. No publish-character for
-    score: score is not a client field.
-  * Heartbeat: if you stop moving you stop publishing, and the
-    server evicts a client silent for disconnection_time_sec.
-    onStep therefore heartbeats every ~20s (budget / 3) while
-    joined. A 403 "disconnected: timeout" means re-join -- the
-    old client_id is dead.
-  * Stream is EventSource. The first event is a full bootstrap
-    (connection, clients, characters LIST of {clientId, state,
-    source}, items {updates, collections}, room, match,
-    character_schema); later events are single-signal patches
-    (character-state-update, item-state-update, client-joined,
-    client-left, ...). extensions.match normalises both forms
-    to the same canonical shape before the callbacks fire, so
-    apply_realtime only ever sees characters / items / clients /
-    client_left. Broadcasts are full merged states, but this
-    app still treats them as partial-safe: only fields present
-    overwrite the stored value.
+Wire shapes (what the extension sends, copied from the live
+demo, which works):
+  * Join: POST /api/multiplayer/join with
+    {environment_name, character_name, game_id, player_id,
+     display_name, skill: {rating}, config: {game_id,
+     requires_matchmaking: False, requires_turn_based: False,
+     max_players_per_room: 8, min_players_per_room: 1,
+     disconnectionTime / disconnection_time_sec: 60,
+     empty_game_ttl_sec: 300,
+     authority: {scopes: ["items", "environment",
+     "character_state"], resource_types: ["*"],
+     allow_client_claims: True},
+     character_schema: {...}}}.
+    The first join for a game_id stores the schema; a later
+    join with a different schema gets 409 + the stored schema,
+    and the extension retries once with it. An empty stored
+    schema is refused (poisoned game_id -- see extensions.match).
+  * Character: PATCH /api/multiplayer/character-state with
+    {updates: [{clientId, state: {position, health, name,
+    color}}], timestamp}. NEVER top-level position / health /
+    velocity / metadata, NEVER score (server-authoritative).
+    The app passes {'state': {...}} to
+    client.publish_character_state(); the extension builds
+    the wire body.
+  * Collect: PATCH /api/multiplayer/item-state with
+    {updates: [], collections: [{instanceId,
+    collectedByClientId, environment}], timestamp}.
+    NOT an update, NOT a claim. The app passes
+    {'updates': [], 'collections': [...]} to
+    client.publish_item_state().
+  * Heartbeat: POST /api/multiplayer/heartbeat with {}.
+    A 403 means evicted -- re-join, the old client_id is dead.
+  * Stream: EventSource GET
+    /api/multiplayer/stream?session_id=... -- first event is
+    the bootstrap, later events are patches. The extension
+    normalises both to the same shape and calls this app's
+    on_mp / on_signal callbacks, which feed apply_mp /
+    apply_realtime below.
+
+  * Score is SERVER-authoritative. The client NEVER sends it
+    and NEVER increments it locally when online. On collection
+    the server increments it and broadcasts the updated
+    character state with source "server". Own character entries
+    are the score channel only.
+  * Gems are SERVER-SPAWNED. The stream bootstrap carries the
+    field (24 live gems, instanceId "top-down-demo:gem-N").
+    A gem the client has never seen is CREATED on arrival.
   * Offline (not joined) the app still plays locally against a
-    fixed 12-gem field, so movement/collecting can be tried
-    without a server. Offline collecting DOES increment score
-    locally (there is no server). Joining clears the offline
-    field and replaces it with the server field, resets score
-    to the server value (0), and leaving restores the offline
-    field.
-
-  Required extensions.match contract (companion update):
-    - join_realtime(..., character_schema=...) must forward
-      it as config.character_schema on POST /join, and surface
-      a 409 character_schema_mismatch (with the stored schema)
-      instead of swallowing it.
-    - publish_character_state(state_dict) takes the STATE dict
-      itself -- {"position": [...], "health": .., "name": ..,
-      "color": ..} -- and wraps it as
-      {updates: [{clientId, state: state_dict}]} on
-      PATCH /character-state. Do NOT add a second "state" key
-      at this call site.
-    - publish_item_state(...) still takes the item form and
-      wraps it as {updates: [], collections: [...]}.
+    fixed 12-gem field. Offline collecting DOES increment
+    score locally (there is no server). Joining clears the
+    offline field, resets score to 0, leaving restores it.
 
 Layout, 1050 x 700:
   Top bar (0..110): title, Name field, Join / Leave / Respawn /
@@ -186,6 +163,99 @@ OFFLINE_ITEM_DEFS = [
 ITEM_DEFS = OFFLINE_ITEM_DEFS
 
 GEM_PALETTE = ['rgb(255,215,0)', 'rgb(0,220,220)', 'rgb(255,120,200)']
+
+
+def _sync_from_client(app):
+    """Mirror the extension client's identity onto app.*.
+
+    The app keeps its own copies (app.client_id, app.session_id,
+    app.room_id, ...) because every parser below reads them.
+    The extension is the source of truth; this copies it after
+    join and after any stream event that changes it.
+    """
+    client = getattr(app, 'client', None)
+    if client is None:
+        return
+    if getattr(client, 'client_id', None) is not None:
+        app.client_id = client.client_id
+    if getattr(client, 'session_id', None) is not None:
+        app.session_id = client.session_id
+    if getattr(client, 'room_id', None) is not None:
+        app.room_id = client.room_id
+    if getattr(client, 'match_status', None) is not None:
+        app.match_status = client.match_status
+    if getattr(client, 'queue_position', None) is not None:
+        app.queue_position = client.queue_position
+    if getattr(client, 'is_synchronizer', None) is not None:
+        app.is_synchronizer = bool(client.is_synchronizer)
+    if getattr(client, 'disconnection_time_sec', None) is not None:
+        try:
+            app.disconnection_time_sec = float(client.disconnection_time_sec)
+        except Exception:
+            pass
+    if getattr(client, 'character_schema', None) is not None:
+        app.character_schema = client.character_schema
+
+
+def _handle_disconnect(app):
+    """Shared 403-evicted cleanup for publish / heartbeat."""
+    add_log(app, 'disconnected -- re-join needed')
+    app.status = 'Disconnected (silent too long) - press Join to re-join.'
+    _close_stream(app)
+    app.client = None
+    app.client_id = None
+    app.session_id = None
+    app.room_id = None
+    app.match_status = None
+    app.players = {}
+    app.items = _fresh_offline_items()
+    app.server_items = False
+
+
+def _close_stream(app):
+    client = getattr(app, 'client', None)
+    if client is not None:
+        try:
+            client.disconnect_stream()
+        except Exception:
+            pass
+    app.stream_es = None
+    app.stream_open = False
+
+
+def _on_stream_open(app):
+    app.stream_open = True
+    app.stream_status = 'Stream: open'
+    add_log(app, 'stream open')
+
+
+def _on_stream_close(app):
+    app.stream_open = False
+    app.stream_status = 'Stream: closed - Reconnect to reopen'
+    add_log(app, 'stream closed')
+
+
+def _on_stream_error(app, _event=None):
+    add_log(app, 'stream error')
+    _on_stream_close(app)
+
+
+def _make_client(app):
+    """One MatchClient whose callbacks feed this app's parsers.
+
+    on_mp gets the normalised mp dict -> apply_mp (room /
+    match / synchronizer / schema). on_signal gets the
+    normalised signals dict {mp, characters, items, ...} ->
+    apply_realtime (players / gems). The extension already
+    normalised bootstrap and patches to the same shape, so
+    apply_realtime does not need to know which form arrived.
+    """
+    return MatchClient(
+        on_mp=lambda mp: apply_mp(app, mp),
+        on_signal=lambda signals: apply_realtime(app, signals),
+        on_stream_open=lambda: _on_stream_open(app),
+        on_stream_close=lambda: _on_stream_close(app),
+        on_stream_error=lambda _ev=None: _on_stream_error(app, _ev))
 
 
 def _inside(x, y, rect):
@@ -678,65 +748,35 @@ def _parse_client_left(app, entry):
         add_log(app, 'player left: ' + _shorten(str(cid), 20))
 
 
-def _schema_from_error(err):
-    """Extract a stored character_schema from a 409 error, if present.
-
-    MatchClient may raise a dict, a stringified dict, or an object
-    with the schema on it. Returns the schema dict or None.
-    """
-    if isinstance(err, dict):
-        if isinstance(err.get('character_schema'), dict):
-            return err['character_schema']
-        detail = err.get('detail')
-        if isinstance(detail, dict) and isinstance(detail.get('character_schema'), dict):
-            return detail['character_schema']
-        return None
-    if hasattr(err, 'character_schema'):
-        try:
-            _s = err.character_schema
-            if isinstance(_s, dict):
-                return _s
-        except Exception:
-            pass
-    try:
-        import json as _j
-        text = str(err)
-        start = text.find('{')
-        if start >= 0:
-            parsed = _j.loads(text[start:])
-            if isinstance(parsed, dict):
-                if isinstance(parsed.get('character_schema'), dict):
-                    return parsed['character_schema']
-                detail = parsed.get('detail')
-                if isinstance(detail, dict) and isinstance(detail.get('character_schema'), dict):
-                    return detail['character_schema']
-    except Exception:
-        pass
-    return None
-
-
 def apply_realtime(app, signals):
     if not isinstance(signals, dict):
         return
     # Effective schema may arrive in the bootstrap or a patch.
-    # Keep it: it is what the next join must declare.
+    # Keep it: it is what the next join must declare. The
+    # extension normalises to characterSchema (camelCase) in
+    # the bootstrap; accept both spellings.
     if isinstance(signals.get('character_schema'), dict):
         app.character_schema = signals['character_schema']
+    if isinstance(signals.get('characterSchema'), dict):
+        app.character_schema = signals['characterSchema']
     candidates = [signals]
     for key in ('mp', 'signals', 'state', 'room', 'data', 'realtime', 'turnState', 'turn_state', 'match', 'game_state', 'game'):
         if isinstance(signals.get(key), dict):
             if isinstance(signals[key].get('character_schema'), dict):
                 app.character_schema = signals[key]['character_schema']
+            if isinstance(signals[key].get('characterSchema'), dict):
+                app.character_schema = signals[key]['characterSchema']
             candidates.append(signals[key])
             # mp may itself nest state/room/data
             for sub in ('state', 'room', 'data', 'realtime', 'turnState', 'turn_state', 'match', 'game_state'):
                 if isinstance(signals[key].get(sub), dict):
                     if isinstance(signals[key][sub].get('character_schema'), dict):
                         app.character_schema = signals[key][sub]['character_schema']
+                    if isinstance(signals[key][sub].get('characterSchema'), dict):
+                        app.character_schema = signals[key][sub]['characterSchema']
                     candidates.append(signals[key][sub])
     for cand in candidates:
-        # --- single-signal patches (already normalised by
-        # extensions.match, but accept the raw names too) ---
+        # --- single-signal patches (accept the raw names too) ---
         for _pk in ('character-state-update', 'character_state_update'):
             _v = cand.get(_pk)
             if isinstance(_v, dict):
@@ -865,6 +905,8 @@ def apply_mp(app, mp):
         return
     if isinstance(mp.get('character_schema'), dict):
         app.character_schema = mp['character_schema']
+    if isinstance(mp.get('characterSchema'), dict):
+        app.character_schema = mp['characterSchema']
     room = mp.get('room')
     if isinstance(room, dict):
         room_id = room.get('roomId')
@@ -926,28 +968,30 @@ async def do_publish_character(app):
         return
     app.publishing = True
     try:
-        # Argument IS the state dict. extensions.match wraps it as
-        # {clientId, state: <this>} on PATCH /character-state.
-        # Do NOT add a second "state" key here, and NEVER send
-        # score: it is server-authoritative and would be dropped
-        # (dropped_server_fields). No velocity / facing /
-        # animation / legacy wrapper fields -- the schema has
-        # only position, health, name, color for clients.
+        # The extension builds the exact live-demo body:
+        # {updates: [{clientId, state: {...}}], timestamp}.
+        # NEVER score (server-authoritative), NEVER top-level
+        # position / health / velocity / metadata -- the
+        # extension drops server fields and rejects the rest.
         result = await app.client.publish_character_state({
-            'position': [int(app.x), int(app.y)],
-            'health': 100,
-            'name': app.name,
-            'color': app.my_color})
-        if isinstance(result, dict):
+            'state': {
+                'position': [int(app.x), int(app.y)],
+                'health': 100,
+                'name': app.name,
+                'color': app.my_color}})
+        if isinstance(result, dict) and '_status' in result:
+            status = result.get('_status')
+            if status == 403:
+                add_log(app, 'publish 403 disconnected -- re-join needed')
+                _handle_disconnect(app)
+            elif status and status >= 400:
+                add_log(app, 'publish ' + str(status) + ': ' + _shorten(str(result), 80))
+        elif isinstance(result, dict):
             dropped = result.get('dropped_server_fields')
             if dropped is None:
                 dropped = result.get('droppedServerFields')
             if dropped:
-                # Should not happen now that we never send score --
-                # log it so a future schema change is visible.
                 add_log(app, 'publish dropped server fields: ' + _shorten(str(dropped), 80))
-            if result.get('_status'):
-                add_log(app, 'publish ' + str(result.get('_status')) + ': ' + _shorten(str(result), 80))
     except Exception as err:
         add_log(app, 'publish: ' + str(err))
     app.publishing = False
@@ -957,19 +1001,11 @@ async def do_heartbeat(app):
     if app.client is None or app.client_id is None:
         return
     try:
-        res = await app.client.heartbeat()
-        if isinstance(res, dict) and res.get('_status') == 403:
+        result = await app.client.heartbeat()
+        if isinstance(result, dict) and result.get('_status') == 403:
             # Already evicted -- the old client_id is dead. Re-join.
             add_log(app, 'heartbeat 403 disconnected -- re-join needed')
-            app.status = 'Disconnected (silent too long) - press Join to re-join.'
-            app.client = None
-            app.client_id = None
-            app.session_id = None
-            app.room_id = None
-            app.match_status = None
-            app.players = {}
-            app.items = _fresh_offline_items()
-            app.server_items = False
+            _handle_disconnect(app)
     except Exception as err:
         add_log(app, 'heartbeat: ' + str(err))
 
@@ -999,20 +1035,22 @@ async def do_collect(app, item_id):
         try:
             # COLLECTION ONLY. No claim/release (server owns the
             # gems), no update for the same item (server drops
-            # updates for server-spawned items). extensions.match
-            # turns this single-item form into
-            # {updates: [], collections: [...]}.
+            # updates for server-spawned items).
             # NO publish-character for score: score is not ours to send.
-            res = await app.client.publish_item_state({
-                'instanceId': _namespaced_item_id(item_id),
-                'pos': [int(item['x']), int(item['y'])],
-                'isCollected': True,
-                'collectedByClientId': app.client_id,
-                'environment': ENVIRONMENT_NAME})
-            if isinstance(res, dict) and res.get('_status'):
-                add_log(app, 'item publish ' + str(res.get('_status')) + ': ' + _shorten(str(res), 60))
+            # The extension builds the exact live-demo body:
+            # {updates: [], collections: [{instanceId,
+            # collectedByClientId, environment}], timestamp}.
+            # No pos, no isCollected, no claim.
+            result = await app.client.publish_item_state({
+                'updates': [],
+                'collections': [{
+                    'instanceId': _namespaced_item_id(item_id),
+                    'collectedByClientId': app.client_id,
+                    'environment': ENVIRONMENT_NAME}]})
+            if isinstance(result, dict) and '_status' in result and result.get('_status') and result.get('_status') >= 400:
+                add_log(app, 'item publish ' + str(result.get('_status')) + ': ' + _shorten(str(result), 60))
             else:
-                add_log(app, 'item pub ok: ' + _shorten(str(res), 60))
+                add_log(app, 'item pub ok: ' + _shorten(str(result), 60))
         except Exception as err:
             add_log(app, 'item publish: ' + str(err))
     app.collecting.discard(item_id)
@@ -1024,128 +1062,56 @@ async def do_join(app):
     app.joining = True
     app.status = 'Joining...'
     name = app.name or 'player'
-
-    def _on_mp(mp):
-        apply_mp(app, mp)
-
-    def _on_character(signals):
-        try:
-            apply_realtime(app, signals)
-        except Exception as _err:
-            add_log(app, 'on_character ERR: ' + str(_err))
-
-    def _on_item(signals):
-        try:
-            apply_realtime(app, signals)
-        except Exception as _err:
-            add_log(app, 'on_item ERR: ' + str(_err))
-
-    def _on_signal(signals):
-        if isinstance(signals, dict):
-            try:
-                apply_realtime(app, signals)
-            except Exception as _err:
-                add_log(app, 'on_signal ERR: ' + str(_err))
-
-    def _on_client_left(signals):
-        try:
-            apply_realtime(app, signals)
-        except Exception as _err:
-            add_log(app, 'on_client_left ERR: ' + str(_err))
-
-    def _on_open():
-        app.stream_open = True
-        app.stream_status = 'Stream: open'
-        add_log(app, 'stream open')
-
-    def _on_close():
-        app.stream_open = False
-        app.stream_status = 'Stream: closed - Reconnect to reopen'
-        add_log(app, 'stream closed')
-
-    client = MatchClient(on_mp=_on_mp, on_character=_on_character,
-                         on_item=_on_item, on_signal=_on_signal,
-                         on_client_left=_on_client_left,
-                         on_stream_open=_on_open,
-                         on_stream_close=_on_close)
-    # Do NOT set app.client yet: onStep publishes whenever app.client is not
-    # None, and client_id is still None until join_realtime returns -> server
-    # 400s 'Missing X-Client-ID'. Assign only after join succeeds below.
+    # Do NOT set app.client yet: onStep publishes whenever
+    # app.client is not None, and client_id is still None until
+    # join returns -> server 400s 'Missing X-Client-ID'.
+    # Assign only after join succeeds below.
     try:
-        data = None
-        schema = CHARACTER_SCHEMA
-        try:
-            data = await client.join_realtime(
-                environment_name=ENVIRONMENT_NAME,
-                character_name=name,
-                game_id=GAME_ID,
-                display_name=name,
-                game_mode=GAME_MODE,
-                max_players_per_room=8,
-                min_players_per_room=1,
-                requires_matchmaking=False,
-                disconnection_time_sec=DISCONNECTION_TIME_SEC,
-                empty_game_ttl_sec=EMPTY_GAME_TTL_SEC,
-                character_schema=schema)
-        except TypeError as _te:
-            # Old extensions.match that does not accept
-            # character_schema yet. Do NOT silently fall back to
-            # an empty schema -- the server would then 422 every
-            # character-state patch. Fail loudly instead.
-            if 'character_schema' in str(_te):
-                add_log(app, 'join needs updated extensions.match: join_realtime must accept character_schema')
-                app.status = 'Join failed - update extensions.match to forward character_schema.'
-                app.client = None
-                app.joining = False
-                return
-            raise
-        except Exception as _err:
-            # 409 character_schema_mismatch: another client already
-            # stored a different schema for this game_id. Retry
-            # ONCE with the stored schema from the error.
-            _text = str(_err)
-            if '409' in _text or 'character_schema_mismatch' in _text or 'schema_mismatch' in _text:
-                stored = _schema_from_error(_err)
-                if stored is None and isinstance(data, dict):
-                    stored = data.get('character_schema')
-                if stored is not None:
-                    add_log(app, 'join 409 schema mismatch -- retrying with stored schema')
-                    app.character_schema = stored
-                    data = await client.join_realtime(
-                        environment_name=ENVIRONMENT_NAME,
-                        character_name=name,
-                        game_id=GAME_ID,
-                        display_name=name,
-                        game_mode=GAME_MODE,
-                        max_players_per_room=8,
-                        min_players_per_room=1,
-                        requires_matchmaking=False,
-                        disconnection_time_sec=DISCONNECTION_TIME_SEC,
-                        empty_game_ttl_sec=EMPTY_GAME_TTL_SEC,
-                        character_schema=stored)
-                else:
-                    raise
-            else:
-                raise
-        app.client_id = client.client_id
-        app.session_id = client.session_id
-        app.room_id = client.room_id
-        app.match_status = client.match_status
-        app.queue_position = client.queue_position
-        app.is_synchronizer = client.is_synchronizer
-        if client.disconnection_time_sec is not None:
-            app.disconnection_time_sec = client.disconnection_time_sec
-        # Effective schema: prefer what the server echoed back.
+        client = _make_client(app)
+        data = await client.join_realtime(
+            environment_name=ENVIRONMENT_NAME,
+            character_name=name,
+            game_id=GAME_ID,
+            display_name=name,
+            skill=1000,
+            max_players_per_room=8,
+            min_players_per_room=1,
+            requires_matchmaking=False,
+            disconnection_time_sec=DISCONNECTION_TIME_SEC,
+            empty_game_ttl_sec=EMPTY_GAME_TTL_SEC,
+            character_schema=CHARACTER_SCHEMA)
+        if client.client_id is None:
+            # Join failed. The extension already handled the
+            # 409 retry (once, with the stored schema, non-empty
+            # only). What is left is a real failure -- or the
+            # poisoned-empty-schema case, which the extension
+            # refuses to adopt. Surface that case explicitly:
+            # close every old tab, wait out empty_game_ttl_sec
+            # (300s), then Join again.
+            detail = data.get('detail') if isinstance(data, dict) else None
+            stored = detail.get('character_schema') if isinstance(detail, dict) else None
+            if isinstance(stored, dict):
+                _fields = stored.get('fields')
+                if not isinstance(_fields, dict) or len(_fields) == 0:
+                    add_log(app, 'join 409: stored schema is empty (poisoned by an old client) -- close all old tabs, wait 300s, then Join again')
+                    app.status = 'Join failed - old client stored an empty schema. Close all tabs, wait 5 min, Join again.'
+                    app.client = None
+                    app.joining = False
+                    return
+            add_log(app, 'join failed: ' + _shorten(str(data), 100))
+            app.status = 'Join failed - see log.'
+            app.client = None
+            app.joining = False
+            return
+        app.client = client
+        _sync_from_client(app)
+        # Effective schema: prefer what the server echoed back
+        # (the extension already stored it on the client).
         if getattr(client, 'character_schema', None) is not None:
             app.character_schema = client.character_schema
-        elif isinstance(data, dict) and isinstance(data.get('character_schema'), dict):
-            app.character_schema = data['character_schema']
-        else:
-            app.character_schema = schema
-        app.client = client
         # SERVER FIELD: drop the offline gems. The bootstrap that
-        # arrives on connect_stream() repopulates app.items with
-        # the server's 24 gems. Keeping the offline 12 would draw
+        # arrives on the stream repopulates app.items with the
+        # server's 24 gems. Keeping the offline 12 would draw
         # phantom gems the server knows nothing about.
         app.items = {}
         app.server_items = True
@@ -1155,14 +1121,13 @@ async def do_join(app):
         # source "server") is what moves it after that.
         app.score = 0
         # DO NOT reassign my_color on join -- the avatar colour is fixed at
-        # onAppStart (PLAYER_COLORS[0]). Reassigning to _color_for_id(client_id)
-        # made the square change colour the moment you joined.
-        # KEEP EXACT POSITION: do NOT teleport to _spawn_for_id on join.
-        # Where you are when you press Join IS your join position. The next
+        # onAppStart (PLAYER_COLORS[0]).
+        # KEEP EXACT POSITION: do NOT teleport on join. Where you
+        # are when you press Join IS your join position. The next
         # publish sends this exact app.x/app.y.
         add_log(app, 'join keep pos: ' + str(int(app.x)) + ',' + str(int(app.y)))
-        if client.match_status == 'queued':
-            app.status = 'Queued (position ' + str(client.queue_position) + ') - waiting...'
+        if app.match_status == 'queued':
+            app.status = 'Queued (position ' + str(app.queue_position) + ') - waiting...'
         else:
             app.status = 'Ready! Room ' + str(app.room_id or '')
         add_log(app, 'joined: ' + _shorten(str(data), 100))
@@ -1188,13 +1153,13 @@ async def do_leave(app):
     app.match_status = None
     app.queue_position = None
     app.players = {}
+    app.stream_es = None
     app.stream_open = False
     app.stream_status = 'Stream: closed'
     app.status = 'Left - still moving locally.'
     # Back to the offline field.
     app.items = _fresh_offline_items()
     app.server_items = False
-    app.is_synchronizer = False
 
 
 async def do_respawn(app):

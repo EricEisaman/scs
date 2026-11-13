@@ -26,19 +26,32 @@ server/app/multiplayer, README "Client protocol"):
         returns: client_id, session_id, is_synchronizer, room_id,
                  game_id, match_status ("ready" for direct rooms,
                  "queued" for matchmaking), queue_position,
-                 disconnection_time_sec, empty_game_ttl_sec
+                 disconnection_time_sec, empty_game_ttl_sec,
+                 character_schema (the effective schema for this
+                 game_id -- what you declared, or the stored one
+                 after a 409 retry).
+        config.character_schema declares the shape of
+        per-player state for this game_id. The FIRST join for a
+        game_id stores it; a later join with a different schema
+        gets 409 + the stored schema in the response detail, and
+        this client retries ONCE with that stored schema (see
+        MatchClient.join). An empty schema ({version: 1,
+        fields: {}}) means the game sends no character state
+        (e.g. tic-tac-toe). To change a schema, use a new
+        game_id or wait for the old game data to expire
+        (empty_game_ttl_sec, 300s).
   GET   /api/multiplayer/stream?session_id=<session_id>
         SSE / Datastar: ``datastar-patch-signals`` events whose
         data is ``signals {...}``. First event is a FULL BOOTSTRAP:
         signals.mp = {connection, clients, characters (LIST),
         items ({updates, collections}), room, custom, turnState,
-        match}. Later events are PATCHES: a single signal name
-        such as character-state-update, item-state-update,
-        client-joined, client-left, synchronizer-changed,
-        game-over, matchmaking-queued. This extension normalises
-        both forms to the same canonical shape before it calls
-        the app callbacks, so apps never have to know which form
-        arrived.
+        match, characterSchema}. Later events are PATCHES: a single
+        signal name such as character-state-update,
+        item-state-update, client-joined, client-left,
+        synchronizer-changed, game-over, matchmaking-queued.
+        This extension normalises both forms to the same
+        canonical shape before it calls the app callbacks, so
+        apps never have to know which form arrived.
   GET   /api/multiplayer/turn/state?room_id=<room_id> (turn-based)
         header: X-Client-ID. Returns { turnState / turn_state }.
   POST  /api/multiplayer/turn/action         (turn-based)
@@ -52,20 +65,34 @@ server/app/multiplayer, README "Client protocol"):
         Fall back to turn/action with action_type pass/resign
         when the dedicated endpoint 404s (older server).
   PATCH /api/multiplayer/character-state     (realtime)
-        Body: {updates: [{clientId, position: [x, y], velocity,
-        health, score, animationState, metadata}], timestamp}.
-        CHARACTERS use ``position``; ITEMS use ``pos`` -- they are
-        DIFFERENT fields. The live server (matchgod.onrender.com)
-        rejects ``pos`` in a character update with
-        422 {"detail": "unsupported character fields: pos"}.
-        Proof: the working non-SCS demo (Real-time Demo) sends
-        position + characterModelId + animationFrame + isJumping
-        + facing + onGround + timestamp in every character
-        update, and position is what its bootstrap broadcasts
-        back. The README's character example using ``pos`` is
-        wrong for the deployed server; do NOT "fix" this back
-        to pos. Name / colour live ONLY in metadata, never
-        top-level in an update.
+        Protocol v1 -- SCHEMA-DECLARED. Body:
+        {updates: [{clientId, state: {...}}], timestamp}.
+        The ONLY universal top-level character field is
+        ``clientId``. Everything else lives inside ``state``
+        and must be declared in ``config.character_schema``
+        on join. The working non-SCS demo (Real-time Demo /
+        top-down) sends exactly this: it declares
+        position (vec2, required, client), health (int 0..100,
+        required, client), score (int, SERVER, default 0),
+        name (string, client), color (string, client), and
+        publishes {clientId, state: {position, health, name,
+        color}} -- never score, never anything top-level.
+        Legacy top-level fields -- position, health, velocity,
+        score, metadata, pos, characterModelId, animationState,
+        animationFrame, isJumping, facing, onGround -- are
+        REJECTED by the server with
+        422 {"detail": "unsupported character fields: ..."}.
+        (An older version of this file claimed the demo sent
+        those fields top-level. It does not. Do NOT "fix" this
+        back to the flat shape.) Name / colour live in
+        state.name / state.color when declared -- never in
+        metadata, never top-level. A client patch that
+        includes a server-authoritative field (e.g. score)
+        has that field DROPPED, never broadcast; the response
+        reports it in dropped_server_fields. Unknown fields
+        are rejected (422) unless the schema opts into
+        allow_unknown. Patches are partial: required-ness is
+        enforced on the merged full state, not on each patch.
   PATCH /api/multiplayer/item-state          (realtime)
         Body: {updates: [...], collections: [...], timestamp}.
         An update is {instanceId, pos, isCollected,
@@ -114,6 +141,31 @@ Brython notes: all public APIs are async def. Use browser.aio:
             character_name=app.name, game_id='tic-tac-toe-demo',
             display_name=app.name, skill=app.skill)
         app.client.connect_stream()
+
+Realtime apps pass their schema to join_realtime:
+
+    await app.client.join_realtime(
+        environment_name='top-down-demo',
+        character_name=app.name, game_id='top-down-demo',
+        display_name=app.name, skill={'rating': 1000},
+        character_schema={
+            'version': 1,
+            'fields': {
+                'position': {'type': 'vec2', 'required': True,
+                             'authority': 'client', 'semantic': 'position'},
+                'health': {'type': 'int', 'required': True,
+                           'min': 0, 'max': 100, 'authority': 'client',
+                           'semantic': 'health'},
+                'score': {'type': 'int', 'authority': 'server',
+                          'default': 0, 'min': 0, 'semantic': 'score'},
+                'name': {'type': 'string', 'authority': 'client',
+                         'semantic': 'name'},
+                'color': {'type': 'string', 'authority': 'client'},
+            }},
+        disconnection_time_sec=60, empty_game_ttl_sec=300)
+    # ... then publish_character_state({'state': {
+    #     'position': [x, y], 'health': 100,
+    #     'name': app.name, 'color': app.color}}) -- never score.
 
 Polling fallback: if EventSource callbacks do not reach Brython
 in some browser, an app can also poll with
@@ -250,6 +302,72 @@ def _pick(data, names):
     return None
 
 
+def _schema_fields(schema):
+    """fields dict of a character_schema, or {}.
+
+    Accepts the server shape {version, fields: {...}} and the
+    {properties: {...}} alias the server also accepts on join.
+    """
+    if not isinstance(schema, dict):
+        return {}
+    fields = schema.get('fields')
+    if fields is None:
+        fields = schema.get('properties')
+    if isinstance(fields, dict):
+        return fields
+    return {}
+
+
+def _schema_is_empty(schema):
+    return len(_schema_fields(schema)) == 0
+
+
+def _field_authority(schema, name):
+    """'server' / 'client' / None for one schema field.
+
+    Field specs are dicts like {'type': 'int', 'authority':
+    'server'} in the JSON the server returns. Anything else is
+    treated as client-owned (the server validates the value).
+    """
+    spec = _schema_fields(schema).get(name)
+    if isinstance(spec, dict):
+        auth = spec.get('authority')
+        if isinstance(auth, str):
+            return auth
+    return None
+
+
+def _extract_character_schema(data):
+    """Character schema out of a join response / error payload.
+
+    Success: data['character_schema'] (top level). 409 mismatch:
+    FastAPI wraps the detail, so it is
+    data['detail']['character_schema']. Also accepts the
+    camelCase characterSchema spelling and a schema nested in
+    data['config']. Returns the schema dict or None.
+    """
+    if not isinstance(data, dict):
+        return None
+    for key in ('character_schema', 'characterSchema'):
+        v = data.get(key)
+        if isinstance(v, dict):
+            return v
+    detail = data.get('detail')
+    if isinstance(detail, dict):
+        for key in ('character_schema', 'characterSchema'):
+            v = detail.get(key)
+            if isinstance(v, dict):
+                return v
+    cfg = data.get('config')
+    if isinstance(cfg, dict):
+        for key in ('character_schema', 'characterSchema',
+                    'character_state_schema', 'characterStateSchema'):
+            v = cfg.get(key)
+            if isinstance(v, dict):
+                return v
+    return None
+
+
 def _extract_join_fields(data):
     """Join responses vary a little by server version; accept all."""
     out = {}
@@ -265,6 +383,7 @@ def _extract_join_fields(data):
     out['environment_name'] = _pick(data, ['environment_name', 'environmentName', 'environment'])
     out['disconnection_time_sec'] = _pick(data, ['disconnection_time_sec', 'disconnectionTimeSec', 'disconnectionTime', 'disconnect_timeout_sec'])
     out['empty_game_ttl_sec'] = _pick(data, ['empty_game_ttl_sec', 'emptyGameTtlSec', 'emptyGameTtl'])
+    out['character_schema'] = _extract_character_schema(data)
     client = data.get('client')
     if isinstance(client, dict):
         if out['client_id'] is None:
@@ -422,92 +541,126 @@ def _pos_from(src):
     return None
 
 
-def canonical_character_update(src, default_client_id=None, position_field=None):
-    """Normalise any caller shape to a CharacterState update.
+# Top-level keys that are NEVER character state. Old (pre-v1)
+# callers passed them flat next to / instead of inside state;
+# canonical_character_update drops them instead of forwarding
+# them, because the server 422s every one of them top-level.
+# 'score' is dropped by the server-authority rule below (it is
+# server-owned in every shipped schema), but it is listed here
+# too so a schema-less caller can never send it.
+_LEGACY_CHARACTER_KEYS = {
+    'velocity', 'animationState', 'animation_state',
+    'animationFrame', 'animation_frame', 'isJumping', 'facing',
+    'onGround', 'characterModelId', 'metadata', 'score',
+    'clientId', 'client_id', 'characterId', 'character_id',
+    'id', 'timestamp', 'source', 'updates', 'state',
+}
 
-    Output: {clientId, <position field>, velocity, score?, health?,
-    animationState?, metadata}. Name / colour are folded into
-    metadata ONLY -- they are not top-level CharacterState fields
-    and the server rejects them there.
 
-    position_field: 'position' (live server / working demo --
-    the default), 'pos' (items only, NOT characters),
-    'xy' (flat x/y), 'position_dict' (position: {x, y}) or
-    'pos_dict' (pos: {x, y}). None defaults to 'position'.
+def canonical_character_update(src, default_client_id=None, position_field=None, character_schema=None, **kwargs):
+    """Normalise any caller shape to a protocol-v1 CharacterState update.
+
+    Output: {clientId, state: {...}} -- and NOTHING else.
+    The server accepts exactly {clientId, state, timestamp,
+    source} per update, and this function sends only the first
+    two (the body carries the timestamp; the server stamps
+    source). Any top-level legacy field -- position, health,
+    velocity, score, metadata, pos, characterModelId,
+    animationState, animationFrame, isJumping, facing, onGround
+    -- is rejected by the server with 422, so none of them ever
+    appears top-level here.
+
+    Accepted inputs (both keep working, so old apps do not break):
+      * canonical: {'clientId': ..., 'state': {position, health,
+        name, color, ...}} -- passed through (minus dropped
+        server-authority fields).
+      * flat (pre-v1): {'position': [x, y], 'health': 100,
+        'name': 'Zed', 'color': 'red'} -- folded into state.
+        A flat 'metadata' dict ({name, color, health}) is also
+        folded in, so old metadata callers keep working. A flat
+        'pos' is renamed to 'position'. Any other flat key that
+        is not a legacy key is passed through as a custom
+        state field, so games with extra declared fields
+        (e.g. state: {direction: ...}) work without a code
+        change here.
+
+    Server-authority fields are DROPPED, never sent: if
+    character_schema declares a field authority 'server'
+    (score in every shipped schema), it is removed from
+    state. With no schema, 'score' is still dropped -- it is
+    server-owned in every shipped schema and the demo never
+    sends it. Unknown fields are NOT dropped here: the server
+    422s them (unless the schema opts into allow_unknown),
+    which is the fail-fast signal that the caller is sending
+    a field it never declared.
+
+    position_field is accepted for backwards compatibility
+    and IGNORED: characters always use 'position' inside
+    state. ('pos' is items only, never characters.)
+    character_schema may also be passed as kwarg schema=...
     """
     if not isinstance(src, dict):
         src = {}
+    if character_schema is None and isinstance(kwargs.get('schema'), dict):
+        character_schema = kwargs.get('schema')
     cid = src.get('clientId') or src.get('client_id') or src.get('characterId') or src.get('character_id') or src.get('id') or default_client_id
+    # --- Build the state dict. Canonical state wins; flat keys
+    # fill in anything the state dict does not already have.
+    state = {}
+    raw_state = src.get('state')
+    if isinstance(raw_state, dict):
+        for k, v in raw_state.items():
+            state[k] = v
+    # 'pos' inside state is the old name -- rename to position.
+    if 'pos' in state and 'position' not in state:
+        state['position'] = state.pop('pos')
+    elif 'pos' in state:
+        state.pop('pos')
+    # Flat known fields.
     pos = _pos_from(src)
-    if pos is None:
-        pos = [0.0, 0.0]
-    vel = src.get('velocity')
-    if not (isinstance(vel, (list, tuple)) and len(vel) == 2):
-        vel = [0, 0]
-    else:
-        try:
-            vel = [float(vel[0]), float(vel[1])]
-        except Exception:
-            vel = [0, 0]
-    upd = {'clientId': cid, 'velocity': vel}
-    field = position_field or 'position'
-    if field == 'position':
-        upd['position'] = [float(pos[0]), float(pos[1])]
-    elif field == 'xy':
-        upd['x'] = float(pos[0])
-        upd['y'] = float(pos[1])
-    elif field == 'position_dict':
-        upd['position'] = {'x': float(pos[0]), 'y': float(pos[1])}
-    elif field == 'pos_dict':
-        upd['pos'] = {'x': float(pos[0]), 'y': float(pos[1])}
-    else:
-        upd['pos'] = [float(pos[0]), float(pos[1])]
-    score = src.get('score')
-    if isinstance(score, (int, float)) and not isinstance(score, bool):
-        upd['score'] = score
-    health = src.get('health')
-    if isinstance(health, (int, float)) and not isinstance(health, bool):
-        upd['health'] = health
-    anim = src.get('animationState') or src.get('animation_state')
-    if anim is not None:
-        upd['animationState'] = anim
-    if src.get('characterModelId') is not None:
-        upd['characterModelId'] = src.get('characterModelId')
-    if isinstance(src.get('animationFrame'), (int, float)):
-        upd['animationFrame'] = src.get('animationFrame')
-    # Demo fields the live server accepts (see working demo):
-    # isJumping / facing / onGround / per-update timestamp.
-    if isinstance(src.get('isJumping'), bool):
-        upd['isJumping'] = src.get('isJumping')
-    if isinstance(src.get('facing'), (int, float)) and not isinstance(src.get('facing'), bool):
-        upd['facing'] = src.get('facing')
-    if isinstance(src.get('onGround'), bool):
-        upd['onGround'] = src.get('onGround')
-    if isinstance(src.get('timestamp'), (int, float)) and not isinstance(src.get('timestamp'), bool):
-        upd['timestamp'] = int(src.get('timestamp'))
+    if pos is not None and 'position' not in state:
+        state['position'] = [float(pos[0]), float(pos[1])]
+    for key in ('health', 'name', 'color'):
+        if key not in state and src.get(key) is not None:
+            state[key] = src.get(key)
+    # Flat metadata -- old callers put name / color / health there.
     meta = src.get('metadata')
     if isinstance(meta, dict):
-        # Copy so we never mutate the caller's dict, and fill in
-        # any fields the caller put top-level instead. An explicit
-        # {} metadata must NOT swallow a top-level name/colour.
-        meta = dict(meta)
-    else:
-        meta = {}
-    if meta.get('name') is None and src.get('name') is not None:
-        meta['name'] = src.get('name')
-    if meta.get('display_name') is None and src.get('name') is not None:
-        meta['display_name'] = src.get('name')
-    if meta.get('display_name') is None and src.get('display_name') is not None:
-        meta['display_name'] = src.get('display_name')
-    if meta.get('displayName') is None and src.get('displayName') is not None:
-        meta['displayName'] = src.get('displayName')
-    if meta.get('color') is None and src.get('color') is not None:
-        meta['color'] = src.get('color')
-    # Do NOT inject score into metadata: the working demo's
-    # metadata is exactly {health, name, color} and score rides
-    # top-level. (Receiving still reads meta.score as a fallback.)
-    upd['metadata'] = meta
-    return upd
+        if 'name' not in state and meta.get('name') is not None:
+            state['name'] = meta.get('name')
+        if 'name' not in state and meta.get('display_name') is not None:
+            state['name'] = meta.get('display_name')
+        if 'name' not in state and meta.get('displayName') is not None:
+            state['name'] = meta.get('displayName')
+        if 'color' not in state and meta.get('color') is not None:
+            state['color'] = meta.get('color')
+        if 'health' not in state and meta.get('health') is not None:
+            state['health'] = meta.get('health')
+    # Any other flat key that is not a legacy key is a custom
+    # state field -- pass it through (server validates it
+    # against the schema).
+    for key in src:
+        if key in _LEGACY_CHARACTER_KEYS:
+            continue
+        if key in ('pos', 'position', 'health', 'name', 'color'):
+            continue
+        if key not in state:
+            state[key] = src[key]
+    # Normalise position to [x, y] floats when we have one.
+    if 'position' in state:
+        norm = _pos_from({'position': state.get('position')})
+        if norm is not None:
+            state['position'] = [float(norm[0]), float(norm[1])]
+    # Drop server-authority fields. With a schema, drop exactly
+    # what the schema marks server-owned. Without one, drop
+    # 'score' (server-owned in every shipped schema).
+    for key in list(state.keys()):
+        auth = _field_authority(character_schema, key) if character_schema is not None else None
+        if auth == 'server':
+            del state[key]
+        elif auth is None and key == 'score':
+            del state[key]
+    return {'clientId': cid, 'state': state}
 
 
 def canonical_item_update(src, default_client_id=None, environment=None):
@@ -772,6 +925,13 @@ class MatchClient(object):
         self.disconnection_time_sec = None
         self.empty_game_ttl_sec = None
         self.disconnected = False
+        # Effective character_schema for this game_id: what we
+        # declared on join, or the stored schema after a 409
+        # retry, or what the stream bootstrap carried
+        # (mp.characterSchema). publish_character_state uses it
+        # to drop server-authority fields (e.g. score) before
+        # they reach the server. None until the first join.
+        self.character_schema = None
         self._stream = None
         self.stream_connected = False
         self.on_mp = on_mp
@@ -915,7 +1075,8 @@ class MatchClient(object):
                         custom_rules=None, metadata=None,
                         max_turns=None, turn_order_strategy=None,
                         max_initial_skill_gap=None, gap_widen_per_sec=None,
-                        max_skill_gap=None, **kwargs):
+                        max_skill_gap=None, character_schema=None,
+                        **kwargs):
         """Build the exact join body the server expects.
 
         Pass config=... to override everything. Otherwise config is
@@ -925,6 +1086,18 @@ class MatchClient(object):
         empty_game_ttl_sec, custom_rules, matchmaking tolerances,
         turn max_turns / turn_order_strategy, and the authority
         scopes the server actually uses.
+
+        character_schema: the declared shape of per-player state
+        for this game_id, e.g. the top-down schema in the module
+        docstring. It is stored as config.character_schema. When
+        config=... is passed AND character_schema=... is also
+        passed, the explicit character_schema wins. When neither
+        is passed and config is derived here, an empty schema
+        ({version: 1, fields: {}}) is declared -- the server's
+        "this game sends no character state" (tic-tac-toe).
+        When config=... is passed and it already carries a
+        schema, that schema is left alone. characterSchema /
+        character_state_schema spellings are accepted as aliases.
         """
         if requires_turn_based is None:
             requires_turn_based = True
@@ -932,6 +1105,12 @@ class MatchClient(object):
             requires_matchmaking = kwargs.get('requires_matchmaking')
         if requires_matchmaking is None:
             requires_matchmaking = True
+        if character_schema is None:
+            for _alias in ('characterSchema', 'character_state_schema',
+                           'characterStateSchema'):
+                if isinstance(kwargs.get(_alias), dict):
+                    character_schema = kwargs.get(_alias)
+                    break
         if player_id is None:
             player_id = make_player_id(character_name)
         if display_name is None:
@@ -999,6 +1178,10 @@ class MatchClient(object):
                 'authority': {'scopes': ['items', 'environment', 'character_state'],
                               'resource_types': ['*'],
                               'allow_client_claims': True},
+                # Empty schema = no character state. Realtime
+                # callers pass their real schema; turn-based
+                # callers get the empty default.
+                'character_schema': character_schema if isinstance(character_schema, dict) else {'version': 1, 'fields': {}},
             }
             if visibility is not None:
                 config['visibility'] = visibility
@@ -1013,6 +1196,13 @@ class MatchClient(object):
                 config['custom_rules'] = custom_rules
             if metadata is not None:
                 config['metadata'] = metadata
+        elif isinstance(character_schema, dict):
+            # Explicit schema wins over a caller-supplied config.
+            # Copy so we never mutate the caller's dict.
+            config = dict(config)
+            config['character_schema'] = character_schema
+            if 'characterSchema' in config:
+                del config['characterSchema']
         body = {
             'environment_name': environment_name,
             'character_name': character_name,
@@ -1038,9 +1228,16 @@ class MatchClient(object):
                    empty_game_ttl_sec=None, custom_rules=None,
                    metadata=None, max_turns=None,
                    turn_order_strategy=None, max_initial_skill_gap=None,
-                   gap_widen_per_sec=None, max_skill_gap=None, **kwargs):
+                   gap_widen_per_sec=None, max_skill_gap=None,
+                   character_schema=None, **kwargs):
         if requires_turn_based is None:
             requires_turn_based = True
+        if character_schema is None:
+            for _alias in ('characterSchema', 'character_state_schema',
+                           'characterStateSchema'):
+                if isinstance(kwargs.get(_alias), dict):
+                    character_schema = kwargs.get(_alias)
+                    break
         self.requires_turn_based = bool(requires_turn_based)
         self.game_id = game_id
         self.environment_name = environment_name
@@ -1059,11 +1256,55 @@ class MatchClient(object):
             max_turns=max_turns, turn_order_strategy=turn_order_strategy,
             max_initial_skill_gap=max_initial_skill_gap,
             gap_widen_per_sec=gap_widen_per_sec,
-            max_skill_gap=max_skill_gap, **kwargs)
+            max_skill_gap=max_skill_gap, character_schema=character_schema,
+            **kwargs)
+        # What we declared, before the server answers. The
+        # effective schema (self.character_schema) is updated
+        # from the join response / a 409 retry below.
+        _declared = None
+        if isinstance(body.get('config'), dict):
+            _declared = _extract_character_schema(body['config'])
+            if _declared is None:
+                _declared = body['config'].get('character_schema')
+        self.character_schema = _declared
         result = await self._http('POST', '/api/multiplayer/join', body)
         data = result.get('data')
         if not isinstance(data, dict):
             data = {}
+        if result.get('status') == 409:
+            # Another client already stored a different schema
+            # for this game_id. Retry ONCE with the stored schema
+            # -- but ONLY if it is non-empty. An empty stored
+            # schema means an old client joined with no schema
+            # (or this is a no-character-state game) and adopting
+            # it would join "successfully" and then 422 every
+            # character patch with "unknown character field".
+            # In that case fail here: close every old tab, wait
+            # out empty_game_ttl_sec (300s), then Join again.
+            # The 409 detail is wrapped: data = {detail:
+            # {character_schema: ...}} (FastAPI).
+            stored = _extract_character_schema(data)
+            if isinstance(stored, dict) and not _schema_is_empty(stored):
+                retry_body = dict(body)
+                retry_cfg = dict(body.get('config') or {})
+                retry_cfg['character_schema'] = stored
+                if 'characterSchema' in retry_cfg:
+                    del retry_cfg['characterSchema']
+                retry_body['config'] = retry_cfg
+                result = await self._http('POST', '/api/multiplayer/join', retry_body)
+                data = result.get('data')
+                if not isinstance(data, dict):
+                    data = {}
+                if result.get('ok'):
+                    self.character_schema = stored
+            else:
+                self.character_schema = stored
+                self.last_error = str(data)
+                return data
+        # Effective schema: prefer what the server echoed back.
+        _echoed = _extract_character_schema(data)
+        if isinstance(_echoed, dict):
+            self.character_schema = _echoed
         fields = _extract_join_fields(data)
         if fields.get('client_id') is not None:
             self.client_id = fields['client_id']
@@ -1106,8 +1347,15 @@ class MatchClient(object):
                               allow_resign=True, requires_matchmaking=None,
                               max_turns=None, turn_order_strategy=None,
                               disconnection_time_sec=None,
-                              empty_game_ttl_sec=None, **kwargs):
-        """Convenience: join a turn-based game (tic-tac-toe style)."""
+                              empty_game_ttl_sec=None, character_schema=None,
+                              **kwargs):
+        """Convenience: join a turn-based game (tic-tac-toe style).
+
+        Turn-based games normally send no character state, so
+        the default declared schema is the empty one. Pass
+        character_schema=... if the game does send character
+        state alongside turns.
+        """
         return await self.join(
             environment_name, character_name, game_id,
             player_id=player_id, display_name=display_name, skill=skill,
@@ -1118,7 +1366,8 @@ class MatchClient(object):
             allow_resign=allow_resign, requires_matchmaking=requires_matchmaking,
             max_turns=max_turns, turn_order_strategy=turn_order_strategy,
             disconnection_time_sec=disconnection_time_sec,
-            empty_game_ttl_sec=empty_game_ttl_sec, **kwargs)
+            empty_game_ttl_sec=empty_game_ttl_sec,
+            character_schema=character_schema, **kwargs)
 
     async def join_realtime(self, environment_name, character_name,
                             game_id, player_id=None, display_name=None,
@@ -1127,7 +1376,8 @@ class MatchClient(object):
                             min_players_per_room=1,
                             game_mode='default', requires_matchmaking=None,
                             disconnection_time_sec=60,
-                            empty_game_ttl_sec=300, **kwargs):
+                            empty_game_ttl_sec=300, character_schema=None,
+                            **kwargs):
         """Convenience: join a non-turn-based game (platformer style).
 
         No turn_state exists in this mode. Use
@@ -1135,6 +1385,10 @@ class MatchClient(object):
         state and on_character / on_item to receive others'.
         disconnection_time_sec / empty_game_ttl_sec are the new
         server's per-game budgets (60s / 300s defaults).
+        Pass character_schema=... to declare the per-player
+        state shape (see module docstring for the top-down
+        schema). Without it the empty schema is declared,
+        which means the game sends no character state.
         """
         return await self.join(
             environment_name, character_name, game_id,
@@ -1145,7 +1399,8 @@ class MatchClient(object):
             game_mode=game_mode, allow_pass=False, allow_resign=False,
             requires_matchmaking=requires_matchmaking,
             disconnection_time_sec=disconnection_time_sec,
-            empty_game_ttl_sec=empty_game_ttl_sec, **kwargs)
+            empty_game_ttl_sec=empty_game_ttl_sec,
+            character_schema=character_schema, **kwargs)
 
     # -- session / matchmaking --------------------------------------------
 
@@ -1356,24 +1611,28 @@ class MatchClient(object):
 
     async def publish_character_state(self, character_state,
                                       character_id=None):
-        """PATCH character-state.
+        """PATCH character-state. Protocol v1, schema-declared.
 
-        Body is {updates: [CharacterState], timestamp}. CharacterState
-        is {clientId, position: [x, y], velocity, score?, health?,
-        animationState?, metadata}. CHARACTERS use position;
-        ITEMS use pos. Name / colour ride in metadata only --
-        never as top-level update fields.
+        Body is {updates: [{clientId, state: {...}}], timestamp}
+        -- exactly the live demo's body. The ONLY top-level
+        update field is clientId; everything else lives in
+        state and must be declared in config.character_schema
+        on join. Name / colour ride in state.name / state.color
+        (when declared) -- never as top-level fields, never in
+        metadata. Server-authority fields (e.g. score) are
+        dropped before sending (see canonical_character_update);
+        the client NEVER sends score.
         """
         src = character_state if isinstance(character_state, dict) else {}
-        env = self._env(src)
         if isinstance(src.get('updates'), list):
             updates = []
             for entry in src['updates']:
-                updates.append(canonical_character_update(entry, default_client_id=character_id or self.client_id, position_field='position'))
+                updates.append(canonical_character_update(
+                    entry, default_client_id=character_id or self.client_id,
+                    character_schema=self.character_schema))
             body = {
-                'updates': updates, 'timestamp': self._int_ts(src.get('timestamp')),
-                'clientId': self.client_id, 'client_id': self.client_id,
-                'sessionId': self.session_id, 'session_id': self.session_id,
+                'updates': updates,
+                'timestamp': self._int_ts(src.get('timestamp')),
             }
             result = await self._http('PATCH', '/api/multiplayer/character-state', body)
             failed = self._failed(result)
@@ -1381,11 +1640,11 @@ class MatchClient(object):
                 self._note_disconnect(result)
                 return failed
             return result.get('data')
-        upd = canonical_character_update(src, default_client_id=character_id or self.client_id, position_field='position')
+        upd = canonical_character_update(
+            src, default_client_id=character_id or self.client_id,
+            character_schema=self.character_schema)
         body = {
             'updates': [upd], 'timestamp': self._now(),
-            'clientId': upd.get('clientId'), 'client_id': upd.get('clientId'),
-            'sessionId': self.session_id, 'session_id': self.session_id,
         }
         result = await self._http('PATCH', '/api/multiplayer/character-state', body)
         failed = self._failed(result)
@@ -1419,8 +1678,6 @@ class MatchClient(object):
             body = {
                 'updates': updates, 'collections': collections,
                 'timestamp': self._int_ts(src.get('timestamp')),
-                'clientId': self.client_id, 'client_id': self.client_id,
-                'sessionId': self.session_id, 'session_id': self.session_id,
             }
             result = await self._http('PATCH', '/api/multiplayer/item-state', body)
             failed = self._failed(result)
@@ -1437,14 +1694,10 @@ class MatchClient(object):
             coll = canonical_collection(upd, default_client_id=self.client_id, environment=env)
             body = {
                 'updates': [], 'collections': [coll], 'timestamp': self._now(),
-                'clientId': self.client_id, 'client_id': self.client_id,
-                'sessionId': self.session_id, 'session_id': self.session_id,
             }
         else:
             body = {
                 'updates': [upd], 'collections': [], 'timestamp': self._now(),
-                'clientId': self.client_id, 'client_id': self.client_id,
-                'sessionId': self.session_id, 'session_id': self.session_id,
             }
         result = await self._http('PATCH', '/api/multiplayer/item-state', body)
         failed = self._failed(result)
@@ -1527,6 +1780,16 @@ class MatchClient(object):
         if not isinstance(mp, dict):
             return None
         mp = normalize_patch(mp)
+        # Bootstrap carries the effective schema (mp.characterSchema
+        # camelCase from the server, or character_schema snake_case
+        # from a join echo). Learn it before publishing anything.
+        _schema = None
+        if isinstance(mp.get('characterSchema'), dict):
+            _schema = mp.get('characterSchema')
+        elif isinstance(mp.get('character_schema'), dict):
+            _schema = mp.get('character_schema')
+        if isinstance(_schema, dict):
+            self.character_schema = _schema
         if isinstance(mp.get('room'), dict):
             room_id = mp['room'].get('roomId')
             if room_id is None:
@@ -1856,6 +2119,7 @@ class MatchClient(object):
         self.is_synchronizer = False
         self.synchronizer_id = None
         self.disconnected = False
+        self.character_schema = None
         return data
 
 
@@ -1883,7 +2147,8 @@ async def join_match(client, environment_name, character_name, game_id,
                      config=None, requires_turn_based=None,
                      max_players_per_room=None, min_players_per_room=None,
                      game_mode='default', allow_pass=True,
-                     allow_resign=True, requires_matchmaking=None, **kwargs):
+                     allow_resign=True, requires_matchmaking=None,
+                     character_schema=None, **kwargs):
     return await client.join(
         environment_name, character_name, game_id,
         player_id=player_id, display_name=display_name, skill=skill,
@@ -1891,7 +2156,8 @@ async def join_match(client, environment_name, character_name, game_id,
         max_players_per_room=max_players_per_room,
         min_players_per_room=min_players_per_room,
         game_mode=game_mode, allow_pass=allow_pass,
-        allow_resign=allow_resign, requires_matchmaking=requires_matchmaking, **kwargs)
+        allow_resign=allow_resign, requires_matchmaking=requires_matchmaking,
+        character_schema=character_schema, **kwargs)
 
 
 async def get_turn_state(client):
@@ -1922,7 +2188,7 @@ def main():
     print('extensions.match: MatchClient ready')
     print('extensions.match: base_url=' + client.base_url)
     print('extensions.match: turn-based = join_turn_based + turn/state + turn/action + turn/pass + turn/resign')
-    print('extensions.match: realtime = join_realtime + character-state (pos) + item-state (collections) + heartbeat + custom/effects-state')
+    print('extensions.match: realtime = join_realtime + character-state (state:{position, health, name, color}) + item-state (collections) + heartbeat + custom/effects-state')
     return client
 
 
