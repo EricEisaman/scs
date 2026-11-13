@@ -1172,10 +1172,12 @@ class MatchClient(object):
                 'matchmaking': matchmaking_cfg,
                 'turn': turn_cfg,
                 # Server authority scopes: items + environment +
-                # character_state. The old client sent
-                # ['characters', 'items'] / ['turns'], which do not
-                # match the server's AuthorityConfig.
-                'authority': {'scopes': ['items', 'environment', 'character_state'],
+                # character_state, plus 'turns' when turn-based --
+                # without it the server rejects every turn action
+                # with accepted=False, reason='authority_not_enabled'.
+                # Realtime games keep the old scopes so their
+                # matchmaking fingerprint does not change.
+                'authority': {'scopes': ['items', 'environment', 'character_state'] + (['turns'] if requires_turn_based else []),
                               'resource_types': ['*'],
                               'allow_client_claims': True},
                 # Empty schema = no character state. Realtime
