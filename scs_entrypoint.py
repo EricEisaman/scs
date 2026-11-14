@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-FIXED-v34-hud-offscreen-sync'
+__version__ = '2026-11-14-FIXED-v36-app-size-wins-no-ro-override'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -618,6 +618,47 @@ def setHtmlHudElement(el):
     return _hud_html_element
 
 
+def _replace_canvas_for_context(kind):
+    # v35: One canvas = one context type per page load (browser rule).
+    # WebGL -> 2D (spatial_audio -> fetch_demo) or 2D -> WebGL on the SAME
+    # canvas makes getContext() return null and run_app fails with no loop.
+    # Fix: if the requested kind differs from the canvas's existing context
+    # kind, replace the <canvas> element with a fresh one (same id, same
+    # attributes). Fresh element has no context, so getContext() succeeds.
+    try:
+        _prev = _scs_get('canvasContextKind', None)
+        if _prev is None or str(_prev).lower() == str(kind).lower():
+            return
+        _c = _find_canvas()
+        if _c is None:
+            return
+        _parent = getattr(_c, 'parentNode', None)
+        if _parent is None:
+            return
+        _new = document.createElement('canvas')
+        try:
+            _new.id = _c.id
+        except Exception:
+            pass
+        for _attr in ('data-app', 'width', 'height', 'tabindex'):
+            try:
+                _v = _c.getAttribute(_attr)
+                if _v is not None:
+                    _new.setAttribute(_attr, _v)
+            except Exception:
+                pass
+        try:
+            _new.style.cssText = _c.style.cssText
+        except Exception:
+            pass
+        _parent.replaceChild(_new, _c)
+        global _canvas
+        _canvas = _new
+        _scs_set('canvasContextKind', str(kind).lower())
+        _debug_log('SCS canvas: replaced canvas to switch context %s -> %s' % (_prev, kind))
+    except Exception:
+        pass
+
 def _size_canvas(width, height):
     """v29: CSS controls displayed size, buffer is derived.
     Initial CSS = width x height px (the layout). Backing = CSS * budgeted ratio.
@@ -631,26 +672,18 @@ def _size_canvas(width, height):
     _br = _budgeted_ratio()
     _resize_last_dpr = _br
     try:
-        # v30: host page owns CSS. Only set inline size if the page gives the
-        # canvas no usable CSS size (computed is auto/0). Otherwise leave the
-        # host's stylesheet / inline style alone - do not break wild pages.
-        _need_css = True
+        # v36: APP SIZE WINS. runApp(900,560) means 900x560, period.
+        # v30 "host owns CSS" left the canvas at index.html's 1050x700 while
+        # the app drew at 900x560 - then ResizeObserver measured 1050x700
+        # (or DevTools 9990x7593) and overwrote the app size every frame.
+        # That is the tiny flashing HUD tile at the bottom. Always set CSS
+        # to the app size. Host pages that want responsive must opt in via
+        # fullscreen / responsive mode, not by having a different CSS size.
         try:
-            _cs = window.getComputedStyle(canvas)
-            _cw = float(str(getattr(_cs, 'width', '') or '0').replace('px','') or 0)
-            _ch = float(str(getattr(_cs, 'height', '') or '0').replace('px','') or 0)
-            if _cw > 0 and _ch > 0:
-                _need_css = False
+            canvas.style.width = '%dpx' % int(width)
+            canvas.style.height = '%dpx' % int(height)
         except Exception:
             pass
-        if _need_css:
-            # Only if no inline size already set by the host.
-            try:
-                if not (canvas.style.width and canvas.style.height):
-                    canvas.style.width = '%dpx' % int(width)
-                    canvas.style.height = '%dpx' % int(height)
-            except Exception:
-                pass
         # Buffer: assign only if actually changed (avoids needless reset).
         _bw, _bh = int(width * _br), int(height * _br)
         if int(canvas.width) != _bw:
@@ -704,6 +737,29 @@ def _apply_pending_resize():
         return
     _cssW, _cssH, _bw, _bh = _resize_pending
     _resize_pending = None
+    # v36: FIXED-SIZE APPS IGNORE ResizeObserver. If the pending size does not
+    # match the app's current size, it is the PAGE / DevTools viewport size
+    # (1050x700, 9990x7593), not the app size. Applying it overwrites
+    # runApp(900,560) and makes the app draw as a tiny flashing tile.
+    # Only responsive/fullscreen apps opt into RO-driven size.
+    try:
+        _is_resp = bool(_responsive) if '_responsive' in globals() else False
+    except Exception:
+        _is_resp = False
+    if not _is_resp:
+        try:
+            if int(round(_cssW)) != int(_canvas_width) or int(round(_cssH)) != int(_canvas_height):
+                return
+        except Exception:
+            pass
+    # v36: no-op if backing already matches - assigning canvas.width clears
+    # the canvas and resets the 2D context, which is the per-frame flash.
+    try:
+        _c0 = _find_canvas()
+        if _c0 is not None and int(_c0.width) == int(_bw) and int(_c0.height) == int(_bh):
+            return
+    except Exception:
+        pass
     try:
         _c = _find_canvas()
         if _c is not None:
@@ -789,6 +845,18 @@ def _on_resize_observer(entries, observer=None):
             if _bw is None or _bh is None:
                 _br = _budgeted_ratio()
                 _bw, _bh = int(round(_cssW * _br)), int(round(_cssH * _br))
+            # v36: fixed-size app - RO is advisory only. If CSS box != app
+            # size, it is the host page / DevTools, not the app. Ignore it.
+            try:
+                _is_resp2 = bool(_responsive) if '_responsive' in globals() else False
+            except Exception:
+                _is_resp2 = False
+            if not _is_resp2:
+                try:
+                    if int(round(_cssW)) != int(_canvas_width) or int(round(_cssH)) != int(_canvas_height):
+                        continue
+                except Exception:
+                    pass
             _queue_resize(_cssW, _cssH, _bw, _bh)
     except Exception:
         pass
@@ -3168,6 +3236,10 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
             return
 
         def _gpu_ready():
+            try:
+                _scs_set('canvasContextKind', 'webgpu')
+            except Exception:
+                pass
             _activate_renderer(r, 'webgpu')
             _start_loop()
 
@@ -3179,9 +3251,18 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
         r.on_error = _gpu_fail
         return  # loop starts from _gpu_ready
 
+    # v35: switch canvas if context kind changed (WebGL -> 2D for fetch_demo).
+    try:
+        _replace_canvas_for_context(kind)
+    except Exception:
+        pass
     # webgl2 / 2d: explicit, no fallback. If create fails, FAIL.
     try:
         r = create_renderer(kind, _find_canvas(), width, height)
+        try:
+            _scs_set('canvasContextKind', str(kind).lower())
+        except Exception:
+            pass
     except Exception as e:
         try:
             import traceback as _tb
@@ -3426,6 +3507,15 @@ def getFullscreenState():
 
 def _setup_presentation(canvas):
     global _presentation, _presentation_coordinator
+    # v36: fixed-size app - PresentationController must NOT resize it.
+    # It observes the canvas/parent and calls apply_size() with the PAGE
+    # size, which overwrites runApp(900,560). Only run it for responsive apps.
+    try:
+        _is_resp3 = bool(_responsive) if '_responsive' in globals() else False
+    except Exception:
+        _is_resp3 = False
+    if not _is_resp3:
+        return
     try:
         from scs_presentation import PresentationController, ResizeCoordinator
         container = canvas
