@@ -69,6 +69,19 @@ __all__ = [
 
 __version__ = '2026-11-14-runApp-*args-v2'
 
+# Console proof: log version the moment this file is imported by Brython.
+# If the live console does NOT show this line, the browser is NOT running this file.
+try:
+    _ver_msg = '[SCS entrypoint] version=' + __version__
+    print(_ver_msg)
+    try:
+        from browser import window as _w
+        _w.console.log(_ver_msg)
+    except Exception:
+        pass
+except Exception:
+    pass
+
 # ----------------------------------------------------------------------
 # Align -- exact CMU semantics
 # ----------------------------------------------------------------------
@@ -2524,6 +2537,22 @@ def load():
 def boot():
     """Called from index.html / the JS loader. Binds events, loads the
     app (?app= / SCS_CONFIG), and starts it."""
+    # Console proof at boot(): which runApp is actually in globals() RIGHT NOW.
+    try:
+        import inspect as _insp
+        try:
+            _sig = str(_insp.signature(runApp))
+        except Exception:
+            _sig = 'signature-unavailable'
+        _boot_msg = '[SCS entrypoint] boot() version=' + __version__ + ' runApp' + _sig
+        print(_boot_msg)
+        try:
+            from browser import window as _w2
+            _w2.console.log(_boot_msg)
+        except Exception:
+            pass
+    except Exception:
+        pass
     _bind_events()
     load()
 

@@ -37,35 +37,49 @@ class FetchError(Exception):
 
 
 def _js_to_py(obj):
-    """JSObject / JS array -> real Python dict/list. Framework fix, not an app fix.
+    """JSObject / JS array -> real Python dict/list, RECURSIVELY.
 
-    Bug: FetchResponse.json() did `isinstance(result, (dict, list))` which is
-    False for a Brython JSObject, then `_pyjson.loads(window.JSON.stringify(result))`
-    where JSON.stringify returns a JS string, not a Python str -- json.loads
-    chokes, falls through, and the raw JSObject leaks to the app.
-    fetch_demo had to work around with data['title']; any app doing
-    data.get('title') / isinstance(data, dict) broke.
+    Live bug, even with the first fix:
+      fetch_json returned type=<class 'list'>
+      data preview=[<Javascript object: [object Object]>]
+      data type=<class 'JSObject'>
+    Brython converts the JS *array* to a Python list, but leaves its
+    elements as JSObjects. The first fix did:
+      if isinstance(obj, (dict, list, ...)): return obj
+    so it returned the list untouched and the nested JSObject survived.
 
-    Fix order: (1) to_py() if present (Brython recursive), (2) JSON round-trip
-    with str() so json.loads gets a real Python str, (3) dict() fallback.
+    Fix: ALWAYS recurse into lists/dicts, even when they are already
+    Python. And re-recurse after to_py(), because to_py() can also
+    return a list of JSObjects.
     """
-    if isinstance(obj, (dict, list, str, int, float, bool)) or obj is None:
+    if obj is None or isinstance(obj, (str, int, float, bool)):
         return obj
+    if isinstance(obj, (list, tuple)):
+        return [_js_to_py(x) for x in obj]
+    if isinstance(obj, dict):
+        return {_js_to_py(k): _js_to_py(v) for k, v in obj.items()}
     try:
         to_py = getattr(obj, 'to_py', None)
         if callable(to_py):
-            return to_py()
+            converted = to_py()
+            if converted is not obj:
+                return _js_to_py(converted)
     except Exception:
         pass
     try:
         txt = window.JSON.stringify(obj)
-        return _pyjson.loads(str(txt))
+        return _js_to_py(_pyjson.loads(str(txt)))
     except Exception:
         pass
     try:
-        return dict(obj)
+        return _js_to_py(dict(obj))
     except Exception:
-        return obj
+        pass
+    try:
+        return _js_to_py(list(obj))
+    except Exception:
+        pass
+    return obj
 
 
 class FetchResponse:
@@ -74,9 +88,7 @@ class FetchResponse:
     Mirrors the Fetch API: https://developer.mozilla.org/en-US/docs/Web/API/Response
     """
     def __init__(self, js_response):
-        # js_response is the JS Response from window.fetch or aio.fetch
         self._js = js_response
-        # Standard Fetch API attributes
         try:
             self.ok = bool(getattr(js_response, 'ok', True))
         except:
@@ -93,7 +105,6 @@ class FetchResponse:
             self.headers = getattr(js_response, 'headers', {})
         except:
             self.headers = {}
-        # For aio.fetch compatibility, data may be in .data
         self._aio_data = getattr(js_response, 'data', None)
 
     async def json(self):
@@ -101,22 +112,18 @@ class FetchResponse:
         Async parse as JSON. Mirrors Response.json()
         Returns Python dict/list.
         """
-        # If this came from aio.fetch and already has data, convert it too
         if self._aio_data is not None:
             if isinstance(self._aio_data, (dict, list)):
-                return self._aio_data
+                return _js_to_py(self._aio_data)
             try:
                 return _pyjson.loads(self._aio_data)
             except:
                 pass
             return _js_to_py(self._aio_data)
-
-        # Standard browser fetch path: await self._js.json()
         try:
             result = await self._js.json()
             return _js_to_py(result)
         except Exception as e:
-            # Fallback: try text then parse
             try:
                 txt = await self._js.text()
                 return _pyjson.loads(txt)
@@ -130,7 +137,6 @@ class FetchResponse:
         try:
             return await self._js.text()
         except Exception as e:
-            # aio.fetch may have data as text
             if self._aio_data is not None:
                 return str(self._aio_data)
             raise FetchError(f"Failed to read text: {e}", status=self.status, response=self)
@@ -157,40 +163,18 @@ class FetchResponse:
 async def fetch(url, method='GET', headers=None, body=None, mode='cors', credentials=None, cache=None):
     """
     Async fetch, aligned to browser fetch API.
-
-    Args:
-        url (str): URL to fetch
-        method (str): HTTP method, default 'GET'
-        headers (dict): Optional headers dict, e.g. {'Content-Type': 'application/json'}
-        body (str|dict): Optional body. If dict, will be JSON-stringified.
-        mode (str): CORS mode, default 'cors' - 'cors', 'no-cors', 'same-origin'
-        credentials (str): Optional 'omit', 'same-origin', 'include'
-        cache (str): Optional cache mode
-
-    Returns:
-        FetchResponse: Response wrapper with .ok, .status, .json(), .text()
-
-    Browser alignment:
-        Mirrors window.fetch(url, {method, headers, body, mode, credentials, cache})
-
-    Brython agreement:
-        Uses window.fetch (JS Promise) which Brython can await, with fallback to aio.fetch
     """
-    # Prepare init dict for window.fetch
     init = {}
     init['method'] = method
     if headers is not None:
         init['headers'] = headers
     if body is not None:
-        # If body is dict/list, JSON stringify for browser fetch
         if isinstance(body, (dict, list)):
             try:
                 init['body'] = _pyjson.dumps(body)
-                # Ensure content-type if not set
                 if headers is None or 'Content-Type' not in headers and 'content-type' not in str(headers).lower():
                     if 'headers' not in init:
                         init['headers'] = {}
-                    # Don't mutate if headers is JS object
                     try:
                         init['headers']['Content-Type'] = 'application/json'
                     except:
@@ -205,43 +189,24 @@ async def fetch(url, method='GET', headers=None, body=None, mode='cors', credent
         init['credentials'] = credentials
     if cache is not None:
         init['cache'] = cache
-
     js_response = None
-
-    # Primary path: window.fetch for strict browser alignment
     try:
-        # window.fetch returns a Promise that Brython can await
         js_response = await window.fetch(url, init)
     except Exception as e1:
-        # Fallback: aio.fetch - Brython's own async fetch, more forgiving with Python dicts
         try:
-            # aio.fetch signature: aio.fetch(url, method, headers, data)
-            # data is body
             data = body
             if isinstance(body, (dict, list)):
                 data = _pyjson.dumps(body)
             js_response = await aio.fetch(url, method=method, headers=headers, data=data)
         except Exception as e2:
-            # Both failed, raise network error
             raise FetchError(f"Fetch failed for {url}: {e1} / fallback {e2}", response=None)
-
     return FetchResponse(js_response)
 
 
 async def fetch_json(url, method='GET', headers=None, body=None, mode='cors', check_ok=True):
     """
     Convenience: fetch and parse as JSON in one await.
-
-    Args:
-        url: URL to fetch
-        method, headers, body, mode: passed to fetch()
-        check_ok: if True, raises FetchError if response.ok is False
-
-    Returns:
-        dict|list: Parsed JSON
-
-    Example:
-        poem = await fetch_json('https://poetrydb.org/random')
+    Returns dict|list: Parsed JSON
     """
     resp = await fetch(url, method=method, headers=headers, body=body, mode=mode)
     if check_ok and not resp.ok:
@@ -252,14 +217,7 @@ async def fetch_json(url, method='GET', headers=None, body=None, mode='cors', ch
 async def fetch_text(url, method='GET', headers=None, body=None, mode='cors', check_ok=True):
     """
     Convenience: fetch and parse as text in one await.
-
-    Args:
-        url: URL to fetch
-        method, headers, body, mode: passed to fetch()
-        check_ok: if True, raises FetchError if response.ok is False
-
-    Returns:
-        str: Response text
+    Returns str: Response text
     """
     resp = await fetch(url, method=method, headers=headers, body=body, mode=mode)
     if check_ok and not resp.ok:
@@ -267,15 +225,10 @@ async def fetch_text(url, method='GET', headers=None, body=None, mode='cors', ch
     return await resp.text()
 
 
-# For apps that need to run async from sync onAppStart, re-export aio.run helper
 def run(coro):
     """
     Helper to run an async coroutine from sync context.
     Wraps browser.aio.run.
-
-    Example:
-        from extensions.fetch import run
-        run(load_poem(app))
     """
     return aio.run(coro)
 
