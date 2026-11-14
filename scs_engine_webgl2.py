@@ -347,12 +347,26 @@ class WebGL2Engine:
             return False
         gl = self.gl
         try:
-            dpr = 1.0
+            # v29 3D resize: viewport from the ACTUAL drawing buffer, not
+            # width*dpr recomputed here. WebGL does NOT update the viewport
+            # automatically after canvas.width/height changes. drawingBufferWidth
+            # is the backing size set by the entrypoint pipeline (CSS * budgeted
+            # ratio). Projection below uses CSS aspect (width/height) so resizing
+            # reframes without stretching geometry.
             try:
-                dpr = float(window.devicePixelRatio or 1.0)
+                _dbw = int(getattr(gl, 'drawingBufferWidth', 0) or 0)
+                _dbh = int(getattr(gl, 'drawingBufferHeight', 0) or 0)
             except Exception:
-                pass
-            gl.viewport(0, 0, int(self.width * dpr), int(self.height * dpr))
+                _dbw = _dbh = 0
+            if _dbw > 0 and _dbh > 0:
+                gl.viewport(0, 0, _dbw, _dbh)
+            else:
+                _dpr2 = 1.0
+                try:
+                    _dpr2 = min(float(window.devicePixelRatio or 1.0), 2.0)
+                except Exception:
+                    pass
+                gl.viewport(0, 0, int(self.width * _dpr2), int(self.height * _dpr2))
             r, g, b, a = self.clear_color
             gl.clearColor(r, g, b, a)
             # REAL depth: colour + depth, depth test on for the whole draw.
@@ -524,11 +538,20 @@ class WebGL2Engine:
                     self._hud_buf = _buf
                 if getattr(self, '_hud_prog', None) is None:
                     return False
+                # v29: HUD pass viewport also from drawing buffer, not recomputed DPR.
                 try:
-                    _dpr = float(window.devicePixelRatio or 1.0)
+                    _dbw2 = int(getattr(gl, 'drawingBufferWidth', 0) or 0)
+                    _dbh2 = int(getattr(gl, 'drawingBufferHeight', 0) or 0)
                 except Exception:
-                    _dpr = 1.0
-                gl.viewport(0, 0, int(self.width * _dpr), int(self.height * _dpr))
+                    _dbw2 = _dbh2 = 0
+                if _dbw2 > 0 and _dbh2 > 0:
+                    gl.viewport(0, 0, _dbw2, _dbh2)
+                else:
+                    try:
+                        _dpr = min(float(window.devicePixelRatio or 1.0), 2.0)
+                    except Exception:
+                        _dpr = 1.0
+                    gl.viewport(0, 0, int(self.width * _dpr), int(self.height * _dpr))
                 gl.disable(gl.DEPTH_TEST)
                 gl.enable(gl.BLEND)
                 gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
