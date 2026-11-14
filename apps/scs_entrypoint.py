@@ -3147,18 +3147,10 @@ def exec_code(code, fn):
                     pass
             except Exception as _e_scs:
                 print('[SCS] import scs failed: ' + str(_e_scs))
-            # What does `import cmu_graphics` give, if app.py uses it?
-            try:
-                import cmu_graphics as _cg
-                _cg_sig = str(_insp2.signature(_cg.runApp))
-                _cg_msg = '[SCS] import cmu_graphics runApp' + _cg_sig
-                print(_cg_msg)
-                try:
-                    _w3.console.log(_cg_msg)
-                except Exception:
-                    pass
-            except Exception as _e_cg:
-                print('[SCS] import cmu_graphics not found / no runApp: ' + str(_e_cg))
+            # SCS uses the cmu_graphics API, NOT the actual cmu_graphics module.
+            # Never `import cmu_graphics` - there is no cmu_graphics.py on the server,
+            # and trying to fetch it is what caused the 404s. SCS *is* the API.
+            # App code uses `from scs import *`, never `from cmu_graphics import *`.
             # First line of app code - what does it import?
             try:
                 _first = str(code)[:300].replace(chr(10), ' | ')
