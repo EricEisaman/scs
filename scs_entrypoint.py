@@ -67,18 +67,13 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v12-dom-boot-once'
+__version__ = '2026-11-14-runApp-*args-v13-log-once'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
 try:
     _ver_msg = '[SCS entrypoint] version=' + __version__
-    print(_ver_msg)
-    try:
-        from browser import window as _w
-        _w.console.log(_ver_msg)
-    except Exception:
-        pass
+    print(_ver_msg)  # Brython print -> console, do NOT also console.log
 except Exception:
     pass
 
@@ -295,11 +290,8 @@ _clear_all_shapes = _clear_shapes
 
 
 def _debug_log(msg):
-    try:
-        if hasattr(window, 'console'):
-            window.console.log(msg)
-    except Exception:
-        pass
+    # Log ONCE. In Brython, print() already goes to browser console.
+    # Old code did print() + console.log() -> every line twice.
     try:
         print(msg)
     except Exception:
@@ -3225,7 +3217,7 @@ def exec_code(code, fn):
             print(_ns_msg)
             try:
                 from browser import window as _w3
-                _w3.console.log(_ns_msg)
+                pass  # was console.log - print already logged
             except Exception:
                 pass
             # What does `import scs` give RIGHT NOW?
@@ -3235,7 +3227,7 @@ def exec_code(code, fn):
                 _scs_msg = '[SCS] import scs runApp' + _scs_sig + ' scs module=' + str(getattr(_scs_now, '__name__', '?')) + ' is_ep=' + str(_scs_now is globals().get('_ep', None) or _scs_now is __import__('scs_entrypoint'))
                 print(_scs_msg)
                 try:
-                    _w3.console.log(_scs_msg)
+                    pass  # was console.log - print already logged
                 except Exception:
                     pass
             except Exception as _e_scs:
@@ -3250,7 +3242,7 @@ def exec_code(code, fn):
                 _first_msg = '[SCS] app code head: ' + _first
                 print(_first_msg)
                 try:
-                    _w3.console.log(_first_msg)
+                    pass  # was console.log - print already logged
                 except Exception:
                     pass
             except Exception:
@@ -3338,12 +3330,7 @@ def boot(app=None):
         except Exception:
             _sig = 'signature-unavailable'
         _boot_msg = '[SCS entrypoint] boot() version=' + __version__ + ' runApp' + _sig
-        print(_boot_msg)
-        try:
-            from browser import window as _w2
-            _w2.console.log(_boot_msg)
-        except Exception:
-            pass
+        print(_boot_msg)  # Brython print -> console, do NOT also console.log
     except Exception:
         pass
     # (window guard already done at top - do not re-guard here)
