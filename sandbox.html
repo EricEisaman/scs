@@ -19,7 +19,7 @@ select{background:#1a1d24;border:1px solid #3a3f4b;}
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="icon" href="favicon.ico">
 </head>
-<body onload="brython({debug:1, pythonpath:['../scs', '..']})">
+<body onload="brython({debug:1, pythonpath:['..', '../scs']})">
 <div id="canvas-container"><canvas id="canvas" width="400" height="400" tabindex="0"></canvas></div>
 <div id="controls">
 <textarea id="code-input">from scs import *
@@ -109,7 +109,7 @@ document['renderer-select'].bind('change', on_renderer_change)
 # Events (mouse / keys / touch / resize) only -- no app loading.
 ep._bind_events()
 log('Sandbox ready. The graphics API is loaded from scs_entrypoint.py (via scs.py).')
-log('pythonpath is [../scs, ..]: package branch, publish /. Page URL is /sandbox/, so .. is root, ../scs is /scs/. scs_3d.py is fetched from /scs/scs_3d.py, never /scs_3d.py, never /sandbox/scs_3d.py.')
+log('pythonpath is [.., ../scs]: package branch, publish /. Page URL is /sandbox/, so .. is root, ../scs is /scs/. Root first: scs_3d.py is at /scs_3d.py. scs/ second for the 10 newer modules. Never /sandbox/scs_3d.py.')
 </script>
 </body>
 </html>

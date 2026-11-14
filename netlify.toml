@@ -3,29 +3,25 @@
 # Production: branch = package, publish = / (base directory).
 # Both are correct and are NOT the bug. Do not change them.
 #
-# Layout in package:
-#   /index.html, /sandbox.html, /scs_entrypoint.py, /scs.py at root
-#   /scs/scs_3d.py, /scs/scs_spatial_audio.py, ... under scs/
-#   /apps/*.py
+# Layout in package (from README Project Structure in this branch):
+#   /scs_3d.py, /scs_entrypoint.py, /scs.py at ROOT
+#   /scs/ holds ONLY the 10 newer modules:
+#     scs_presentation, scs_controller, scs_loader, scs_splats,
+#     scs_storage, scs_wasm, scs_audio, scs_media, scs_serial, scs_xr
+#   scs_3d.py is NOT in scs/. The previous build check required
+#   scs/scs_3d.py ONLY and failed a correct deploy. That was wrong.
+# Build check now accepts scs_3d.py at root OR in scs/ (tolerance),
+# plus the root files + apps/. pythonpath covers both.
 #
-# Live-site error was:
+# Live-site error that started this:
 #   brython.min.js: File "./scs_3d.py", line 1, <!DOCTYPE html> ^ SyntaxError
-# Brython tried ./scs_3d.py (pythonpath '.' first). In package that
-# file does not exist at root -- it is scs/scs_3d.py. The old
-# /* -> /index.html rewrite turned that 404 into a 200 HTML response,
-# and Brython parsed HTML as Python.
-#
-# Fix, kept here:
-#   1. NO generic /* rewrite. Missing .py must 404, never HTML.
-#      /?app=... needs no rewrite: path is /, it serves index.html.
-#   2. pythonpath puts scs/ FIRST (index.html, sandbox.html), so
-#      scs_3d resolves to /scs/scs_3d.py on the first try.
-#   3. Build fails if the package-layout files are missing, so a
-#      broken deploy never ships.
+# was the old /* -> /index.html rewrite turning a .py 404 into HTML.
+# Fix, kept here: NO generic /* rewrite. Missing .py must 404, never HTML.
+# /?app=... needs no rewrite: path is /, it serves index.html.
 
 [build]
   publish = "."
-  command = "test -f scs/scs_3d.py && test -f scs_entrypoint.py && test -f scs.py && test -f index.html && test -f sandbox.html && test -d apps && echo 'SCS deploy files OK: package layout, scs/scs_3d.py + scs_entrypoint.py + scs.py + index.html + sandbox.html + apps/' || (echo 'FATAL: package-layout files missing. Expected scs/scs_3d.py (in scs/, not root), scs_entrypoint.py, scs.py, index.html, sandbox.html, apps/ on branch package.' && exit 1)"
+  command = "ls -la; ls -la scs/ 2>/dev/null || echo 'no scs/ dir (flat layout, OK)'; (test -f scs/scs_3d.py || test -f scs_3d.py) && test -f scs_entrypoint.py && test -f scs.py && test -f index.html && test -f sandbox.html && test -d apps && echo 'SCS deploy files OK: scs_3d.py found (scs/ OR root) + scs_entrypoint.py + scs.py + index.html + sandbox.html + apps/ on branch package' || (echo 'FATAL: scs_3d.py missing in BOTH scs/scs_3d.py AND scs_3d.py, or scs_entrypoint.py / scs.py / index.html / sandbox.html / apps/ missing on branch package.'; ls -la; ls -la scs/ 2>/dev/null || true; exit 1)"
 
 # /sandbox -> /sandbox.html. The sandbox page is sandbox.html at the
 # root. These are the ONLY rewrites. No /* rewrite.

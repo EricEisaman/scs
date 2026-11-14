@@ -14,7 +14,7 @@ canvas{display:block;background:black;outline:none;}
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="icon" href="favicon.png">
 </head>
-<body onload="brython({debug:1, pythonpath:['scs', '.']})">
+<body onload="brython({debug:1, pythonpath:['.', 'scs']})">
 <div id="toolbar">
 <label>Renderer <select id="renderer-select"><option value="auto">auto</option><option value="2d">2d</option><option value="webgl2">webgl2</option><option value="webgpu">webgpu</option></select></label>
 <button id="xr-btn">Enter XR</button>
@@ -23,10 +23,12 @@ canvas{display:block;background:black;outline:none;}
 </div>
 <div id="canvas-container"><canvas id="cmu-canvas" width="1050" height="700" tabindex="0"></canvas></div>
 <script>
-// pythonpath is ['scs', '.']: package branch, publish /. Canonical
-// modules live in scs/ (scs/scs_3d.py), entrypoint + scs.py at root.
-// scs/ FIRST so scs_3d resolves on the first try, no ./scs_3d.py 404,
-// no chance to parse HTML as Python.
+// pythonpath is ['.', 'scs']: package branch, publish /.
+// Root FIRST: scs_3d.py, scs_entrypoint.py, scs.py are at root per
+// README Project Structure. scs/ second: the 10 newer modules
+// (scs_presentation, scs_controller, ...) live only in scs/.
+// First hit wins. 404s are real 404s now (no /* rewrite), so
+// Brython falls through, never parses HTML as Python.
 // Toolbar only: reflect ?renderer= in the select. Renderer selection
 // itself lives in scs_entrypoint (_resolve_renderer_kind); changing
 // the select reloads with ?renderer=, it does not reimplement selection.
