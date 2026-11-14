@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-FIXED-v32-single-window-scs'
+__version__ = '2026-11-14-FIXED-v33-single-log-no-blackscreen'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -164,11 +164,7 @@ try:
             _scs_set('versionPrinted', True)
         except Exception:
             pass
-        print(_ver_msg)
-        try:
-            _w.console.log(_ver_msg)
-        except Exception:
-            pass
+        _debug_log(_ver_msg)
 except Exception:
     pass
 
@@ -398,9 +394,13 @@ _clear_all_shapes = _clear_shapes
 
 
 def _debug_log(msg):
+    # v33: log ONCE. Brython print() already goes to DevTools, so doing
+    # console.log AND print duplicated every line (looked like double-run).
+    # Prefer console.log in browser, print only as fallback (CPython tests).
     try:
-        if hasattr(window, 'console'):
+        if window is not None and hasattr(window, 'console'):
             window.console.log(msg)
+            return
     except Exception:
         pass
     try:
@@ -2658,7 +2658,18 @@ def _render_one_view(view, renderer=None):
                 except Exception:
                     pass
             _cam = getattr(_app, 'camera', None)
-            r.render(_cam)
+            if _cam is None:
+                # v33: correct camera primitive. Never pass None to engine -
+                # engine returns False on None and you get black screen.
+                # Default matches spatial_audio: pos (0,2,6), yaw 0, pitch -4, fov 60.
+                try:
+                    from scs_3d import Camera3D as _C3D
+                    _cam = _C3D(position=(0.0, 2.0, 6.0), yaw=0.0, pitch=-4.0, fov=60.0)
+                    _app.camera = _cam
+                except Exception:
+                    _cam = None
+            if _cam is not None:
+                r.render(_cam)
             # FIX v26 HUD: ALWAYS draw HUD shapes (centerZ is None) in 3D mode,
             # not only if _hud_mode is True. Old code required _hud_mode, but
             # _hud_mode is only True when _is_3d_app is True, and _is_3d_app is
@@ -2899,21 +2910,10 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
     setRenderer() > ?renderer= URL param > SCS_CONFIG.renderer.
     """
     global _app, _canvas, _steps_per_second, _pending_renderer
-    # v31 single-run: duplicate runApp within 500ms (two execs of the same app
-    # file) is a double-boot, not a user re-run. Sandbox re-runs are seconds apart.
-    try:
-        import time as _time
-        _now = _time.time()
-        _last = float(_scs_get('lastRunApp', 0) or 0)
-        if _now - _last < 0.5:
-            try:
-                print('[SCS entrypoint] runApp() duplicate within 500ms - ignoring second run')
-            except Exception:
-                pass
-            return
-        _scs_set('lastRunApp', _now)
-    except Exception:
-        pass
+    # v33: NO 500ms guard. It black-screened: second exec_code stops loop #1,
+    # then this guard rejected runApp #2, leaving NO loop running.
+    # Single-run is enforced by boot() via window.scs.booted, not here.
+    # runApp ALWAYS starts a loop after stop().
     if isinstance(width, App):
         _a = width
         try:
@@ -3506,12 +3506,9 @@ def getSpatialAudioEngine(context=None):
 
 
 def Camera3D(*args, **kwargs):
-    """Camera3D from scs_3d.py (position, yaw, pitch, fov)."""
-    try:
-        from scs_3d import Camera3D as _C3D
-        return _C3D(*args, **kwargs)
-    except Exception:
-        return None
+    """Camera3D from scs_3d.py (position, yaw, pitch, fov). Never returns None."""
+    from scs_3d import Camera3D as _C3D
+    return _C3D(*args, **kwargs)
 
 
 def getWebGL2Engine(canvas=None, width=900, height=560):
@@ -3927,12 +3924,7 @@ def boot(app=None):
         except Exception:
             _sig = 'signature-unavailable'
         _boot_msg = '[SCS entrypoint] boot() version=' + __version__ + ' runApp' + _sig
-        print(_boot_msg)
-        try:
-            from browser import window as _w2
-            _w2.console.log(_boot_msg)
-        except Exception:
-            pass
+        _debug_log(_boot_msg)
     except Exception:
         pass
     # v31 single-run: second boot() on the same page is a duplicate (e.g.
