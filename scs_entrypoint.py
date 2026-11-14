@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-FIXED-v25-webgl2-3d-engine'
+__version__ = '2026-11-14-FIXED-v29-resize-pipeline'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -238,6 +238,20 @@ _renderer_kind = '2d'
 # composited every frame as a fullscreen HUD quad (depth off, ortho) in the
 # 3D scene. The 2D app never knows it is in 3D. No rewrite, one-line change.
 _hud_mode = False
+# --- Fullscreen button (enableFullscreen=True) ---
+# Minimal HUD button, bottom-right, 36x36, 16px margin. Same HUD system as
+# PLAY/STOP: centerZ is None -> drawn via HUD texture, hit-tested via
+# _hud_shape_at in the SAME logical space as _pos (v27). Position is derived
+# from _canvas_width/_canvas_height on every resize, so it stays bottom-right
+# in windowed AND fullscreen. Logical size tracks CSS size on fullscreenchange,
+# so picking stays correct without a second coordinate system.
+_fullscreen_enabled = False
+_fullscreen_btn = None
+_fullscreen_btn_label = None
+_fullscreen_orig_w = None
+_fullscreen_orig_h = None
+_fullscreen_orig_style_w = None
+_fullscreen_orig_style_h = None
 _hud_offscreen = None   # offscreen 2D canvas where the 2D app draws in HUD mode
 _hud_2d_renderer = None  # 2D renderer for the offscreen canvas
 _hud_3d_kind = None     # 'webgl2' or 'webgpu' when in HUD mode
@@ -342,6 +356,25 @@ def _dpr():
     except Exception:
         return 1.0
 
+def _budgeted_ratio():
+    # 3D + 2D: deliberate rendering-resolution budget. Do NOT render at
+    # unrestricted native density on high-DPI (e.g. 3x) displays - cap at 2x.
+    # Backing = CSS * budgeted ratio. Logical (CSS) size is what HUD / mouse use.
+    try:
+        return min(float(window.devicePixelRatio or 1.0), 2.0)
+    except Exception:
+        return 1.0
+
+# --- Resize pipeline (v29): CSS drives layout, ResizeObserver drives buffer ---
+# CSS size (content box) is the source of truth. canvas.width/height (backing)
+# are derived, never the other way round, so a buffer change cannot feed back
+# into layout. Notifications coalesce into one pending update, applied before
+# the next frame draw, not once per burst event.
+_resize_pending = None  # (cssW, cssH, backingW, backingH)
+_resize_observer = None
+_resize_last_dpr = None
+_resize_wrapper_css_injected = False
+
 def _get_hud_offscreen(width, height):
     """Offscreen 2D canvas for HUD mode. The 2D app draws here, unchanged.
     Returns the canvas. Created once per size, reused every frame."""
@@ -350,16 +383,17 @@ def _get_hud_offscreen(width, height):
         w, h = int(width), int(height)
     except Exception:
         w, h = 400, 400
+    _br = _budgeted_ratio()
     if _hud_offscreen is not None:
         try:
-            if int(_hud_offscreen.width) == int(w * _dpr()) and int(_hud_offscreen.height) == int(h * _dpr()):
+            if int(_hud_offscreen.width) == int(w * _br) and int(_hud_offscreen.height) == int(h * _br):
                 return _hud_offscreen
         except Exception:
             pass
     try:
         c = document.createElement('canvas')
-        c.width = int(w * _dpr())
-        c.height = int(h * _dpr())
+        c.width = int(w * _br)
+        c.height = int(h * _br)
         try:
             c.style.width = '%dpx' % w
             c.style.height = '%dpx' % h
@@ -483,26 +517,231 @@ def setHtmlHudElement(el):
 
 
 def _size_canvas(width, height):
-    """Backing store = width*dpr, CSS size = width px. User coords stay
-    in CSS pixels on every renderer."""
-    global _canvas_width, _canvas_height
+    """v29: CSS controls displayed size, buffer is derived.
+    Initial CSS = width x height px (the layout). Backing = CSS * budgeted ratio.
+    After this, CSS is NOT rewritten from the buffer - ResizeObserver measures
+    the content box and queues a buffer update. No layout feedback loop."""
+    global _canvas_width, _canvas_height, _resize_last_dpr
     _canvas_width, _canvas_height = int(width), int(height)
     canvas = _find_canvas()
     if canvas is None:
         return
-    dpr = _dpr()
+    _br = _budgeted_ratio()
+    _resize_last_dpr = _br
     try:
-        canvas.width = int(width * dpr)
-        canvas.height = int(height * dpr)
+        # CSS is the layout input - set once here as the initial layout.
         canvas.style.width = '%dpx' % int(width)
         canvas.style.height = '%dpx' % int(height)
+        # Buffer: assign only if actually changed (avoids needless reset).
+        _bw, _bh = int(width * _br), int(height * _br)
+        if int(canvas.width) != _bw:
+            canvas.width = _bw
+        if int(canvas.height) != _bh:
+            canvas.height = _bh
+    except Exception:
+        pass
+    try:
+        _ensure_resize_observer()
+    except Exception:
+        pass
+
+def _measure_canvas_css():
+    # CSS content-box size in CSS px, rounded. Used as fallback when
+    # devicePixelContentBoxSize is unavailable.
+    try:
+        _c = _find_canvas()
+        if _c is None:
+            return (float(_canvas_width), float(_canvas_height))
+        _r = _c.getBoundingClientRect()
+        return (float(_r.width), float(_r.height))
+    except Exception:
+        return (float(_canvas_width), float(_canvas_height))
+
+def _queue_resize(cssW, cssH, backingW=None, backingH=None):
+    # Coalesce: keep only the LATEST request. _apply_pending_resize runs
+    # before the next frame draw.
+    global _resize_pending
+    try:
+        _cssW, _cssH = float(cssW), float(cssH)
+        if _cssW <= 0 or _cssH <= 0:
+            return
+        _br = _budgeted_ratio()
+        if backingW is None or backingH is None:
+            backingW, backingH = int(round(_cssW * _br)), int(round(_cssH * _br))
+        else:
+            backingW, backingH = int(backingW), int(backingH)
+        _resize_pending = (_cssW, _cssH, backingW, backingH)
+    except Exception:
+        pass
+
+def _apply_pending_resize():
+    # Called at the START of _frame, before any draw. Applies one coalesced
+    # update: buffer only if changed, HUD offscreen + renderer sizes in step,
+    # fullscreen button repositioned. Post-resize, the next draw restores
+    # 2D context config (begin_frame sets absolute transform) and redraws the
+    # scene from scratch - never stretches an old frame.
+    global _resize_pending, _canvas_width, _canvas_height, _hud_offscreen, _hud_2d_renderer
+    if _resize_pending is None:
+        return
+    _cssW, _cssH, _bw, _bh = _resize_pending
+    _resize_pending = None
+    try:
+        _c = _find_canvas()
+        if _c is not None:
+            # Buffer: only when changed.
+            if int(_c.width) != int(_bw):
+                _c.width = int(_bw)
+            if int(_c.height) != int(_bh):
+                _c.height = int(_bh)
+        _canvas_width, _canvas_height = int(round(_cssW)), int(round(_cssH))
+        # HUD offscreen (size-dependent target) resized consistently.
         try:
-            canvas.setAttribute('width', str(int(width * dpr)))
-            canvas.setAttribute('height', str(int(height * dpr)))
+            _hud_offscreen = None
+            _hud_2d_renderer = None
+            if _hud_offscreen is None:
+                _get_hud_offscreen(_canvas_width, _canvas_height)
+            if _hud_offscreen is not None:
+                try:
+                    _hud_2d_renderer = create_renderer('2d', _hud_offscreen, _canvas_width, _canvas_height)
+                    # 2D renderer must use the same budgeted ratio for its absolute transform.
+                    try:
+                        _hud_2d_renderer.dpr = _budgeted_ratio()
+                    except Exception:
+                        pass
+                except Exception:
+                    _hud_2d_renderer = None
+        except Exception:
+            pass
+        # Main renderer: logical size for HUD/mouse + viewport for 3D.
+        try:
+            _r = _renderer
+            if _r is not None:
+                _r.width = int(_canvas_width)
+                _r.height = int(_canvas_height)
+                try:
+                    _r.dpr = _budgeted_ratio()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        _reposition_fullscreen_button()
+    except Exception:
+        pass
+
+def _check_pixel_ratio_change():
+    # Zoom / display-density change with unchanged CSS size: device-pixel
+    # observation would catch it, but not all browsers support it. Check DPR
+    # every frame in the resize pipeline and queue a buffer-only update.
+    global _resize_last_dpr
+    try:
+        _br = _budgeted_ratio()
+        if _resize_last_dpr is None:
+            _resize_last_dpr = _br
+            return
+        if abs(_br - _resize_last_dpr) > 0.001:
+            _resize_last_dpr = _br
+            _cssW, _cssH = _measure_canvas_css()
+            _queue_resize(_cssW, _cssH)
+    except Exception:
+        pass
+
+def _on_resize_observer(entries):
+    # ResizeObserver: prefer devicePixelContentBoxSize (exact backing size),
+    # fallback to contentBoxSize * budgeted ratio, then bounding rect * ratio.
+    try:
+        for _e in entries:
+            _bw = _bh = None
+            try:
+                _dpc = getattr(_e, 'devicePixelContentBoxSize', None)
+                if _dpc is not None and len(_dpc) > 0:
+                    _bw = int(_dpc[0].inlineSize)
+                    _bh = int(_dpc[0].blockSize)
+            except Exception:
+                pass
+            try:
+                _cb = getattr(_e, 'contentBoxSize', None)
+                if _cb is not None and len(_cb) > 0:
+                    _cssW = float(_cb[0].inlineSize)
+                    _cssH = float(_cb[0].blockSize)
+                else:
+                    _cssW, _cssH = _measure_canvas_css()
+            except Exception:
+                _cssW, _cssH = _measure_canvas_css()
+            if _bw is None or _bh is None:
+                _br = _budgeted_ratio()
+                _bw, _bh = int(round(_cssW * _br)), int(round(_cssH * _br))
+            _queue_resize(_cssW, _cssH, _bw, _bh)
+    except Exception:
+        pass
+
+def _ensure_resize_observer():
+    global _resize_observer
+    if _resize_observer is not None:
+        return
+    try:
+        _c = _find_canvas()
+        if _c is None:
+            return
+        _RO = getattr(window, 'ResizeObserver', None)
+        if _RO is None:
+            # No RO: window.resize fallback + DPR check in _frame still works.
+            try:
+                window.addEventListener('resize', lambda _ev: _queue_resize(*_measure_canvas_css()))
+            except Exception:
+                pass
+            return
+        try:
+            # Prefer device-pixel box - exact backing size, catches zoom/DPR.
+            _resize_observer = _RO.new(_on_resize_observer, {'box': 'device-pixel-content-box'})
+        except Exception:
+            try:
+                _resize_observer = _RO.new(_on_resize_observer)
+            except Exception:
+                return
+        try:
+            _resize_observer.observe(_c)
         except Exception:
             pass
     except Exception:
         pass
+
+def _ensure_app_wrapper():
+    # Wrapper that holds the canvas (and any DOM controls). Fullscreen goes on
+    # the wrapper so controls stay visible. Returns the wrapper element.
+    try:
+        _c = _find_canvas()
+        if _c is None:
+            return None
+        _p = _c.parentElement
+        if _p is not None and getattr(_p, 'id', '') == 'scs-app-wrapper':
+            return _p
+        # Create wrapper, move canvas inside, inject :fullscreen layout.
+        _w = document.createElement('div')
+        _w.id = 'scs-app-wrapper'
+        try:
+            _w.style.display = 'flex'
+            _w.style.alignItems = 'center'
+            _w.style.justifyContent = 'center'
+        except Exception:
+            pass
+        if _p is not None:
+            try:
+                _p.insertBefore(_w, _c)
+                _w.appendChild(_c)
+            except Exception:
+                return _p
+        global _resize_wrapper_css_injected
+        if not _resize_wrapper_css_injected:
+            _resize_wrapper_css_injected = True
+            try:
+                _st = document.createElement('style')
+                _st.textContent = '#scs-app-wrapper:fullscreen{width:100vw;height:100vh;margin:0;padding:0;display:flex;align-items:center;justify-content:center;background:#000} #scs-app-wrapper:fullscreen canvas{width:100% !important;height:100% !important;max-width:none;max-height:none}'
+                document.head.appendChild(_st)
+            except Exception:
+                pass
+        return _w
+    except Exception:
+        return None
 
 
 def _url_param(name):
@@ -1904,29 +2143,209 @@ def _call(name, *args):
         pass
 
 
+def _fullscreen_btn_rect(w, h):
+    # Minimal: 36x36, 16px margin from bottom-right in logical space.
+    _m, _s = 16.0, 36.0
+    return (float(w) - _m - _s, float(h) - _m - _s, _s, _s)
+
+def _create_fullscreen_button(w, h):
+    global _fullscreen_btn, _fullscreen_btn_label
+    try:
+        _l, _t, _s, _h = _fullscreen_btn_rect(w, h)
+        # Rect() appends to _shapes - created AFTER onAppStart so it is topmost
+        # (reversed _hud_shape_at checks it first) and draws on top of other HUD.
+        _btn = Rect(_l, _t, _s, _h, fill='#1a1a2a', border='#555566', borderWidth=1, roundness=8, align='left-top')
+        _btn._is_fullscreen_btn = True
+        _lab = Label('\u26f6', _l + _s/2, _t + _s/2, fill='#e6e6e6', size=18, bold=True, align='center')
+        _lab._is_fullscreen_btn = True
+        _fullscreen_btn = _btn
+        _fullscreen_btn_label = _lab
+        return _btn
+    except Exception:
+        return None
+
+def _reposition_fullscreen_button():
+    try:
+        if _fullscreen_btn is None:
+            return
+        _l, _t, _s, _h = _fullscreen_btn_rect(_canvas_width, _canvas_height)
+        _fullscreen_btn._left = _l
+        _fullscreen_btn._top = _t
+        if _fullscreen_btn_label is not None:
+            try:
+                _fullscreen_btn_label.centerX = _l + _s/2
+                _fullscreen_btn_label.centerY = _t + _s/2
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+def _toggle_fullscreen():
+    # v29: request on the WRAPPER (canvas + controls stay visible), from a
+    # user gesture, handle rejected promise. Do NOT assume success - the
+    # fullscreenchange handler + ResizeObserver will measure the actual layout.
+    try:
+        try:
+            _fs = document.fullscreenElement
+        except Exception:
+            _fs = None
+        if _fs is not None:
+            try:
+                _p = document.exitFullscreen()
+                # exitFullscreen also returns a promise in modern browsers - swallow rejection.
+                try:
+                    if _p is not None and hasattr(_p, 'catch'):
+                        _p.catch(lambda _e: None)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            return
+        _w = _ensure_app_wrapper()
+        _target = _w if _w is not None else _find_canvas()
+        if _target is None:
+            return
+        try:
+            _p = _target.requestFullscreen()
+            try:
+                if _p is not None and hasattr(_p, 'catch'):
+                    _p.catch(lambda _e: None)
+            except Exception:
+                pass
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+def _on_fullscreen_change(ev=None):
+    # v29: fullscreen goes through the SAME resize pipeline. Do NOT substitute
+    # screen dims (window.innerWidth) - measure the canvas's resulting layout.
+    # Detect actual state via document.fullscreenElement, not button assumption.
+    # If exiting, restore the orig CSS size; if entering, the wrapper's
+    # :fullscreen CSS makes the canvas fill the wrapper, RO fires, and the
+    # pending resize is applied before the next frame (freshly resized frame).
+    try:
+        try:
+            _is_fs = document.fullscreenElement is not None
+        except Exception:
+            _is_fs = False
+        _c = _find_canvas()
+        if _c is None:
+            return
+        if not _is_fs:
+            # Exit: restore orig CSS layout. RO will then measure it; queue
+            # a direct measurement as well in case RO does not fire.
+            if _fullscreen_orig_w is not None and _fullscreen_orig_h is not None:
+                try:
+                    _c.style.width = _fullscreen_orig_style_w or ('%dpx' % int(_fullscreen_orig_w))
+                    _c.style.height = _fullscreen_orig_style_h or ('%dpx' % int(_fullscreen_orig_h))
+                except Exception:
+                    pass
+                _queue_resize(float(_fullscreen_orig_w), float(_fullscreen_orig_h))
+        else:
+            # Enter: do NOT set sizes here. Wrapper :fullscreen CSS lays the
+            # canvas out; measure that layout on the next RO / frame tick.
+            # Queue a measurement now in case RO is delayed.
+            try:
+                _cssW, _cssH = _measure_canvas_css()
+                _queue_resize(_cssW, _cssH)
+            except Exception:
+                pass
+        # Force an immediate re-measure on the next frame tick (in case RO
+        # has not fired yet, e.g. CSS transition). _apply_pending_resize in
+        # _frame will apply it before the next draw.
+        try:
+            _apply_pending_resize()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
 def _pos(ev):
+    # FIX v27 HUD events: map CSS rect -> logical app size (_canvas_width x
+    # _canvas_height), NOT via backing-store canvas.width / DPR. Old code did
+    # (clientX-left)*canvas.width/r.width/dpr. canvas.width = _canvas_width*dpr
+    # at _size_canvas time, so if DPR changes after sizing (DevTools emulation,
+    # zoom, display move), the division is wrong and clicks drift off the HUD
+    # buttons. Logical size is the same space HUD Rects are drawn in (Rect(40,470,160,44)
+    # means app x=40..200, y=470..514), so this is the space onMousePress expects.
+    # Y is top-down in both: CSS y=0 is top, app y=0 is top, HUD texture V=0 is top
+    # (see engine draw_hud_canvas: top vertex has V=0). No Y flip.
     canvas = _find_canvas()
     try:
         r = canvas.getBoundingClientRect()
-        sx = canvas.width / r.width if r.width else 1
-        sy = canvas.height / r.height if r.height else 1
-        # Backing store is width*dpr; user coords are CSS pixels, so
-        # divide by dpr to map backing-store scale back to CSS pixels.
-        return ((ev.clientX - r.left) * sx / _dpr(),
-                (ev.clientY - r.top) * sy / _dpr())
+        if not r.width or not r.height:
+            return (0, 0)
+        # Prefer logical size (set by _size_canvas). Fall back to 900x560 if not yet set.
+        _lw = float(_canvas_width) if _canvas_width else 900.0
+        _lh = float(_canvas_height) if _canvas_height else 560.0
+        return ((ev.clientX - r.left) * _lw / float(r.width),
+                (ev.clientY - r.top) * _lh / float(r.height))
     except Exception:
         return (0, 0)
+
+def _hud_shape_at(x, y):
+    # HUD hit-test in the SAME logical space as _pos and as HUD Rects are drawn.
+    # Returns the topmost HUD shape (centerZ is None) whose bbox contains (x,y),
+    # or None. Used to stop camera-drag from starting when a HUD button is clicked.
+    try:
+        for s in reversed(list(_shapes)):
+            if getattr(s, 'centerZ', None) is not None:
+                continue
+            if not getattr(s, 'visible', True):
+                continue
+            # Rect: _left/_top/_width/_height. Circle/Oval/Label: use _left/_top + size.
+            try:
+                _l = float(getattr(s, '_left', 0) or 0)
+                _t = float(getattr(s, '_top', 0) or 0)
+                _w = float(getattr(s, '_width', 0) or 0)
+                _h = float(getattr(s, '_height', 0) or 0)
+                # Label has no _width/_height in some builds - use a small hit box around center
+                if _w == 0 and _h == 0:
+                    _cx = float(getattr(s, 'centerX', _l) or _l)
+                    _cy = float(getattr(s, 'centerY', _t) or _t)
+                    _l, _t, _w, _h = _cx - 20, _cy - 10, 40, 20
+                if _l <= x <= _l + _w and _t <= y <= _t + _h:
+                    return s
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
 
 
 def _mp(ev):
     global _is_dragging
-    _is_dragging = True
+    # FIX v27 HUD events: HUD buttons are UI, not camera drag. If the press lands
+    # on a HUD shape (centerZ is None), do NOT start dragging - the app's
+    # onMousePress will handle the button (PLAY/STOP/CENTRE/MODE). Otherwise,
+    # dragging starts for camera look.
+    _x, _y = _pos(ev)
+    _hit = _hud_shape_at(_x, _y)
+    # Fullscreen button (enableFullscreen=True) is owned by the entrypoint, NOT
+    # the app. It is a HUD Rect + Label, both tagged _is_fullscreen_btn.
+    # If either is hit, toggle fullscreen, do NOT start drag, do NOT call
+    # the app's onMousePress (the app did not create this button).
+    if _hit is not None and getattr(_hit, '_is_fullscreen_btn', False):
+        _is_dragging = False
+        try:
+            _find_canvas().focus()
+        except Exception:
+            pass
+        _toggle_fullscreen()
+        return
+    # Only Rect buttons block drag - Labels are text, they should not block look.
+    # If the hit is a Rect (button background), it is a UI element.
+    if _hit is not None and type(_hit).__name__ in ('Rect',):
+        _is_dragging = False
+    else:
+        _is_dragging = True
     try:
         _find_canvas().focus()
     except Exception:
         pass
     if _app is not None:
-        _call('onMousePress', _app, *_pos(ev))
+        _call('onMousePress', _app, _x, _y)
 
 
 def _mr(ev):
@@ -2082,6 +2501,14 @@ def _render_one_view(view, renderer=None):
     # FIX: Oval has no radius - use width/2, NOT 1.0. Old code made all balls radius 1.0 -> red/green clipped.
     if getattr(r, 'kind', '') == 'webgl2-3d':
         try:
+            # FIX v26 HUD: engine path MUST call redrawAll first. Old code
+            # never did, so _update_world never ran, sphere positions never
+            # updated, and HUD labels never updated. Non-engine path calls
+            # redrawAll - engine path must too.
+            try:
+                _call('redrawAll', _app)
+            except Exception:
+                pass
             r.clear_scene()
             r.add_floor(40, '#22223a')
             for s in list(_shapes):
@@ -2120,18 +2547,42 @@ def _render_one_view(view, renderer=None):
                     pass
             _cam = getattr(_app, 'camera', None)
             r.render(_cam)
+            # FIX v26 HUD: ALWAYS draw HUD shapes (centerZ is None) in 3D mode,
+            # not only if _hud_mode is True. Old code required _hud_mode, but
+            # _hud_mode is only True when _is_3d_app is True, and _is_3d_app is
+            # only True when the app defines onRender3D etc. Spatial audio has
+            # NO such callback - it uses centerZ shapes + redrawAll - so
+            # _hud_mode stayed False and HUD was never drawn. Now: if there is
+            # ANY HUD shape, lazily create the offscreen + 2d renderer and draw it.
             try:
-                if _hud_mode and _hud_2d_renderer is not None:
-                    _hud_2d_renderer.begin_frame('rgba(0,0,0,0)')
-                    for s in list(_shapes):
+                _has_hud = False
+                for _hs in list(_shapes):
+                    if getattr(_hs, 'centerZ', None) is None and getattr(_hs, 'visible', True):
+                        _has_hud = True
+                        break
+                if _has_hud:
+                    global _hud_offscreen, _hud_2d_renderer
+                    if _hud_offscreen is None:
                         try:
-                            if getattr(s, 'centerZ', None) is None and getattr(s, 'visible', True):
-                                getattr(s, 'draw', lambda _r: None)(_hud_2d_renderer)
+                            _get_hud_offscreen(_canvas_width, _canvas_height)
                         except Exception:
                             pass
-                    _hud_2d_renderer.end_frame()
-                    if _hud_offscreen is not None and hasattr(r, 'draw_hud_canvas'):
-                        r.draw_hud_canvas(_hud_offscreen, 0, 0, _canvas_width, _canvas_height)
+                    if _hud_2d_renderer is None and _hud_offscreen is not None:
+                        try:
+                            _hud_2d_renderer = create_renderer('2d', _hud_offscreen, _canvas_width, _canvas_height)
+                        except Exception:
+                            _hud_2d_renderer = None
+                    if _hud_2d_renderer is not None:
+                        _hud_2d_renderer.begin_frame('rgba(0,0,0,0)')
+                        for s in list(_shapes):
+                            try:
+                                if getattr(s, 'centerZ', None) is None and getattr(s, 'visible', True):
+                                    getattr(s, 'draw', lambda _r: None)(_hud_2d_renderer)
+                            except Exception:
+                                pass
+                        _hud_2d_renderer.end_frame()
+                        if _hud_offscreen is not None and hasattr(r, 'draw_hud_canvas'):
+                            r.draw_hud_canvas(_hud_offscreen, 0, 0, _canvas_width, _canvas_height)
             except Exception:
                 pass
         except Exception:
@@ -2296,6 +2747,15 @@ def _frame():
             cur = _presentation_coordinator.current()
             if cur is not None and getattr(cur, 'is_zero_sized', False):
                 return
+        # v29 resize pipeline: apply coalesced resize + DPR change BEFORE draw.
+        try:
+            _check_pixel_ratio_change()
+        except Exception:
+            pass
+        try:
+            _apply_pending_resize()
+        except Exception:
+            pass
         _step()
         _render()
     except Exception:
@@ -2314,7 +2774,7 @@ def _start_loop():
 
 
 def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
-            canvas=None, hud=None, mode=None, html_element=None, **kwargs):
+            canvas=None, hud=None, mode=None, html_element=None, enableFullscreen=False, **kwargs):
     """The initialiser. renderer: '2d', 'webgl2', or 'webgpu'. NO FALLBACK.
     NO WebGPU -> WebGL2 -> 2D fallback chain. 'auto' = default (2D, or HUD texture if 3D renderer). If you ask for 'webgl2' and
     WebGL2 fails, it FAILS. If you ask for 'webgpu' and WebGPU fails, it FAILS.
@@ -2350,6 +2810,21 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
     # forced into HUD; it runs natively. We detect 2D apps by: no 3D callbacks
     # defined (no onRender3D / onDraw3D / draw3D in _user_funcs).
     global _hud_mode, _hud_2d_renderer, _hud_3d_kind, _hud_kind, _hud_html_element
+    global _fullscreen_enabled, _fullscreen_btn, _fullscreen_btn_label, _fullscreen_orig_w, _fullscreen_orig_h, _fullscreen_orig_style_w, _fullscreen_orig_style_h
+    # enableFullscreen: explicit arg > kwargs (enableFullscreen / enable_fullscreen / fullscreenButton)
+    _ef = enableFullscreen
+    if not _ef:
+        for _k in ('enableFullscreen', 'enable_fullscreen', 'fullscreenButton', 'fullscreen_button'):
+            if _k in kwargs and kwargs.get(_k):
+                _ef = True
+                break
+    _fullscreen_enabled = bool(_ef)
+    _fullscreen_btn = None
+    _fullscreen_btn_label = None
+    _fullscreen_orig_w = int(width)
+    _fullscreen_orig_h = int(height)
+    _fullscreen_orig_style_w = None
+    _fullscreen_orig_style_h = None
     _hud_mode = False
     _hud_2d_renderer = None
     _hud_3d_kind = None
@@ -2479,6 +2954,25 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
     _call('onAppStart', app)
     if 'appStarted' in _user_funcs and 'onAppStart' not in _user_funcs:
         _call('appStarted', app)
+    # Fullscreen button: created AFTER onAppStart so it is topmost in _shapes
+    # (drawn last, hit-tested first). Position derived from runApp width/height.
+    if _fullscreen_enabled:
+        try:
+            _c0 = _find_canvas()
+            if _c0 is not None:
+                try:
+                    _fullscreen_orig_style_w = _c0.style.width
+                    _fullscreen_orig_style_h = _c0.style.height
+                except Exception:
+                    pass
+            _create_fullscreen_button(width, height)
+            # Bind once: fullscreenchange -> _on_fullscreen_change (resizing + reposition)
+            try:
+                document.addEventListener('fullscreenchange', _on_fullscreen_change)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     kind = _resolve_renderer_kind(
         renderer or _pending_renderer or getattr(app, 'renderer', None))
