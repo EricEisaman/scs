@@ -2,280 +2,95 @@
 <html><head><meta charset="UTF-8"><title>SCS</title>
 <style>
 body{margin:0;padding:0;background:#0f1115;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;}
+#toolbar{display:flex;gap:8px;align-items:center;margin-bottom:10px;color:#e6e6e6;font-family:monospace;font-size:12px;}
+#toolbar select,#toolbar button{background:#1a1d24;color:#e6e6e6;border:1px solid #3a3f4b;border-radius:6px;padding:6px 10px;cursor:pointer;}
+#scs-status{color:#8b93a5;}
 #canvas-container{border:2px solid #3a3f4b;border-radius:8px;background:#000;overflow:hidden;box-shadow:0 0 30px rgba(0,0,0,0.6);}
 canvas{display:block;background:black;outline:none;}
 </style>
-<script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython_stdlib.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython_stdlib.js"></script>
+<script>window.SCS_CONFIG = window.SCS_CONFIG || {};</script>
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="icon" href="favicon.png">
 </head>
-<body onload="brython({debug:1, pythonpath:['.']})">
+<body onload="brython({debug:1, pythonpath:['.', 'scs']})">
+<div id="toolbar">
+<label>Renderer <select id="renderer-select"><option value="auto">auto</option><option value="2d">2d</option><option value="webgl2">webgl2</option><option value="webgpu">webgpu</option></select></label>
+<button id="xr-btn">Enter XR</button>
+<button id="fullscreen-btn">Fullscreen</button>
+<span id="scs-status"></span>
+</div>
 <div id="canvas-container"><canvas id="cmu-canvas" width="1050" height="700" tabindex="0"></canvas></div>
+<script>
+// Toolbar only: reflect ?renderer= in the select. Renderer selection
+// itself lives in scs_entrypoint (_resolve_renderer_kind); changing
+// the select reloads with ?renderer=, it does not reimplement selection.
+(function(){try{var v=new URLSearchParams(window.location.search).get('renderer')||window.SCS_CONFIG.renderer||'auto';document.getElementById('renderer-select').value=v;}catch(e){}})();
+</script>
 <script type="text/python" id="main">
+# Thin shell only. No loop, no events, no renderer, no app loading here:
+# all of that lives in scs_entrypoint.py. This file wires the toolbar
+# to the entrypoint and calls boot().
 from browser import document, window, timer
-import scs
-import math
+import scs_entrypoint as ep
 
-_canvas = None
-try:
-    _canvas = document['cmu-canvas']
-except:
-    pass
-if _canvas is None:
+_status = document['scs-status']
+
+def _set_status(msg):
     try:
-        _canvas = document.getElementById('cmu-canvas')
-    except:
+        _status.text = str(msg)
+    except Exception:
         pass
 
-_user_funcs = {}
-_app_timer = None
-_user_ns = {}
-_callback_names = ('onAppStart','appStarted','redrawAll','onStep','onMousePress','onMouseRelease','onMouseMove','onMouseDrag','onKeyPress','onKeyRelease','onKeyHold','onResize')
-
-scs._canvas = _canvas
-try:
-    scs._ctx = _canvas.getContext('2d')
-except:
-    pass
-scs._ensure_canvas()
-_canvas = scs._canvas
-scs._canvas = _canvas
-
-def _call(name, *args):
-    cb = _user_funcs.get(name)
-    if cb is None:
-        return
+def _on_renderer_change(ev):
+    # Reload with ?renderer= so the entrypoint resolves it once,
+    # in one place (explicit arg > ?renderer= > SCS_CONFIG > '2d').
     try:
-        cb(*args)
-    except:
+        val = document['renderer-select'].value or 'auto'
+        p = window.URLSearchParams.new(window.location.search)
+        p.set('renderer', val)
+        window.location.search = '?' + p.toString()
+    except Exception:
         pass
 
-_is_dragging = False
-_pressed_keys = set()
-
-def _pos(ev):
-    r = _canvas.getBoundingClientRect()
-    sx = _canvas.width / r.width if r.width else 1
-    sy = _canvas.height / r.height if r.height else 1
-    return ((ev.clientX - r.left) * sx, (ev.clientY - r.top) * sy)
-
-def _mp(ev):
-    global _is_dragging
-    _is_dragging = True
+def _on_xr(ev):
     try:
-        _canvas.focus()
-    except:
-        pass
-    if scs._app is not None:
-        _call('onMousePress', scs._app, *_pos(ev))
+        ep.startXR()
+        _set_status('XR: ' + str(ep.getXRState()))
+    except Exception as e:
+        _set_status('XR unavailable: ' + str(e))
 
-def _mr(ev):
-    global _is_dragging
-    if scs._app is not None:
-        _call('onMouseRelease', scs._app, *_pos(ev))
-    _is_dragging = False
-
-def _mm(ev):
-    if scs._app is None:
-        return
-    x, y = _pos(ev)
-    if _is_dragging:
-        _call('onMouseDrag', scs._app, x, y)
-    _call('onMouseMove', scs._app, x, y)
-
-def _norm_key(raw):
-    if raw == ' ':
-        return 'space'
-    if len(raw) == 1:
-        return raw
-    low = raw.lower()
-    if low == 'arrowleft':
-        return 'left'
-    if low == 'arrowright':
-        return 'right'
-    if low == 'arrowup':
-        return 'up'
-    if low == 'arrowdown':
-        return 'down'
-    return low
-
-def _kp(ev):
-    if scs._app is None:
-        return
+def _on_fullscreen(ev):
     try:
-        ae = document.activeElement
-        if ae is not None and ae.tagName in ('INPUT','TEXTAREA','SELECT'):
-            return
-    except:
-        pass
-    k = _norm_key(ev.key)
-    if k not in _pressed_keys:
-        _pressed_keys.add(k)
-        _call('onKeyPress', scs._app, k)
-
-def _kr(ev):
-    if scs._app is None:
-        return
-    k = _norm_key(ev.key)
-    if k in _pressed_keys:
-        _pressed_keys.discard(k)
-    _call('onKeyRelease', scs._app, k)
-
-def _kh():
-    if scs._app is None:
-        return
-    for k in list(_pressed_keys):
-        _call('onKeyHold', scs._app, k)
-
-_canvas.bind('mousedown', _mp)
-_canvas.bind('mouseup', _mr)
-_canvas.bind('mousemove', _mm)
-document.bind('keydown', _kp)
-document.bind('keyup', _kr)
-
-def stop():
-    global _app_timer
-    if _app_timer is not None:
-        timer.clear_interval(_app_timer)
-        _app_timer = None
-
-def run_app(width=400, height=400, stepsPerSecond=30):
-    global _user_funcs, _app_timer
-    stop()
-    _user_funcs = {n: _user_ns[n] for n in _callback_names if callable(_user_ns.get(n))}
-    _canvas.setAttribute('width', str(width))
-    _canvas.setAttribute('height', str(height))
-    _canvas.style.width = f"{width}px"
-    _canvas.style.height = f"{height}px"
-    scs._ctx = _canvas.getContext('2d')
-    scs._app = scs.App(width, height)
-    scs._app.stepsPerSecond = stepsPerSecond
-    _call('onAppStart', scs._app)
-    if 'appStarted' in _user_funcs and 'onAppStart' not in _user_funcs:
-        _call('appStarted', scs._app)
-    def frame():
-        try:
-            _kh()
-            if 'onStep' in _user_funcs and not scs._app.paused:
-                _call('onStep', scs._app)
-            scs._ctx.clearRect(0, 0, width, height)
-            if scs._app.background:
-                try:
-                    bg = scs._app.background
-                    if isinstance(bg, dict) and bg.get('_is_grad'):
-                        scs._ctx.fillStyle = bg['colors'][0]
-                    else:
-                        scs._ctx.fillStyle = bg
-                    scs._ctx.fillRect(0, 0, width, height)
-                except:
-                    pass
-            _call('redrawAll', scs._app)
-            shapes = getattr(scs, '_all_shapes', None)
-            if shapes is None:
-                shapes = getattr(scs, '_shapes', [])
-            for s in list(shapes):
-                try:
-                    s.draw(scs._ctx)
-                except:
-                    pass
-        except:
-            stop()
-    frame()
-    iv = int(1000 / stepsPerSecond) if stepsPerSecond > 0 else 33
-    _app_timer = timer.set_interval(frame, iv)
-
-def app_file():
-    d = "apps/app.py"
-    try:
-        s = window.location.search
-        if not s:
-            return d
-        v = None
-        try:
-            p = window.URLSearchParams.new(s)
-            v = p.get("app")
-        except:
-            qs = s.lstrip("?")
-            for part in qs.split("&"):
-                if part.startswith("app="):
-                    v = part[4:]
-                    break
-        if not v:
-            return d
-        try:
-            v = window.decodeURIComponent(v)
-        except:
-            pass
-        v = v.strip()
-        if not v or ".." in v or v.startswith("/") or "\\" in v:
-            return d
-        if v.endswith(".py"):
-            v = v[:-3]
-        if v.startswith("apps/"):
-            b = v[5:].split("/")[-1]
-            return "apps/" + b + ".py"
+        st = ep.getFullscreenState() or {}
+        if st.get('is_fullscreen'):
+            ep.exitFullscreen()
         else:
-            b = v.split("/")[-1]
-            b = "".join(c for c in b if c.isalnum() or c in "_-")
-            return "apps/" + b + ".py" if b else d
-    except:
-        return d
+            ep.enterFullscreen()
+    except Exception as e:
+        _set_status('Fullscreen unavailable: ' + str(e))
 
-def exec_code(code, fn):
-    global _user_ns, _user_funcs
-    stop()
+_last_status = None
+
+def _refresh_status():
+    global _last_status
     try:
-        if hasattr(scs, '_clear_all_shapes'):
-            scs._clear_all_shapes()
-        elif hasattr(scs, '_clear_shapes'):
-            scs._clear_shapes()
-        else:
-            scs._all_shapes.clear()
-    except:
-        pass
-    _user_ns = {'__builtins__': __builtins__}
-    try:
-        for name in scs.__all__:
-            if hasattr(scs, name):
-                _user_ns[name] = getattr(scs, name)
-    except:
-        for k in dir(scs):
-            if not k.startswith('_'):
-                _user_ns[k] = getattr(scs, k)
-    _user_ns['sin']=math.sin
-    _user_ns['cos']=math.cos
-    _user_ns['atan2']=math.atan2
-    _user_ns['sqrt']=math.sqrt
-    _user_ns['pi']=math.pi
-    _user_ns['runApp']=run_app
-    _user_ns['run']=run_app
-    _user_ns['loop']=run_app
-    scs.runApp=run_app
-    scs.run=run_app
-    scs.loop=run_app
-    try:
-        exec(code, _user_ns)
-        has = any(n in _user_ns and callable(_user_ns.get(n)) for n in _callback_names)
-        if has and not _user_funcs:
-            _user_funcs = {n: _user_ns[n] for n in _callback_names if callable(_user_ns.get(n))}
-            if _user_funcs:
-                run_app(width=1050, height=700)
-    except:
+        msg = (
+            'renderer=' + str(ep.getRendererKind()) +
+            ' xr=' + str(ep.getXRState())
+        )
+        if msg != _last_status:
+            _status.text = msg
+            _last_status = msg
+    except Exception:
         pass
 
-def load():
-    t = app_file()
-    def ok(txt):
-        if txt:
-            exec_code(txt, t)
-    def fail(e):
-        pass
-    try:
-        window.fetch(t).then(lambda r: r.text().then(ok)).catch(fail)
-    except:
-        pass
+document['renderer-select'].bind('change', _on_renderer_change)
+document['xr-btn'].bind('click', _on_xr)
+document['fullscreen-btn'].bind('click', _on_fullscreen)
+timer.set_interval(_refresh_status, 500)
 
-load()
+ep.boot()
 </script>
 </body></html>

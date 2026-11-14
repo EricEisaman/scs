@@ -9,15 +9,17 @@ body{margin:0;padding:10px;background:#0f1115;color:#e6e6e6;font-family:monospac
 canvas{display:block;background:black;outline:none;}
 #controls{margin-top:12px;width:1050px;max-width:98vw;}
 textarea{width:100%;height:400px;background:#1a1d24;color:#d6deeb;border:1px solid #3a3f4b;border-radius:6px;padding:12px;font-family:monospace;font-size:11px;}
-button{background:#4c6ef5;color:white;border:0;padding:10px 18px;border-radius:6px;cursor:pointer;font-weight:600;margin-right:8px;}
+button,select{background:#4c6ef5;color:white;border:0;padding:10px 18px;border-radius:6px;cursor:pointer;font-weight:600;margin-right:8px;}
+select{background:#1a1d24;border:1px solid #3a3f4b;}
 #log{margin-top:10px;background:#1a1d24;border:1px solid #3a3f4b;border-radius:6px;padding:10px;min-height:80px;white-space:pre-wrap;font-size:11px;max-height:300px;overflow:auto;}
 </style>
-<script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython_stdlib.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython_stdlib.js"></script>
+<script>window.SCS_CONFIG = window.SCS_CONFIG || {};</script>
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="icon" href="favicon.ico">
 </head>
-<body onload="brython({debug:1, pythonpath:['.']})">
+<body onload="brython({debug:1, pythonpath:['.', 'scs']})">
 <div id="canvas-container"><canvas id="canvas" width="400" height="400" tabindex="0"></canvas></div>
 <div id="controls">
 <textarea id="code-input">from scs import *
@@ -44,197 +46,69 @@ def main():
 
 main()
 </textarea>
-<div style="margin-top:8px;"><button id="run-btn">▶ Run</button><button id="stop-btn">■ Stop</button></div>
+<div style="margin-top:8px;"><button id="run-btn">▶ Run</button><button id="stop-btn">■ Stop</button><label>Renderer <select id="renderer-select"><option value="auto">auto</option><option value="2d">2d</option><option value="webgl2">webgl2</option><option value="webgpu">webgpu</option></select></label></div>
 <div id="log"></div>
 </div>
-
 <script type="text/python" id="main">
-from browser import document, timer
-import scs
+# Thin shell only. No loop, no events, no renderer, no shape drawing here:
+# all of that lives in scs_entrypoint.py. This file wires Run/Stop and
+# the renderer select to the entrypoint. It deliberately does NOT
+# auto-load ?app= -- the sandbox runs textarea code.
+from browser import document
 import traceback
+import scs_entrypoint as ep
 
 _log = document['log']
 _code_area = document['code-input']
-scs._ensure_canvas()
-_canvas = scs._canvas
-_user_funcs = {}
-_app_timer = None
-_user_ns = {}
-_callback_names = (
-    'onAppStart', 'appStarted', 'redrawAll', 'onStep', 'onMousePress', 'onMouseRelease',
-    'onMouseMove', 'onMouseDrag', 'onKeyPress', 'onKeyRelease', 'onKeyHold', 'onResize'
-)
 
 def log(message):
-    _log.text += str(message) + '\n'
-    print(message)
-
-def _call_callback(name, *args):
-    callback = _user_funcs.get(name)
-    if callback is None:
-        return
     try:
-        callback(*args)
+        _log.text += str(message) + '\n'
     except Exception:
-        log(f'{name} failed:\n{traceback.format_exc()}')
-
-_is_dragging = False
-_pressed_keys = set()
-
-def _mouse_position(event):
-    rect = _canvas.getBoundingClientRect()
-    scale_x = _canvas.width / rect.width if rect.width else 1
-    scale_y = _canvas.height / rect.height if rect.height else 1
-    return ((event.clientX - rect.left) * scale_x,
-            (event.clientY - rect.top) * scale_y)
-
-def _on_mouse_press(event):
-    global _is_dragging
-    _is_dragging = True
-    try:
-        _canvas.focus()
-    except:
         pass
-    if scs._app is not None:
-        _call_callback('onMousePress', scs._app, *_mouse_position(event))
 
-def _on_mouse_release(event):
-    global _is_dragging
-    if scs._app is not None:
-        _call_callback('onMouseRelease', scs._app, *_mouse_position(event))
-    _is_dragging = False
-
-def _on_mouse_move(event):
-    if scs._app is None:
-        return
-    x, y = _mouse_position(event)
-    if _is_dragging:
-        _call_callback('onMouseDrag', scs._app, x, y)
-    _call_callback('onMouseMove', scs._app, x, y)
-
-def _on_key_press(event):
-    if scs._app is None:
-        return
+# Surface entrypoint errors in the sandbox log, instead of only console.
+_orig_debug_log = ep._debug_log
+def _sandbox_debug_log(msg):
     try:
-        ae = document.activeElement
-        if ae is not None and ae.tagName in ('INPUT','TEXTAREA','SELECT'):
-            if ae.id == 'code-input':
-                return
-    except:
-        pass
-    k = event.key
-    if k == ' ':
-        k = 'space'
-    else:
-        k = k.lower()
-        if k == 'arrowleft':
-            k = 'left'
-        elif k == 'arrowright':
-            k = 'right'
-        elif k == 'arrowup':
-            k = 'up'
-        elif k == 'arrowdown':
-            k = 'down'
-    if k not in _pressed_keys:
-        _pressed_keys.add(k)
-    _call_callback('onKeyPress', scs._app, k)
-
-def _on_key_release(event):
-    if scs._app is None:
-        return
-    k = event.key
-    if k == ' ':
-        k = 'space'
-    else:
-        k = k.lower()
-        if k == 'arrowleft':
-            k = 'left'
-        elif k == 'arrowright':
-            k = 'right'
-        elif k == 'arrowup':
-            k = 'up'
-        elif k == 'arrowdown':
-            k = 'down'
-    if k in _pressed_keys:
-        _pressed_keys.discard(k)
-    _call_callback('onKeyRelease', scs._app, k)
-
-def _on_key_hold():
-    if scs._app is None:
-        return
-    for k in list(_pressed_keys):
-        _call_callback('onKeyHold', scs._app, k)
-
-_canvas.bind('mousedown', _on_mouse_press)
-_canvas.bind('mouseup', _on_mouse_release)
-_canvas.bind('mousemove', _on_mouse_move)
-document.bind('keydown', _on_key_press)
-document.bind('keyup', _on_key_release)
-
-def stop_app():
-    global _app_timer
-    if _app_timer is not None:
-        timer.clear_interval(_app_timer)
-        _app_timer = None
-
-def sandbox_run_app(width=400, height=400, stepsPerSecond=30):
-    global _user_funcs, _app_timer
-    stop_app()
-    _user_funcs = {
-        name: _user_ns[name]
-        for name in _callback_names
-        if callable(_user_ns.get(name))
-    }
-    _canvas.setAttribute('width', str(width))
-    _canvas.setAttribute('height', str(height))
-    _canvas.style.width = f'{width}px'
-    _canvas.style.height = f'{height}px'
-    scs._ctx = _canvas.getContext('2d')
-    scs._app = scs.App(width, height)
-    scs._app.stepsPerSecond = stepsPerSecond
-    _call_callback('onAppStart', scs._app)
-
-    def frame():
-        try:
-            _on_key_hold()
-            if 'onStep' in _user_funcs and not scs._app.paused:
-                _call_callback('onStep', scs._app)
-            scs._ctx.clearRect(0, 0, width, height)
-            if scs._app.background:
-                scs._ctx.fillStyle = scs._app.background
-                scs._ctx.fillRect(0, 0, width, height)
-            _call_callback('redrawAll', scs._app)
-            shapes = getattr(scs, '_all_shapes', None)
-            if shapes is None:
-                shapes = getattr(scs, '_shapes', [])
-            for shape in list(shapes):
-                try:
-                    shape.draw(scs._ctx)
-                except:
-                    pass
-        except Exception:
-            log(f'Frame failed:\n{traceback.format_exc()}')
-            stop_app()
-
-    frame()
-    interval = int(1000 / stepsPerSecond) if stepsPerSecond > 0 else 33
-    _app_timer = timer.set_interval(frame, interval)
-    log(f'Running {width}x{height} at {stepsPerSecond} fps; canvas={_canvas.width}x{_canvas.height}')
-
-def exec_user_code(event=None):
-    global _user_ns
-    stop_app()
-    _log.text = ''
-    _user_ns = {'__builtins__': __builtins__}
-    scs.runApp = sandbox_run_app
-    try:
-        exec(_code_area.value, _user_ns)
+        log(msg)
     except Exception:
-        log(f'Error:\n{traceback.format_exc()}')
+        pass
+    try:
+        _orig_debug_log(msg)
+    except Exception:
+        pass
+ep._debug_log = _sandbox_debug_log
 
-document['run-btn'].bind('click', exec_user_code)
-document['stop-btn'].bind('click', lambda event: stop_app())
-log('Sandbox ready. The graphics API is loaded from root scs.py.')
+def run_sandbox(ev=None):
+    # One call: entrypoint owns exec, user-namespace setup, auto-start,
+    # renderer selection, events, and the loop.
+    try:
+        ep.exec_code(_code_area.value, '<sandbox>')
+        log('Running; renderer=' + str(ep.getRendererKind()))
+    except Exception:
+        log('Error:\n' + traceback.format_exc())
+
+def stop_sandbox(ev=None):
+    ep.stop()
+    log('Stopped.')
+
+def on_renderer_change(ev=None):
+    # setRenderer() applies to the NEXT runApp(); re-run so the
+    # sandbox picks it up immediately.
+    try:
+        ep.setRenderer(document['renderer-select'].value or 'auto')
+    except Exception:
+        pass
+    run_sandbox()
+
+document['run-btn'].bind('click', run_sandbox)
+document['stop-btn'].bind('click', stop_sandbox)
+document['renderer-select'].bind('change', on_renderer_change)
+
+# Events (mouse / keys / touch / resize) only -- no app loading.
+ep._bind_events()
+log('Sandbox ready. The graphics API is loaded from scs_entrypoint.py (via scs.py).')
 </script>
 </body>
 </html>
