@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v15-no-canvas-replace'
+__version__ = '2026-11-14-runApp-*args-v16-hud-submit'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -2059,6 +2059,18 @@ def _render_one_view(view, renderer=None):
         return
     target = getattr(view, 'target', None) if view is not None else None
     viewport = getattr(view, 'viewport', None) if view is not None else None
+    # HUD offscreen needs its OWN begin_frame/end_frame per frame.
+    # Old code only did begin/end on the WebGL2 renderer, so HUD shapes
+    # were drawn to a 2d renderer that never submitted -> offscreen blank
+    # -> composited as transparent -> no HUD visible.
+    try:
+        if _hud_mode and _hud_2d_renderer is not None:
+            try:
+                _hud_2d_renderer.begin_frame('rgba(0,0,0,0)')
+            except TypeError:
+                _hud_2d_renderer.begin_frame('rgba(0,0,0,0)')
+    except Exception:
+        pass
     try:
         r.begin_frame(_app.background, target=target, viewport=viewport)
     except TypeError:
@@ -2156,6 +2168,12 @@ def _render_one_view(view, renderer=None):
         # This is the one-line-change contract: the 2D app never knows it is in 3D.
         # Only composite HUD if HUD shapes were actually drawn this frame.
         # 3D app with only 3D flat shapes (hud='3d') has no HUD to composite.
+        # Submit HUD offscreen before compositing it onto WebGL2
+        try:
+            if _hud_mode and _hud_2d_renderer is not None and _hud_shapes_drawn:
+                _hud_2d_renderer.end_frame()
+        except Exception:
+            pass
         if _hud_mode and _hud_shapes_drawn:
             try:
                 _hud_done = False
