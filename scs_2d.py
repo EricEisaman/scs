@@ -39,6 +39,7 @@ class Renderer2D:
             self.ctx = None
         if self.ctx is None:
             raise RuntimeError('Canvas 2D context not available')
+        print('SCS renderer version=0.1 mode=2d')
         self._alpha_stack = [1.0]
         self._image_cache = {}
 

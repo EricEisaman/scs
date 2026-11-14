@@ -397,6 +397,7 @@ class WebGPU3DEngine:
             except Exception as _e:
                 self._msdf_pipeline = None
             self.ready = True
+            print('SCS renderer version=0.1 mode=webgpu')
             if self.on_ready:
                 self.on_ready()
         except Exception as e:

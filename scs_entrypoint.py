@@ -646,6 +646,7 @@ def _activate_renderer(renderer, kind):
     global _renderer, _renderer_kind, _ctx
     _renderer = renderer
     _renderer_kind = kind
+    _debug_log('SCS renderer version=0.1 mode=%s' % kind)
     if kind == '2d' and renderer is not None:
         _ctx = getattr(renderer, 'ctx', None)
     else:
