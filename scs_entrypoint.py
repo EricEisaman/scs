@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v18-no-stale-zero'
+__version__ = '2026-11-14-runApp-*args-v19-engine-in-entrypoint'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -642,6 +642,14 @@ def create_renderer(kind, canvas, width, height):
     if kind in ('2d', 'canvas', 'canvas2d'):
         return _import_renderer_module('scs_2d')(canvas, width, height)
     if kind in ('webgl', 'webgl2', 'webgl-2'):
+        # 3D app => REAL 3D engine (scs_engine_webgl2), NOT 2d-on-WebGL.
+        # 2d-on-WebGL has no depth, no MVP, treats world (0,1,-2) as screen (0,1).
+        # Engine lives in entrypoint, NEVER in the app. App stays CMU-simple.
+        try:
+            if _hud_mode or getattr(_app, '_is_3d_app', False):
+                return _import_renderer_module('scs_engine_webgl2').WebGL2Engine(canvas, width, height)
+        except Exception:
+            pass
         return _import_renderer_module('scs_webgl')(canvas, width, height)
     if kind in ('webgpu', 'gpu'):
         return _import_renderer_module('scs_webgpu')(canvas, width, height)
@@ -2056,6 +2064,54 @@ def _render_one_view(view, renderer=None):
     # is distinct from per-object / per-material data).
     r = renderer if renderer is not None else _renderer
     if r is None or _app is None:
+        return
+    # 3D engine path: translate CMU shapes (centerZ) to engine scene.
+    # App never sees engine. Entrypoint does: Circle->sphere, Rect->box, Line->box.
+    if getattr(r, 'kind', '') == 'webgl2-3d':
+        try:
+            r.clear_scene()
+            # Floor / plane from app.planeLines not needed - engine floor
+            r.add_floor(40, '#22223a')
+            for s in list(_shapes):
+                try:
+                    if not getattr(s, 'visible', True):
+                        continue
+                    _cz = getattr(s, 'centerZ', None)
+                    if _cz is None:
+                        continue  # HUD handled below
+                    _cx = float(getattr(s, 'centerX', 0) or 0)
+                    _cy = float(getattr(s, 'centerY', 0) or 0)
+                    _fill = getattr(s, 'fill', 'blue') or 'blue'
+                    # Circle/Oval -> sphere, Rect -> box, else sphere
+                    _cls = type(s).__name__
+                    if _cls in ('Rect',):
+                        r.add_box(_cx, _cy, float(_cz), float(getattr(s, 'width', 1) or 1), float(getattr(s, 'height', 1) or 1), 1.0, _fill)
+                    else:
+                        _rad = float(getattr(s, 'radius', getattr(s, '_radius', 1.0)) or 1.0)
+                        # Metal sphere for hero, else sphere
+                        r.add_sphere(_cx, _cy, float(_cz), _rad, _fill)
+                except Exception:
+                    pass
+            # Camera from app.camera (Camera3D), fallback default
+            _cam = getattr(_app, 'camera', None)
+            r.render(_cam)
+            # HUD: draw offscreen 2d then composite via engine
+            try:
+                if _hud_mode and _hud_2d_renderer is not None:
+                    _hud_2d_renderer.begin_frame('rgba(0,0,0,0)')
+                    for s in list(_shapes):
+                        try:
+                            if getattr(s, 'centerZ', None) is None and getattr(s, 'visible', True):
+                                getattr(s, 'draw', lambda _r: None)(_hud_2d_renderer)
+                        except Exception:
+                            pass
+                    _hud_2d_renderer.end_frame()
+                    if _hud_offscreen is not None and hasattr(r, 'draw_hud_canvas'):
+                        r.draw_hud_canvas(_hud_offscreen, 0, 0, _canvas_width, _canvas_height)
+            except Exception:
+                pass
+        except Exception:
+            pass
         return
     target = getattr(view, 'target', None) if view is not None else None
     viewport = getattr(view, 'viewport', None) if view is not None else None
