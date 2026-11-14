@@ -412,7 +412,7 @@ def redrawAll(app):
 
 def main():
     # Plain CMU: no renderer words, no engine words. Just run it.
-    runApp(900, 560)
+    runApp(900, 560, renderer='webgl2', hud=True)
 
 
 main()
