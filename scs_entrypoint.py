@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-FIXED-v41-revert-scs-shims-no-package'
+__version__ = '2026-11-14-FIXED-v42-no-silent-swallow'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -2332,8 +2332,13 @@ def _call(name, *args):
         return
     try:
         cb(*args)
-    except Exception:
-        pass
+    except Exception as e:
+        # v42: NEVER swallow. ofdm did nothing because onAppStart/redrawAll
+        # raised here and was hidden. Log it so the console shows the real error.
+        try:
+            _debug_log('SCS _call %s failed: %s' % (name, e))
+        except Exception:
+            pass
 
 
 def _fullscreen_btn_rect(w, h):
@@ -2977,7 +2982,13 @@ def _frame():
             pass
         _step()
         _render()
-    except Exception:
+    except Exception as e:
+        # v42: _frame used to stop() the loop on ANY error with no log -
+        # one redrawAll exception = black screen forever, no console error.
+        try:
+            _debug_log('SCS _frame failed: %s' % (e,))
+        except Exception:
+            pass
         stop()
 
 
@@ -3658,6 +3669,10 @@ def exec_code(code, fn):
     try:
         exec(code, _user_ns)
         _refresh_user_funcs()
+        try:
+            _debug_log('SCS exec ok %s callbacks=%s' % (fn, sorted(list(_user_funcs.keys()))))
+        except Exception:
+            pass
         if _user_funcs:
             # CMU-style app: callbacks defined, no explicit runApp() call
             # (or runApp() already started the loop -- starting again is
@@ -3671,7 +3686,16 @@ def exec_code(code, fn):
                 w, h = 1050, 700
             # Only auto-start if the loop is not already running.
             if _app_timer is None:
+                try:
+                    _debug_log('SCS auto-start %s %sx%s' % (fn, w, h))
+                except Exception:
+                    pass
                 run_app(width=w, height=h)
+        else:
+            try:
+                _debug_log('SCS exec ok %s but NO callbacks found - not starting. _user_ns keys=%s' % (fn, sorted([k for k in _user_ns.keys() if not k.startswith('_')])[:30]))
+            except Exception:
+                pass
     except Exception as e:
         _debug_log('SCS exec error in %s: %s' % (fn, e))
         # Prove WHICH runApp app.py actually called: _user_ns['runApp'] may have
