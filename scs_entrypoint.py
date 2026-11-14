@@ -67,32 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-FIXED-v39-scs-run-package-shim'
-
-# v39: scs is a single file (scs.py -> scs_entrypoint.py), NOT a package dir.
-# Apps written as `import scs.run` / `from scs.run import runApp` fail with
-# "No module named 'scs.run'; 'scs' is not a package".
-# Fix: register scs.run in sys.modules as this same module, and give this
-# module a __path__ so importers treat it as a package. scs.run IS scs.
-try:
-    import sys as _sys_shim
-    try:
-        __path__ = []  # type: ignore
-    except Exception:
-        pass
-    try:
-        _sys_shim.modules['scs.run'] = _sys_shim.modules.get('scs_entrypoint', None) or globals().get('__name__', None) and _sys_shim.modules.get(__name__, None)
-    except Exception:
-        pass
-    try:
-        # Attribute access: scs.run -> this module
-        globals()['run'] = globals().get('runApp', None) or globals().get('run_app', None)
-    except Exception:
-        pass
-except Exception:
-    pass
-
-
+__version__ = '2026-11-14-FIXED-v41-revert-scs-shims-no-package'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -3670,19 +3645,6 @@ def exec_code(code, fn):
         _scs_patch.loop = runApp
         _scs_patch.cmu_graphics_run = cmu_graphics_run
         _scs_patch.run_app = run_app
-        # v39: scs.run shim - `import scs.run` / `from scs.run import runApp` must work.
-        # scs is a file, not a package dir, so Brython would 404 on scs/run.py.
-        # Register it in sys.modules BEFORE exec, and expose it as an attribute.
-        try:
-            import sys as _sys_patch
-            _sys_patch.modules['scs.run'] = _sys_patch.modules.get('scs_entrypoint') or _scs_patch
-            try:
-                _scs_patch.__path__ = []
-            except Exception:
-                pass
-            _scs_patch.run = _scs_patch
-        except Exception:
-            pass
     except Exception:
         pass
     try:
