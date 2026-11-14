@@ -45,15 +45,19 @@ def _log_versions(where):
     except Exception:
         _stats = {}
     _msg = '[SCS versions] where=%s entrypoint=%s renderer_version=0.1 renderer_kind=%s renderer_cap=%s renderer_stats=%s app=%s' % (where, _ep_ver, _kind, _cap, _stats, APP_VERSION)
-    try:
-        print(_msg)
-    except Exception:
-        pass
+    # v33: log ONCE. print() already lands in DevTools in Brython, so
+    # print + console.log duplicated every line (looked like double-run).
     try:
         from browser import window as _w
-        _w.console.log(_msg)
+        if _w is not None and hasattr(_w, 'console'):
+            _w.console.log(_msg)
+        else:
+            print(_msg)
     except Exception:
-        pass
+        try:
+            print(_msg)
+        except Exception:
+            pass
 
 _log_versions('import')
 
