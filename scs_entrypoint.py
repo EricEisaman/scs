@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v16-hud-submit'
+__version__ = '2026-11-14-runApp-*args-v17-log-shape-errors'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -2059,6 +2059,10 @@ def _render_one_view(view, renderer=None):
         return
     target = getattr(view, 'target', None) if view is not None else None
     viewport = getattr(view, 'viewport', None) if view is not None else None
+    try:
+        _render_one_view._logged_shape_err = False
+    except Exception:
+        pass
     # HUD offscreen needs its OWN begin_frame/end_frame per frame.
     # Old code only did begin/end on the WebGL2 renderer, so HUD shapes
     # were drawn to a 2d renderer that never submitted -> offscreen blank
@@ -2155,8 +2159,17 @@ def _render_one_view(view, renderer=None):
                         draw_fn(r)
                 else:
                     draw_fn(r)
-            except Exception:
-                pass
+            except Exception as _se:
+                # DO NOT swallow per-shape errors. Old code did `pass`, so
+                # _hud_shapes_drawn stayed False, HUD compositing was skipped,
+                # and canvas stayed black with no error. Log first error per frame.
+                try:
+                    if not getattr(_render_one_view, '_logged_shape_err', False):
+                        _render_one_view._logged_shape_err = True
+                        import traceback as _tb2
+                        _debug_log('SCS shape draw error: %s | %s' % (s, _tb2.format_exc()))
+                except Exception:
+                    pass
         # HUD mode: composite as a fullscreen HUD quad in the 3D scene.
         # Both, with a flag:
         #   hud='texture' -> offscreen 2D canvas (where scs.py's 2D app drew,
