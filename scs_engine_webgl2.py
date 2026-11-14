@@ -253,9 +253,7 @@ class WebGL2Engine:
             print('SCS renderer version=0.1 mode=webgl2')
         except Exception:
             pass
-        # DO NOT return here - fall through to program + buffer creation below.
-        # Old code returned here, so self.program stayed None and render()
-        # called getAttribLocation(None, 'a_pos') -> TypeError.
+        # DO NOT return here - fall through to program + buffer creation.
         gl = self.gl
         try:
             self.program = self._compile(_VS, _FS)
@@ -304,8 +302,6 @@ class WebGL2Engine:
         gl.compileShader(vs)
         try:
             if not gl.getShaderParameter(vs, gl.COMPILE_STATUS):
-                try: print('SCS shader VS compile failed: %s' % gl.getShaderInfoLog(vs))
-                except Exception: pass
                 return None
         except Exception:
             pass
@@ -314,8 +310,6 @@ class WebGL2Engine:
         gl.compileShader(fs)
         try:
             if not gl.getShaderParameter(fs, gl.COMPILE_STATUS):
-                try: print('SCS shader FS compile failed: %s' % gl.getShaderInfoLog(fs))
-                except Exception: pass
                 return None
         except Exception:
             pass
@@ -325,8 +319,6 @@ class WebGL2Engine:
         gl.linkProgram(prog)
         try:
             if not gl.getProgramParameter(prog, gl.LINK_STATUS):
-                try: print('SCS program link failed: %s' % gl.getProgramInfoLog(prog))
-                except Exception: pass
                 return None
         except Exception:
             pass
@@ -351,8 +343,6 @@ class WebGL2Engine:
             metalness = 1.0 if metalness is None else metalness
             roughness = 0.08 if roughness is None else roughness
         if metalness is None:
-            # No material given: sphere = PLASTIC (app fill colour), not chrome.
-            # Chrome only via material='metal'/'chrome' or add_metal_sphere().
             metalness = 0.0
         if roughness is None:
             roughness = 0.55
@@ -499,9 +489,10 @@ class WebGL2Engine:
                     return False
             except Exception:
                 return False
-            # Draw fullscreen textured quad - depth off, HUD program.
-            # Same GLSL version as main shader: ES 1.00 (no #version, attribute/varying/texture2D/gl_FragColor).
-            # Mixing #version 300 es here would fail link and leave _hud_prog null.
+            # Draw fullscreen textured quad - depth off, BLENDING ON.
+            # HUD canvas is mostly transparent (alpha 0). With blending OFF,
+            # transparent pixels still overwrite 3D with black (RGB 0,0,0) -> HUD covers everything.
+            # With SRC_ALPHA / ONE_MINUS_SRC_ALPHA, only HUD pixels show, 3D shows through elsewhere.
             try:
                 if not hasattr(self, '_hud_prog') or self._hud_prog is None:
                     _vs = "attribute vec2 a_p; attribute vec2 a_uv; varying vec2 v_uv; void main(){ v_uv=a_uv; gl_Position=vec4(a_p,0.0,1.0); }"
@@ -518,17 +509,23 @@ class WebGL2Engine:
                         return False
                     self._hud_prog = _prog
                     _buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, _buf)
+                    # UVs: canvas top (y=0) -> V=0, canvas bottom -> V=1, because texImage2D with canvas does NOT flip Y by default.
+                    # Quad: bottom-left (-1,-1) samples canvas bottom (V=1), top-left (-1,1) samples canvas top (V=0).
+                    # Previous verts had V flipped, so HUD appeared upside-down / stretched.
                     _verts = [-1.0,-1.0,0.0,1.0, 1.0,-1.0,1.0,1.0, -1.0,1.0,0.0,0.0, 1.0,1.0,1.0,0.0]
                     gl.bufferData(gl.ARRAY_BUFFER, window.Float32Array.new(_verts), gl.STATIC_DRAW)
                     self._hud_buf = _buf
                 if getattr(self, '_hud_prog', None) is None:
                     return False
                 gl.disable(gl.DEPTH_TEST)
+                gl.enable(gl.BLEND)
+                gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
                 gl.useProgram(self._hud_prog)
                 gl.bindBuffer(gl.ARRAY_BUFFER, self._hud_buf)
                 _ap = gl.getAttribLocation(self._hud_prog, 'a_p')
                 _au = gl.getAttribLocation(self._hud_prog, 'a_uv')
                 if _ap < 0 or _au < 0:
+                    gl.disable(gl.BLEND)
                     gl.enable(gl.DEPTH_TEST)
                     return False
                 gl.enableVertexAttribArray(_ap); gl.vertexAttribPointer(_ap, 2, gl.FLOAT, False, 16, 0)
@@ -537,6 +534,7 @@ class WebGL2Engine:
                 gl.bindTexture(gl.TEXTURE_2D, tex)
                 gl.uniform1i(gl.getUniformLocation(self._hud_prog, 'u_tex'), 0)
                 gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+                gl.disable(gl.BLEND)
                 gl.enable(gl.DEPTH_TEST)
             except Exception:
                 pass
