@@ -67,13 +67,18 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v21-engine-whitelist'
+__version__ = '2026-11-14-runApp-*args-v3-app-fix'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
 try:
     _ver_msg = '[SCS entrypoint] version=' + __version__
-    print(_ver_msg)  # Brython print -> console, do NOT also console.log
+    print(_ver_msg)
+    try:
+        from browser import window as _w
+        _w.console.log(_ver_msg)
+    except Exception:
+        pass
 except Exception:
     pass
 
@@ -227,7 +232,6 @@ _canvas = None
 _ctx = None            # 2D context when renderer is 2D, else None
 _renderer = None       # current renderer object
 _renderer_kind = '2d'
-_booted_once = False
 # HUD mode: any existing 2D app can just change runApp() to get it in 3D.
 # runApp(..., renderer='webgl2' / 'webgpu' / '3d', hud=True, mode='hud'/'3d')
 # The 2D app draws unchanged to an offscreen 2D canvas. That canvas is
@@ -290,8 +294,11 @@ _clear_all_shapes = _clear_shapes
 
 
 def _debug_log(msg):
-    # Log ONCE. In Brython, print() already goes to browser console.
-    # Old code did print() + console.log() -> every line twice.
+    try:
+        if hasattr(window, 'console'):
+            window.console.log(msg)
+    except Exception:
+        pass
     try:
         print(msg)
     except Exception:
@@ -604,17 +611,6 @@ def _import_renderer_module(name):
     tries both layouts and raises a RuntimeError that names the file
     that must be deployed alongside scs_entrypoint.py.
     """
-    # Engine is a MODULE, not a Renderer class - return the module itself.
-    # v20 failed here: whitelist only knew 2d/webgl/webgpu, so engine import
-    # raised Unknown renderer module and fell back to scs_webgl -> black.
-    if name == 'scs_engine_webgl2':
-        try:
-            import scs_engine_webgl2 as _eng
-            return _eng
-        except Exception:
-            from scs.scs_engine_webgl2 import WebGL2Engine as _E2
-            import scs.scs_engine_webgl2 as _eng2
-            return _eng2
     try:
         if name == 'scs_2d':
             from scs_2d import Renderer2D
@@ -633,9 +629,6 @@ def _import_renderer_module(name):
             if name == 'scs_webgl':
                 from scs.scs_webgl import RendererWebGL2
                 return RendererWebGL2
-            if name == 'scs_engine_webgl2':
-                import scs.scs_engine_webgl2 as _eng3
-                return _eng3
             if name == 'scs_webgpu':
                 from scs.scs_webgpu import RendererWebGPU
                 return RendererWebGPU
@@ -656,25 +649,6 @@ def create_renderer(kind, canvas, width, height):
     if kind in ('2d', 'canvas', 'canvas2d'):
         return _import_renderer_module('scs_2d')(canvas, width, height)
     if kind in ('webgl', 'webgl2', 'webgl-2'):
-        # 3D app => REAL 3D engine (scs_engine_webgl2), NOT 2d-on-WebGL.
-        # 2d-on-WebGL has no depth, no MVP, treats world (0,1,-2) as screen (0,1).
-        # Engine lives in entrypoint, NEVER in the app. App stays CMU-simple.
-        try:
-            if _hud_mode or getattr(_app, '_is_3d_app', False):
-                try:
-                    _mod = _import_renderer_module('scs_engine_webgl2')
-                except Exception as _ie:
-                    # DO NOT swallow: this is the control-flow branch that
-                    # silently fell back to 2d-on-WebGL in v19.
-                    try:
-                        import traceback as _tb3
-                        _debug_log('SCS engine import FAILED, falling back to scs_webgl: %s\n%s' % (_ie, _tb3.format_exc()))
-                    except Exception:
-                        pass
-                    raise
-                return _mod.WebGL2Engine(canvas, width, height)
-        except Exception:
-            pass
         return _import_renderer_module('scs_webgl')(canvas, width, height)
     if kind in ('webgpu', 'gpu'):
         return _import_renderer_module('scs_webgpu')(canvas, width, height)
@@ -706,12 +680,6 @@ def _activate_renderer(renderer, kind):
 
 
 def _ensure_canvas():
-    # HUD mode: 2D shapes draw to OFFSCREEN, not visible canvas.
-    # If we create a 2d context on the visible canvas here, the browser locks it
-    # to 2d and later WebGL2 creation on the same canvas FAILS (returns null).
-    # That was why v5 still ended as mode=2d even with hud=True.
-    if _hud_mode and _hud_offscreen is not None:
-        return _hud_offscreen
     global _canvas
     canvas = _find_canvas()
     if canvas is None:
@@ -2090,12 +2058,11 @@ def _render_one_view(view, renderer=None):
     r = renderer if renderer is not None else _renderer
     if r is None or _app is None:
         return
-    # 3D engine path: translate CMU shapes (centerZ) to engine scene.
-    # App never sees engine. Entrypoint does: Circle->sphere, Rect->box, Line->box.
+    # ENGINE PATH: 3D engine (webgl2-3d) - translate CMU shapes to engine scene.
+    # FIX: Oval has no radius - use width/2, NOT 1.0. Old code made all balls radius 1.0 -> red/green clipped.
     if getattr(r, 'kind', '') == 'webgl2-3d':
         try:
             r.clear_scene()
-            # Floor / plane from app.planeLines not needed - engine floor
             r.add_floor(40, '#22223a')
             for s in list(_shapes):
                 try:
@@ -2103,24 +2070,24 @@ def _render_one_view(view, renderer=None):
                         continue
                     _cz = getattr(s, 'centerZ', None)
                     if _cz is None:
-                        continue  # HUD handled below
+                        continue
                     _cx = float(getattr(s, 'centerX', 0) or 0)
                     _cy = float(getattr(s, 'centerY', 0) or 0)
                     _fill = getattr(s, 'fill', 'blue') or 'blue'
-                    # Circle/Oval -> sphere, Rect -> box, else sphere
                     _cls = type(s).__name__
                     if _cls in ('Rect',):
                         r.add_box(_cx, _cy, float(_cz), float(getattr(s, 'width', 1) or 1), float(getattr(s, 'height', 1) or 1), 1.0, _fill)
                     else:
-                        _rad = float(getattr(s, 'radius', getattr(s, '_radius', 1.0)) or 1.0)
-                        # Metal sphere for hero, else sphere
+                        # Circle: radius attr. Oval: width/2 (NOT 1.0). Ball highlights: radius attr.
+                        if _cls in ('Oval',):
+                            _rad = float(getattr(s, 'width', 1.0) or 1.0) / 2.0
+                        else:
+                            _rad = float(getattr(s, 'radius', getattr(s, '_radius', 1.0)) or 1.0)
                         r.add_sphere(_cx, _cy, float(_cz), _rad, _fill)
                 except Exception:
                     pass
-            # Camera from app.camera (Camera3D), fallback default
             _cam = getattr(_app, 'camera', None)
             r.render(_cam)
-            # HUD: draw offscreen 2d then composite via engine
             try:
                 if _hud_mode and _hud_2d_renderer is not None:
                     _hud_2d_renderer.begin_frame('rgba(0,0,0,0)')
@@ -2141,22 +2108,6 @@ def _render_one_view(view, renderer=None):
     target = getattr(view, 'target', None) if view is not None else None
     viewport = getattr(view, 'viewport', None) if view is not None else None
     try:
-        _render_one_view._logged_shape_err = False
-    except Exception:
-        pass
-    # HUD offscreen needs its OWN begin_frame/end_frame per frame.
-    # Old code only did begin/end on the WebGL2 renderer, so HUD shapes
-    # were drawn to a 2d renderer that never submitted -> offscreen blank
-    # -> composited as transparent -> no HUD visible.
-    try:
-        if _hud_mode and _hud_2d_renderer is not None:
-            try:
-                _hud_2d_renderer.begin_frame('rgba(0,0,0,0)')
-            except TypeError:
-                _hud_2d_renderer.begin_frame('rgba(0,0,0,0)')
-    except Exception:
-        pass
-    try:
         r.begin_frame(_app.background, target=target, viewport=viewport)
     except TypeError:
         r.begin_frame(_app.background)
@@ -2171,18 +2122,10 @@ def _render_one_view(view, renderer=None):
         # hud=False/'texture'/True -> screen-space HUD (draw to _hud_2d_renderer / offscreen)
         # hud='3d'/'world'/False -> world-space 3D (draw to 3D renderer r, depth on)
         # 2D apps: no 3D, all shapes draw to r (2D renderer) - no routing needed.
-        # DO NOT recompute _is_3d from callbacks here. run_app already set
-        # _is_3d_app=True for explicit HUD/3D (demo declares itself as 3D).
-        # Recomputing from callbacks overwrote it to False (no onRender3D),
-        # so routing never happened, _hud_shapes_drawn stayed False, HUD never
-        # composited, and nothing rendered. HUD mode IS 3D for routing.
         _is_3d = bool(getattr(_app, '_is_3d_app', False)) if _app is not None else False
-        if _hud_mode:
-            _is_3d = True
-        # Keep callback check only as an OR, never as an overwrite:
+        # _is_3d_app is computed in run_app from _user_funcs - use that if available
         try:
-            if any(k in _user_funcs for k in ('onRender3D', 'onDraw3D', 'draw3D', 'onRender', 'render3D')):
-                _is_3d = True
+            _is_3d = any(k in _user_funcs for k in ('onRender3D', 'onDraw3D', 'draw3D', 'onRender', 'render3D'))
         except Exception:
             pass
         _hud_shapes_drawn = False
@@ -2204,26 +2147,15 @@ def _render_one_view(view, renderer=None):
                     continue
                 # Route per shape in 3D apps only
                 if _is_3d and _hud_mode:
-                    # ROUTING RULE (demo's rule, not hud flag):
-                    # No centerZ -> HUD overlay (draw to 2d offscreen)
-                    # centerZ set (even 0) -> 3D world (draw to WebGL2)
-                    # Demo's HUD Rects have no centerZ and no hud=True, so
-                    # old hud-flag routing treated them as 3D and HUD never
-                    # composited. centerZ is the source of truth.
-                    try:
-                        _cz = getattr(s, 'centerZ', None)
-                    except Exception:
-                        _cz = None
-                    # Also check centerZ1/centerZ2 for Lines
-                    if _cz is None:
-                        try:
-                            _cz = getattr(s, 'centerZ1', None)
-                        except Exception:
-                            _cz = None
-                    if _cz is None:
+                    _sh = getattr(s, 'hud', False)
+                    # FINAL: hud=False (default) = 3D mode, hud=True = overlay. _normalize_hud maps
+                    # True->'hud', False->'3d'. Handle raw bools: True => overlay, False => 3D.
+                    if _sh is True:
                         _sh_str = 'hud'
-                    else:
+                    elif _sh is False or _sh is None:
                         _sh_str = '3d'
+                    else:
+                        _sh_str = str(_sh).lower() if _sh is not None else '3d'
                     if _sh_str in ('hud', 'texture', 'html', 'true', '1', ''):
                         # Overlay flat shape (hud=True): draw to HUD 2D renderer (offscreen), NOT to 3D renderer
                         _hr = _hud_2d_renderer
@@ -2240,17 +2172,8 @@ def _render_one_view(view, renderer=None):
                         draw_fn(r)
                 else:
                     draw_fn(r)
-            except Exception as _se:
-                # DO NOT swallow per-shape errors. Old code did `pass`, so
-                # _hud_shapes_drawn stayed False, HUD compositing was skipped,
-                # and canvas stayed black with no error. Log first error per frame.
-                try:
-                    if not getattr(_render_one_view, '_logged_shape_err', False):
-                        _render_one_view._logged_shape_err = True
-                        import traceback as _tb2
-                        _debug_log('SCS shape draw error: %s | %s' % (s, _tb2.format_exc()))
-                except Exception:
-                    pass
+            except Exception:
+                pass
         # HUD mode: composite as a fullscreen HUD quad in the 3D scene.
         # Both, with a flag:
         #   hud='texture' -> offscreen 2D canvas (where scs.py's 2D app drew,
@@ -2262,12 +2185,6 @@ def _render_one_view(view, renderer=None):
         # This is the one-line-change contract: the 2D app never knows it is in 3D.
         # Only composite HUD if HUD shapes were actually drawn this frame.
         # 3D app with only 3D flat shapes (hud='3d') has no HUD to composite.
-        # Submit HUD offscreen before compositing it onto WebGL2
-        try:
-            if _hud_mode and _hud_2d_renderer is not None and _hud_shapes_drawn:
-                _hud_2d_renderer.end_frame()
-        except Exception:
-            pass
         if _hud_mode and _hud_shapes_drawn:
             try:
                 _hud_done = False
@@ -2343,38 +2260,14 @@ def _frame():
     # In XR this loop is STOPPED and the session owns scheduling.
     # Zero-sized container: skip normal rendering (Presentation D4).
     try:
-        # DO NOT early-return on stale zero-sized. ResizeObserver fires once
-        # at boot when container is still 0x0, _current sticks at zero-sized,
-        # and every _frame after that returns early -> black forever, even
-        # though canvas is visibly 900x560 now. Check LIVE canvas size.
-        try:
-            if _presentation_coordinator is not None:
-                cur = _presentation_coordinator.current()
-                if cur is not None and getattr(cur, 'is_zero_sized', False):
-                    # Verify live: if canvas now has size, ignore stale zero.
-                    try:
-                        _cv = _find_canvas()
-                        if _cv is not None:
-                            _r = _cv.getBoundingClientRect()
-                            if float(getattr(_r, 'width', 0) or 0) > 0 and float(getattr(_r, 'height', 0) or 0) > 0:
-                                pass  # live non-zero, do NOT return
-                            else:
-                                return
-                        else:
-                            return
-                    except Exception:
-                        return
-        except Exception:
-            pass
+        if _presentation_coordinator is not None:
+            cur = _presentation_coordinator.current()
+            if cur is not None and getattr(cur, 'is_zero_sized', False):
+                return
         _step()
         _render()
-    except Exception as _e_frame:
-        # Do NOT stop() on a single frame error - one bad frame (audio, etc.)
-        # must not kill rendering forever. Log and keep looping.
-        try:
-            _debug_log('SCS _frame error (continuing): %s: %s' % (type(_e_frame).__name__, _e_frame))
-        except Exception:
-            pass
+    except Exception:
+        stop()
 
 
 def _start_loop():
@@ -2413,32 +2306,6 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
         stepsPerSecond = kwargs.get('steps_per_second')
     if 'fps' in kwargs and stepsPerSecond == 30:
         stepsPerSecond = kwargs.get('fps')
-    # RUN ONCE: DOM guard + timer guard. Second run_app in SAME page load
-    # must be a no-op. Python _app_timer is wiped by Brython re-import,
-    # so check DOM too.
-    try:
-        from browser import document as _doc_run
-        try:
-            if _doc_run.getElementById('scs-running') is not None:
-                return
-            try:
-                _rflag = _doc_run.createElement('div')
-                _rflag.id = 'scs-running'
-                _rflag.style.display = 'none'
-                _doc_run.body.appendChild(_rflag)
-            except Exception:
-                pass
-        except Exception:
-            pass
-    except Exception:
-        pass
-    global _app_timer, _app
-    try:
-        if _app_timer is not None and _app is not None:
-            _debug_log('SCS run_app: already running - ignoring second run_app (run once).')
-            return
-    except Exception:
-        pass
     _refresh_user_funcs()
     _bind_events()
     stop()
@@ -2499,18 +2366,15 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
     # 3D app (has onRender3D / onDraw3D / draw3D) + webgl2/webgpu => HUD is the 2D
     # overlay (labels, buttons) on top of the 3D scene. THAT is when HUD makes sense.
     _is_3d_app = any(k in _user_funcs for k in ('onRender3D', 'onDraw3D', 'draw3D', 'onRender', 'render3D'))
-    # NOTE: No shape-based 3D guess here. Flat CMU shapes can be 3D (centerZ set later, or flat in world).
-    # The DEMO must declare itself as 3D: runApp(..., renderer='webgl2'). EntryPoint does NOT guess.
     # _renderer_req must include setRenderer() / _pending_renderer / App.renderer,
     # not just the runApp() arg.
     _renderer_req = str(renderer or _pending_renderer or getattr(_app, 'renderer', None) or '').lower() or None  # FIX: _app, not app - app is defined at line 2394, using app here = UnboundLocalError
     if not _is_3d_app and _hud_requested:
-        # Explicit hud=True / mode='hud' / renderer='3d' IS a declaration: "I am 3D".
-        # Do NOT ignore it. The demo declares itself as 3D - that wins over
-        # callback guessing. Flat shapes can be 3D, so callback/shape guessing is wrong.
-        # If the app explicitly asked for HUD, it IS a 3D app.
-        _is_3d_app = True
-        _debug_log('SCS HUD: explicit HUD/3D requested - demo declares itself as 3D. Respecting it.')
+        # Explicit hud=True / mode='hud' on a 2D app - HUD makes no sense, ignore it.
+        # Don't force a 2D app into HUD. Just render 2D.
+        _debug_log('SCS HUD: hud requested on a 2D app (no 3D callbacks) - HUD only makes sense in 3D apps. Ignoring HUD, rendering 2D directly.')
+        _hud_requested = False
+        _hud_kind = 'texture'
     if _renderer_req in ('webgl2', 'webgl', 'webgpu', 'gpu', 'auto') and _is_3d_app:
         # Implicit HUD: 3D app + 3D renderer => HUD overlay automatically, no explicit mode needed.
         _hud_requested = True
@@ -2629,16 +2493,6 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
         r.on_error = _gpu_fail
         return  # loop starts from _gpu_ready
 
-    # DEBUG: log kind before creating main renderer. If this says 2d,
-    # the demo's renderer='webgl2' did not survive to here.
-    try:
-        _debug_log('SCS run_app kind=%s renderer_arg=%s hud_mode=%s hud_3d=%s' % (kind, str(renderer), str(_hud_mode), str(_hud_3d_kind)))
-    except Exception:
-        pass
-    # NO canvas replace. _ensure_canvas already returns HUD offscreen in HUD mode,
-    # so visible canvas never gets a 2d context, so getContext('webgl2') on
-    # the ORIGINAL canvas works. Replacing broke presentation + events and
-    # made ResizeCoordinator think canvas is zero-sized -> _frame early-return -> black.
     # webgl2 / 2d: explicit, no fallback. If create fails, FAIL.
     try:
         r = create_renderer(kind, _find_canvas(), width, height)
@@ -3325,7 +3179,7 @@ def exec_code(code, fn):
             print(_ns_msg)
             try:
                 from browser import window as _w3
-                pass  # was console.log - print already logged
+                _w3.console.log(_ns_msg)
             except Exception:
                 pass
             # What does `import scs` give RIGHT NOW?
@@ -3335,7 +3189,7 @@ def exec_code(code, fn):
                 _scs_msg = '[SCS] import scs runApp' + _scs_sig + ' scs module=' + str(getattr(_scs_now, '__name__', '?')) + ' is_ep=' + str(_scs_now is globals().get('_ep', None) or _scs_now is __import__('scs_entrypoint'))
                 print(_scs_msg)
                 try:
-                    pass  # was console.log - print already logged
+                    _w3.console.log(_scs_msg)
                 except Exception:
                     pass
             except Exception as _e_scs:
@@ -3350,7 +3204,7 @@ def exec_code(code, fn):
                 _first_msg = '[SCS] app code head: ' + _first
                 print(_first_msg)
                 try:
-                    pass  # was console.log - print already logged
+                    _w3.console.log(_first_msg)
                 except Exception:
                     pass
             except Exception:
@@ -3409,27 +3263,6 @@ def boot(app=None):
     boot("apps/myapp.py") - same, explicit path
     Binds events, loads the app, and starts it. Loop / events / renderer
     all live in the package, not in HTML."""
-    # Boot-once FIRST, before any log. DOM guard, not Python / window.
-    # Brython re-imports scs_entrypoint (via `from scs import *` in app)
-    # and re-executes top-level, wiping Python globals and window.SCS_BOOTED.
-    # DOM survives. If <div id="scs-booted"> exists, this is the 2nd boot in
-    # the SAME page load - return before anything runs.
-    try:
-        from browser import document as _doc_boot
-        try:
-            if _doc_boot.getElementById('scs-booted') is not None:
-                return
-            try:
-                _flag = _doc_boot.createElement('div')
-                _flag.id = 'scs-booted'
-                _flag.style.display = 'none'
-                _doc_boot.body.appendChild(_flag)
-            except Exception:
-                pass
-        except Exception:
-            pass
-    except Exception:
-        pass
     # Console proof at boot(): which runApp is actually in globals() RIGHT NOW.
     try:
         import inspect as _insp
@@ -3438,10 +3271,14 @@ def boot(app=None):
         except Exception:
             _sig = 'signature-unavailable'
         _boot_msg = '[SCS entrypoint] boot() version=' + __version__ + ' runApp' + _sig
-        print(_boot_msg)  # Brython print -> console, do NOT also console.log
+        print(_boot_msg)
+        try:
+            from browser import window as _w2
+            _w2.console.log(_boot_msg)
+        except Exception:
+            pass
     except Exception:
         pass
-    # (window guard already done at top - do not re-guard here)
     _bind_events()
     load(app)
 
