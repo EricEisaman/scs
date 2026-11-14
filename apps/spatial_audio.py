@@ -34,12 +34,36 @@ from scs_spatial_audio import SpatialAudioEngine
 from scs_3d import Camera3D
 import math as _math
 
-# App version - SEPARATE from entrypoint version. Logs don't lie: if this line
-# doesn't appear, the deployed app file is old, not the entrypoint.
-APP_VERSION = '2026-11-14-spatial-audio-v1-app-log'
+# --- Version logs: logs don't lie ---
+# Three versions, one line each, so you can tell which file is actually live:
+#   entrypoint = scs_entrypoint.py (__version__)
+#   renderer   = live renderer kind + capability + stats (0.1 + kind)
+#   app        = this file (APP_VERSION)
+APP_VERSION = '2026-11-14-spatial-audio-v2-3way-log'
 
-def _log_app_version(where):
-    _msg = '[SCS spatial_audio] version=' + APP_VERSION + ' where=' + where
+def _log_versions(where):
+    _ep_ver = 'unknown'
+    try:
+        import scs_entrypoint as _ep
+        _ep_ver = getattr(_ep, '__version__', 'unknown')
+    except Exception as _e_ep:
+        _ep_ver = 'import-failed:%r' % (_e_ep,)
+    _kind = 'unknown'
+    _cap = {}
+    _stats = {}
+    try:
+        _kind = getRendererKind()
+    except Exception as _e_k:
+        _kind = 'getRendererKind-failed:%r' % (_e_k,)
+    try:
+        _cap = getCapability()
+    except Exception:
+        _cap = {}
+    try:
+        _stats = getStats()
+    except Exception:
+        _stats = {}
+    _msg = '[SCS versions] where=%s entrypoint=%s renderer_version=0.1 renderer_kind=%s renderer_cap=%s renderer_stats=%s app=%s' % (where, _ep_ver, _kind, _cap, _stats, APP_VERSION)
     try:
         print(_msg)
     except Exception:
@@ -50,7 +74,7 @@ def _log_app_version(where):
     except Exception:
         pass
 
-_log_app_version('import')
+_log_versions('import')
 
 SPHERE_START = (0.0, 1.0, -2.0)   # radius 1 -> bottom touches the plane
 SPHERE_PRESETS = {
@@ -113,7 +137,7 @@ def _project(app, world):
 
 
 def onAppStart(app):
-    _log_app_version('onAppStart')
+    _log_versions('onAppStart')
     app.background = '#0e0e1a'
     app.camera = Camera3D(position=(0.0, 2.0, 6.0), yaw=0.0, pitch=-4.0)
     app.spatial = SpatialAudioEngine()
@@ -139,6 +163,10 @@ def onAppStart(app):
 
 def onStep(app):
     app.stepCount += 1
+    if app.stepCount == 1:
+        _log_versions('onStep-first-frame')
+    if app.stepCount == 60:
+        _log_versions('onStep-frame-60')
     if app.playing:
         app.pulse += 0.12
     # Sync listener + panner every step -- same camera drives view + audio.
@@ -383,7 +411,7 @@ def redrawAll(app):
 
 
 def main():
-    _log_app_version('main-before-runApp')
+    _log_versions('main-before-runApp')
     runApp(900, 560)
 
 
