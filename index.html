@@ -8,13 +8,13 @@ body{margin:0;padding:0;background:#0f1115;display:flex;flex-direction:column;al
 #canvas-container{border:2px solid #3a3f4b;border-radius:8px;background:#000;overflow:hidden;box-shadow:0 0 30px rgba(0,0,0,0.6);}
 canvas{display:block;background:black;outline:none;}
 </style>
-<script defer src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython_stdlib.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython_stdlib.js"></script>
 <script>window.SCS_CONFIG = window.SCS_CONFIG || {};</script>
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="icon" href="favicon.png">
 </head>
-<body onload="brython({debug:1, pythonpath:['.', 'scs']})">
+<body onload="brython({debug:1, pythonpath:['.', 'scs', '..', '../scs', '/', '/scs']})">
 <div id="toolbar">
 <label>Renderer <select id="renderer-select"><option value="auto">auto</option><option value="2d">2d</option><option value="webgl2">webgl2</option><option value="webgpu">webgpu</option></select></label>
 <button id="xr-btn">Enter XR</button>
@@ -26,7 +26,7 @@ canvas{display:block;background:black;outline:none;}
 // Toolbar only: reflect ?renderer= in the select. Renderer selection
 // itself lives in scs_entrypoint (_resolve_renderer_kind); changing
 // the select reloads with ?renderer=, it does not reimplement selection.
-(function(){try{var v=new URLSearchParams(window.location.search).get('renderer')||window.SCS_CONFIG.renderer||'auto';document.getElementById('renderer-select').value=v;}catch(e){}})();
+(function(){try{var q=new URLSearchParams(window.location.search);var v=q.get('renderer')||window.SCS_CONFIG.renderer||'auto';document.getElementById('renderer-select').value=v;var app=q.get('app')||'(default apps/app.py)';document.getElementById('scs-status').textContent='app='+app+' renderer='+v;}catch(e){}})();
 </script>
 <script type="text/python" id="main">
 # Thin shell only. No loop, no events, no renderer, no app loading here:
@@ -44,12 +44,16 @@ def _set_status(msg):
         pass
 
 def _on_renderer_change(ev):
-    # Reload with ?renderer= so the entrypoint resolves it once,
-    # in one place (explicit arg > ?renderer= > SCS_CONFIG > '2d').
+    # Reload with ?renderer= -- but PRESERVE every other param, above
+    # all ?app=. The old bug: rebuilding the query as '?renderer=...'
+    # dropped ?app=, so the URL param "disappeared" and the page fell
+    # back to apps/app.py. Build from the CURRENT search, change only
+    # the renderer key.
     try:
         val = document['renderer-select'].value or 'auto'
         p = window.URLSearchParams.new(window.location.search)
         p.set('renderer', val)
+        # Keep ?app= (and anything else) exactly as it was.
         window.location.search = '?' + p.toString()
     except Exception:
         pass
@@ -71,18 +75,10 @@ def _on_fullscreen(ev):
     except Exception as e:
         _set_status('Fullscreen unavailable: ' + str(e))
 
-_last_status = None
-
 def _refresh_status():
-    global _last_status
     try:
-        msg = (
-            'renderer=' + str(ep.getRendererKind()) +
-            ' xr=' + str(ep.getXRState())
-        )
-        if msg != _last_status:
-            _status.text = msg
-            _last_status = msg
+        _set_status('renderer=' + str(ep.getRendererKind()) +
+                    ' xr=' + str(ep.getXRState()))
     except Exception:
         pass
 

@@ -1,24 +1,37 @@
+# render.yaml -- Render STATIC deploy. Client only.
+#
+# Use this file when you want Render to serve the SCS frontend
+# with no server at all. Render serves index.html + scs_*.py +
+# apps/ as files. Brython fetches .py at runtime.
+#
+# What is NOT here on purpose:
+#   No Dockerfile, no PORT, no /healthz, no SESSION_SECRET,
+#   no CHAT_* env vars, no ALLOWED_ORIGINS. A static site has
+#   no server to read them. If you need chat / session / API,
+#   use render.docker.yaml instead.
+#
+# To deploy: Render -> New -> Blueprint -> pick this repo.
+# Blueprint file is render.yaml (the default).
+# For Docker instead, use Blueprint file render.docker.yaml.
+
 services:
   - type: web
-    name: scs-207
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    plan: starter
-    healthCheckPath: /healthz
+    name: scs-static
+    env: static
+    buildCommand: ""
+    staticPublishPath: ./
     autoDeploy: false
-    envVars:
-      - key: PYTHONUNBUFFERED
-        value: "1"
-      - key: PORT
-        value: "10000"
-      - key: ALLOWED_ORIGINS
-        value: "https://ericeisaman.github.io,https://scs-207.onrender.com,http://localhost:8000,https://scs-2qah.onrender.com"
-      - key: SESSION_SECRET
-        generateValue: true
-      - key: CHAT_UPSTREAM_URL
-        value: https://chat-slayer.onrender.com
-      - key: CHAT_PROXY_PREFIX
-        value: /chat-api
-      - key: CHAT_CLIENT_ID
-        value: web-demo
-
+    routes:
+      - type: rewrite
+        source: /sandbox
+        destination: /sandbox.html
+      - type: rewrite
+        source: /sandbox/
+        destination: /sandbox.html
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /*
+        name: Cache-Control
+        value: no-store

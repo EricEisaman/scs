@@ -43,6 +43,8 @@ except ImportError:  # CPython tests
     window = None
     timer = None
 
+from scs_3d import Camera3D
+
 __all__ = [
     'Rect', 'Oval', 'Circle', 'RegularPolygon', 'Star', 'Line', 'Polygon',
     'Arc', 'Label', 'Image', 'Group', 'Sound', 'App',
@@ -60,6 +62,8 @@ __all__ = [
     # adapters around the renderer, never inside render().
     'getAssetCache', 'getPrefs', 'getAudioEngine', 'getMediaAdapter',
     'getSerialAdapter', 'getUSBAdapter',
+    # 3D / spatial: Camera3D IS the audio listener.
+    'Camera3D', 'getSpatialAudioEngine',
 ]
 
 # ----------------------------------------------------------------------
@@ -1374,14 +1378,10 @@ class App:
         _clear_shapes()
 
 
-def runApp(width=400, height=400):
-    """Kept for `App(...)` + `runApp()` CMU shape. Real entry is run_app()
-    below, which runApp/run/loop all alias."""
-    run_app(width=width, height=height)
-
-
-def cmu_graphics_run(app=None, width=400, height=400):
-    run_app(width=width, height=height)
+def cmu_graphics_run(app=None, width=400, height=400, stepsPerSecond=30,
+                      renderer=None, canvas=None, **kwargs):
+    run_app(width=width, height=height, stepsPerSecond=stepsPerSecond,
+            renderer=renderer, canvas=canvas, **kwargs)
 
 
 # ----------------------------------------------------------------------
@@ -1880,6 +1880,12 @@ def getAudioEngine(context=None):
         return None
 
 
+def getSpatialAudioEngine(context=None):
+    """SpatialAudioEngine: AudioEngine + PannerNode listener/sources."""
+    from scs_spatial_audio import SpatialAudioEngine
+    return SpatialAudioEngine(context=context)
+
+
 def getMediaAdapter(kind='camera', source=None, **kw):
     """Media-source adapter: 'camera' (latest buffering), 'video'
     (element), or 'frames' (VideoFrame producer). The adapter is
@@ -2111,7 +2117,11 @@ def loadAudio(source, options=None):
     return loadAsset(source, kind='audio', options=options)
 
 
-# Aliases the user namespace expects.
+# Aliases the user namespace expects. runApp IS run_app -- not a
+# 2-arg wrapper. `from scs import *` re-binds runApp from this
+# module, so a wrapper here shadowed exec_code's correct runApp
+# and made runApp(stepsPerSecond=...) raise TypeError on Netlify.
+runApp = run_app
 run = run_app
 loop = run_app
 
@@ -2176,6 +2186,8 @@ def exec_code(code, fn):
     _user_ns['getAssetCache'] = getAssetCache
     _user_ns['getPrefs'] = getPrefs
     _user_ns['getAudioEngine'] = getAudioEngine
+    _user_ns['getSpatialAudioEngine'] = getSpatialAudioEngine
+    _user_ns['Camera3D'] = Camera3D
     _user_ns['getMediaAdapter'] = getMediaAdapter
     _user_ns['getSerialAdapter'] = getSerialAdapter
     _user_ns['getUSBAdapter'] = getUSBAdapter

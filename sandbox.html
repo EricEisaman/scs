@@ -13,13 +13,13 @@ button,select{background:#4c6ef5;color:white;border:0;padding:10px 18px;border-r
 select{background:#1a1d24;border:1px solid #3a3f4b;}
 #log{margin-top:10px;background:#1a1d24;border:1px solid #3a3f4b;border-radius:6px;padding:10px;min-height:80px;white-space:pre-wrap;font-size:11px;max-height:300px;overflow:auto;}
 </style>
-<script defer src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython_stdlib.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython_stdlib.js"></script>
 <script>window.SCS_CONFIG = window.SCS_CONFIG || {};</script>
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="icon" href="favicon.ico">
 </head>
-<body onload="brython({debug:1, pythonpath:['.', 'scs']})">
+<body onload="brython({debug:1, pythonpath:['.', 'scs', '..', '../scs', '/', '/scs']})">
 <div id="canvas-container"><canvas id="canvas" width="400" height="400" tabindex="0"></canvas></div>
 <div id="controls">
 <textarea id="code-input">from scs import *
@@ -109,6 +109,7 @@ document['renderer-select'].bind('change', on_renderer_change)
 # Events (mouse / keys / touch / resize) only -- no app loading.
 ep._bind_events()
 log('Sandbox ready. The graphics API is loaded from scs_entrypoint.py (via scs.py).')
+log('pythonpath covers . / scs / .. / ../scs / /scs -- scs_3d resolves from site root even when this page is /sandbox/.')
 </script>
 </body>
 </html>

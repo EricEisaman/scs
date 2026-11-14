@@ -1,0 +1,60 @@
+# netlify.toml -- SCS on Netlify, static only.
+#
+# No build. Brython fetches .py at runtime, so the deploy MUST serve
+# the .py files exactly as committed, with no caching and no query
+# stripping. Two rules that matter:
+#
+#   1. Rewrites are 200 only. A rewrite that changes the URL drops
+#      the query string, which is how ?app= "disappeared" and the
+#      page loaded apps/app.py instead. A 200 rewrite keeps the
+#      URL -- and ?app= -- intact.
+#   2. Existing files win over rewrites. Netlify serves a real file
+#      (index.html, scs_entrypoint.py, apps/*.py, scs_3d.py) before
+#      it applies /* below, so the SPA rewrite never shadows .py.
+#
+# Publish is the repo root: index.html, sandbox.html, scs_*.py,
+# apps/ all live here. Do NOT set publish to a subdir and do NOT
+# enable Pretty URLs -- /sandbox.html -> /sandbox would change what
+# '.' means for Brython's pythonpath.
+
+[build]
+  publish = "."
+  command = ""
+
+# /sandbox -> /sandbox.html. The sandbox page is sandbox.html at the
+# root. Specific rewrites come before the generic /* rewrite.
+[[redirects]]
+  from = "/sandbox"
+  to = "/sandbox.html"
+  status = 200
+
+[[redirects]]
+  from = "/sandbox/"
+  to = "/sandbox.html"
+  status = 200
+
+# SPA rewrite: any path that is not a real file serves index.html,
+# URL + query preserved. This is what makes /?app=spatial_audio work.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# .py is source, not a build artifact. Serve as text, never cache:
+# a cached scs_entrypoint.py is how the old runApp(stepsPerSecond)
+# TypeError survived a deploy. Same for .html shells.
+[[headers]]
+  for = "*.py"
+  [headers.values]
+    Content-Type = "text/plain; charset=utf-8"
+    Cache-Control = "no-store"
+
+[[headers]]
+  for = "*.html"
+  [headers.values]
+    Cache-Control = "no-store"
+
+[[headers]]
+  for = "/apps/*"
+  [headers.values]
+    Cache-Control = "no-store"
