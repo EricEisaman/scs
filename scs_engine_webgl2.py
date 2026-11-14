@@ -248,12 +248,12 @@ class WebGL2Engine:
             return
         if self.gl is None:
             self.error = 'WebGL2 not available (getContext returned null)'
+        else:
+            try:
+                print('SCS renderer version=0.1 mode=webgl2')
+            except Exception:
+                pass
             return
-        try:
-            print('SCS renderer version=0.1 mode=webgl2')
-        except Exception:
-            pass
-        # DO NOT return here - fall through to buffer/program creation below
         gl = self.gl
         try:
             self.program = self._compile(_VS, _FS)
@@ -328,10 +328,12 @@ class WebGL2Engine:
             metalness = 1.0 if metalness is None else metalness
             roughness = 0.08 if roughness is None else roughness
         if metalness is None:
-            # No material given: sphere = metal (the hero object). Boxes stay dielectric below.
-            metalness = 1.0
+            # No material given: sphere = PLASTIC (app's fill color), not chrome.
+            # Chrome is only via material='metal'/'chrome' or add_metal_sphere().
+            # Forcing metal=1.0 washed out blue / #ff5a5a / #ffd23a to chrome.
+            metalness = 0.0
         if roughness is None:
-            roughness = 0.14
+            roughness = 0.55
         self.scene.append({'kind': 'sphere',
                            'pos': (float(x), float(y), float(z)),
                            'scale': (float(radius),) * 3,
@@ -473,12 +475,35 @@ class WebGL2Engine:
                     return False
             except Exception:
                 return False
-            # Draw fullscreen quad with HUD texture - depth off, ortho
-            # The engine's 3D shader is for 3D meshes; for HUD we use a simple
-            # 2D textured quad via the same pipeline if available, else skip.
-            # For this engine, HUD is composited by the entrypoint's WebGL2 renderer
-            # (scs_webgl.draw_hud_canvas) - this method just uploads and reports success
-            # so the engine can be used standalone without the entrypoint.
+            # Draw fullscreen textured quad - depth off, HUD program
+            try:
+                if not hasattr(self, '_hud_prog') or self._hud_prog is None:
+                    _vs = "attribute vec2 a_p; attribute vec2 a_uv; varying vec2 v_uv; void main(){ v_uv=a_uv; gl_Position=vec4(a_p,0.0,1.0); }"
+                    _fs = "precision mediump float; uniform sampler2D u_tex; varying vec2 v_uv; void main(){ gl_FragColor=texture2D(u_tex, v_uv); }"
+                    _vs_o = gl.createShader(gl.VERTEX_SHADER); gl.shaderSource(_vs_o, _vs); gl.compileShader(_vs_o)
+                    _fs_o = gl.createShader(gl.FRAGMENT_SHADER); gl.shaderSource(_fs_o, _fs); gl.compileShader(_fs_o)
+                    _prog = gl.createProgram(); gl.attachShader(_prog, _vs_o); gl.attachShader(_prog, _fs_o); gl.linkProgram(_prog)
+                    self._hud_prog = _prog
+                    _buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, _buf)
+                    # Fullscreen quad: x,y, u,v - flip V (canvas top-left vs GL bottom-left)
+                    import array as _arr
+                    _verts = [-1.0,-1.0,0.0,1.0, 1.0,-1.0,1.0,1.0, -1.0,1.0,0.0,0.0, 1.0,1.0,1.0,0.0]
+                    gl.bufferData(gl.ARRAY_BUFFER, window.Float32Array.new(_verts), gl.STATIC_DRAW)
+                    self._hud_buf = _buf
+                gl.disable(gl.DEPTH_TEST)
+                gl.useProgram(self._hud_prog)
+                gl.bindBuffer(gl.ARRAY_BUFFER, self._hud_buf)
+                _ap = gl.getAttribLocation(self._hud_prog, 'a_p')
+                _au = gl.getAttribLocation(self._hud_prog, 'a_uv')
+                gl.enableVertexAttribArray(_ap); gl.vertexAttribPointer(_ap, 2, gl.FLOAT, False, 16, 0)
+                gl.enableVertexAttribArray(_au); gl.vertexAttribPointer(_au, 2, gl.FLOAT, False, 16, 8)
+                gl.activeTexture(gl.TEXTURE0)
+                gl.bindTexture(gl.TEXTURE_2D, tex)
+                gl.uniform1i(gl.getUniformLocation(self._hud_prog, 'u_tex'), 0)
+                gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+                gl.enable(gl.DEPTH_TEST)
+            except Exception:
+                pass
             return True
         except Exception:
             return False
