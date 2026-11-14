@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-FIXED-v33-single-log-no-blackscreen'
+__version__ = '2026-11-14-FIXED-v34-hud-offscreen-sync'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -473,17 +473,29 @@ def _get_hud_offscreen(width, height):
         w, h = int(width), int(height)
     except Exception:
         w, h = 400, 400
-    _br = _budgeted_ratio()
+    # v34: offscreen size is CSS size * DPR at creation. Do NOT recreate
+    # just because the budgeted DPR wobbled (1.0 -> 0.5) - that was recreating
+    # the canvas every few frames and desyncing the HUD renderer.
+    # Only recreate if CSS size changed.
     if _hud_offscreen is not None:
         try:
-            if int(_hud_offscreen.width) == int(w * _br) and int(_hud_offscreen.height) == int(h * _br):
+            # Compare against stored CSS size, not budgeted size.
+            _ow = getattr(_hud_offscreen, '_scs_css_w', None)
+            _oh = getattr(_hud_offscreen, '_scs_css_h', None)
+            if _ow == w and _oh == h:
                 return _hud_offscreen
         except Exception:
             pass
+    _br = _budgeted_ratio()
     try:
         c = document.createElement('canvas')
         c.width = int(w * _br)
         c.height = int(h * _br)
+        try:
+            c._scs_css_w = w
+            c._scs_css_h = h
+        except Exception:
+            pass
         try:
             c.style.width = '%dpx' % w
             c.style.height = '%dpx' % h
@@ -2685,16 +2697,34 @@ def _render_one_view(view, renderer=None):
                         break
                 if _has_hud:
                     global _hud_offscreen, _hud_2d_renderer
-                    if _hud_offscreen is None:
-                        try:
-                            _get_hud_offscreen(_canvas_width, _canvas_height)
-                        except Exception:
-                            pass
+                    # v34: HUD offscreen / renderer MUST stay in sync.
+                    # _get_hud_offscreen recreates the canvas when CSS size or
+                    # budgeted DPR changes. Old code kept the old 2D renderer,
+                    # which still drew to the OLD (detached) offscreen - HUD
+                    # briefly showed, then went into the off-canvas behind.
+                    # Fix: if the offscreen changed, recreate the renderer.
+                    _prev_off = _hud_offscreen
+                    try:
+                        _get_hud_offscreen(_canvas_width, _canvas_height)
+                    except Exception:
+                        pass
+                    if _hud_offscreen is not None and _hud_offscreen is not _prev_off:
+                        _hud_2d_renderer = None
                     if _hud_2d_renderer is None and _hud_offscreen is not None:
                         try:
                             _hud_2d_renderer = create_renderer('2d', _hud_offscreen, _canvas_width, _canvas_height)
                         except Exception:
                             _hud_2d_renderer = None
+                    # Safety: renderer must draw to the CURRENT offscreen,
+                    # not a stale one. If it does not, recreate it.
+                    try:
+                        _rc = getattr(_hud_2d_renderer, 'canvas', None) if _hud_2d_renderer is not None else None
+                        if _rc is None:
+                            _rc = getattr(_hud_2d_renderer, '_canvas', None) if _hud_2d_renderer is not None else None
+                        if _rc is not None and _hud_offscreen is not None and _rc is not _hud_offscreen:
+                            _hud_2d_renderer = create_renderer('2d', _hud_offscreen, _canvas_width, _canvas_height)
+                    except Exception:
+                        pass
                     if _hud_2d_renderer is not None:
                         _hud_2d_renderer.begin_frame('rgba(0,0,0,0)')
                         for s in list(_shapes):
