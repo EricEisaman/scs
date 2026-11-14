@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-FIXED-v24-cloudy-spatial-2d-bug'
+__version__ = '2026-11-14-FIXED-v25-webgl2-3d-engine'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -649,6 +649,20 @@ def create_renderer(kind, canvas, width, height):
     if kind in ('2d', 'canvas', 'canvas2d'):
         return _import_renderer_module('scs_2d')(canvas, width, height)
     if kind in ('webgl', 'webgl2', 'webgl-2'):
+        # FIX v25: 'webgl2' means the 3D engine (kind webgl2-3d), NOT the 2D
+        # tessellator in scs_webgl.py. The 3D path in _render_one_view only
+        # runs when kind == 'webgl2-3d'. Try the engine first; if its
+        # getContext(webgl2) fails (e.g. canvas already has 2d), fall back
+        # to the 2D tessellator so 2D apps still work.
+        try:
+            from scs_engine_webgl2 import WebGL2Engine
+            _eng = WebGL2Engine(canvas=canvas, width=width, height=height)
+            if getattr(_eng, 'error', None) is None and getattr(_eng, 'gl', None) is not None:
+                return _eng
+            # Engine failed - fall through to tessellator
+            _debug_log('SCS renderer webgl2 engine failed (%s) - using 2D tessellator' % (getattr(_eng, 'error', 'unknown'),))
+        except Exception as _e_eng:
+            _debug_log('SCS renderer webgl2 engine import failed (%r) - using 2D tessellator' % (_e_eng,))
         return _import_renderer_module('scs_webgl')(canvas, width, height)
     if kind in ('webgpu', 'gpu'):
         return _import_renderer_module('scs_webgpu')(canvas, width, height)
@@ -673,6 +687,12 @@ def _activate_renderer(renderer, kind):
     global _renderer, _renderer_kind, _ctx
     _renderer = renderer
     _renderer_kind = kind
+    # FIX v25: log the real kind. Old code never logged here, so the only
+    # 'SCS renderer version=0.1 mode=...' line came from a cached old file.
+    try:
+        _debug_log('SCS renderer version=0.1 mode=%s' % (kind,))
+    except Exception:
+        pass
     if kind == '2d' and renderer is not None:
         _ctx = getattr(renderer, 'ctx', None)
     else:
@@ -680,17 +700,14 @@ def _activate_renderer(renderer, kind):
 
 
 def _ensure_canvas():
+    # FIX v25: do NOT create a 2d renderer here. getContext('2d') on the visible
+    # canvas permanently blocks getContext('webgl2') on the same canvas (browser
+    # rule: one canvas = one context type). The old code created 2d first, so
+    # every later webgl2 request got null and fell back to 2d. Just return canvas.
     global _canvas
     canvas = _find_canvas()
     if canvas is None:
         return None
-    if _renderer is None:
-        _size_canvas(_canvas_width, _canvas_height)
-        try:
-            r = create_renderer('2d', canvas, _canvas_width, _canvas_height)
-            _activate_renderer(r, '2d')
-        except Exception:
-            pass
     return canvas
 
 
@@ -1468,6 +1485,9 @@ class Group:
 # ----------------------------------------------------------------------
 
 def _renderer_or_2d():
+    # FIX v25: do NOT auto-create a 2d renderer here. _ensure_canvas used to
+    # create 2d and steal the canvas. Now it just returns the canvas, so
+    # returning _renderer (possibly None) is correct - run_app creates it.
     if _renderer is None:
         _ensure_canvas()
     return _renderer
