@@ -249,8 +249,12 @@ class WebGL2Engine:
         if self.gl is None:
             self.error = 'WebGL2 not available (getContext returned null)'
             return
+        try:
+            print('SCS renderer version=0.1 mode=webgl2')
+        except Exception:
+            pass
+        # DO NOT return here - fall through to buffer/program creation below
         gl = self.gl
-        print('SCS renderer version=0.1 mode=webgl2')
         try:
             self.program = self._compile(_VS, _FS)
             self._buf_v = gl.createBuffer()
