@@ -31,7 +31,7 @@ class Renderer2D:
         try:
             # v29: deliberate resolution budget - cap at 2x, not unrestricted native DPR.
             # Backing = CSS * budgeted ratio. begin_frame uses this for its absolute transform.
-            self.dpr = min(float(window.devicePixelRatio or 1.0), 2.0)
+            self.dpr = 1.0  # v38: no DPR scaling
         except Exception:
             pass
         self.ctx = None
@@ -52,7 +52,7 @@ class Renderer2D:
         # at the wrong scale (fetch_demo = black / stretched).
         self.width, self.height = int(width), int(height)
         try:
-            self.dpr = min(float(window.devicePixelRatio or 1.0), 2.0) if window is not None else 1.0
+            self.dpr = 1.0  # v38: no DPR scaling if window is not None else 1.0
         except Exception:
             pass
         try:
@@ -66,15 +66,8 @@ class Renderer2D:
 
     def begin_frame(self, background):
         ctx = self.ctx
-        # v35: if backing store drifted (entrypoint resized canvas), re-sync.
-        try:
-            _bw, _bh = int(self.width * self.dpr), int(self.height * self.dpr)
-            if int(self.canvas.width) != _bw or int(self.canvas.height) != _bh:
-                self.canvas.width = _bw
-                self.canvas.height = _bh
-        except Exception:
-            pass
-        ctx.setTransform(self.dpr, 0, 0, self.dpr, 0, 0)
+        # v38: NEVER resize canvas in begin_frame. runApp size is fixed.
+        ctx.setTransform(1, 0, 0, 1, 0, 0)  # v38: dpr=1
         ctx.clearRect(0, 0, self.width, self.height)
         if background is not None:
             if isinstance(background, dict) and background.get('_is_grad'):
