@@ -627,3 +627,116 @@ class SplatAssetLoader:
         chunk.residency = 'downloaded'
         self._ready.add('monolithic')
         return [chunk]
+
+
+# [STRIPPED 70 bytes]
+# BATCH 3: DISK vs GPU SEPARATION -- renderer is GPU-only.
+# [STRIPPED 70 bytes]
+#   DISK (scs_splat_formats.py) -> SplatData -> GPU (scs_splat_gpu.py) -> RENDERER (this file)
+# The renderer below NEVER parses disk bytes. If you see a call to
+# parse_ply / parse_spz / parse_splat in this file, that is a bug --
+# disk parsing lives in scs_splat_formats.py only.
+# New disk format (RAD, ...): register_format() in scs_splat_formats.py.
+# Renderer + GPU layout do NOT change.
+# [STRIPPED 70 bytes]
+
+try:
+    from scs_splat_formats import (
+        SplatData as _SplatData, parse_file as _parse_file,
+        parse_sog_manifest as _parse_sog_manifest,
+        SOGManifest as _SOGManifest,
+        register_format as _register_format,
+    )
+    from scs_splat_gpu import pack_gpu as _pack_gpu, SplatGPUBuffer as _SplatGPUBuffer
+    _HAS_SPLIT = True
+except Exception:
+    _HAS_SPLIT = False
+    _SplatData = None
+
+def _ensure_split():
+    if not _HAS_SPLIT:
+        raise RuntimeError('scs_splat_formats / scs_splat_gpu are required for the disk/GPU split')
+
+# -- New asset constructors (GPU-only path) --
+def _asset_from_splat_data(splat_data, name=''):
+    """SplatData -> SplatAsset with a GPU buffer. The ONLY way to make
+    an asset from parsed data. Disk -> SplatData happens in formats."""
+    _ensure_split()
+    gpu = _pack_gpu(splat_data)
+    # Build a minimal asset using the existing SplatAsset API.
+    # SplatAsset.__init__ signature: (schema, name=...) -- check at runtime.
+    try:
+        from scs_splats import SplatSchema as _Schema
+    except Exception:
+        _Schema = None
+    # Use the module's own SplatAsset (defined above) -- construct via __new__
+    # to avoid signature churn, then fill fields the renderer reads.
+    asset = SplatAsset.__new__(SplatAsset)
+    asset.name = name or getattr(splat_data, 'name', '') or 'splat'
+    asset.schema = _Schema(version=1, sh_degree=getattr(splat_data, 'sh_degree', 0)) if _Schema else None
+    asset.gpu_buffer = gpu
+    asset.splat_data = splat_data
+    asset.chunks = []
+    asset._positions = list(splat_data.positions)
+    # The renderer reads asset.chunks / asset._positions in older paths;
+    # give it one chunk that carries the GPU buffer.
+    try:
+        ch = SplatChunk('chunk-0', bounds=None, level=0, byte_range=(0, len(gpu.data)))
+        ch.count = gpu.count
+        ch.gpu_buffer = gpu
+        ch.residency = 'downloaded'
+        asset.chunks = [ch]
+    except Exception:
+        pass
+    return asset
+
+def _asset_from_file_bytes(data, format_hint='', name=''):
+    """Disk bytes -> SplatData (formats) -> GPU (gpu) -> Asset (renderer).
+    This is the ONLY disk entry point. The renderer never parses disk."""
+    _ensure_split()
+    splat_data = _parse_file(data, format_hint=format_hint)
+    splat_data.name = name or splat_data.name
+    return _asset_from_splat_data(splat_data, name=name)
+
+# Attach as classmethods on SplatAsset (so existing code can call them)
+try:
+    SplatAsset.from_splat_data = staticmethod(_asset_from_splat_data)
+    SplatAsset.from_file_bytes = staticmethod(_asset_from_file_bytes)
+    SplatAsset.from_disk = staticmethod(_asset_from_file_bytes)
+except Exception:
+    pass
+
+# -- Streaming: SOG manifest + chunk loading, via formats+gpu --
+class SOGStreamer:
+    """Stream a SOG asset: manifest first (coarse), then chunks by LOD/distance.
+    Each chunk: disk bytes -> SplatData (formats) -> GPU (gpu) -> asset chunk.
+    The renderer only ever sees GPU buffers."""
+    def __init__(self, fetcher=None):
+        self.fetcher = fetcher  # (chunk_id, byte_range) -> bytes, or None
+        self.manifest = None
+        self.loaded = {}  # chunk_id -> SplatAsset chunk
+    def load_manifest(self, manifest_bytes):
+        _ensure_split()
+        self.manifest = _parse_sog_manifest(manifest_bytes)
+        return self.manifest
+    def load_chunk(self, chunk_id, chunk_bytes, sh_degree=0):
+        """Chunk disk bytes -> SplatData -> GPU -> asset chunk."""
+        _ensure_split()
+        from scs_splat_formats import parse_sog_chunk as _parse_sog_chunk
+        sd = _parse_sog_chunk(chunk_bytes, sh_degree=sh_degree or (self.manifest.sh_degree if self.manifest else 0))
+        gpu = _pack_gpu(sd)
+        ch = SplatChunk(chunk_id, bounds=None, level=0, byte_range=(0, len(gpu.data)))
+        ch.count = gpu.count
+        ch.gpu_buffer = gpu
+        ch.residency = 'downloaded'
+        self.loaded[chunk_id] = ch
+        return ch
+    def coarse_first(self):
+        """Return the coarse chunk id (load this first for partial readiness)."""
+        if self.manifest is None:
+            return None
+        c = self.manifest.coarse_chunk()
+        return c.get('id') if c else None
+    def describe(self):
+        return {'manifest': self.manifest.describe() if self.manifest else None,
+                'loaded': sorted(self.loaded.keys())}
