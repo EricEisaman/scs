@@ -82,8 +82,6 @@ def onAppStart(app):
     app.background = '#0e0e1a'
     app.camera = Camera3D(position=(0.0, 2.0, 6.0), yaw=0.0, pitch=-4.0)
     app.spatial = SpatialAudioEngine()
-    # CLOUDY SKY ENV: spheres reflect a cloudy overcast sky (see scs_engine_webgl2_CLOUDY.py cloudySky()).
-    # No black background, no fake softboxes. Cloudy sky IS the light.
     app.sphere_pos = SPHERE_START
     app.envelope = 'pad'
     app.use_pipeline = True
@@ -103,7 +101,6 @@ def onAppStart(app):
     app.pulse = 0.0
     app.stepCount = 0
     app.balls = [
-        # Decorative ONLY - not sound sources. Separated in X AND Z so red/green never touch.
         {'x': -6.0, 'z': -3.0, 'r': 0.60, 'y': 3.0, 'vy': 0.0, 'color': '#B87333', 'defect': 0.72, 'corrosion': 0.0, 'name': 'Copper'},
         {'x': 0.0, 'z': 4.0, 'r': 0.50, 'y': 4.5, 'vy': 0.0, 'color': '#C9A227', 'defect': 0.68, 'corrosion': 0.0, 'name': 'Brass'},
         {'x': 6.0, 'z': -3.0, 'r': 0.70, 'y': 2.2, 'vy': 0.0, 'color': '#B87333', 'defect': 0.82, 'corrosion': 1.0, 'name': 'Copper-Patina'},
@@ -114,59 +111,57 @@ def onAppStart(app):
                          20, 18, fill='#FFD700', size=18, bold=True,
                          align='left-top')
     app.hudHelp = Label('WASD move | Q down | Shift sprint | Drag / Arrows look | Space play | E envelope | P pipeline',
-                        20, 42, fill='#FFD700', size=12, align='left-top')
-    app.hudDist = Label('', 880, 42, fill='#FFD700', size=12, align='right-top')
-    app.hudSourceLegend = Label('GOLD = SOUND SOURCE  |  Red/Yellow/Green = bouncing decoys (no sound)', 20, 64, fill='#FFD700', size=12, bold=True, align='left-top')
+                        20, 42, fill='#a0a0c0', size=12, align='left-top')
+    app.hudDist = Label('', 880, 42, fill='#ffd97a', size=12,
                         align='right-top')
+    app.hudSourceLegend = Label('GOLD = SOUND SOURCE  |  Red/Yellow/Green = bouncing decoys (no sound)', 20, 64, fill='#FFD700', size=12, bold=True, align='left-top')
     app.statusBar = Rect(40, 430, 820, 32, fill='#26263a', roundness=6,
                          align='left-top')
-    app.statusLabel = Label(app.status, 56, 446, fill='#FFD700', size=13,
+    app.statusLabel = Label(app.status, 56, 446, fill='#ffd97a', size=13,
                             align='left-top')
     app.playBtn = Rect(PLAY_BTN[0], PLAY_BTN[1], PLAY_BTN[2], PLAY_BTN[3],
                        fill='#22aa66', roundness=8, align='left-top')
     app.playLabel = Label('PLAY', PLAY_BTN[0] + 80, PLAY_BTN[1] + 22,
-                          fill='#FFD700', size=15, bold=True, align='center')
+                          fill='white', size=15, bold=True, align='center')
     app.stopBtn = Rect(STOP_BTN[0], STOP_BTN[1], STOP_BTN[2], STOP_BTN[3],
                        fill='#cc3344', roundness=8, align='left-top')
     app.stopLabel = Label('STOP', STOP_BTN[0] + 60, STOP_BTN[1] + 22,
-                          fill='#FFD700', size=15, bold=True, align='center')
+                          fill='white', size=15, bold=True, align='center')
     app.centerBtn = Rect(CENTER_BTN[0], CENTER_BTN[1], CENTER_BTN[2], CENTER_BTN[3],
                          fill='#2e2e4a', roundness=8, align='left-top')
     app.centerLabel = Label('CENTRE SPHERE (C)', CENTER_BTN[0] + 100, CENTER_BTN[1] + 22,
-                            fill='#FFD700', size=13, bold=True, align='center')
+                            fill='white', size=13, bold=True, align='center')
     app.modeBtn = Rect(MODE_BTN[0], MODE_BTN[1], MODE_BTN[2], MODE_BTN[3],
                        fill='#2e2e4a', roundness=8, align='left-top')
     app.modeLabel = Label('MODE: PIPELINE (P)', MODE_BTN[0] + 80, MODE_BTN[1] + 22,
-                          fill='#FFD700', size=11, bold=True, align='center')
+                          fill='white', size=11, bold=True, align='center')
     app.miniMap = Rect(740, 70, 120, 120, fill='#111128', roundness=6,
                        align='left-top')
-    app.miniMapTitle = Label('TOP-DOWN  40m', 800, 80, fill='#FFD700', size=10,
+    app.miniMapTitle = Label('TOP-DOWN  40m', 800, 80, fill='#8888aa', size=10,
                              align='center')
-    app.miniSphere = Circle(800, 120, 7, fill='#FFD700', border='white', borderWidth=1)
+    app.miniSphere = Circle(800, 120, 6, fill='blue', border='white', borderWidth=1)
     app.miniCam = Circle(800, 120, 4, fill='white')
     app.miniArrow = Line(800, 120, 800, 106, fill='white', lineWidth=2)
-    app.readout = Label('', 40, 530, fill='#FFD700', size=12,
+    app.readout = Label('', 40, 530, fill='#a0a0c0', size=12,
                         align='left-top')
     # ---- World shapes: in the 3D world ----
     # World: centerZ set = 3D. HUD above has NO centerZ = HUD. That is the whole rule.
     app.sphereShadow = Oval(450, 280, 70, 14, fill='black', centerZ=0.02)
-    # SOUND SOURCE: damaged GOLD metal. Gold does NOT corrode (corrosionEnabled=0), defect 0.45 = scratches + pits, no orange rust.
-    app.sphere = Circle(0, 1, 1.2, fill='#B87333', border='white', borderWidth=3, centerZ=-2.0)  # TARGET: patina copper, not flat gold
-    app.sphere.defectLevel = 0.80  # TARGET: heavy patina + scratches + pits, like reference image
-    app.sphere.corrosionEnabled = 1.0  # TARGET: patina + rust are corrosion, not gold
+    # TARGET: patina copper, not flat blue/gold. Cloudy sky is the light (see CLOUDY engine).
+    app.sphere = Circle(0, 1, 1.2, fill='#B87333', border='white', borderWidth=3, centerZ=-2.0)
+    app.sphere.defectLevel = 0.80
+    app.sphere.corrosionEnabled = 1.0
     app.sphere.metalness = 1.0
-    app.sphere.roughness = 0.28  # TARGET: polished metal where clean, rough where patinated
-    app.sphereHighlight = Circle(435, 265, 14, fill='white', centerZ=-2.0)
-    app.sphereLabel = Label('SOUND SOURCE - 440 Hz - DAMAGED COPPER', 450, 340, fill='#FFD700', size=16, bold=True,
+    app.sphere.roughness = 0.28
+    app.sphereHighlight = Circle(435, 265, 12, fill='#88aaff', centerZ=-2.0)
+    app.sphereLabel = Label('SOUND SOURCE - 440 Hz - DAMAGED COPPER', 450, 340, fill='#FFD700', size=11, bold=True,
                             align='center', centerZ=-2.0)
-    app.sourceFloorMarker = Oval(450, 280, 90, 18, fill=None, border='#FFD700', borderWidth=3, centerZ=0.02)
     app.ballBodies = []
     app.ballHighlights = []
     for b in app.balls:
         app.ballBodies.append(Oval(0, 1, b['r']*2, b['r']*2, fill=b['color'],
                                     border='white', borderWidth=1, centerZ=b['z']))
         app.ballHighlights.append(Circle(435, 265, 10, fill='white', centerZ=b['z']))
-        # Damaged metal: store per-sphere defect on the shape so entrypoint -> engine can read it
         app.ballBodies[-1].defectLevel = b.get('defect', 0.55)
         app.ballBodies[-1].corrosionEnabled = b.get('corrosion', 0.0)
         app.ballBodies[-1].metalness = 1.0
@@ -362,18 +357,8 @@ def _update_world(app):
     app.sphereHighlight.centerY = sy + 0.3
     app.sphereHighlight.centerZ = sz
     app.sphereLabel.centerX = sx
-    app.sphereLabel.centerY = sy + 1.6
+    app.sphereLabel.centerY = sy + 1.2
     app.sphereLabel.centerZ = sz
-    # Floor marker + drop line follow source - always show where it is on the floor
-    app.sourceFloorMarker.centerX = sx
-    app.sourceFloorMarker.centerY = 0.02
-    app.sourceFloorMarker.centerZ = sz
-    app.sourceFloorMarker.visible = True
-    app.sourceDropLine.x1, app.sourceDropLine.y1 = sx, sy - 0.5
-    app.sourceDropLine.x2, app.sourceDropLine.y2 = sx, 0.02
-    # Drop line needs centerZ to be treated as 3D - use sphere's Z
-    app.sourceDropLine.centerZ = sz
-    app.sourceDropLine.visible = True
     app.sphere.visible = True
     app.sphereHighlight.visible = True
     app.sphereLabel.visible = True
