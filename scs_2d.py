@@ -29,7 +29,9 @@ class Renderer2D:
         self.height = height
         self.dpr = 1.0
         try:
-            self.dpr = float(window.devicePixelRatio or 1.0)
+            # v29: deliberate resolution budget - cap at 2x, not unrestricted native DPR.
+            # Backing = CSS * budgeted ratio. begin_frame uses this for its absolute transform.
+            self.dpr = min(float(window.devicePixelRatio or 1.0), 2.0)
         except Exception:
             pass
         self.ctx = None
@@ -39,7 +41,6 @@ class Renderer2D:
             self.ctx = None
         if self.ctx is None:
             raise RuntimeError('Canvas 2D context not available')
-        print('SCS renderer version=0.1 mode=2d')
         self._alpha_stack = [1.0]
         self._image_cache = {}
 
