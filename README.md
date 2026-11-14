@@ -1,13 +1,13 @@
-![SCS : Scientific Computing System](scs.jpg)
+[SCS : Scientific Computing System](scs.jpg)
 
 # SCS : Scientific Computing System
 
 > A fast, faithful, Brython-powered implementation of the **CMU Graphics** API that runs in the browser. No server-side Python backend is required; scientific-computing labs load Pyodide and SciPy in a Web Worker when needed.
 
-[![Brython](https://img.shields.io/badge/Brython-3.11.3-blue)](https://brython.info/)
-[![CMU Graphics](https://img.shields.io/badge/API-CMU%20Graphics-red)](https://academy.cs.cmu.edu/)
-[![License](https://img.shields.io/badge/license-MIT-black)](LICENSE)
-[![Apps](https://img.shields.io/badge/apps-13-green)](#apps-included)
+[[Brython](https://img.shields.io/badge/Brython-3.11.3-blue)](https://brython.info/)
+[[CMU Graphics](https://img.shields.io/badge/API-CMU%20Graphics-red)](https://academy.cs.cmu.edu/)
+[[License](https://img.shields.io/badge/license-MIT-black)](LICENSE)
+[[Apps](https://img.shields.io/badge/apps-19-green)](#apps-included)
 
 Live demo:
 <a href="https://ericeisaman.github.io/scs/" target="_blank" rel="noopener noreferrer">
@@ -31,6 +31,45 @@ Sandbox: <code>/sandbox/</code> →
 
 ---
 
+## Multi-Renderer: 2D Canvas, WebGL2, WebGPU, and WebXR
+
+SCS is now SCS API-compatible across renderers. The same CMU Graphics app code runs on a 2D canvas context, WebGL2, or WebGPU, depending on initialization. `scs_entrypoint.py` handles all user choices.
+
+```python
+run_app(renderer='2d')      # 2D canvas context
+run_app(renderer='webgl2')  # WebGL2
+run_app(renderer='webgpu')  # WebGPU (async init, auto fallback)
+run_app(renderer='auto')    # WebGPU -> WebGL2 -> 2D
+```
+
+Other ways to choose:
+
+```
+?app=rabbit_sim&renderer=webgpu   # URL param
+SCS.create({renderer: 'webgpu'})  # JS / CDN loader
+setRenderer('webgl2')             # switch at runtime where supported
+```
+
+| Choice | Renderer | Notes |
+| --- | --- | --- |
+| `2d` | 2D canvas context | Original path, `_ctx` is the 2D context |
+| `webgl2` | WebGL2 | Same API, GPU raster path |
+| `webgpu` | WebGPU | Same API, async init, falls back on failure |
+| `auto` | Best available | WebGPU → WebGL2 → 2D |
+
+WebXR is handled separately, not as a fourth renderer:
+
+```python
+startXR(mode='immersive-vr')  # enter XR
+renderFrame(frameContext)     # externally-driven XR loop
+stopXR()                      # exit XR
+getXRState() / getXRCapability()
+```
+
+See `docs/ARCHITECTURE_XR.md` for the XR loop, `FrameContext`, lifecycle, and semantic actions (`select` / `squeeze`, not mouse).
+
+---
+
 ## New Interactive Labs
 
 SCS now pairs its CMU Graphics runtime with focused visual and scientific-computing experiences:
@@ -51,10 +90,71 @@ SCS is a drop-in browser runtime for CMU Graphics / `cmu_graphics` coursework. Y
 This repo includes:
 
 - **`scs.py`**: the full API shim (`Rect`, `Oval`, `Circle`, `Label`, `Line`, `Polygon`, `Group`, `Image`, `Sound`, `draw*`, `rgb()`, `gradient()`, `distance()`, `angleTo()`, etc.) with **align as a true general property**
+- **`scs_entrypoint.py`**: multi-renderer entrypoint — 2D / WebGL2 / WebGPU selection, auto fallback, event handlers, and boilerplate from `index.html`
+- **`scs/`**: renderer and subsystem modules — see [SCS modules](#scs-modules) below
 - **`index.html`**: production viewer. Loads apps from `apps/` via URL param `?app=`, with auto-start and a `window.fetch` loader
 - **`sandbox.html`**: live editor. Edit code in a textarea and hit Run. It also auto-starts
 - **`extensions/`**: **NEW: SCS Extensions System**, pure Model-layer libraries that bring the browser to your CMU app
 - **`apps/`**: all runnable apps. No root duplication.
+
+---
+
+## SCS Modules
+
+All new modules live under `scs/` in the repository. Docs live under `docs/`.
+
+| Module | What it is | Doc |
+| --- | --- | --- |
+| `scs/scs_presentation.py` | Fullscreen / presentation as an async presentation mode, not a canvas resize | `docs/ARCHITECTURE_PRESENTATION.md` |
+| `scs/scs_controller.py` | Gamepad / controller — gameplay depends on buttons, axes, capabilities, never on USB vs Bluetooth transport | `docs/ARCHITECTURE_CONTROLLER.md` |
+| `scs/scs_loader.py` | Asset loader (GLB / audio / textures) — source data, decoded assets, mutable instances, and backend resources are four distinct things | `docs/ARCHITECTURE_LOADER.md` |
+| `scs/scs_splats.py` | 3D Gaussian splats as a first-class rendering primitive, not a mesh-loader special case | `docs/ARCHITECTURE_SPLATS.md` |
+| `scs/scs_storage.py` | Storage / persistence layer | `docs/ARCHITECTURE_INTEGRATIONS.md` |
+| `scs/scs_wasm.py` | WASM interop layer | `docs/ARCHITECTURE_INTEGRATIONS.md` |
+| `scs/scs_audio.py` | Audio subsystem | `docs/ARCHITECTURE_INTEGRATIONS.md` |
+| `scs/scs_media.py` | Media subsystem | `docs/ARCHITECTURE_INTEGRATIONS.md` |
+| `scs/scs_serial.py` | Serial subsystem | `docs/ARCHITECTURE_INTEGRATIONS.md` |
+| `scs/scs_xr.py` | WebXR — externally-driven loop, `FrameContext`, lifecycle | `docs/ARCHITECTURE_XR.md` |
+
+Entrypoint surface (all in `scs_entrypoint.py`):
+
+```python
+# Renderers
+run_app(renderer='2d' | 'webgl2' | 'webgpu' | 'auto')
+setRenderer('webgpu')
+# XR
+startXR(), stopXR(), renderFrame(frameContext), getXRState(), getXRCapability()
+# Presentation / controller / loader / splats
+enterFullscreen(), getControllerManager(), getAssetLoader(), loadAsset()
+getSplatRenderer(), createSplatSchema(), createSplatAsset(), loadSplatManifest()
+```
+
+### Splats: first-class primitive
+
+Splats get their own projection + ordering pipeline, schema, chunk / LOD / residency machinery, and appearance model — behind the same boundary for WebGL (raster) and WebGPU (compute-assisted):
+
+- **Custom passes**, not just mesh draw calls — shared cameras, transforms, lighting inputs, and opaque-scene depth.
+- **Versioned logical schema** ≠ packed GPU layout — position, scale/rotation or covariance, opacity, variable-degree SH, optional normals / material / lighting-transfer / custom attributes, chunk-local quantization metadata. No JS object per Gaussian.
+- **Sorting / transparency as an explicit service** — replaceable ordering stage, across interacting splat objects, with validity info. Static attribute buffers are separate from the visible/sorted index list.
+- **Multi-view preparation** — scene-wide work once, view-dependent work per view. One eye's ordering is never assumed sufficient for the other.
+- **Chunked assets** — manifest + coarse chunk first, fetch by id / byte range, decode independently, cancel / reprioritize, partial readiness, monolithic fallback.
+- **Hierarchical LOD as representation** — bounds, parent/child, approximation error, payload refs. Coarse parents stand in while children load. Never "first N splats".
+- **Residency ≠ scene membership** — separate accounting/budgets for downloaded / decoded / GPU / sorting / pending work. Stable chunk handles with generation checks, never raw GPU offsets.
+- **Captured radiance ≠ intrinsic material** — modes: `captured-radiance`, `artistic-adjustment`, `relightable-material`, `precomputed-lighting-variant`. SH coefficients are never labeled "albedo".
+- **Aligned proxy geometry** — per-role proxies (`relighting` / `collision` / `shadow` / `occlusion` / `picking` / `radiance-transfer`) in the same coordinate system. A collision proxy is not automatically an adequate relighting proxy.
+- **Appearance updates independent of geometry/LOD** — replace appearance without rebuilding positions, covariance, hierarchy, or bounds. Only appearance buffers are invalidated.
+
+Demo: `?app=splats_demo`
+
+### Presentation, Controller, Loader
+
+- **Presentation** (`apps/presentation_demo.py`): fullscreen is an async presentation mode. Capability-tested entry, presentation state, and exit paths are explicit.
+- **Controller** (`apps/controller_demo.py`): button / axis / capability model with deadzones, mapping, and disconnect/reconnect handling. Game code never branches on transport.
+- **Loader** (`apps/loader_demo.py`): `getAssetLoader()` / `loadAsset()` / `loadGLB()` / `loadTexture()` / `loadAudio()`. Source bytes, decoded data, instances, and GPU resources stay distinct, so the same asset can be reused across backends without re-decoding.
+
+### Integrations: Storage, WASM, Audio, Media, Serial
+
+`apps/integrations_demo.py` exercises the integration layer: storage, WASM, audio, media, and serial behind explicit boundaries — resource creation, updates, command recording, and submission stay separate, with explicit ownership, async lifecycle, timestamped data where relevant, and bounded work at the rendering boundary. Mutable WebGL global state is never the shared abstraction; each backend defines its portable baseline, capability checks, and backend-specific extensions.
 
 ---
 
@@ -254,6 +354,15 @@ http://localhost:8000/?app=fetch_demo      → Extensions.fetch Demo (NEW!)
 http://localhost:8000/sandbox.html         → Live editor
 ```
 
+Pick a renderer:
+
+```
+http://localhost:8000/?app=rabbit_sim&renderer=webgpu  → WebGPU
+http://localhost:8000/?app=rabbit_sim&renderer=webgl2  → WebGL2
+http://localhost:8000/?app=rabbit_sim&renderer=2d      → 2D canvas
+http://localhost:8000/?app=rabbit_sim&renderer=auto    → best available
+```
+
 #### 3. Try Extensions in sandbox
 
 Paste this into `sandbox.html`:
@@ -290,6 +399,7 @@ Click for new joke. No backend.
 ├── index.html          # Viewer: loads apps via ?app=, auto-start, window.fetch
 ├── sandbox.html        # Editor: edit + Run, auto-start, pythonpath=['.']
 ├── scs.py              # CMU Graphics API (Brython)
+├── scs_entrypoint.py   # Multi-renderer entrypoint: 2D / WebGL2 / WebGPU / WebXR
 ├── app.py              # DEPRECATED placeholder (see apps/app.py)
 ├── extensions.py        # Root shim: makes `import extensions` work in Brython
 ├── extensions/         # SCS Extensions System
@@ -298,6 +408,24 @@ Click for new joke. No backend.
 │   ├── file_loader.py  # Browser image loading and RGBA extraction, Model-only
 │   ├── pyodide.py      # Lazy SciPy API: Pyodide Web Worker, Model-only
 │   └── pyodide_worker.js # Worker runtime and serialized SciPy operations
+├── scs/                # Renderer + subsystem modules (new)
+│   ├── scs_presentation.py
+│   ├── scs_controller.py
+│   ├── scs_loader.py
+│   ├── scs_splats.py
+│   ├── scs_storage.py
+│   ├── scs_wasm.py
+│   ├── scs_audio.py
+│   ├── scs_media.py
+│   ├── scs_serial.py
+│   └── scs_xr.py
+├── docs/               # Architecture docs (new)
+│   ├── ARCHITECTURE_PRESENTATION.md
+│   ├── ARCHITECTURE_CONTROLLER.md
+│   ├── ARCHITECTURE_LOADER.md
+│   ├── ARCHITECTURE_SPLATS.md
+│   ├── ARCHITECTURE_INTEGRATIONS.md
+│   └── ARCHITECTURE_XR.md
 └── apps/
     ├── acceleration_academy.py
     ├── app.py              → Joukowski Aerofoil Wind Tunnel (default)
@@ -312,7 +440,13 @@ Click for new joke. No backend.
     ├── platformer_bgs.py
     ├── proc_audio_demo.py  → Procedural audio workbench
     ├── rabbit_sim.py       → Rabbit Meadow Population Dynamics
-    └── swila.py
+    ├── swila.py
+    ├── presentation_demo.py → Fullscreen / presentation (new)
+    ├── controller_demo.py   → Gamepad / controller (new)
+    ├── loader_demo.py       → Asset loader (new)
+    ├── splats_demo.py       → Gaussian splats, first-class primitive (new)
+    ├── integrations_demo.py → Storage / WASM / audio / media / serial (new)
+    └── xr_demo.py           → WebXR (new)
 ```
 
 No root `app.py` duplication. Real apps are **only** in `apps/`.
@@ -375,6 +509,15 @@ Load the bundled `scs.jpg`, choose a local image, or enter a CORS-enabled image 
 
 - Resizes input to a maximum 384-pixel edge before processing
 - Open with `/?app=image_processing`
+
+#### New subsystem demos
+
+- `apps/presentation_demo.py` — Fullscreen / presentation (`?app=presentation_demo`)
+- `apps/controller_demo.py` — Gamepad / controller (`?app=controller_demo`)
+- `apps/loader_demo.py` — Asset loader, GLB / audio / textures (`?app=loader_demo`)
+- `apps/splats_demo.py` — Gaussian splats as a first-class primitive (`?app=splats_demo`)
+- `apps/integrations_demo.py` — Storage / WASM / audio / media / serial (`?app=integrations_demo`)
+- `apps/xr_demo.py` — WebXR (`?app=xr_demo`)
 
 ### 🛠 Creating a New App
 
@@ -452,6 +595,9 @@ SCS implements the CMU Graphics exact API plus fixes:
 | Events | `onAppStart`, `onStep`, `redrawAll`, `onMousePress/Release/Drag/Move`, `onKeyPress/Release/Hold`, `onResize` |
 | Utils | `rgb(r,g,b)`, `gradient(*colors, start=)`, `distance()`, `angleTo()`, `getPointInDir()`, `rounded()`, `makeList()` |
 | Extensions | `extensions.fetch` — `fetch()`, `fetch_json()`, `fetch_text()`, `FetchResponse`, `FetchError` |
+| Renderers | `run_app(renderer='2d' | 'webgl2' | 'webgpu' | 'auto')`, `setRenderer()`, `?renderer=` |
+| XR | `startXR()`, `stopXR()`, `renderFrame()`, `getXRState()`, `getXRCapability()` |
+| Splats | `getSplatRenderer()`, `createSplatSchema()`, `createSplatAsset()`, `loadSplatManifest()` |
 
 **Brython-safe logging:** Uses `chr(10)` not `\n` inside string literals to avoid Brython parse errors.
 
@@ -474,6 +620,10 @@ extensions.fetch:
   window.fetch (Promise) → await → FetchResponse
       ↘ fallback aio.fetch
   FetchResponse.json() → Python dict/list
+
+scs_entrypoint.py:
+  run_app(renderer=...) → 2D / WebGL2 / WebGPU, auto fallback
+  startXR() → XR loop → renderFrame(frameContext)
 ```
 
 ### 🔒 Security
