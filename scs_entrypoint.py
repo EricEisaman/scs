@@ -8,7 +8,7 @@ index.html is now ~20 lines: load Brython, load this module, call boot().
     scs_entrypoint.boot()
 
 What lives here:
-  * Align logic (exact CMU semantics, creation-time only)
+  * Align logic (exact CMU semantics, creation-time only): BIG DAWG APPROVED
   * Shape classes (Rect, Oval, Circle, RegularPolygon, Star, Line,
     Polygon, Arc, Label, Image, Group) -- each with draw(renderer)
   * Immediate-mode draw* functions -- thin forwards to the renderer
@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v2'
+__version__ = '2026-11-14-runApp-*args-v3-app-fix'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -2084,6 +2084,17 @@ def _render_one_view(view, renderer=None):
         _hud_shapes_drawn = False
         for s in list(_shapes):
             try:
+                # NO Canvas2D fallback for 3D: a shape with centerZ set
+                # must NOT be drawn as a shaded 2D circle on a 2D renderer.
+                # Fail loud, do not downgrade.
+                try:
+                    _rk = getattr(r, 'kind', getattr(r, 'name', ''))
+                    if _is_3d_shape(s) and str(_rk).lower() in ('2d', 'canvas2d'):
+                        raise RuntimeError('3D shape (centerZ set) requires WebGL2 / WebGPU, got 2D renderer. NO Canvas2D fallback.')
+                except RuntimeError:
+                    raise
+                except Exception:
+                    pass
                 draw_fn = getattr(s, 'draw', None)
                 if draw_fn is None:
                     continue
@@ -2310,7 +2321,7 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
     _is_3d_app = any(k in _user_funcs for k in ('onRender3D', 'onDraw3D', 'draw3D', 'onRender', 'render3D'))
     # _renderer_req must include setRenderer() / _pending_renderer / App.renderer,
     # not just the runApp() arg.
-    _renderer_req = str(renderer or _pending_renderer or getattr(app, 'renderer', None) or '').lower() or None
+    _renderer_req = str(renderer or _pending_renderer or getattr(_app, 'renderer', None) or '').lower() or None  # FIX: _app, not app - app is defined at line 2394, using app here = UnboundLocalError
     if not _is_3d_app and _hud_requested:
         # Explicit hud=True / mode='hud' on a 2D app - HUD makes no sense, ignore it.
         # Don't force a 2D app into HUD. Just render 2D.
@@ -3136,18 +3147,10 @@ def exec_code(code, fn):
                     pass
             except Exception as _e_scs:
                 print('[SCS] import scs failed: ' + str(_e_scs))
-            # What does `import cmu_graphics` give, if app.py uses it?
-            try:
-                import cmu_graphics as _cg
-                _cg_sig = str(_insp2.signature(_cg.runApp))
-                _cg_msg = '[SCS] import cmu_graphics runApp' + _cg_sig
-                print(_cg_msg)
-                try:
-                    _w3.console.log(_cg_msg)
-                except Exception:
-                    pass
-            except Exception as _e_cg:
-                print('[SCS] import cmu_graphics not found / no runApp: ' + str(_e_cg))
+            # SCS uses the cmu_graphics API, NOT the actual cmu_graphics module.
+            # Never `import cmu_graphics` - there is no cmu_graphics.py on the server,
+            # and trying to fetch it is what caused the 404s. SCS *is* the API.
+            # App code uses `from scs import *`, never `from cmu_graphics import *`.
             # First line of app code - what does it import?
             try:
                 _first = str(code)[:300].replace(chr(10), ' | ')
