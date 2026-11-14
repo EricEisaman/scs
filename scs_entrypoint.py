@@ -2510,6 +2510,61 @@ def exec_code(code, fn):
                 run_app(width=w, height=h)
     except Exception as e:
         _debug_log('SCS exec error in %s: %s' % (fn, e))
+        # Prove WHICH runApp app.py actually called: _user_ns['runApp'] may have
+        # been overwritten by `from scs import *` inside app.py with a DIFFERENT
+        # runApp (e.g. from scs.py or cmu_graphics.py) that still has the old
+        # def runApp(width=400, height=400) signature. Log it.
+        try:
+            import inspect as _insp2
+            _ns_run = _user_ns.get('runApp', None)
+            try:
+                _ns_sig = str(_insp2.signature(_ns_run)) if _ns_run is not None else 'None'
+            except Exception:
+                _ns_sig = 'signature-unavailable'
+            _ns_msg = '[SCS] exec failed: _user_ns runApp' + _ns_sig + ' ep.runApp' + str(_insp2.signature(runApp))
+            print(_ns_msg)
+            try:
+                from browser import window as _w3
+                _w3.console.log(_ns_msg)
+            except Exception:
+                pass
+            # What does `import scs` give RIGHT NOW?
+            try:
+                import scs as _scs_now
+                _scs_sig = str(_insp2.signature(_scs_now.runApp))
+                _scs_msg = '[SCS] import scs runApp' + _scs_sig + ' scs module=' + str(getattr(_scs_now, '__name__', '?')) + ' is_ep=' + str(_scs_now is globals().get('_ep', None) or _scs_now is __import__('scs_entrypoint'))
+                print(_scs_msg)
+                try:
+                    _w3.console.log(_scs_msg)
+                except Exception:
+                    pass
+            except Exception as _e_scs:
+                print('[SCS] import scs failed: ' + str(_e_scs))
+            # What does `import cmu_graphics` give, if app.py uses it?
+            try:
+                import cmu_graphics as _cg
+                _cg_sig = str(_insp2.signature(_cg.runApp))
+                _cg_msg = '[SCS] import cmu_graphics runApp' + _cg_sig
+                print(_cg_msg)
+                try:
+                    _w3.console.log(_cg_msg)
+                except Exception:
+                    pass
+            except Exception as _e_cg:
+                print('[SCS] import cmu_graphics not found / no runApp: ' + str(_e_cg))
+            # First line of app code - what does it import?
+            try:
+                _first = str(code)[:300].replace(chr(10), ' | ')
+                _first_msg = '[SCS] app code head: ' + _first
+                print(_first_msg)
+                try:
+                    _w3.console.log(_first_msg)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        except Exception:
+            pass
 
 
 def load():
