@@ -14,7 +14,7 @@ canvas{display:block;background:black;outline:none;}
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="icon" href="favicon.png">
 </head>
-<body onload="brython({debug:1, pythonpath:['.', 'scs', '..', '../scs', '/', '/scs']})">
+<body onload="brython({debug:1, pythonpath:['.', 'scs']})">
 <div id="toolbar">
 <label>Renderer <select id="renderer-select"><option value="auto">auto</option><option value="2d">2d</option><option value="webgl2">webgl2</option><option value="webgpu">webgpu</option></select></label>
 <button id="xr-btn">Enter XR</button>
@@ -23,6 +23,9 @@ canvas{display:block;background:black;outline:none;}
 </div>
 <div id="canvas-container"><canvas id="cmu-canvas" width="1050" height="700" tabindex="0"></canvas></div>
 <script>
+// pythonpath is ['.', 'scs']: this page is at /, so '.' IS the publish root.
+// No '..' / '/' entries: each extra entry is another URL that used to
+// return index.html for a missing .py and make Brython parse HTML as Python.
 // Toolbar only: reflect ?renderer= in the select. Renderer selection
 // itself lives in scs_entrypoint (_resolve_renderer_kind); changing
 // the select reloads with ?renderer=, it does not reimplement selection.

@@ -1,28 +1,27 @@
 # netlify.toml -- SCS on Netlify, static only.
 #
-# No build. Brython fetches .py at runtime, so the deploy MUST serve
-# the .py files exactly as committed, with no caching and no query
-# stripping. Two rules that matter:
+# Root cause of the live-site error:
+#   brython.min.js: File "./scs_3d.py", line 1, <!DOCTYPE html> ^ SyntaxError
+# Netlify returned index.html for /scs_3d.py. That happens only when
+# the /* -> /index.html rewrite swallows a missing .py 404 and turns
+# it into a 200 HTML response. Brython then parses HTML as Python.
 #
-#   1. Rewrites are 200 only. A rewrite that changes the URL drops
-#      the query string, which is how ?app= "disappeared" and the
-#      page loaded apps/app.py instead. A 200 rewrite keeps the
-#      URL -- and ?app= -- intact.
-#   2. Existing files win over rewrites. Netlify serves a real file
-#      (index.html, scs_entrypoint.py, apps/*.py, scs_3d.py) before
-#      it applies /* below, so the SPA rewrite never shadows .py.
+# Fix: NO generic /* rewrite. Only explicit rewrites.
+# /?app=... needs no rewrite: path is /, it serves index.html directly.
+# Missing .py must 404, never HTML. Build fails if the .py files are
+# not at publish root, so a broken deploy never ships.
 #
 # Publish is the repo root: index.html, sandbox.html, scs_*.py,
-# apps/ all live here. Do NOT set publish to a subdir and do NOT
-# enable Pretty URLs -- /sandbox.html -> /sandbox would change what
-# '.' means for Brython's pythonpath.
+# apps/ all live here. In Netlify UI, Publish directory must be
+# blank or "." -- if UI says "scs" or "dist", it overrides this file
+# and /scs_3d.py 404s (then used to return index.html).
 
 [build]
   publish = "."
-  command = ""
+  command = "test -f scs_3d.py && test -f scs_entrypoint.py && test -f scs.py && test -f index.html && test -f sandbox.html && echo 'SCS deploy files OK: scs_3d.py scs_entrypoint.py scs.py index.html sandbox.html at publish root' || (echo 'FATAL: Brython .py files missing from publish root. Commit scs_3d.py / scs_entrypoint.py / scs.py at repo root and set Netlify Publish directory to . -- not scs, not dist.' && exit 1)"
 
 # /sandbox -> /sandbox.html. The sandbox page is sandbox.html at the
-# root. Specific rewrites come before the generic /* rewrite.
+# root. These are the ONLY rewrites. No /* rewrite.
 [[redirects]]
   from = "/sandbox"
   to = "/sandbox.html"
@@ -31,13 +30,6 @@
 [[redirects]]
   from = "/sandbox/"
   to = "/sandbox.html"
-  status = 200
-
-# SPA rewrite: any path that is not a real file serves index.html,
-# URL + query preserved. This is what makes /?app=spatial_audio work.
-[[redirects]]
-  from = "/*"
-  to = "/index.html"
   status = 200
 
 # .py is source, not a build artifact. Serve as text, never cache:
