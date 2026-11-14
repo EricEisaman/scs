@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v10-render-is3d-hud'
+__version__ = '2026-11-14-runApp-*args-v11-run-once'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -2279,6 +2279,17 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
         stepsPerSecond = kwargs.get('steps_per_second')
     if 'fps' in kwargs and stepsPerSecond == 30:
         stepsPerSecond = kwargs.get('fps')
+    # RUN ONCE: if loop is already running, do NOT stop / reset / re-run.
+    # boot() + exec_code auto-start + main() all call run_app. Second call
+    # used to stop() the first loop, reset _hud_mode, replace canvas, and
+    # re-run as 2d, so nothing ever rendered. Second call is a no-op.
+    global _app_timer, _app
+    try:
+        if _app_timer is not None and _app is not None:
+            _debug_log('SCS run_app: already running - ignoring second run_app (run once).')
+            return
+    except Exception:
+        pass
     _refresh_user_funcs()
     _bind_events()
     stop()
