@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v11-run-once'
+__version__ = '2026-11-14-runApp-*args-v12-dom-boot-once'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -2279,10 +2279,25 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
         stepsPerSecond = kwargs.get('steps_per_second')
     if 'fps' in kwargs and stepsPerSecond == 30:
         stepsPerSecond = kwargs.get('fps')
-    # RUN ONCE: if loop is already running, do NOT stop / reset / re-run.
-    # boot() + exec_code auto-start + main() all call run_app. Second call
-    # used to stop() the first loop, reset _hud_mode, replace canvas, and
-    # re-run as 2d, so nothing ever rendered. Second call is a no-op.
+    # RUN ONCE: DOM guard + timer guard. Second run_app in SAME page load
+    # must be a no-op. Python _app_timer is wiped by Brython re-import,
+    # so check DOM too.
+    try:
+        from browser import document as _doc_run
+        try:
+            if _doc_run.getElementById('scs-running') is not None:
+                return
+            try:
+                _rflag = _doc_run.createElement('div')
+                _rflag.id = 'scs-running'
+                _rflag.style.display = 'none'
+                _doc_run.body.appendChild(_rflag)
+            except Exception:
+                pass
+        except Exception:
+            pass
+    except Exception:
+        pass
     global _app_timer, _app
     try:
         if _app_timer is not None and _app is not None:
@@ -3294,20 +3309,23 @@ def boot(app=None):
     boot("apps/myapp.py") - same, explicit path
     Binds events, loads the app, and starts it. Loop / events / renderer
     all live in the package, not in HTML."""
-    # Boot-once FIRST, before any log. v7 logged boot() before guard, so
-    # second boot still printed boot() and HUD. Guard must be first line.
-    # Use window.SCS_BOOTED via direct JS access - getattr with default
-    # does not reliably see JS props in Brython.
+    # Boot-once FIRST, before any log. DOM guard, not Python / window.
+    # Brython re-imports scs_entrypoint (via `from scs import *` in app)
+    # and re-executes top-level, wiping Python globals and window.SCS_BOOTED.
+    # DOM survives. If <div id="scs-booted"> exists, this is the 2nd boot in
+    # the SAME page load - return before anything runs.
     try:
-        from browser import window as _w_boot0
+        from browser import document as _doc_boot
         try:
-            _already = _w_boot0.SCS_BOOTED
-        except Exception:
-            _already = False
-        if _already:
-            return
-        try:
-            _w_boot0.SCS_BOOTED = True
+            if _doc_boot.getElementById('scs-booted') is not None:
+                return
+            try:
+                _flag = _doc_boot.createElement('div')
+                _flag.id = 'scs-booted'
+                _flag.style.display = 'none'
+                _doc_boot.body.appendChild(_flag)
+            except Exception:
+                pass
         except Exception:
             pass
     except Exception:
