@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v13-log-once'
+__version__ = '2026-11-14-runApp-*args-v14-centerZ-routing'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -2107,15 +2107,26 @@ def _render_one_view(view, renderer=None):
                     continue
                 # Route per shape in 3D apps only
                 if _is_3d and _hud_mode:
-                    _sh = getattr(s, 'hud', False)
-                    # FINAL: hud=False (default) = 3D mode, hud=True = overlay. _normalize_hud maps
-                    # True->'hud', False->'3d'. Handle raw bools: True => overlay, False => 3D.
-                    if _sh is True:
+                    # ROUTING RULE (demo's rule, not hud flag):
+                    # No centerZ -> HUD overlay (draw to 2d offscreen)
+                    # centerZ set (even 0) -> 3D world (draw to WebGL2)
+                    # Demo's HUD Rects have no centerZ and no hud=True, so
+                    # old hud-flag routing treated them as 3D and HUD never
+                    # composited. centerZ is the source of truth.
+                    try:
+                        _cz = getattr(s, 'centerZ', None)
+                    except Exception:
+                        _cz = None
+                    # Also check centerZ1/centerZ2 for Lines
+                    if _cz is None:
+                        try:
+                            _cz = getattr(s, 'centerZ1', None)
+                        except Exception:
+                            _cz = None
+                    if _cz is None:
                         _sh_str = 'hud'
-                    elif _sh is False or _sh is None:
-                        _sh_str = '3d'
                     else:
-                        _sh_str = str(_sh).lower() if _sh is not None else '3d'
+                        _sh_str = '3d'
                     if _sh_str in ('hud', 'texture', 'html', 'true', '1', ''):
                         # Overlay flat shape (hud=True): draw to HUD 2D renderer (offscreen), NOT to 3D renderer
                         _hr = _hud_2d_renderer
