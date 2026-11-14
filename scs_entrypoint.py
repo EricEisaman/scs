@@ -67,18 +67,108 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-FIXED-v30-resize-observer-arity'
+__version__ = '2026-11-14-FIXED-v32-single-window-scs'
+
+# v32: ONE window property only: window.scs.
+# Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
+# across window. All SCS runtime state lives nested under window.scs.
+# We never create any other window.* property. We never overwrite an
+# existing window.scs - we reuse it and only add our own keys.
+def _scs_ns():
+    try:
+        _ns = getattr(window, 'scs', None)
+        if _ns is None:
+            _ns = {}
+            try:
+                window.scs = _ns
+            except Exception:
+                pass
+            return _ns
+        return _ns
+    except Exception:
+        return {}
+
+def _scs_get(_k, _default=None):
+    try:
+        _ns = _scs_ns()
+        try:
+            if isinstance(_ns, dict):
+                return _ns.get(_k, _default)
+        except Exception:
+            pass
+        return getattr(_ns, _k, _default)
+    except Exception:
+        return _default
+
+def _scs_set(_k, _v):
+    try:
+        _ns = _scs_ns()
+        try:
+            if isinstance(_ns, dict):
+                _ns[_k] = _v
+                return
+        except Exception:
+            pass
+        try:
+            setattr(_ns, _k, _v)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+def _scs_cleanup_legacy():
+    # v31 wrote window.__SCS_* - remove them on first v32 load so the host
+    # window is left clean. Migrate any values into window.scs first.
+    try:
+        for _old, _new in (('__SCS_VERSION_PRINTED__', 'versionPrinted'),
+                           ('__SCS_EVENTS_BOUND__', 'eventsBound'),
+                           ('__SCS_BOOTED__', 'booted'),
+                           ('__SCS_LAST_RUNAPP__', 'lastRunApp')):
+            try:
+                _v = getattr(window, _old, None)
+            except Exception:
+                _v = None
+            if _v is not None:
+                try:
+                    if _scs_get(_new, None) is None:
+                        _scs_set(_new, _v)
+                except Exception:
+                    pass
+                try:
+                    delattr(window, _old)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+try:
+    _scs_cleanup_legacy()
+except Exception:
+    pass
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
+# v31 single-run: window-level guard. Two module instances (scs_entrypoint
+# vs scs.scs_entrypoint) have separate Python globals, so a Python-only
+# _booted flag does NOT stop the second instance. window is shared, so it
+# is the only place an "already ran" flag works across instances.
 try:
     _ver_msg = '[SCS entrypoint] version=' + __version__
-    print(_ver_msg)
+    _already_printed = False
     try:
         from browser import window as _w
-        _w.console.log(_ver_msg)
+        _already_printed = bool(_scs_get('versionPrinted', False))
     except Exception:
-        pass
+        _w = None
+    if not _already_printed:
+        try:
+            _scs_set('versionPrinted', True)
+        except Exception:
+            pass
+        print(_ver_msg)
+        try:
+            _w.console.log(_ver_msg)
+        except Exception:
+            pass
 except Exception:
     pass
 
@@ -761,9 +851,13 @@ def _url_param(name):
 
 
 def _js_config():
-    """window.SCS_CONFIG set by the JS / CDN loader (see src/scs-loader.js).
-    Returns a dict-like or None."""
+    """v32: config lives under window.scs.config. Legacy window.SCS_CONFIG
+    (set by the JS / CDN loader) is still read for backwards compat with
+    pages already in the wild, but we never create it."""
     try:
+        cfg = _scs_get('config', None)
+        if cfg is not None:
+            return cfg
         cfg = getattr(window, 'SCS_CONFIG', None)
         if cfg is None:
             return None
@@ -2449,6 +2543,14 @@ def _bind_events():
     global _events_bound
     if _events_bound:
         return
+    # v32: window.scs.eventsBound - one window property, nested.
+    try:
+        if bool(_scs_get('eventsBound', False)):
+            _events_bound = True
+            return
+        _scs_set('eventsBound', True)
+    except Exception:
+        pass
     _events_bound = True
     canvas = _find_canvas()
     if canvas is None:
@@ -2774,6 +2876,9 @@ def _frame():
 
 def _start_loop():
     global _app_timer
+    # v31: stop() clears THIS instance's timer, but not another instance's.
+    # The window flag + runApp 500ms guard above are the real dedup; here we
+    # just ensure we don't start a second interval from THIS instance.
     stop()
     _frame()
     iv = int(1000 / _steps_per_second) if _steps_per_second > 0 else 33
@@ -2794,6 +2899,21 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
     setRenderer() > ?renderer= URL param > SCS_CONFIG.renderer.
     """
     global _app, _canvas, _steps_per_second, _pending_renderer
+    # v31 single-run: duplicate runApp within 500ms (two execs of the same app
+    # file) is a double-boot, not a user re-run. Sandbox re-runs are seconds apart.
+    try:
+        import time as _time
+        _now = _time.time()
+        _last = float(_scs_get('lastRunApp', 0) or 0)
+        if _now - _last < 0.5:
+            try:
+                print('[SCS entrypoint] runApp() duplicate within 500ms - ignoring second run')
+            except Exception:
+                pass
+            return
+        _scs_set('lastRunApp', _now)
+    except Exception:
+        pass
     if isinstance(width, App):
         _a = width
         try:
@@ -3813,6 +3933,19 @@ def boot(app=None):
             _w2.console.log(_boot_msg)
         except Exception:
             pass
+    except Exception:
+        pass
+    # v31 single-run: second boot() on the same page is a duplicate (e.g.
+    # index.html + loader both calling boot, or Brython executing the
+    # <script> twice). Ignore it - do NOT fetch/exec the app a second time.
+    try:
+        if bool(_scs_get('booted', False)):
+            try:
+                print('[SCS entrypoint] boot() already ran - ignoring duplicate boot()')
+            except Exception:
+                pass
+            return
+        _scs_set('booted', True)
     except Exception:
         pass
     _bind_events()
