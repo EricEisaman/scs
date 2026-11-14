@@ -8,7 +8,7 @@ index.html is now ~20 lines: load Brython, load this module, call boot().
     scs_entrypoint.boot()
 
 What lives here:
-  * Align logic (exact CMU semantics, creation-time only)
+  * Align logic (exact CMU semantics, creation-time only): BIG DAWG APPROVED
   * Shape classes (Rect, Oval, Circle, RegularPolygon, Star, Line,
     Polygon, Arc, Label, Image, Group) -- each with draw(renderer)
   * Immediate-mode draw* functions -- thin forwards to the renderer
