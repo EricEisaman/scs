@@ -1374,24 +1374,20 @@ class App:
         _clear_shapes()
 
 
-def runApp(width=400, height=400, stepsPerSecond=30, renderer=None,
-           canvas=None, **kwargs):
-    """CMU shape: runApp(width, height, stepsPerSecond=...).
+def runApp(*args, **kwargs):
+    """CMU shape: runApp(width, height, stepsPerSecond=..., renderer=...).
 
-    MUST accept the same kwargs as run_app(). apps/app.py does
-    `from scs import *`, which imports THIS runApp and overwrites
-    _user_ns['runApp'] = run_app. The old shim only took
-    (width, height), so runApp(stepsPerSecond=...) died with:
+    BULLETPROOF: *args/**kwargs, forwards everything to run_app().
+    apps/app.py does `from scs import *`, which imports THIS runApp
+    and overwrites _user_ns['runApp'] = run_app. The old shim only
+    took (width, height), so runApp(stepsPerSecond=...) died with:
       runApp() got an unexpected keyword argument 'stepsPerSecond'
-    Forward everything to run_app()."""
-    run_app(width=width, height=height, stepsPerSecond=stepsPerSecond,
-            renderer=renderer, canvas=canvas, **kwargs)
+    With *args/**kwargs no kwarg can ever be 'unexpected' again."""
+    return run_app(*args, **kwargs)
 
 
-def cmu_graphics_run(app=None, width=400, height=400, stepsPerSecond=30,
-                      renderer=None, canvas=None, **kwargs):
-    run_app(width=width, height=height, stepsPerSecond=stepsPerSecond,
-            renderer=renderer, canvas=canvas, **kwargs)
+def cmu_graphics_run(*args, **kwargs):
+    return run_app(*args, **kwargs)
 
 
 # ----------------------------------------------------------------------
