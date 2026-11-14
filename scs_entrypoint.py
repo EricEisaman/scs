@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v9-fresh-canvas-webgl2'
+__version__ = '2026-11-14-runApp-*args-v10-render-is3d-hud'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -2082,10 +2082,18 @@ def _render_one_view(view, renderer=None):
         # hud=False/'texture'/True -> screen-space HUD (draw to _hud_2d_renderer / offscreen)
         # hud='3d'/'world'/False -> world-space 3D (draw to 3D renderer r, depth on)
         # 2D apps: no 3D, all shapes draw to r (2D renderer) - no routing needed.
+        # DO NOT recompute _is_3d from callbacks here. run_app already set
+        # _is_3d_app=True for explicit HUD/3D (demo declares itself as 3D).
+        # Recomputing from callbacks overwrote it to False (no onRender3D),
+        # so routing never happened, _hud_shapes_drawn stayed False, HUD never
+        # composited, and nothing rendered. HUD mode IS 3D for routing.
         _is_3d = bool(getattr(_app, '_is_3d_app', False)) if _app is not None else False
-        # _is_3d_app is computed in run_app from _user_funcs - use that if available
+        if _hud_mode:
+            _is_3d = True
+        # Keep callback check only as an OR, never as an overwrite:
         try:
-            _is_3d = any(k in _user_funcs for k in ('onRender3D', 'onDraw3D', 'draw3D', 'onRender', 'render3D'))
+            if any(k in _user_funcs for k in ('onRender3D', 'onDraw3D', 'draw3D', 'onRender', 'render3D')):
+                _is_3d = True
         except Exception:
             pass
         _hud_shapes_drawn = False
@@ -2226,8 +2234,13 @@ def _frame():
                 return
         _step()
         _render()
-    except Exception:
-        stop()
+    except Exception as _e_frame:
+        # Do NOT stop() on a single frame error - one bad frame (audio, etc.)
+        # must not kill rendering forever. Log and keep looping.
+        try:
+            _debug_log('SCS _frame error (continuing): %s: %s' % (type(_e_frame).__name__, _e_frame))
+        except Exception:
+            pass
 
 
 def _start_loop():
