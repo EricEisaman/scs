@@ -2076,14 +2076,26 @@ def _render_one_view(view, renderer=None):
                     _fill = getattr(s, 'fill', 'blue') or 'blue'
                     _cls = type(s).__name__
                     if _cls in ('Rect',):
-                        r.add_box(_cx, _cy, float(_cz), float(getattr(s, 'width', 1) or 1), float(getattr(s, 'height', 1) or 1), 1.0, _fill)
+                        r.add_box(_cx, _cy, float(_cz), float(getattr(s, 'width', 1) or 1), float(getattr(s, 'height', 1) or 1), 1.0, _fill, metalness=float(getattr(s, 'metalness', 1.0) or 1.0), roughness=float(getattr(s, 'roughness', 0.38) or 0.38), defectLevel=float(getattr(s, 'defectLevel', 0.5) or 0.5))
                     else:
                         # Circle: radius attr. Oval: width/2 (NOT 1.0). Ball highlights: radius attr.
                         if _cls in ('Oval',):
                             _rad = float(getattr(s, 'width', 1.0) or 1.0) / 2.0
                         else:
                             _rad = float(getattr(s, 'radius', getattr(s, '_radius', 1.0)) or 1.0)
-                        r.add_sphere(_cx, _cy, float(_cz), _rad, _fill)
+                        # DAMAGED METAL: per-sphere defect + corrosion, stored on shape by app (v5).
+                        # Default: metallic=1.0 (metal, not plastic), roughness from shape or 0.32, defect 0.45.
+                        _def = float(getattr(s, 'defectLevel', 0.45) or 0.45)
+                        _corr = float(getattr(s, 'corrosionEnabled', 0.0) or 0.0)
+                        _met = float(getattr(s, 'metalness', 1.0) if getattr(s, 'metalness', None) is not None else 1.0)
+                        _rou = float(getattr(s, 'roughness', 0.32) if getattr(s, 'roughness', None) is not None else 0.32)
+                        # Copper-patina green is corrosion, not base colour - engine handles it via corrosionColor.
+                        # For patina ball, base is copper, corrosion colour is patina green.
+                        _corrCol = '#3affa8' if _corr > 0.5 else '#3a1a08'
+                        try:
+                            r.add_sphere(_cx, _cy, float(_cz), _rad, _fill, metalness=_met, roughness=_rou, defectLevel=_def, corrosionEnabled=_corr, corrosionColor=_corrCol)
+                        except TypeError:
+                            r.add_sphere(_cx, _cy, float(_cz), _rad, _fill)
                 except Exception:
                     pass
             _cam = getattr(_app, 'camera', None)
