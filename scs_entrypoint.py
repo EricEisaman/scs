@@ -48,7 +48,7 @@ __all__ = [
     'Arc', 'Label', 'Image', 'Group', 'Sound', 'App',
     'drawRect', 'drawOval', 'drawCircle', 'drawRegularPolygon', 'drawStar',
     'drawLine', 'drawPolygon', 'drawArc', 'drawLabel', 'drawImage',
-    'runApp', 'run', 'loop', 'run_app', 'stop', 'boot', 'main',
+    'runApp', 'run', 'loop', 'run_app', 'cmu_graphics_run', 'stop', 'boot', 'main',
     'rgb', 'gradient', 'distance', 'angleTo', 'getPointInDir', 'rounded',
     'makeList', 'randrange', 'randint', 'random',
     'getRendererKind', 'create_renderer', 'setRenderer',
@@ -60,7 +60,14 @@ __all__ = [
     # adapters around the renderer, never inside render().
     'getAssetCache', 'getPrefs', 'getAudioEngine', 'getMediaAdapter',
     'getSerialAdapter', 'getUSBAdapter',
+    # Spatial audio + 3D math + separate 3D engines.
+    'getSpatialAudioEngine', 'Camera3D',
+    'getWebGL2Engine', 'getWebGPUEngine',
+    'getSplatRenderer', 'createSplatSchema', 'loadSplatManifest',
+    'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
+
+__version__ = '2026-11-14-runApp-*args-v2'
 
 # ----------------------------------------------------------------------
 # Align -- exact CMU semantics
@@ -172,6 +179,7 @@ _pixel_ratio_cap = None
 _pixel_budget = None
 _controller_manager = None
 _asset_loader = None
+_splat_renderer = None
 
 _CALLBACK_NAMES = (
     'onAppStart', 'appStarted', 'redrawAll', 'onStep',
@@ -358,20 +366,57 @@ def requestReadback(x, y, w, h):
     return _renderer._readback_promise(x, y, w, h)
 
 
+def _import_renderer_module(name):
+    """Import scs_2d / scs_webgl / scs_webgpu, trying both layouts.
+
+    Deployments exist in two shapes: modules at the site root (pythonpath
+    '.') and modules under scs/ (pythonpath 'scs'). Brython's ImportError
+    str() is just the module name ('scs_2d'), which is why the sandbox
+    showed the cryptic `SCS renderer failed (2d): scs_2d`. This helper
+    tries both layouts and raises a RuntimeError that names the file
+    that must be deployed alongside scs_entrypoint.py.
+    """
+    try:
+        if name == 'scs_2d':
+            from scs_2d import Renderer2D
+            return Renderer2D
+        if name == 'scs_webgl':
+            from scs_webgl import RendererWebGL2
+            return RendererWebGL2
+        if name == 'scs_webgpu':
+            from scs_webgpu import RendererWebGPU
+            return RendererWebGPU
+    except Exception as _e1:
+        try:
+            if name == 'scs_2d':
+                from scs.scs_2d import Renderer2D
+                return Renderer2D
+            if name == 'scs_webgl':
+                from scs.scs_webgl import RendererWebGL2
+                return RendererWebGL2
+            if name == 'scs_webgpu':
+                from scs.scs_webgpu import RendererWebGPU
+                return RendererWebGPU
+        except Exception as _e2:
+            raise RuntimeError(
+                '%s.py not importable (tried %s and scs/%s.py). '
+                'Deploy %s.py next to scs_entrypoint.py (or under scs/) '
+                'and hard-refresh. First error: %r; second: %r'
+                % (name, name, name, name, _e1, _e2))
+    raise ValueError('Unknown renderer module %r' % name)
+
+
 def create_renderer(kind, canvas, width, height):
     """Instantiate a renderer. 'webgpu' is async -- the returned object
     has .ready == False until on_ready fires; the entrypoint falls back
     on on_error. Raises on sync failure (2D / WebGL2)."""
     kind = (kind or '2d').lower()
     if kind in ('2d', 'canvas', 'canvas2d'):
-        from scs_2d import Renderer2D
-        return Renderer2D(canvas, width, height)
+        return _import_renderer_module('scs_2d')(canvas, width, height)
     if kind in ('webgl', 'webgl2', 'webgl-2'):
-        from scs_webgl import RendererWebGL2
-        return RendererWebGL2(canvas, width, height)
+        return _import_renderer_module('scs_webgl')(canvas, width, height)
     if kind in ('webgpu', 'gpu'):
-        from scs_webgpu import RendererWebGPU
-        return RendererWebGPU(canvas, width, height)
+        return _import_renderer_module('scs_webgpu')(canvas, width, height)
     raise ValueError('Unknown renderer %r (expected 2d, webgl2, webgpu, auto)' % kind)
 
 
@@ -1361,11 +1406,22 @@ class Sound:
 class App:
     def __init__(self, width=400, height=400, renderer=None, **kwargs):
         global _app
+        if isinstance(width, App):
+            _src = width
+            width = getattr(_src, 'width', 400)
+            height = getattr(_src, 'height', 400)
+            if renderer is None:
+                renderer = getattr(_src, 'renderer', None)
+            for _k in ('stepsPerSecond', 'background', 'paused'):
+                if _k not in kwargs and hasattr(_src, _k):
+                    kwargs[_k] = getattr(_src, _k)
         self.width = width
         self.height = height
-        self.background = 'white'
-        self.stepsPerSecond = kwargs.get('stepsPerSecond', 30)
-        self.paused = False
+        self.background = kwargs.get('background', 'white')
+        self.stepsPerSecond = kwargs.get(
+            'stepsPerSecond',
+            kwargs.get('steps_per_second', kwargs.get('fps', 30)))
+        self.paused = kwargs.get('paused', False)
         self.renderer = renderer  # per-app renderer request (runApp wins)
         self._onAppStart = None
         self._onStep = None
@@ -1373,21 +1429,82 @@ class App:
         _app = self
         _clear_shapes()
 
+    def runApp(self, *args, **kwargs):
+        return runApp(self, *args, **kwargs)
+
+    def run(self, *args, **kwargs):
+        return runApp(self, *args, **kwargs)
+
+    def loop(self, *args, **kwargs):
+        return runApp(self, *args, **kwargs)
+
+
+def _parse_run_args(args, kwargs):
+    """Parse every runApp calling convention in the wild. Precedence:
+    defaults < global _app from prior App(...) < App passed to runApp
+    < explicit kwargs < explicit positionals. Unknown kwargs dropped,
+    never TypeError."""
+    kwargs = dict(kwargs) if kwargs else {}
+    width, height, steps, renderer, canvas = 400, 400, 30, None, None
+    try:
+        if _app is not None:
+            width = getattr(_app, 'width', width)
+            height = getattr(_app, 'height', height)
+            steps = getattr(_app, 'stepsPerSecond', steps)
+            renderer = getattr(_app, 'renderer', renderer)
+    except Exception:
+        pass
+    app_obj = None
+    if args and isinstance(args[0], App):
+        app_obj = args[0]
+        args = args[1:]
+    if app_obj is None and 'app' in kwargs and isinstance(kwargs.get('app'), App):
+        app_obj = kwargs.pop('app')
+    if app_obj is not None:
+        try:
+            width = getattr(app_obj, 'width', width)
+            height = getattr(app_obj, 'height', height)
+            steps = getattr(app_obj, 'stepsPerSecond', steps)
+            renderer = getattr(app_obj, 'renderer', renderer)
+        except Exception:
+            pass
+    if 'width' in kwargs:
+        width = kwargs.pop('width')
+    if 'height' in kwargs:
+        height = kwargs.pop('height')
+    for _k in ('stepsPerSecond', 'steps_per_second', 'fps', 'frameRate'):
+        if _k in kwargs:
+            steps = kwargs.pop(_k)
+            break
+    if 'renderer' in kwargs:
+        renderer = kwargs.pop('renderer')
+    if 'canvas' in kwargs:
+        canvas = kwargs.pop('canvas')
+    if len(args) >= 1:
+        width = args[0]
+    if len(args) >= 2:
+        height = args[1]
+    if len(args) >= 3:
+        steps = args[2]
+    if len(args) >= 4:
+        renderer = args[3]
+    if len(args) >= 5:
+        canvas = args[4]
+    return width, height, steps, renderer, canvas
+
 
 def runApp(*args, **kwargs):
-    """CMU shape: runApp(width, height, stepsPerSecond=..., renderer=...).
-
-    BULLETPROOF: *args/**kwargs, forwards everything to run_app().
-    apps/app.py does `from scs import *`, which imports THIS runApp
-    and overwrites _user_ns['runApp'] = run_app. The old shim only
-    took (width, height), so runApp(stepsPerSecond=...) died with:
-      runApp() got an unexpected keyword argument 'stepsPerSecond'
-    With *args/**kwargs no kwarg can ever be 'unexpected' again."""
-    return run_app(*args, **kwargs)
+    """Full alias of run_app(). NEVER raises 'unexpected keyword argument'."""
+    width, height, steps, renderer, canvas = _parse_run_args(args, kwargs)
+    return run_app(width=width, height=height,
+                   stepsPerSecond=steps, renderer=renderer, canvas=canvas)
 
 
 def cmu_graphics_run(*args, **kwargs):
-    return run_app(*args, **kwargs)
+    """CMU alias. Same bulletproof parsing as runApp()."""
+    width, height, steps, renderer, canvas = _parse_run_args(args, kwargs)
+    return run_app(width=width, height=height,
+                   stepsPerSecond=steps, renderer=renderer, canvas=canvas)
 
 
 # ----------------------------------------------------------------------
@@ -1678,6 +1795,20 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
     setRenderer() > ?renderer= URL param > SCS_CONFIG.renderer.
     """
     global _app, _canvas, _steps_per_second, _pending_renderer
+    if isinstance(width, App):
+        _a = width
+        try:
+            width = getattr(_a, 'width', 400)
+            height = getattr(_a, 'height', height)
+            stepsPerSecond = getattr(_a, 'stepsPerSecond', stepsPerSecond)
+            if renderer is None:
+                renderer = getattr(_a, 'renderer', None)
+        except Exception:
+            pass
+    if 'steps_per_second' in kwargs and stepsPerSecond == 30:
+        stepsPerSecond = kwargs.get('steps_per_second')
+    if 'fps' in kwargs and stepsPerSecond == 30:
+        stepsPerSecond = kwargs.get('fps')
     _refresh_user_funcs()
     _bind_events()
     stop()
@@ -1704,9 +1835,17 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
 
     def _fallback(exc_kind, err):
         # WebGPU/WebGL2 failed: walk down the chain, then start anyway.
+        # Log type + repr + traceback: Brython's ImportError str() is
+        # just the module name ('scs_2d'), which hid the real cause.
         nxt = {'webgpu': 'webgl2', 'webgl2': '2d'}.get(exc_kind)
         if nxt is None:
-            _debug_log('SCS renderer failed (%s): %s' % (exc_kind, err))
+            try:
+                import traceback as _tb
+                _detail = _tb.format_exc()
+            except Exception:
+                _detail = ''
+            _debug_log('SCS renderer failed (%s): %s: %r\n%s'
+                       % (exc_kind, type(err).__name__, err, _detail))
             return
         try:
             r = create_renderer(nxt, _find_canvas(), width, height)
@@ -2095,6 +2234,49 @@ def getAssetLoader():
     return _asset_loader
 
 
+def getSpatialAudioEngine(context=None):
+    """SpatialAudioEngine: AudioEngine + PannerNode listener/sources.
+    The listener is the Camera3D -- call engine.update(camera) per
+    step. Returns None if scs_spatial_audio.py is not deployed."""
+    try:
+        from scs_spatial_audio import SpatialAudioEngine
+        return SpatialAudioEngine(context=context)
+    except Exception:
+        return None
+
+
+def Camera3D(*args, **kwargs):
+    """Camera3D from scs_3d.py (position, yaw, pitch, fov)."""
+    try:
+        from scs_3d import Camera3D as _C3D
+        return _C3D(*args, **kwargs)
+    except Exception:
+        return None
+
+
+def getWebGL2Engine(canvas=None, width=900, height=560):
+    """Separate WebGL2 3D engine. Owns its OWN WebGL2 context on its
+    OWN canvas. Does NOT share the 2D renderer's context, loop, or
+    buffers. If it fails, it fails -- no silent fallback to 2D."""
+    try:
+        from scs_engine_webgl2 import WebGL2Engine
+        return WebGL2Engine(canvas=canvas, width=width, height=height)
+    except Exception:
+        return None
+
+
+def getWebGPUEngine(canvas=None, width=900, height=560):
+    """Separate WebGPU 3D engine. Owns its OWN WebGPU context/device.
+    Does NOT share the WebGL2 engine's context or the 2D renderer's.
+    Async init: engine.ready is False until on_ready fires."""
+    try:
+        from scs_engine_webgpu import WebGPU3DEngine
+        return WebGPU3DEngine(canvas=canvas, width=width, height=height)
+    except Exception:
+        return None
+
+
+
 def loadAsset(source, kind='auto', options=None):
     """Load one asset through the staged pipeline. Returns an
     AssetHandle with a documented ownership contract, not a raw
@@ -2115,6 +2297,95 @@ def loadTexture(source, options=None):
 
 def loadAudio(source, options=None):
     return loadAsset(source, kind='audio', options=options)
+
+
+# [STRIPPED 70 bytes]
+# Splats (scs_splats.py) -- first-class primitive
+# [STRIPPED 70 bytes]
+
+def getSplatRenderer(backend='webgl2'):
+    """Singleton splat renderer extension. WebGL raster + WebGPU
+    compute behind the same boundary. Custom passes, shared camera /
+    depth, explicit ordering."""
+    global _splat_renderer
+    if _splat_renderer is None:
+        try:
+            from scs_splats import WebGLSplatRenderer, WebGPUSplatRenderer
+            _splat_renderer = WebGPUSplatRenderer() if backend == 'webgpu' \
+                else WebGLSplatRenderer()
+        except Exception:
+            _splat_renderer = None
+    return _splat_renderer
+
+
+def createSplatSchema(sh_degree=0, relightable=False):
+    """Versioned logical schema. Backends pack it; the schema is
+    the contract, not any packed layout."""
+    from scs_splats import SplatSchema
+    s = SplatSchema(version=1, sh_degree=sh_degree)
+    if relightable:
+        s.add_relightable()
+    s.validate()
+    return s
+
+
+def createSplatAsset(schema=None, name='splats'):
+    """A splat asset: schema + chunks + hierarchy + appearance +
+    proxies. Scene membership here; residency in ResidencyManager."""
+    from scs_splats import SplatAsset
+    return SplatAsset(schema or createSplatSchema(), name=name)
+
+
+
+def getPipelineManager():
+    """Singleton PipelineManager (scs_pipeline). Pipelines are owned
+    state, not inline GL calls -- one per backend + material-kind."""
+    global _pipeline_manager
+    try:
+        _pipeline_manager
+    except NameError:
+        _pipeline_manager = None
+    if _pipeline_manager is None:
+        try:
+            from scs_pipeline import PipelineManager
+            _pipeline_manager = PipelineManager()
+        except Exception:
+            _pipeline_manager = None
+    return _pipeline_manager
+
+
+def getMaterialLibrary():
+    """Singleton MaterialLibrary (scs_materials). PBR materials are
+    data -- GLB loader fills it, pipelines bind it."""
+    global _material_library
+    try:
+        _material_library
+    except NameError:
+        _material_library = None
+    if _material_library is None:
+        try:
+            from scs_materials import MaterialLibrary
+            _material_library = MaterialLibrary()
+        except Exception:
+            _material_library = None
+    return _material_library
+
+
+def getPBRMaterial(name='', **kw):
+    """One-liner PBR material: getPBRMaterial('car-paint', base_color=(0.8,0.1,0.1), metallic=0.9, roughness=0.3, clearcoat=1.0)."""
+    try:
+        from scs_materials import PBRMaterial
+        return PBRMaterial(name=name, **kw)
+    except Exception:
+        return None
+
+
+def loadSplatManifest(asset_id, schema, chunk_ids, coarse_chunk_id=None):
+    """Chunked asset manifest + coarse representation before the
+    whole asset is available."""
+    from scs_splats import SplatAssetLoader
+    return SplatAssetLoader().manifest(asset_id, schema, chunk_ids,
+                                       coarse_chunk_id)
 
 
 # Aliases the user namespace expects.
@@ -2175,9 +2446,10 @@ def exec_code(code, fn):
     _user_ns['atan2'] = math.atan2
     _user_ns['sqrt'] = math.sqrt
     _user_ns['pi'] = math.pi
-    _user_ns['runApp'] = run_app
-    _user_ns['run'] = run_app
-    _user_ns['loop'] = run_app
+    _user_ns['runApp'] = runApp
+    _user_ns['run'] = runApp
+    _user_ns['loop'] = runApp
+    _user_ns['cmu_graphics_run'] = cmu_graphics_run
     _user_ns['App'] = App
     _user_ns['getAssetCache'] = getAssetCache
     _user_ns['getPrefs'] = getPrefs

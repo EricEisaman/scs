@@ -36,6 +36,38 @@ class FetchError(Exception):
         self.response = response
 
 
+def _js_to_py(obj):
+    """JSObject / JS array -> real Python dict/list. Framework fix, not an app fix.
+
+    Bug: FetchResponse.json() did `isinstance(result, (dict, list))` which is
+    False for a Brython JSObject, then `_pyjson.loads(window.JSON.stringify(result))`
+    where JSON.stringify returns a JS string, not a Python str -- json.loads
+    chokes, falls through, and the raw JSObject leaks to the app.
+    fetch_demo had to work around with data['title']; any app doing
+    data.get('title') / isinstance(data, dict) broke.
+
+    Fix order: (1) to_py() if present (Brython recursive), (2) JSON round-trip
+    with str() so json.loads gets a real Python str, (3) dict() fallback.
+    """
+    if isinstance(obj, (dict, list, str, int, float, bool)) or obj is None:
+        return obj
+    try:
+        to_py = getattr(obj, 'to_py', None)
+        if callable(to_py):
+            return to_py()
+    except Exception:
+        pass
+    try:
+        txt = window.JSON.stringify(obj)
+        return _pyjson.loads(str(txt))
+    except Exception:
+        pass
+    try:
+        return dict(obj)
+    except Exception:
+        return obj
+
+
 class FetchResponse:
     """
     Wrapper around browser's Response object.
@@ -69,29 +101,20 @@ class FetchResponse:
         Async parse as JSON. Mirrors Response.json()
         Returns Python dict/list.
         """
-        # If this came from aio.fetch and already has data, try that
+        # If this came from aio.fetch and already has data, convert it too
         if self._aio_data is not None:
-            # aio.fetch may already have parsed data
             if isinstance(self._aio_data, (dict, list)):
                 return self._aio_data
             try:
                 return _pyjson.loads(self._aio_data)
             except:
                 pass
+            return _js_to_py(self._aio_data)
 
         # Standard browser fetch path: await self._js.json()
         try:
             result = await self._js.json()
-            if isinstance(result, (dict, list)):
-                return result
-            try:
-                import json as _j
-                return _j.loads(window.JSON.stringify(result))
-            except:
-                try:
-                    return dict(result)
-                except:
-                    return result
+            return _js_to_py(result)
         except Exception as e:
             # Fallback: try text then parse
             try:

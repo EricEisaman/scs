@@ -23,16 +23,10 @@ canvas{display:block;background:black;outline:none;}
 </div>
 <div id="canvas-container"><canvas id="cmu-canvas" width="1050" height="700" tabindex="0"></canvas></div>
 <script>
-// pythonpath is ['.', 'scs']: package branch, publish /.
-// Root FIRST: scs_3d.py, scs_entrypoint.py, scs.py are at root per
-// README Project Structure. scs/ second: the 10 newer modules
-// (scs_presentation, scs_controller, ...) live only in scs/.
-// First hit wins. 404s are real 404s now (no /* rewrite), so
-// Brython falls through, never parses HTML as Python.
 // Toolbar only: reflect ?renderer= in the select. Renderer selection
 // itself lives in scs_entrypoint (_resolve_renderer_kind); changing
 // the select reloads with ?renderer=, it does not reimplement selection.
-(function(){try{var q=new URLSearchParams(window.location.search);var v=q.get('renderer')||window.SCS_CONFIG.renderer||'auto';document.getElementById('renderer-select').value=v;var app=q.get('app')||'(default apps/app.py)';document.getElementById('scs-status').textContent='app='+app+' renderer='+v;}catch(e){}})();
+(function(){try{var v=new URLSearchParams(window.location.search).get('renderer')||window.SCS_CONFIG.renderer||'auto';document.getElementById('renderer-select').value=v;}catch(e){}})();
 </script>
 <script type="text/python" id="main">
 # Thin shell only. No loop, no events, no renderer, no app loading here:
@@ -50,16 +44,12 @@ def _set_status(msg):
         pass
 
 def _on_renderer_change(ev):
-    # Reload with ?renderer= -- but PRESERVE every other param, above
-    # all ?app=. The old bug: rebuilding the query as '?renderer=...'
-    # dropped ?app=, so the URL param "disappeared" and the page fell
-    # back to apps/app.py. Build from the CURRENT search, change only
-    # the renderer key.
+    # Reload with ?renderer= so the entrypoint resolves it once,
+    # in one place (explicit arg > ?renderer= > SCS_CONFIG > '2d').
     try:
         val = document['renderer-select'].value or 'auto'
         p = window.URLSearchParams.new(window.location.search)
         p.set('renderer', val)
-        # Keep ?app= (and anything else) exactly as it was.
         window.location.search = '?' + p.toString()
     except Exception:
         pass
