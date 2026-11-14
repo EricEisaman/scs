@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v17-log-shape-errors'
+__version__ = '2026-11-14-runApp-*args-v18-no-stale-zero'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -2262,10 +2262,29 @@ def _frame():
     # In XR this loop is STOPPED and the session owns scheduling.
     # Zero-sized container: skip normal rendering (Presentation D4).
     try:
-        if _presentation_coordinator is not None:
-            cur = _presentation_coordinator.current()
-            if cur is not None and getattr(cur, 'is_zero_sized', False):
-                return
+        # DO NOT early-return on stale zero-sized. ResizeObserver fires once
+        # at boot when container is still 0x0, _current sticks at zero-sized,
+        # and every _frame after that returns early -> black forever, even
+        # though canvas is visibly 900x560 now. Check LIVE canvas size.
+        try:
+            if _presentation_coordinator is not None:
+                cur = _presentation_coordinator.current()
+                if cur is not None and getattr(cur, 'is_zero_sized', False):
+                    # Verify live: if canvas now has size, ignore stale zero.
+                    try:
+                        _cv = _find_canvas()
+                        if _cv is not None:
+                            _r = _cv.getBoundingClientRect()
+                            if float(getattr(_r, 'width', 0) or 0) > 0 and float(getattr(_r, 'height', 0) or 0) > 0:
+                                pass  # live non-zero, do NOT return
+                            else:
+                                return
+                        else:
+                            return
+                    except Exception:
+                        return
+        except Exception:
+            pass
         _step()
         _render()
     except Exception as _e_frame:
