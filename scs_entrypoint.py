@@ -14,7 +14,7 @@ What lives here:
   * Immediate-mode draw* functions -- thin forwards to the renderer
   * App + runApp/run/loop -- renderer selection happens HERE:
         runApp(width, height, renderer='2d' | 'webgl2' | 'webgpu' | 'auto')
-        runApp(..., renderer='webgpu')   # WebGPU (async init, auto fallback)
+        runApp(..., renderer='webgpu')   # WebGPU (async init, NO FALLBACK)
         runApp(..., renderer='auto')     # WebGPU -> WebGL2 -> 2D
         ?app=rabbit_sim&renderer=webgpu  # URL param, same selection
         SCS.create({renderer: 'webgpu'}) # JS / CDN loader, same selection
@@ -144,11 +144,11 @@ def _normalize_hud(hud=None, mode=None):
          '3d' | 'world' | False -> '3d' (3D world, depth on, not HUD)
          'auto' -> 'auto' (inherit from app's global HUD mode)
     mode: alias for hud - mode='hud'/'2d' -> 'hud', mode='3d'/'world' -> '3d'
-    Returns 'hud' | '3d' | 'texture' | 'html' | 'auto'. Default is 'hud' (HUD/2D)."""
+    Returns 'hud' | '3d' | 'texture' | 'html' | 'auto'. Default is '3d' (hud=False, 3D mode)."""
     # mode alias takes precedence if hud is default/None
     if mode is not None and hud is None:
         hud = mode
-    elif mode is not None and hud == 'hud':
+    elif mode is not None and (hud is False or hud == 'hud'):
         # If both given, mode overrides only if it explicitly says 3d
         _m = str(mode).strip().lower().replace('-', '_')
         if _m in ('3d', 'world', '3d_world'):
@@ -156,11 +156,11 @@ def _normalize_hud(hud=None, mode=None):
         elif _m in ('hud', '2d', 'texture', 'html', 'auto'):
             hud = _m if _m != '2d' else 'hud'
     if hud is None:
-        return 'hud'
+        return '3d'  # default False = 3D mode
     if hud is True:
-        return 'hud'
+        return 'hud'  # hud=True = overlay
     if hud is False:
-        return '3d'
+        return '3d'  # hud=False (default) = 3D mode
     s = str(hud).strip().lower().replace('-', '_')
     if s in ('', 'hud', '2d', '2_d', 'hud_2d', '2d_hud', 'true', 'yes', 'on', '1'):
         return 'hud'
@@ -173,6 +173,33 @@ def _normalize_hud(hud=None, mode=None):
     if s in ('3d', 'world', '3d_world', 'world_3d', 'false', 'no', 'off', '0'):
         return '3d'
     return 'hud'
+
+
+def _is_3d_shape(shape):
+    """CMU rule: centerZ set = 3D, no centerZ = HUD. centerZ at END.
+    centerZ wins over hud. hud=False / hud='3d' also counts as 3D for backwards compat.
+    """
+    try:
+        z = getattr(shape, 'centerZ', getattr(shape, 'z', getattr(shape, '_centerZ', getattr(shape, '_z', None))))
+        if z is not None:
+            return True
+        z1 = getattr(shape, 'centerZ1', getattr(shape, 'z1', None))
+        z2 = getattr(shape, 'centerZ2', getattr(shape, 'z2', None))
+        if z1 is not None or z2 is not None:
+            return True
+        h = getattr(shape, 'hud', None)
+        if h == '3d':
+            return True
+        return False
+    except Exception:
+        return False
+
+def _get_shape_z(shape):
+    try:
+        return getattr(shape, 'centerZ', getattr(shape, 'z', getattr(shape, '_centerZ', None)))
+    except Exception:
+        return None
+
 
 
 def _get_align_offsets(align, width, height):
@@ -218,7 +245,7 @@ _hud_3d_kind = None     # 'webgl2' or 'webgpu' when in HUD mode
 # (Chrome 157+ only, live DOM). _hud_kind: 'texture' | 'html' | 'auto'.
 #   hud='texture'  -> offscreen 2D canvas -> WebGL texture (works everywhere)
 #   hud='html'     -> live DOM element -> WebGL texture via texElementSubImage2D
-#                      (Chrome 157+ only, fallback to texture if not supported)
+#                      (Chrome 157+ only, NO FALLBACK to texture)
 #   hud='auto'     -> try HTML-in-Canvas if supported, else texture
 #   hud=True       -> 'texture' (backwards compat, default)
 #   mode='hud'/'3d' -> 'texture', mode='html' -> 'html', mode='auto' -> 'auto'
@@ -629,8 +656,8 @@ def create_renderer(kind, canvas, width, height):
 
 
 def _resolve_renderer_kind(requested):
-    """Precedence: explicit arg > ?renderer= > SCS_CONFIG.renderer >
-    SCS_CONFIG default > '2d'. 'auto' stays 'auto'."""
+    """Precedence: explicit arg > ?renderer= > SCS_CONFIG.renderer > '2d'.
+    'auto' = default (2D). No fallback chain."""
     if requested:
         return str(requested).lower()
     url = _url_param('renderer')
@@ -646,7 +673,6 @@ def _activate_renderer(renderer, kind):
     global _renderer, _renderer_kind, _ctx
     _renderer = renderer
     _renderer_kind = kind
-    _debug_log('SCS renderer version=0.1 mode=%s' % kind)
     if kind == '2d' and renderer is not None:
         _ctx = getattr(renderer, 'ctx', None)
     else:
@@ -681,10 +707,21 @@ def setRenderer(kind):
 # ----------------------------------------------------------------------
 
 class _BaseShape:
-    def __init__(self, hud='hud', **kwargs):
+    def __init__(self, hud=None, centerZ=None, **kwargs):
         self._align = _normalize_align(kwargs.get('align', 'center'))
-        # Per-shape HUD-or-3D flag. Default to HUD/2D. See _normalize_hud.
-        self.hud = _normalize_hud(kwargs.get('hud', None), kwargs.get('mode', None))
+        # Per-shape: centerZ at END wins. No centerZ + no hud = HUD (new rule).
+        # centerZ set = 3D, even centerZ=0. hud=False / hud='3d' still = 3D for backwards compat.
+        _cz = centerZ
+        if _cz is None:
+            _cz = kwargs.get('centerZ', kwargs.get('z', None))
+        self._centerZ = None if _cz is None else float(_cz)
+        self._z = self._centerZ
+        if self._centerZ is not None:
+            self.hud = '3d'
+        elif hud is not None or 'hud' in kwargs or 'mode' in kwargs:
+            self.hud = _normalize_hud(hud if hud is not None else kwargs.get('hud', None), kwargs.get('mode', None))
+        else:
+            self.hud = 'hud'
         self.fill = kwargs.get('fill', 'black')
         self.border = kwargs.get('border', None)
         self.borderWidth = kwargs.get('borderWidth', 2)
@@ -705,6 +742,28 @@ class _BaseShape:
     @align.setter
     def align(self, _v):
         raise AttributeError('align is creation-time only in CMU Graphics')
+
+    @property
+    def z(self):
+        return getattr(self, '_z', None)
+
+    @z.setter
+    def z(self, v):
+        self._z = None if v is None else float(v)
+        self._centerZ = self._z
+        if self._z is not None:
+            self.hud = '3d'
+
+    @property
+    def centerZ(self):
+        return getattr(self, '_z', None)
+
+    @centerZ.setter
+    def centerZ(self, v):
+        self._z = None if v is None else float(v)
+        self._centerZ = self._z
+        if self._z is not None:
+            self.hud = '3d'
 
     @property
     def left(self):
@@ -800,10 +859,10 @@ class _BaseShape:
 
 
 class Rect(_BaseShape):
-    def __init__(self, x, y, width, height, hud='hud', **kwargs):
+    def __init__(self, x, y, width, height, hud=None, centerZ=None, **kwargs):
         self.hud = _normalize_hud(hud, kwargs.get('mode', None))
         align = kwargs.pop('align', 'left-top')
-        super().__init__(align=align, hud=hud,
+        super().__init__(align=align, hud=hud, centerZ=centerZ,
                          **{k: v for k, v in kwargs.items() if k != 'align'})
         self._width = float(width)
         self._height = float(height)
@@ -823,10 +882,10 @@ class Rect(_BaseShape):
 
 
 class Oval(_BaseShape):
-    def __init__(self, x, y, width, height, hud='hud', **kwargs):
+    def __init__(self, x, y, width, height, hud=None, centerZ=None, **kwargs):
         self.hud = _normalize_hud(hud, kwargs.get('mode', None))
         align = kwargs.pop('align', 'center')
-        super().__init__(align=align, hud=hud,
+        super().__init__(align=align, hud=hud, centerZ=centerZ,
                          **{k: v for k, v in kwargs.items() if k != 'align'})
         self._width = float(width)
         self._height = float(height)
@@ -844,10 +903,10 @@ class Oval(_BaseShape):
 
 
 class Circle(_BaseShape):
-    def __init__(self, x, y, radius, hud='hud', **kwargs):
+    def __init__(self, x, y, radius, hud=None, centerZ=None, **kwargs):
         self.hud = _normalize_hud(hud, kwargs.get('mode', None))
         align = kwargs.pop('align', 'center')
-        super().__init__(align=align, hud=hud,
+        super().__init__(align=align, hud=hud, centerZ=centerZ,
                          **{k: v for k, v in kwargs.items() if k != 'align'})
         self._radius = float(radius)
         w = h = float(radius) * 2
@@ -907,10 +966,10 @@ class Circle(_BaseShape):
 
 
 class RegularPolygon(_BaseShape):
-    def __init__(self, x, y, radius, points, hud='hud', **kwargs):
+    def __init__(self, x, y, radius, points, hud=None, centerZ=None, **kwargs):
         self.hud = _normalize_hud(hud, kwargs.get('mode', None))
         align = kwargs.pop('align', 'center')
-        super().__init__(align=align, hud=hud,
+        super().__init__(align=align, hud=hud, centerZ=centerZ,
                          **{k: v for k, v in kwargs.items() if k != 'align'})
         self._radius = float(radius)
         self.points = int(points)
@@ -972,7 +1031,7 @@ class RegularPolygon(_BaseShape):
 
 
 class Star(RegularPolygon):
-    def __init__(self, x, y, radius, points, hud='hud', **kwargs):
+    def __init__(self, x, y, radius, points, hud=None, centerZ=None, **kwargs):
         super().__init__(x, y, radius, points, hud=hud, **kwargs)
         self.ratio = kwargs.get('ratio', 0.5)
 
@@ -987,8 +1046,17 @@ class Star(RegularPolygon):
 
 
 class Line:
-    def __init__(self, x1, y1, x2, y2, hud='hud', **kwargs):
+    def __init__(self, x1, y1, x2, y2, hud=None, centerZ=None, centerZ1=None, centerZ2=None, **kwargs):
         self.hud = _normalize_hud(hud, kwargs.get('mode', None))
+        _cz2 = centerZ if centerZ is not None else kwargs.get('centerZ', kwargs.get('z', None))
+        self._centerZ = None if _cz2 is None else float(_cz2)
+        self._z = self._centerZ
+        _z1 = centerZ1 if centerZ1 is not None else kwargs.get('centerZ1', kwargs.get('z1', _cz2))
+        _z2 = centerZ2 if centerZ2 is not None else kwargs.get('centerZ2', kwargs.get('z2', _cz2))
+        self.centerZ1 = None if _z1 is None else float(_z1)
+        self.centerZ2 = None if _z2 is None else float(_z2)
+        if self._centerZ is not None:
+            self.hud = '3d'
         self.x1 = float(x1)
         self.y1 = float(y1)
         self.x2 = float(x2)
@@ -1076,7 +1144,7 @@ class Line:
 
 
 class Polygon:
-    def __init__(self, *points, hud='hud', **kwargs):
+    def __init__(self, *points, hud=None, centerZ=None, **kwargs):
         self.hud = _normalize_hud(hud, kwargs.get('mode', None))
         self.points = [float(p) for p in points]
         self.fill = kwargs.get('fill', 'black')
@@ -1158,10 +1226,10 @@ class Polygon:
 
 
 class Arc(_BaseShape):
-    def __init__(self, x, y, width, height, startAngle, sweepAngle, hud='hud', **kwargs):
+    def __init__(self, x, y, width, height, startAngle, sweepAngle, hud=None, centerZ=None, **kwargs):
         self.hud = _normalize_hud(hud, kwargs.get('mode', None))
         align = kwargs.pop('align', 'center')
-        super().__init__(align=align, hud=hud,
+        super().__init__(align=align, hud=hud, centerZ=centerZ,
                          **{k: v for k, v in kwargs.items() if k != 'align'})
         self._width = float(width)
         self._height = float(height)
@@ -1181,8 +1249,13 @@ class Arc(_BaseShape):
 
 
 class Label:
-    def __init__(self, text, x, y, hud='hud', **kwargs):
+    def __init__(self, text, x, y, hud=None, centerZ=None, **kwargs):
         self.hud = _normalize_hud(hud, kwargs.get('mode', None))
+        _cz2 = centerZ if centerZ is not None else kwargs.get('centerZ', kwargs.get('z', None))
+        self._centerZ = None if _cz2 is None else float(_cz2)
+        self._z = self._centerZ
+        if self._centerZ is not None:
+            self.hud = '3d'
         self.text = str(text)
         self.size = kwargs.get('size', 12)
         self.font = kwargs.get('font', 'arial')
@@ -1255,10 +1328,10 @@ class Label:
 
 
 class Image(_BaseShape):
-    def __init__(self, path, x, y, hud='hud', **kwargs):
+    def __init__(self, path, x, y, hud=None, centerZ=None, **kwargs):
         self.hud = _normalize_hud(hud, kwargs.get('mode', None))
         align = kwargs.pop('align', 'center')
-        super().__init__(align=align, hud=hud,
+        super().__init__(align=align, hud=hud, centerZ=centerZ,
                          **{k: v for k, v in kwargs.items() if k != 'align'})
         self.path = path
         self._width = float(kwargs.get('width', 100))
@@ -1292,7 +1365,7 @@ class Image(_BaseShape):
 
 
 class Group:
-    def __init__(self, *shapes, hud='hud', **kwargs):
+    def __init__(self, *shapes, hud=None, centerZ=None, **kwargs):
         self.hud = _normalize_hud(hud, kwargs.get('mode', None))
         self.shapes = list(shapes)
         self.visible = True
@@ -1402,7 +1475,7 @@ def _renderer_or_2d():
 
 def drawRect(x, y, width, height, fill='black', border=None, borderWidth=2,
              opacity=100, rotateAngle=0, dashes=False, align='left-top',
-             visible=True, roundness=0, hud='hud'):
+             visible=True, roundness=0, hud=False, centerZ=None):
     if not visible:
         return
     r = _renderer_or_2d()
@@ -1416,7 +1489,7 @@ def drawRect(x, y, width, height, fill='black', border=None, borderWidth=2,
 
 
 def drawCircle(x, y, radius, fill='black', border=None, borderWidth=2,
-               opacity=100, rotateAngle=0, dashes=False, align='center', visible=True, hud='hud'):
+               opacity=100, rotateAngle=0, dashes=False, align='center', visible=True, hud=False, centerZ=None):
     if not visible:
         return
     r = _renderer_or_2d()
@@ -1430,7 +1503,7 @@ def drawCircle(x, y, radius, fill='black', border=None, borderWidth=2,
 
 
 def drawOval(x, y, width, height, fill='black', border=None, borderWidth=2,
-             opacity=100, rotateAngle=0, dashes=False, align='center', visible=True, hud='hud'):
+             opacity=100, rotateAngle=0, dashes=False, align='center', visible=True, hud=False, centerZ=None):
     if not visible:
         return
     r = _renderer_or_2d()
@@ -1445,7 +1518,7 @@ def drawOval(x, y, width, height, fill='black', border=None, borderWidth=2,
 
 def drawRegularPolygon(x, y, radius, points, fill='black', border=None,
                        borderWidth=2, opacity=100, rotateAngle=0, dashes=False,
-                       align='center', visible=True, hud='hud'):
+                       align='center', visible=True, hud=False, centerZ=None):
     if not visible:
         return
     r = _renderer_or_2d()
@@ -1460,7 +1533,7 @@ def drawRegularPolygon(x, y, radius, points, fill='black', border=None,
 
 def drawStar(x, y, radius, points, fill='black', border=None, borderWidth=2,
              opacity=100, rotateAngle=0, dashes=False, align='center',
-             visible=True, ratio=0.5, hud='hud'):
+             visible=True, ratio=0.5, hud=False, centerZ=None):
     if not visible:
         return
     r = _renderer_or_2d()
@@ -1475,7 +1548,7 @@ def drawStar(x, y, radius, points, fill='black', border=None, borderWidth=2,
 
 def drawLabel(text, x, y, fill='black', size=12, font='arial', bold=False,
               italic=False, opacity=100, align='center', visible=True,
-              rotateAngle=0, hud='hud'):
+              rotateAngle=0, hud=False, centerZ=None):
     if not visible:
         return
     r = _renderer_or_2d()
@@ -1487,7 +1560,7 @@ def drawLabel(text, x, y, fill='black', size=12, font='arial', bold=False,
 
 
 def drawLine(x1, y1, x2, y2, fill='black', lineWidth=2, opacity=100,
-             dashes=False, visible=True, hud='hud'):
+             dashes=False, visible=True, hud=False, centerZ=None):
     if not visible:
         return
     r = _renderer_or_2d()
@@ -1498,7 +1571,7 @@ def drawLine(x1, y1, x2, y2, fill='black', lineWidth=2, opacity=100,
 
 
 def drawPolygon(*points, fill='black', border=None, borderWidth=2, opacity=100,
-                rotateAngle=0, dashes=False, visible=True, hud='hud'):
+                rotateAngle=0, dashes=False, visible=True, hud=False, centerZ=None):
     if not visible or len(points) < 4:
         return
     r = _renderer_or_2d()
@@ -1510,7 +1583,7 @@ def drawPolygon(*points, fill='black', border=None, borderWidth=2, opacity=100,
 
 
 def drawArc(x, y, width, height, startAngle, sweepAngle, fill=None, border=None,
-            borderWidth=2, opacity=100, dashes=False, align='center', visible=True, hud='hud'):
+            borderWidth=2, opacity=100, dashes=False, align='center', visible=True, hud=False, centerZ=None):
     if not visible:
         return
     r = _renderer_or_2d()
@@ -1524,7 +1597,7 @@ def drawArc(x, y, width, height, startAngle, sweepAngle, fill=None, border=None,
 
 
 def drawImage(path, x, y, width=None, height=None, opacity=100, rotateAngle=0,
-              align='center', visible=True, hud='hud'):
+              align='center', visible=True, hud=False, centerZ=None):
     if not visible:
         return
     r = _renderer_or_2d()
@@ -1625,7 +1698,7 @@ class Sound:
 # ----------------------------------------------------------------------
 
 class App:
-    def __init__(self, width=400, height=400, renderer=None, hud='hud', **kwargs):
+    def __init__(self, width=400, height=400, renderer=None, hud=False, **kwargs):
         global _app
         if isinstance(width, App):
             _src = width
@@ -1716,7 +1789,7 @@ def _parse_run_args(args, kwargs):
         html_element = kwargs.pop('html_hud', None)
     # Both, with a flag: hud can be True/False OR a string:
     #   hud='texture' -> offscreen 2D canvas -> WebGL texture (works everywhere, default)
-    #   hud='html'    -> live DOM -> WebGL texture via texElementSubImage2D (Chrome 157+ only, fallback to texture)
+    #   hud='html'    -> live DOM -> WebGL texture via texElementSubImage2D (Chrome 157+ only, NO FALLBACK to texture)
     #   hud='auto'    -> try HTML if supported, else texture
     #   hud=True      -> 'texture' (backwards compat)
     #   hud='html-in-canvas' / 'html_in_canvas' / 'canvas' -> 'html'
@@ -1998,10 +2071,48 @@ def _render_one_view(view, renderer=None):
             pass
     try:
         _call('redrawAll', _app)
+        # PER-SHAPE HUD vs 3D: 3D apps have flat shapes that can be HUD mode OR 3D mode.
+        # hud=False/'texture'/True -> screen-space HUD (draw to _hud_2d_renderer / offscreen)
+        # hud='3d'/'world'/False -> world-space 3D (draw to 3D renderer r, depth on)
+        # 2D apps: no 3D, all shapes draw to r (2D renderer) - no routing needed.
+        _is_3d = bool(getattr(_app, '_is_3d_app', False)) if _app is not None else False
+        # _is_3d_app is computed in run_app from _user_funcs - use that if available
+        try:
+            _is_3d = any(k in _user_funcs for k in ('onRender3D', 'onDraw3D', 'draw3D', 'onRender', 'render3D'))
+        except Exception:
+            pass
+        _hud_shapes_drawn = False
         for s in list(_shapes):
             try:
                 draw_fn = getattr(s, 'draw', None)
-                if draw_fn is not None:
+                if draw_fn is None:
+                    continue
+                # Route per shape in 3D apps only
+                if _is_3d and _hud_mode:
+                    _sh = getattr(s, 'hud', False)
+                    # FINAL: hud=False (default) = 3D mode, hud=True = overlay. _normalize_hud maps
+                    # True->'hud', False->'3d'. Handle raw bools: True => overlay, False => 3D.
+                    if _sh is True:
+                        _sh_str = 'hud'
+                    elif _sh is False or _sh is None:
+                        _sh_str = '3d'
+                    else:
+                        _sh_str = str(_sh).lower() if _sh is not None else '3d'
+                    if _sh_str in ('hud', 'texture', 'html', 'true', '1', ''):
+                        # Overlay flat shape (hud=True): draw to HUD 2D renderer (offscreen), NOT to 3D renderer
+                        _hr = _hud_2d_renderer
+                        if _hr is not None:
+                            draw_fn(_hr)
+                            _hud_shapes_drawn = True
+                            continue
+                        # No HUD 2D renderer (should not happen in 3D HUD mode) - fall through to 3D
+                        # No fallback content: draw to 3D renderer as HUD quad via r.draw_label etc.
+                        # For now, draw to r (it will handle HUD quads in 3D engine's MSDF path)
+                        draw_fn(r)
+                    else:
+                        # 3D flat shape: world-space, depth on, draw to 3D renderer
+                        draw_fn(r)
+                else:
                     draw_fn(r)
             except Exception:
                 pass
@@ -2011,13 +2122,16 @@ def _render_one_view(view, renderer=None):
         #     unchanged) -> WebGL texture. Works everywhere.
         #   hud='html' -> live DOM element -> WebGL texture via
         #     texElementSubImage2D (Chrome 157+ only). Live, typeable,
-        #     accessible. Falls back to texture if not supported / if the
-        #     renderer does not implement draw_html_element.
+        #     accessible. NO FALLBACK to texture if not supported.
         #   hud='auto' -> already resolved to 'html' or 'texture' in run_app().
         # This is the one-line-change contract: the 2D app never knows it is in 3D.
-        if _hud_mode:
+        # Only composite HUD if HUD shapes were actually drawn this frame.
+        # 3D app with only 3D flat shapes (hud='3d') has no HUD to composite.
+        if _hud_mode and _hud_shapes_drawn:
             try:
                 _hud_done = False
+                # Only composite HUD texture if HUD shapes were drawn (or app explicitly asked for HUD).
+                # NO FALLBACK: hud='html' failing does NOT fall back to texture. Proper HTML or fail.
                 if _hud_kind == 'html':
                     try:
                         _el = getHtmlHudElement()
@@ -2025,13 +2139,9 @@ def _render_one_view(view, renderer=None):
                             _hud_done = bool(r.draw_html_element(_el, 0, 0, _canvas_width, _canvas_height))
                     except Exception:
                         _hud_done = False
-                    if not _hud_done and _hud_offscreen is not None:
-                        # HTML failed / not supported: fall back to texture, do not break.
-                        try:
-                            if hasattr(r, 'draw_hud_canvas'):
-                                r.draw_hud_canvas(_hud_offscreen, 0, 0, _canvas_width, _canvas_height)
-                        except Exception:
-                            pass
+                    # No fallback to texture - if HTML fails, it fails. No fallback content.
+                    if not _hud_done:
+                        _debug_log('SCS HUD: hud="html" failed - NO FALLBACK to texture. Failing HUD composite.')
                 elif _hud_offscreen is not None:
                     if hasattr(r, 'draw_hud_canvas'):
                         r.draw_hud_canvas(_hud_offscreen, 0, 0, _canvas_width, _canvas_height)
@@ -2115,8 +2225,10 @@ def _start_loop():
 
 def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
             canvas=None, hud=None, mode=None, html_element=None, **kwargs):
-    """The initialiser. renderer: '2d' (default, backwards compat),
-    'webgl2', 'webgpu', or 'auto' (WebGPU -> WebGL2 -> 2D).
+    """The initialiser. renderer: '2d', 'webgl2', or 'webgpu'. NO FALLBACK.
+    NO WebGPU -> WebGL2 -> 2D fallback chain. 'auto' = default (2D, or HUD texture if 3D renderer). If you ask for 'webgl2' and
+    WebGL2 fails, it FAILS. If you ask for 'webgpu' and WebGPU fails, it FAILS.
+    Proper WebGL, proper WebGPU. No silent downgrade, no fallback content.
 
     Also honours (in order): explicit arg > _pending_renderer from
     setRenderer() > ?renderer= URL param > SCS_CONFIG.renderer.
@@ -2183,37 +2295,50 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
         _hud_kind = 'html'
     if mode is not None and str(mode).lower().replace('-', '_') in ('auto', 'automatic'):
         _hud_requested = True
-        _hud_kind = 'auto'
+        _hud_kind = 'texture'  # auto = automatic texture, no explicit mode required
     if renderer is not None and str(renderer).lower() in ('3d', 'hud', 'hud-3d', '3d-hud'):
         _hud_requested = True
         renderer = 'webgl2'
         if _hud_kind not in ('html', 'auto'):
             _hud_kind = 'texture'
-    # Implicit HUD: 2D app + 3D renderer. The app's code has no 3D callbacks,
-    # so the only way to show its 2D output in a 3D scene is as HUD.
+    # HUD ONLY MAKES SENSE IN 3D APPS. Was inverted before - that was the fuckup.
+    # Old (wrong): 2D app + webgl2 => HUD. That forced every 2D app into an empty
+    # 3D scene just to HUD over it. Nonsense.
+    # Correct: 2D app + webgl2/webgpu => just 2D via WebGL, NO HUD, NO offscreen canvas.
+    # 3D app (has onRender3D / onDraw3D / draw3D) + webgl2/webgpu => HUD is the 2D
+    # overlay (labels, buttons) on top of the 3D scene. THAT is when HUD makes sense.
     _is_3d_app = any(k in _user_funcs for k in ('onRender3D', 'onDraw3D', 'draw3D', 'onRender', 'render3D'))
-    _renderer_req = str(renderer or '').lower() if renderer else None
-    if _renderer_req in ('webgl2', 'webgl', 'webgpu', 'gpu', 'auto') and not _is_3d_app:
+    # _renderer_req must include setRenderer() / _pending_renderer / App.renderer,
+    # not just the runApp() arg.
+    _renderer_req = str(renderer or _pending_renderer or getattr(app, 'renderer', None) or '').lower() or None
+    if not _is_3d_app and _hud_requested:
+        # Explicit hud=True / mode='hud' on a 2D app - HUD makes no sense, ignore it.
+        # Don't force a 2D app into HUD. Just render 2D.
+        _debug_log('SCS HUD: hud requested on a 2D app (no 3D callbacks) - HUD only makes sense in 3D apps. Ignoring HUD, rendering 2D directly.')
+        _hud_requested = False
+        _hud_kind = 'texture'
+    if _renderer_req in ('webgl2', 'webgl', 'webgpu', 'gpu', 'auto') and _is_3d_app:
+        # Implicit HUD: 3D app + 3D renderer => HUD overlay automatically, no explicit mode needed.
         _hud_requested = True
+        if _hud_kind not in ('html', 'texture'):
+            _hud_kind = 'texture'
     if _hud_requested:
         _hud_mode = True
-        # 'auto': try HTML-in-Canvas if this browser supports it (Chrome 157+),
-        # else fall back to HUD texture (works everywhere). This is the safe
-        # default for hud='auto' - never breaks on Firefox/Safari.
+        # HUD is AUTOMATIC - no explicit mode required. Native cmu_graphics has NO hud param.
+        # runApp(900,560, renderer='webgl2') with a 3D app => HUD texture, automatically.
+        # 2D app + webgl2 => NO HUD, just 2D via WebGL (see above).
+        # hud='auto' = "figure it out" = texture. NOT a fallback chain, NOT an error.
+        # Only hud='html' is explicit: if Chrome 157+ is missing, it FAILS (no fallback to texture).
         if _hud_kind == 'auto':
-            try:
-                _hud_kind = 'html' if isHtmlInCanvasSupported() else 'texture'
-            except Exception:
-                _hud_kind = 'texture'
-        # 'html' but not supported: fall back to texture, do not break the app.
-        # Log once so the user knows why they are on texture.
+            _hud_kind = 'texture'
         if _hud_kind == 'html':
             try:
                 if not isHtmlInCanvasSupported():
-                    _debug_log('SCS HUD: hud="html" requested but HTML-in-Canvas not supported in this browser (Chrome 157+ only). Falling back to hud="texture".')
-                    _hud_kind = 'texture'
+                    _debug_log('SCS HUD: hud="html" requested but HTML-in-Canvas not supported in this browser (Chrome 157+ only). NO FALLBACK to texture. Failing.')
+                    return
             except Exception:
-                _hud_kind = 'texture'
+                _debug_log('SCS HUD: hud="html" check failed. NO FALLBACK. Failing.')
+                return
         # Store the HTML element for HTML mode (None = default #scs-html-hud div)
         if html_element is not None:
             try:
@@ -2227,11 +2352,11 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
                     setHtmlHudElement(kwargs.get(_hk))
                 except Exception:
                     pass
-        # 3D kind for HUD: webgpu if explicitly asked, else webgl2 (widest support)
+        # 3D kind for HUD: explicit webgpu => webgpu, else webgl2.
+        # 'auto' = default to webgl2 for HUD - NOT a fallback chain, NOT an error.
+        # Native cmu_graphics has no renderer param, so auto must just work.
         if _renderer_req in ('webgpu', 'gpu'):
             _hud_3d_kind = 'webgpu'
-        elif _renderer_req == 'auto':
-            _hud_3d_kind = 'webgpu'  # auto will fall back to webgl2 in the renderer chain
         else:
             _hud_3d_kind = 'webgl2'
         # Offscreen 2D canvas is created AFTER _size_canvas (needs width/height)
@@ -2270,61 +2395,32 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
     _pending_renderer = None
     if _hud_mode:
         # In HUD mode the visible canvas is always 3D. If the resolved kind
-        # is still '2d' (e.g. no renderer was passed, only hud=True), use webgl2.
-        if kind in ('2d', 'canvas', 'canvas2d'):
+        # is still '2d' (e.g. no renderer was passed, only hud=True), use _hud_3d_kind.
+        # 'auto' = default to HUD 3D kind (webgl2) - automatic, no explicit mode required.
+        if kind in ('2d', 'canvas', 'canvas2d', 'auto'):
             kind = _hud_3d_kind or 'webgl2'
-        if kind == 'auto':
-            kind = _hud_3d_kind or 'webgpu'
 
-    def _fallback(exc_kind, err):
-        # WebGPU/WebGL2 failed: walk down the chain, then start anyway.
-        # Log type + repr + traceback: Brython's ImportError str() is
-        # just the module name ('scs_2d'), which hid the real cause.
-        nxt = {'webgpu': 'webgl2', 'webgl2': '2d'}.get(exc_kind)
-        if nxt is None:
-            try:
-                import traceback as _tb
-                _detail = _tb.format_exc()
-            except Exception:
-                _detail = ''
-            _debug_log('SCS renderer failed (%s): %s: %r\n%s'
-                       % (exc_kind, type(err).__name__, err, _detail))
-            return
-        try:
-            r = create_renderer(nxt, _find_canvas(), width, height)
-            _activate_renderer(r, nxt)
-            _start_loop()
-        except Exception as e2:
-            _fallback(nxt, e2)
-
+    # NO FALLBACK. Proper WebGL / WebGPU. If the requested renderer fails, FAIL.
+    # _fallback() is deleted - no WebGPU -> WebGL2 -> 2D chain, no silent downgrade.
+    # BUT: 'auto' is NOT an error. Native cmu_graphics has NO renderer param -
+    # runApp() with no renderer must just work and default to 2D. So 'auto' = '2d'.
+    # No fallback chain, just the native default.
     if kind == 'auto':
-        # Try WebGPU async; on failure fall through to WebGL2 -> 2D.
-        try:
-            r = create_renderer('webgpu', _find_canvas(), width, height)
-        except Exception:
-            r = None
-        if r is not None and getattr(r, '_init_error', None) is None:
-            def _auto_ready():
-                _activate_renderer(r, 'webgpu')
-                _start_loop()
-
-            def _auto_fail(err):
-                _fallback('webgpu', err)
-
-            r.on_ready = _auto_ready
-            r.on_error = _auto_fail
-            return  # loop starts from _auto_ready
-        _fallback('webgpu', getattr(r, '_init_error', 'no WebGPU') if r else 'no WebGPU')
-        return
+        kind = '2d'
 
     if kind == 'webgpu':
         try:
             r = create_renderer('webgpu', _find_canvas(), width, height)
         except Exception as e:
-            _fallback('webgpu', e)
+            try:
+                import traceback as _tb
+                _detail = _tb.format_exc()
+            except Exception:
+                _detail = ''
+            _debug_log('SCS renderer failed (webgpu): %s: %r\n%s - NO FALLBACK. Failing.' % (type(e).__name__, e, _detail))
             return
         if getattr(r, '_init_error', None) is not None:
-            _fallback('webgpu', r._init_error)
+            _debug_log('SCS renderer failed (webgpu): %s - NO FALLBACK. Failing.' % (r._init_error,))
             return
 
         def _gpu_ready():
@@ -2332,16 +2428,23 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
             _start_loop()
 
         def _gpu_fail(err):
-            _fallback('webgpu', err)
+            _debug_log('SCS renderer failed (webgpu): %s - NO FALLBACK. Failing.' % (err,))
+            return
 
         r.on_ready = _gpu_ready
         r.on_error = _gpu_fail
         return  # loop starts from _gpu_ready
 
+    # webgl2 / 2d: explicit, no fallback. If create fails, FAIL.
     try:
         r = create_renderer(kind, _find_canvas(), width, height)
     except Exception as e:
-        _fallback(kind, e)
+        try:
+            import traceback as _tb
+            _detail = _tb.format_exc()
+        except Exception:
+            _detail = ''
+        _debug_log('SCS renderer failed (%s): %s: %r\n%s - NO FALLBACK. Failing.' % (kind, type(e).__name__, e, _detail))
         return
     _activate_renderer(r, kind)
     _start_loop()
@@ -2846,7 +2949,7 @@ def app_file(app=None):
       1. explicit boot(app) / load(app) arg - boot("myapp.py")
       2. ?app=myapp - URL param, user pointing at top level. MUST win over data-app.
          BUG FIX: data-app="apps/app.py" in index.html used to win over ?app=fetch_demo,
-         so ?app=fetch_demo showed app.py. ?app= is explicit, data-app is fallback.
+         so ?app=fetch_demo showed app.py. ?app= is explicit, data-app is the HTML default.
       3. window.SCS_CONFIG.app - npm / CDN config
       4. <canvas data-app="apps/myapp.py"> - fallback in HTML, only if no URL / config
       5. default apps/app.py
@@ -2865,7 +2968,7 @@ def app_file(app=None):
             if cfg_app:
                 v = str(cfg_app)
         if not v:
-            # <canvas data-app="..."> - fallback only, if no URL / config / explicit arg.
+            # <canvas data-app="..."> - HTML default only, if no URL / config / explicit arg.
             try:
                 from browser import document as _doc
                 for _cid in ('canvas', 'cmu-canvas'):

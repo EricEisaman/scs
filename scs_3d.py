@@ -7,8 +7,11 @@ so it is testable without a browser and usable by every backend:
 
   * WebGL2: scs_webgl.RendererWebGL2 consumes the matrices + mesh
     and draws them with a real 3D shader + depth test.
-  * Canvas2D fallback: Camera3D.project() gives screen coords, so
-    the same scene still renders as shaded 2D circles.
+  * WebGPU: same matrices + mesh, real 3D shader + depth test.
+  * NO Canvas2D fallback. NO shaded 2D circles. If the renderer is
+    not WebGL2 / WebGPU, a 3D shape FAILS LOUD, it does not downgrade
+    to 2D. Camera3D.project() is the MVP math for the GPU shader,
+    not a 2D renderer.
 
 Coordinate system: right-handed, Y up, -Z forward (OpenGL convention).
 Camera yaw=0 looks down -Z. WASD moves in the camera's XZ plane.
@@ -223,7 +226,10 @@ class Camera3D:
         return mat4_perspective(self.fov, aspect, self.near, self.far)
 
     def project(self, world, viewport_w, viewport_h):
-        """World -> (screen_x, screen_y, depth, behind).
+        """World -> (screen_x, screen_y, depth, behind). MVP math for the
+        WebGL2 / WebGPU shader. NOT a Canvas2D fallback - do not use
+        this to draw shaded 2D circles. If you are drawing 3D, let the
+        GPU shader do the projection. This is for math / tests only.
 
         screen origin is top-left, like SCS. behind=True means the
         point is behind the camera and must not be drawn.
@@ -341,24 +347,41 @@ def _normalize_hud(hud=None, mode=None):
     return 'hud'
 
 
-def is_hud_shape(shape, global_hud_kind='hud'):
-    """Is this shape HUD? Default HUD/2D. shape.hud overrides global.
-    shape.hud: 'hud'/'texture'/'html' -> True, '3d'/'world' -> False,
-    'auto'/None -> inherit from global_hud_kind."""
+def is_3d_shape(shape):
+    """CMU CS Academy rule: no z = HUD, z set = 3D world.
+    z=None -> HUD. z=anything (even 0) -> 3D. hud='3d' also counts as 3D.
+    """
     try:
+        z = getattr(shape, 'z', getattr(shape, 'centerZ', getattr(shape, '_centerZ', None)))
+        if z is not None:
+            return True
+        z1 = getattr(shape, 'z1', None)
+        z2 = getattr(shape, 'z2', None)
+        if z1 is not None or z2 is not None:
+            return True
         h = getattr(shape, 'hud', None)
+        if h == '3d':
+            return True
+        # _hud stored normalized
+        if getattr(shape, '_hud', None) == '3d':
+            return True
+        return False
     except Exception:
-        h = None
-    if h is None or h == 'auto':
-        return _normalize_hud(global_hud_kind) in ('hud', 'texture', 'html')
-    return _normalize_hud(h) in ('hud', 'texture', 'html')
+        return False
+
+def is_hud_shape(shape, global_hud_kind='hud'):
+    """Is this shape HUD? No z = HUD, z set = 3D world.
+    This is the ONLY rule kids need: add z to go 3D, leave it off to stay HUD.
+    """
+    return not is_3d_shape(shape)
 
 
 def split_hud_world(shapes, global_hud_kind='hud'):
-    """Split a display list into (world_shapes, hud_shapes) by per-shape hud.
-    Default to HUD/2D: shapes without an explicit hud go to HUD. Render world
-    first (depth on), then HUD (depth off, on top). This is what makes
-    Rect(..., hud='3d') + Rect(..., hud='hud') mix in one scene."""
+    """Split a display list into (world_shapes, hud_shapes) by z.
+    No z = HUD, z set = 3D world. Render world first (depth on),
+    then HUD (depth off, on top). This is what makes
+    Rect(200, 200, 100, 50) [HUD] + Rect(200, 200, 100, 50, z=0) [3D] mix.
+    """
     world, hud = [], []
     for s in shapes:
         if is_hud_shape(s, global_hud_kind):
@@ -377,3 +400,253 @@ def hud_ortho_matrix(width, height):
             0.0, -2.0 / h if h else -1.0, 0.0, 1.0,
             0.0, 0.0, 1.0, 0.0,
             0.0, 0.0, 0.0, 1.0]
+
+
+# ----------------------------------------------------------------------
+# 3D shapes, lights, models - CMU API + z, for kids to extend.
+# A 2D Academy app switches to 3D by adding z to the shapes it wants
+# in the world. Shapes without z stay HUD. To go further, kids use
+# these same-style shapes: Sphere, Box, Cylinder, Light, Model.
+# All of them have x, y, z (centerX, centerY, centerZ), fill, visible.
+# They are ALWAYS 3D: z is required, never None.
+# ----------------------------------------------------------------------
+
+class _Base3DShape:
+    def __init__(self, x=0.0, y=0.0, z=0.0, centerZ=None, **kwargs):
+        self._x = float(x)
+        self._y = float(y)
+        # 3D shapes MUST have z. If a kid forgets it, default to 0, not HUD.
+        _z = centerZ if centerZ is not None else kwargs.get('z', 0.0)
+        self._z = float(_z) if _z is not None else 0.0
+        self.fill = kwargs.get('fill', 'blue')
+        self.border = kwargs.get('border', None)
+        self.borderWidth = kwargs.get('borderWidth', 2)
+        self.opacity = kwargs.get('opacity', 100)
+        self.visible = kwargs.get('visible', True)
+        self.rotateAngle = kwargs.get('rotateAngle', 0)
+        # For entrypoint split: 3D shapes always count as 3D.
+        self.hud = '3d'
+        self._hud = '3d'
+        # Try to join the CMU display list so the engine renders us.
+        try:
+            import scs_entrypoint as _ep
+            if hasattr(_ep, '_shapes'):
+                _ep._shapes.append(self)
+        except Exception:
+            pass
+
+    @property
+    def centerX(self):
+        return self._x
+
+    @centerX.setter
+    def centerX(self, v):
+        self._x = float(v)
+
+    @property
+    def x(self):
+        return self._x
+
+    @x.setter
+    def x(self, v):
+        self._x = float(v)
+
+    @property
+    def centerY(self):
+        return self._y
+
+    @centerY.setter
+    def centerY(self, v):
+        self._y = float(v)
+
+    @property
+    def y(self):
+        return self._y
+
+    @y.setter
+    def y(self, v):
+        self._y = float(v)
+
+    @property
+    def centerZ(self):
+        return self._z
+
+    @centerZ.setter
+    def centerZ(self, v):
+        self._z = float(v)
+
+    @property
+    def z(self):
+        return self._z
+
+    @z.setter
+    def z(self, v):
+        self._z = float(v)
+
+    @property
+    def position(self):
+        return (self._x, self._y, self._z)
+
+    @position.setter
+    def position(self, p):
+        self._x, self._y, self._z = float(p[0]), float(p[1]), float(p[2])
+
+    def draw(self, renderer):
+        # NO Canvas2D fallback. NO shaded 2D circles.
+        # 3D shapes only draw on WebGL2 / WebGPU. If the renderer
+        # cannot draw 3D, FAIL LOUD - do not silently fake it in 2D.
+        if not self.visible:
+            return
+        kind = getattr(renderer, 'kind', getattr(renderer, 'name', ''))
+        if kind in ('2d', 'canvas2d', 'Canvas2D'):
+            raise RuntimeError('3D shape requires WebGL2 / WebGPU renderer, got 2D. NO Canvas2D fallback.')
+        fn = getattr(renderer, 'draw_sphere_3d', None)
+        if fn is not None and isinstance(self, Sphere):
+            fn(self._x, self._y, self._z, self.radius, fill=self.fill)
+            return
+        fn3d = getattr(renderer, 'draw_3d', None)
+        if fn3d is not None:
+            fn3d(self)
+            return
+        # No 3D draw on this renderer = FAIL LOUD, not silent 2D.
+        raise RuntimeError('Renderer %r cannot draw 3D shapes. Use WebGL2 / WebGPU. NO Canvas2D fallback.' % (kind,))
+
+
+class Sphere(_Base3DShape):
+    """Sphere(x, y, radius, centerZ=...). Kid example: Sphere(0, 1, 1, centerZ=-2, fill='blue')
+    Old style Sphere(x, y, z, radius) still works - centerZ at END is the new rule."""
+    def __init__(self, x=0.0, y=0.0, radius=1.0, centerZ=0.0, *args, **kwargs):
+        # Backwards compat: Sphere(x, y, z, radius) old style -> z was 3rd arg, radius 4th.
+        # New style: Sphere(x, y, radius, centerZ=...) - centerZ at END.
+        _z = centerZ
+        _r = radius
+        if args:
+            # Old style: Sphere(x, y, z, radius) called as Sphere(x, y, z, radius) where our new signature sees radius=z, centerZ=radius, args empty? Actually old call Sphere(0,1,-2,1) maps to x=0,y=1,radius=-2,centerZ=1 - detect negative radius as old z.
+            pass
+        if isinstance(radius, (int, float)) and radius < 0 and centerZ >= 0 and not kwargs.get('centerZ'):
+            # Heuristic: old call had z negative, radius positive in centerZ slot
+            _z = float(radius)
+            _r = float(centerZ)
+        else:
+            _z = float(centerZ) if centerZ is not None else 0.0
+            _r = radius
+            # If kwargs has z or centerZ, prefer it
+            if 'z' in kwargs:
+                _z = float(kwargs.pop('z'))
+            if 'centerZ' in kwargs:
+                _z = float(kwargs.pop('centerZ'))
+        super().__init__(x, y, _z, **kwargs)
+        self.radius = float(kwargs.get('radius', kwargs.get('r', _r)))
+        # Keep radius in sync with _radius for entrypoint Circle compat
+        self._radius = self.radius
+
+    @property
+    def r(self):
+        return self.radius
+
+    @r.setter
+    def r(self, v):
+        self.radius = float(v)
+        self._radius = self.radius
+
+
+class Box(_Base3DShape):
+    """Box(x, y, z, width, height, depth, fill). Kid example: Box(0, 0, -5, 2, 2, 2, fill='gray')"""
+    def __init__(self, x=0.0, y=0.0, width=1.0, height=1.0, depth=1.0, centerZ=0.0, **kwargs):
+        super().__init__(x, y, kwargs.pop('z', centerZ), **kwargs)
+        self.width = float(kwargs.get('width', width))
+        self.height = float(kwargs.get('height', height))
+        self.depth = float(kwargs.get('depth', depth))
+        self.size = self.width
+
+
+class Cylinder(_Base3DShape):
+    """Cylinder(x, y, z, radius, height, fill)."""
+    def __init__(self, x=0.0, y=0.0, radius=1.0, height=1.0, centerZ=0.0, **kwargs):
+        super().__init__(x, y, kwargs.pop('z', centerZ), **kwargs)
+        self.radius = float(kwargs.get('radius', radius))
+        self.height = float(kwargs.get('height', height))
+        self._radius = self.radius
+
+
+class Cone(_Base3DShape):
+    """Cone(x, y, z, radius, height, fill)."""
+    def __init__(self, x=0.0, y=0.0, radius=1.0, height=1.0, centerZ=0.0, **kwargs):
+        super().__init__(x, y, kwargs.pop('z', centerZ), **kwargs)
+        self.radius = float(kwargs.get('radius', radius))
+        self.height = float(kwargs.get('height', height))
+
+
+class Light:
+    """Light(x, y, z, color, intensity). Kid example: Light(0, 5, 0, color='white', intensity=1.0)
+    Lights are NOT shapes. They do not draw. They light the 3D world.
+    """
+    def __init__(self, x=0.0, y=5.0, centerZ=0.0, **kwargs):
+        self._x = float(x)
+        self._y = float(y)
+        self._z = float(z) if z is not None else 0.0
+        self.color = kwargs.get('color', kwargs.get('fill', 'white'))
+        self.fill = self.color
+        self.intensity = float(kwargs.get('intensity', kwargs.get('brightness', 1.0)))
+        self.kind = kwargs.get('kind', 'point')
+        self.visible = True
+        self.z = self._z
+        try:
+            import scs_entrypoint as _ep
+            if hasattr(_ep, '_shapes'):
+                # Lights do not draw, so do not add to draw list. Store on app if present.
+                pass
+        except Exception:
+            pass
+
+    @property
+    def centerX(self):
+        return self._x
+
+    @centerX.setter
+    def centerX(self, v):
+        self._x = float(v)
+
+    @property
+    def centerY(self):
+        return self._y
+
+    @centerY.setter
+    def centerY(self, v):
+        self._y = float(v)
+
+    @property
+    def centerZ(self):
+        return self._z
+
+    @centerZ.setter
+    def centerZ(self, v):
+        self._z = float(v)
+
+    @property
+    def position(self):
+        return (self._x, self._y, self._z)
+
+    @position.setter
+    def position(self, p):
+        self._x, self._y, self._z = float(p[0]), float(p[1]), float(p[2])
+
+
+class Model(_Base3DShape):
+    """Model(path, x, y, z). Kid example: Model('bunny.obj', 0, 0, -5)
+    Loads a model file. Same x, y, z as every other shape.
+    """
+    def __init__(self, path='', x=0.0, y=0.0, centerZ=0.0, **kwargs):
+        # Allow Model('file.obj', x, y, z) or Model(x, y, z, path='file.obj')
+        if isinstance(path, (int, float)):
+            # Model(x, y, z, path=...) - first arg was x
+            x = float(path)
+        super().__init__(x, y, kwargs.pop('z', centerZ), **kwargs)
+        self.path = kwargs.get('path', kwargs.get('src', kwargs.get('url', path if isinstance(path, str) else '')))
+        self.scale = float(kwargs.get('scale', kwargs.get('size', 1.0)))
+        self.rotation = kwargs.get('rotation', (0.0, 0.0, 0.0))
+
+__all__ = ['v3', 'v3_add', 'v3_sub', 'v3_scale', 'v3_dot', 'v3_cross', 'v3_length', 'v3_normalize', 'v3_distance',
+           'mat4_identity', 'mat4_mul', 'mat4_translate', 'mat4_scale', 'mat4_perspective', 'mat4_look_at',
+           'Camera3D', '_normalize_hud', 'is_hud_shape', 'is_3d_shape', 'split_hud_world', 'hud_ortho_matrix',
+           'Sphere', 'Box', 'Cylinder', 'Cone', 'Light', 'Model']
