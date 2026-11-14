@@ -24,7 +24,7 @@
 # Walk toward the sphere: louder. Walk past it: left -> right.
 # The HUD shows the same distance / gain / pan the browser hears.
 #
-# Rendering is REAL WEBGL 3D: setRenderer('webgl2') BEFORE runApp, and
+# Rendering is WEBGL 3D: setRenderer('webgl2') BEFORE runApp, and
 # runApp(900, 560, renderer='webgl2'). No Canvas2D fallback, no faking 3D
 # in 2D. If you see renderer=2d, the app did not ask for WebGL - that's a bug.
 
