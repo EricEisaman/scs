@@ -253,7 +253,7 @@ class WebGL2Engine:
             print('SCS renderer version=0.1 mode=webgl2')
         except Exception:
             pass
-        # DO NOT return here - fall through to program + buffer creation.
+        # DO NOT return - fall through to program creation.
         gl = self.gl
         try:
             self.program = self._compile(_VS, _FS)
@@ -489,10 +489,11 @@ class WebGL2Engine:
                     return False
             except Exception:
                 return False
-            # Draw fullscreen textured quad - depth off, BLENDING ON.
-            # HUD canvas is mostly transparent (alpha 0). With blending OFF,
-            # transparent pixels still overwrite 3D with black (RGB 0,0,0) -> HUD covers everything.
-            # With SRC_ALPHA / ONE_MINUS_SRC_ALPHA, only HUD pixels show, 3D shows through elsewhere.
+            # HUD quad: depth off, BLENDING ON, viewport = drawing buffer.
+            # Without blending, transparent HUD pixels (alpha 0) overwrite 3D with black.
+            # Size: quad is clip-space -1..1, so it is exactly viewport size, not 4x.
+            # UV: canvas top -> V=0 (texImage2D with canvas does NOT flip Y), so
+            # bottom-left (-1,-1) samples (0,1) = canvas bottom, top-left (-1,1) samples (0,0) = canvas top.
             try:
                 if not hasattr(self, '_hud_prog') or self._hud_prog is None:
                     _vs = "attribute vec2 a_p; attribute vec2 a_uv; varying vec2 v_uv; void main(){ v_uv=a_uv; gl_Position=vec4(a_p,0.0,1.0); }"
@@ -509,14 +510,17 @@ class WebGL2Engine:
                         return False
                     self._hud_prog = _prog
                     _buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, _buf)
-                    # UVs: canvas top (y=0) -> V=0, canvas bottom -> V=1, because texImage2D with canvas does NOT flip Y by default.
-                    # Quad: bottom-left (-1,-1) samples canvas bottom (V=1), top-left (-1,1) samples canvas top (V=0).
-                    # Previous verts had V flipped, so HUD appeared upside-down / stretched.
                     _verts = [-1.0,-1.0,0.0,1.0, 1.0,-1.0,1.0,1.0, -1.0,1.0,0.0,0.0, 1.0,1.0,1.0,0.0]
                     gl.bufferData(gl.ARRAY_BUFFER, window.Float32Array.new(_verts), gl.STATIC_DRAW)
                     self._hud_buf = _buf
                 if getattr(self, '_hud_prog', None) is None:
                     return False
+                # Viewport must be drawing-buffer size, not CSS size, or HUD is scaled.
+                try:
+                    _dpr = float(window.devicePixelRatio or 1.0)
+                except Exception:
+                    _dpr = 1.0
+                gl.viewport(0, 0, int(self.width * _dpr), int(self.height * _dpr))
                 gl.disable(gl.DEPTH_TEST)
                 gl.enable(gl.BLEND)
                 gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
@@ -525,13 +529,10 @@ class WebGL2Engine:
                 _ap = gl.getAttribLocation(self._hud_prog, 'a_p')
                 _au = gl.getAttribLocation(self._hud_prog, 'a_uv')
                 if _ap < 0 or _au < 0:
-                    gl.disable(gl.BLEND)
-                    gl.enable(gl.DEPTH_TEST)
-                    return False
+                    gl.disable(gl.BLEND); gl.enable(gl.DEPTH_TEST); return False
                 gl.enableVertexAttribArray(_ap); gl.vertexAttribPointer(_ap, 2, gl.FLOAT, False, 16, 0)
                 gl.enableVertexAttribArray(_au); gl.vertexAttribPointer(_au, 2, gl.FLOAT, False, 16, 8)
-                gl.activeTexture(gl.TEXTURE0)
-                gl.bindTexture(gl.TEXTURE_2D, tex)
+                gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex)
                 gl.uniform1i(gl.getUniformLocation(self._hud_prog, 'u_tex'), 0)
                 gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
                 gl.disable(gl.BLEND)
