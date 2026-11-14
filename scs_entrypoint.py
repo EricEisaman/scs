@@ -172,7 +172,6 @@ _pixel_ratio_cap = None
 _pixel_budget = None
 _controller_manager = None
 _asset_loader = None
-_splat_renderer = None
 
 _CALLBACK_NAMES = (
     'onAppStart', 'appStarted', 'redrawAll', 'onStep',
@@ -1375,34 +1374,14 @@ class App:
         _clear_shapes()
 
 
-def runApp(width=400, height=400, stepsPerSecond=30, renderer=None,
-         canvas=None, **kwargs):
-    """Kept for `App(...)` + `runApp()` CMU shape. Full alias of run_app().
-
-    Must keep the full run_app() signature: user code does
-    `from scs import *`, which overwrites the entrypoint's
-    `_user_ns['runApp']` (= run_app) with this module-level name.
-    A narrow (width, height)-only wrapper here is what caused
-    `runApp() got an unexpected keyword argument 'stepsPerSecond'`.
-    """
-    return run_app(width=width, height=height,
-                   stepsPerSecond=stepsPerSecond, renderer=renderer,
-                   canvas=canvas, **kwargs)
+def runApp(width=400, height=400):
+    """Kept for `App(...)` + `runApp()` CMU shape. Real entry is run_app()
+    below, which runApp/run/loop all alias."""
+    run_app(width=width, height=height)
 
 
-def cmu_graphics_run(app=None, width=400, height=400, stepsPerSecond=30,
-                      renderer=None, canvas=None, **kwargs):
-    if app is not None:
-        try:
-            width = getattr(app, 'width', width)
-            height = getattr(app, 'height', height)
-            stepsPerSecond = getattr(app, 'stepsPerSecond', stepsPerSecond)
-            renderer = getattr(app, 'renderer', renderer)
-        except Exception:
-            pass
-    return run_app(width=width, height=height,
-                   stepsPerSecond=stepsPerSecond, renderer=renderer,
-                   canvas=canvas, **kwargs)
+def cmu_graphics_run(app=None, width=400, height=400):
+    run_app(width=width, height=height)
 
 
 # ----------------------------------------------------------------------
@@ -2130,51 +2109,6 @@ def loadTexture(source, options=None):
 
 def loadAudio(source, options=None):
     return loadAsset(source, kind='audio', options=options)
-
-
-# [STRIPPED 70 bytes]
-# Splats (scs_splats.py) -- first-class primitive
-# [STRIPPED 70 bytes]
-
-def getSplatRenderer(backend='webgl2'):
-    """Singleton splat renderer extension. WebGL raster + WebGPU
-    compute behind the same boundary. Custom passes, shared camera /
-    depth, explicit ordering."""
-    global _splat_renderer
-    if _splat_renderer is None:
-        try:
-            from scs_splats import WebGLSplatRenderer, WebGPUSplatRenderer
-            _splat_renderer = WebGPUSplatRenderer() if backend == 'webgpu' \
-                else WebGLSplatRenderer()
-        except Exception:
-            _splat_renderer = None
-    return _splat_renderer
-
-
-def createSplatSchema(sh_degree=0, relightable=False):
-    """Versioned logical schema. Backends pack it; the schema is
-    the contract, not any packed layout."""
-    from scs_splats import SplatSchema
-    s = SplatSchema(version=1, sh_degree=sh_degree)
-    if relightable:
-        s.add_relightable()
-    s.validate()
-    return s
-
-
-def createSplatAsset(schema=None, name='splats'):
-    """A splat asset: schema + chunks + hierarchy + appearance +
-    proxies. Scene membership here; residency in ResidencyManager."""
-    from scs_splats import SplatAsset
-    return SplatAsset(schema or createSplatSchema(), name=name)
-
-
-def loadSplatManifest(asset_id, schema, chunk_ids, coarse_chunk_id=None):
-    """Chunked asset manifest + coarse representation before the
-    whole asset is available."""
-    from scs_splats import SplatAssetLoader
-    return SplatAssetLoader().manifest(asset_id, schema, chunk_ids,
-                                       coarse_chunk_id)
 
 
 # Aliases the user namespace expects.
