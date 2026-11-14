@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-FIXED-v29-resize-pipeline'
+__version__ = '2026-11-14-FIXED-v30-resize-observer-arity'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -529,9 +529,26 @@ def _size_canvas(width, height):
     _br = _budgeted_ratio()
     _resize_last_dpr = _br
     try:
-        # CSS is the layout input - set once here as the initial layout.
-        canvas.style.width = '%dpx' % int(width)
-        canvas.style.height = '%dpx' % int(height)
+        # v30: host page owns CSS. Only set inline size if the page gives the
+        # canvas no usable CSS size (computed is auto/0). Otherwise leave the
+        # host's stylesheet / inline style alone - do not break wild pages.
+        _need_css = True
+        try:
+            _cs = window.getComputedStyle(canvas)
+            _cw = float(str(getattr(_cs, 'width', '') or '0').replace('px','') or 0)
+            _ch = float(str(getattr(_cs, 'height', '') or '0').replace('px','') or 0)
+            if _cw > 0 and _ch > 0:
+                _need_css = False
+        except Exception:
+            pass
+        if _need_css:
+            # Only if no inline size already set by the host.
+            try:
+                if not (canvas.style.width and canvas.style.height):
+                    canvas.style.width = '%dpx' % int(width)
+                    canvas.style.height = '%dpx' % int(height)
+            except Exception:
+                pass
         # Buffer: assign only if actually changed (avoids needless reset).
         _bw, _bh = int(width * _br), int(height * _br)
         if int(canvas.width) != _bw:
@@ -645,7 +662,7 @@ def _check_pixel_ratio_change():
     except Exception:
         pass
 
-def _on_resize_observer(entries):
+def _on_resize_observer(entries, observer=None):
     # ResizeObserver: prefer devicePixelContentBoxSize (exact backing size),
     # fallback to contentBoxSize * budgeted ratio, then bounding rect * ratio.
     try:
@@ -686,7 +703,7 @@ def _ensure_resize_observer():
         if _RO is None:
             # No RO: window.resize fallback + DPR check in _frame still works.
             try:
-                window.addEventListener('resize', lambda _ev: _queue_resize(*_measure_canvas_css()))
+                window.addEventListener('resize', lambda *_a: _queue_resize(*_measure_canvas_css()))
             except Exception:
                 pass
             return
@@ -706,40 +723,27 @@ def _ensure_resize_observer():
         pass
 
 def _ensure_app_wrapper():
-    # Wrapper that holds the canvas (and any DOM controls). Fullscreen goes on
-    # the wrapper so controls stay visible. Returns the wrapper element.
+    # v30: NON-INVASIVE for apps already in the wild in standard web pages.
+    # Do NOT create a div, do NOT move the canvas, do NOT inject CSS.
+    # Moving the canvas or injecting !important fullscreen CSS breaks the
+    # host page's own layout (flex/grid, responsive rules, other content).
+    # HUD controls are drawn INSIDE the canvas, so fullscreening the canvas
+    # itself keeps them visible. Use the existing parent ONLY if it holds
+    # just the canvas (a dedicated container); otherwise use the canvas.
     try:
         _c = _find_canvas()
         if _c is None:
             return None
         _p = _c.parentElement
-        if _p is not None and getattr(_p, 'id', '') == 'scs-app-wrapper':
-            return _p
-        # Create wrapper, move canvas inside, inject :fullscreen layout.
-        _w = document.createElement('div')
-        _w.id = 'scs-app-wrapper'
-        try:
-            _w.style.display = 'flex'
-            _w.style.alignItems = 'center'
-            _w.style.justifyContent = 'center'
-        except Exception:
-            pass
         if _p is not None:
             try:
-                _p.insertBefore(_w, _c)
-                _w.appendChild(_c)
-            except Exception:
-                return _p
-        global _resize_wrapper_css_injected
-        if not _resize_wrapper_css_injected:
-            _resize_wrapper_css_injected = True
-            try:
-                _st = document.createElement('style')
-                _st.textContent = '#scs-app-wrapper:fullscreen{width:100vw;height:100vh;margin:0;padding:0;display:flex;align-items:center;justify-content:center;background:#000} #scs-app-wrapper:fullscreen canvas{width:100% !important;height:100% !important;max-width:none;max-height:none}'
-                document.head.appendChild(_st)
+                # Dedicated container = only the canvas inside (ignore text nodes).
+                _kids = [ _n for _n in list(_p.childNodes) if getattr(_n, 'nodeType', 3) == 1 ]
+                if len(_kids) == 1 and _kids[0] is _c:
+                    return _p
             except Exception:
                 pass
-        return _w
+        return _c
     except Exception:
         return None
 
@@ -2233,15 +2237,21 @@ def _on_fullscreen_change(ev=None):
         if _c is None:
             return
         if not _is_fs:
-            # Exit: restore orig CSS layout. RO will then measure it; queue
-            # a direct measurement as well in case RO does not fire.
-            if _fullscreen_orig_w is not None and _fullscreen_orig_h is not None:
-                try:
-                    _c.style.width = _fullscreen_orig_style_w or ('%dpx' % int(_fullscreen_orig_w))
-                    _c.style.height = _fullscreen_orig_style_h or ('%dpx' % int(_fullscreen_orig_h))
-                except Exception:
-                    pass
-                _queue_resize(float(_fullscreen_orig_w), float(_fullscreen_orig_h))
+            # Exit: restore orig inline style ONLY if we recorded one.
+            # If the host page owned CSS, _fullscreen_orig_style_* is None/empty
+            # and we leave it alone. RO will measure the resulting layout.
+            try:
+                if _fullscreen_orig_style_w:
+                    _c.style.width = _fullscreen_orig_style_w
+                if _fullscreen_orig_style_h:
+                    _c.style.height = _fullscreen_orig_style_h
+            except Exception:
+                pass
+            try:
+                _cssW, _cssH = _measure_canvas_css()
+                _queue_resize(_cssW, _cssH)
+            except Exception:
+                pass
         else:
             # Enter: do NOT set sizes here. Wrapper :fullscreen CSS lays the
             # canvas out; measure that layout on the next RO / frame tick.
