@@ -82,6 +82,8 @@ def onAppStart(app):
     app.background = '#0e0e1a'
     app.camera = Camera3D(position=(0.0, 2.0, 6.0), yaw=0.0, pitch=-4.0)
     app.spatial = SpatialAudioEngine()
+    # CLOUDY SKY ENV: spheres reflect a cloudy overcast sky (see scs_engine_webgl2_CLOUDY.py cloudySky()).
+    # No black background, no fake softboxes. Cloudy sky IS the light.
     app.sphere_pos = SPHERE_START
     app.envelope = 'pad'
     app.use_pipeline = True
@@ -102,9 +104,9 @@ def onAppStart(app):
     app.stepCount = 0
     app.balls = [
         # Decorative ONLY - not sound sources. Separated in X AND Z so red/green never touch.
-        {'x': -6.0, 'z': -3.0, 'r': 0.60, 'y': 3.0, 'vy': 0.0, 'color': '#ff5a5a'},
-        {'x': 0.0, 'z': 4.0, 'r': 0.50, 'y': 4.5, 'vy': 0.0, 'color': '#ffd23a'},
-        {'x': 6.0, 'z': -3.0, 'r': 0.70, 'y': 2.2, 'vy': 0.0, 'color': '#3affa8'},
+        {'x': -6.0, 'z': -3.0, 'r': 0.60, 'y': 3.0, 'vy': 0.0, 'color': '#B87333', 'defect': 0.72, 'corrosion': 0.0, 'name': 'Copper'},
+        {'x': 0.0, 'z': 4.0, 'r': 0.50, 'y': 4.5, 'vy': 0.0, 'color': '#C9A227', 'defect': 0.68, 'corrosion': 0.0, 'name': 'Brass'},
+        {'x': 6.0, 'z': -3.0, 'r': 0.70, 'y': 2.2, 'vy': 0.0, 'color': '#B87333', 'defect': 0.82, 'corrosion': 1.0, 'name': 'Copper-Patina'},
     ]
     # ---- HUD shapes: flat, overlay ----
     app.hudTop = Rect(0, 0, 900, 62, fill='black', align='left-top')
@@ -148,9 +150,14 @@ def onAppStart(app):
     # ---- World shapes: in the 3D world ----
     # World: centerZ set = 3D. HUD above has NO centerZ = HUD. That is the whole rule.
     app.sphereShadow = Oval(450, 280, 70, 14, fill='black', centerZ=0.02)
-    app.sphere = Circle(0, 1, 1.2, fill='#FFD700', border='white', borderWidth=3, centerZ=-2.0)
+    # SOUND SOURCE: damaged GOLD metal. Gold does NOT corrode (corrosionEnabled=0), defect 0.45 = scratches + pits, no orange rust.
+    app.sphere = Circle(0, 1, 1.2, fill='#B87333', border='white', borderWidth=3, centerZ=-2.0)  # TARGET: patina copper, not flat gold
+    app.sphere.defectLevel = 0.80  # TARGET: heavy patina + scratches + pits, like reference image
+    app.sphere.corrosionEnabled = 1.0  # TARGET: patina + rust are corrosion, not gold
+    app.sphere.metalness = 1.0
+    app.sphere.roughness = 0.28  # TARGET: polished metal where clean, rough where patinated
     app.sphereHighlight = Circle(435, 265, 14, fill='white', centerZ=-2.0)
-    app.sphereLabel = Label('SOUND SOURCE - 440 Hz', 450, 340, fill='#FFD700', size=16, bold=True,
+    app.sphereLabel = Label('SOUND SOURCE - 440 Hz - DAMAGED COPPER', 450, 340, fill='#FFD700', size=16, bold=True,
                             align='center', centerZ=-2.0)
     app.sourceFloorMarker = Oval(450, 280, 90, 18, fill=None, border='#FFD700', borderWidth=3, centerZ=0.02)
     app.ballBodies = []
@@ -159,10 +166,20 @@ def onAppStart(app):
         app.ballBodies.append(Oval(0, 1, b['r']*2, b['r']*2, fill=b['color'],
                                     border='white', borderWidth=1, centerZ=b['z']))
         app.ballHighlights.append(Circle(435, 265, 10, fill='white', centerZ=b['z']))
+        # Damaged metal: store per-sphere defect on the shape so entrypoint -> engine can read it
+        app.ballBodies[-1].defectLevel = b.get('defect', 0.55)
+        app.ballBodies[-1].corrosionEnabled = b.get('corrosion', 0.0)
+        app.ballBodies[-1].metalness = 1.0
+        app.ballBodies[-1].roughness = 0.32
     app.cubeShapes = []
     for _cz in (-8.0, 2.0):
-        app.cubeShapes.append(Rect(450, 280, 40, 40, fill='gray',
+        app.cubeShapes.append(Rect(450, 280, 40, 40, fill='#8a8f98',
                                    border='#222222', align='left-top', centerZ=_cz))
+    for _c in app.cubeShapes:
+        _c.defectLevel = 0.50
+        _c.corrosionEnabled = 0.0
+        _c.metalness = 1.0
+        _c.roughness = 0.38
     app.planeLines = []
     for _ in range(26):
         app.planeLines.append(Line(0, 0, 0, 0, fill='#2a2a4a', lineWidth=1, centerZ=0.0))
