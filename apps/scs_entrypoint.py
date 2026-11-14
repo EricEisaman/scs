@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v2'
+__version__ = '2026-11-14-runApp-*args-v3-app-fix'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -2321,7 +2321,7 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
     _is_3d_app = any(k in _user_funcs for k in ('onRender3D', 'onDraw3D', 'draw3D', 'onRender', 'render3D'))
     # _renderer_req must include setRenderer() / _pending_renderer / App.renderer,
     # not just the runApp() arg.
-    _renderer_req = str(renderer or _pending_renderer or getattr(app, 'renderer', None) or '').lower() or None
+    _renderer_req = str(renderer or _pending_renderer or getattr(_app, 'renderer', None) or '').lower() or None  # FIX: _app, not app - app is defined at line 2394, using app here = UnboundLocalError
     if not _is_3d_app and _hud_requested:
         # Explicit hud=True / mode='hud' on a 2D app - HUD makes no sense, ignore it.
         # Don't force a 2D app into HUD. Just render 2D.
