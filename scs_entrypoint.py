@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v8-boot-top-guard-kind-log'
+__version__ = '2026-11-14-runApp-*args-v9-fresh-canvas-webgl2'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -2462,6 +2462,44 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
         _debug_log('SCS run_app kind=%s renderer_arg=%s hud_mode=%s hud_3d=%s' % (kind, str(renderer), str(_hud_mode), str(_hud_3d_kind)))
     except Exception:
         pass
+    # FRESH CANVAS for WebGL2: a canvas that already got a 2d context
+    # (previous run, _ensure_canvas, or page) will return null for
+    # getContext('webgl2') forever. Setting width does NOT unlock it.
+    # Replace it with a fresh clone before WebGL2, so getContext('webgl2')
+    # is the FIRST getContext on this element.
+    if kind in ('webgl2', 'webgl', 'webgpu', 'gpu'):
+        try:
+            _old_c = _find_canvas()
+            if _old_c is not None:
+                try:
+                    _new_c = document.createElement('canvas')
+                    try:
+                        _new_c.id = getattr(_old_c, 'id', 'canvas') or 'canvas'
+                    except Exception:
+                        pass
+                    try:
+                        _new_c.width = int(width * _dpr())
+                        _new_c.height = int(height * _dpr())
+                        _new_c.style.width = '%dpx' % int(width)
+                        _new_c.style.height = '%dpx' % int(height)
+                    except Exception:
+                        pass
+                    try:
+                        _new_c.setAttribute('tabindex', '0')
+                    except Exception:
+                        pass
+                    try:
+                        _parent = getattr(_old_c, 'parentElement', None)
+                        if _parent is not None:
+                            _parent.replaceChild(_new_c, _old_c)
+                            _canvas = _new_c
+                            _debug_log('SCS: replaced canvas for fresh WebGL2 context')
+                    except Exception as _e_repl:
+                        _debug_log('SCS: canvas replace failed: %s' % _e_repl)
+                except Exception as _e_c:
+                    _debug_log('SCS: fresh canvas failed: %s' % _e_c)
+        except Exception:
+            pass
     # webgl2 / 2d: explicit, no fallback. If create fails, FAIL.
     try:
         r = create_renderer(kind, _find_canvas(), width, height)
