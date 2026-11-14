@@ -46,10 +46,34 @@ class Renderer2D:
 
     # -- frame ------------------------------------------------------
     def resize(self, width, height):
-        self.width, self.height = width, height
+        # v35: resize must update backing store + DPR, not just logical size.
+        # Old code kept old width/height for canvas but never updated
+        # canvas.width/height or dpr, so after a resize the 2D renderer drew
+        # at the wrong scale (fetch_demo = black / stretched).
+        self.width, self.height = int(width), int(height)
+        try:
+            self.dpr = min(float(window.devicePixelRatio or 1.0), 2.0) if window is not None else 1.0
+        except Exception:
+            pass
+        try:
+            _bw, _bh = int(self.width * self.dpr), int(self.height * self.dpr)
+            if int(self.canvas.width) != _bw:
+                self.canvas.width = _bw
+            if int(self.canvas.height) != _bh:
+                self.canvas.height = _bh
+        except Exception:
+            pass
 
     def begin_frame(self, background):
         ctx = self.ctx
+        # v35: if backing store drifted (entrypoint resized canvas), re-sync.
+        try:
+            _bw, _bh = int(self.width * self.dpr), int(self.height * self.dpr)
+            if int(self.canvas.width) != _bw or int(self.canvas.height) != _bh:
+                self.canvas.width = _bw
+                self.canvas.height = _bh
+        except Exception:
+            pass
         ctx.setTransform(self.dpr, 0, 0, self.dpr, 0, 0)
         ctx.clearRect(0, 0, self.width, self.height)
         if background is not None:
