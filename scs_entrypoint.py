@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v7-window-boot-guard'
+__version__ = '2026-11-14-runApp-*args-v8-boot-top-guard-kind-log'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -2456,6 +2456,12 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
         r.on_error = _gpu_fail
         return  # loop starts from _gpu_ready
 
+    # DEBUG: log kind before creating main renderer. If this says 2d,
+    # the demo's renderer='webgl2' did not survive to here.
+    try:
+        _debug_log('SCS run_app kind=%s renderer_arg=%s hud_mode=%s hud_3d=%s' % (kind, str(renderer), str(_hud_mode), str(_hud_3d_kind)))
+    except Exception:
+        pass
     # webgl2 / 2d: explicit, no fallback. If create fails, FAIL.
     try:
         r = create_renderer(kind, _find_canvas(), width, height)
@@ -3226,6 +3232,24 @@ def boot(app=None):
     boot("apps/myapp.py") - same, explicit path
     Binds events, loads the app, and starts it. Loop / events / renderer
     all live in the package, not in HTML."""
+    # Boot-once FIRST, before any log. v7 logged boot() before guard, so
+    # second boot still printed boot() and HUD. Guard must be first line.
+    # Use window.SCS_BOOTED via direct JS access - getattr with default
+    # does not reliably see JS props in Brython.
+    try:
+        from browser import window as _w_boot0
+        try:
+            _already = _w_boot0.SCS_BOOTED
+        except Exception:
+            _already = False
+        if _already:
+            return
+        try:
+            _w_boot0.SCS_BOOTED = True
+        except Exception:
+            pass
+    except Exception:
+        pass
     # Console proof at boot(): which runApp is actually in globals() RIGHT NOW.
     try:
         import inspect as _insp
@@ -3242,30 +3266,7 @@ def boot(app=None):
             pass
     except Exception:
         pass
-    # Boot-once at WINDOW level, not Python-module level.
-    # v6 used _booted_once (Python global). Two separate Brython loads = two
-    # separate globals, so second boot still ran, stopped first loop, reset
-    # _hud_mode, and re-ran as 2d, locking visible canvas to 2d.
-    # window is shared across loads. First boot sets window._scs_booted = True.
-    # Second boot sees it and returns before anything runs.
-    try:
-        from browser import window as _w_boot
-        try:
-            if getattr(_w_boot, '_scs_booted', False):
-                return
-            _w_boot._scs_booted = True
-        except Exception:
-            pass
-    except Exception:
-        pass
-    # Also keep Python guard for same-module double-boot
-    global _booted_once
-    try:
-        if _booted_once:
-            return
-        _booted_once = True
-    except NameError:
-        _booted_once = True
+    # (window guard already done at top - do not re-guard here)
     _bind_events()
     load(app)
 
