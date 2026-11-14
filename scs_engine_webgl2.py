@@ -343,8 +343,16 @@ class WebGL2Engine:
     def render(self, camera):
         """Draw the scene from `camera` (Camera3D). Own loop calls
         this once per frame. Returns False if no GL context."""
-        if self.gl is None or camera is None:
+        if self.gl is None:
             return False
+        if camera is None:
+            # v33: never black-screen on None camera. Create correct default
+            # Camera3D primitive: pos (0,2,6), yaw 0, pitch -4, fov 60.
+            try:
+                from scs_3d import Camera3D as _C3D
+                camera = _C3D(position=(0.0, 2.0, 6.0), yaw=0.0, pitch=-4.0, fov=60.0)
+            except Exception:
+                return False
         gl = self.gl
         try:
             # v29 3D resize: viewport from the ACTUAL drawing buffer, not
