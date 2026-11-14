@@ -1,88 +1,23 @@
 <!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>SCS</title>
 <style>
-body{margin:0;padding:0;background:#0f1115;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;}
-#toolbar{display:flex;gap:8px;align-items:center;margin-bottom:10px;color:#e6e6e6;font-family:monospace;font-size:12px;}
-#toolbar select,#toolbar button{background:#1a1d24;color:#e6e6e6;border:1px solid #3a3f4b;border-radius:6px;padding:6px 10px;cursor:pointer;}
-#scs-status{color:#8b93a5;}
-#canvas-container{border:2px solid #3a3f4b;border-radius:8px;background:#000;overflow:hidden;box-shadow:0 0 30px rgba(0,0,0,0.6);}
+body{margin:0;padding:0;background:#0f1115;display:flex;align-items:center;justify-content:center;min-height:100vh;}
 canvas{display:block;background:black;outline:none;}
 </style>
+<!-- SCS from CDN: users just import from npm or load from CDN. No app code here. -->
 <script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython_stdlib.js"></script>
-<script>window.SCS_CONFIG = window.SCS_CONFIG || {};</script>
-<link rel="icon" type="image/png" href="favicon.png">
-<link rel="icon" href="favicon.png">
 </head>
 <body onload="brython({debug:1, pythonpath:['.', 'scs']})">
-<div id="toolbar">
-<label>Renderer <select id="renderer-select"><option value="auto">auto</option><option value="2d">2d</option><option value="webgl2">webgl2</option><option value="webgpu">webgpu</option></select></label>
-<button id="xr-btn">Enter XR</button>
-<button id="fullscreen-btn">Fullscreen</button>
-<span id="scs-status"></span>
-</div>
-<div id="canvas-container"><canvas id="cmu-canvas" width="1050" height="700" tabindex="0"></canvas></div>
-<script>
-// Toolbar only: reflect ?renderer= in the select. Renderer selection
-// itself lives in scs_entrypoint (_resolve_renderer_kind); changing
-// the select reloads with ?renderer=, it does not reimplement selection.
-(function(){try{var v=new URLSearchParams(window.location.search).get('renderer')||window.SCS_CONFIG.renderer||'auto';document.getElementById('renderer-select').value=v;}catch(e){}})();
-</script>
-<script type="text/python" id="main">
-# Thin shell only. No loop, no events, no renderer, no app loading here:
-# all of that lives in scs_entrypoint.py. This file wires the toolbar
-# to the entrypoint and calls boot().
-from browser import document, window, timer
+<!-- Top level: point to a valid app. Change data-app to your app file, nothing else. -->
+<canvas id="canvas" data-app="apps/app.py" width="1050" height="700" tabindex="0"></canvas>
+<script type="text/python">
+# Thin shell only. No loop, no events, no renderer, no shape drawing here.
+# All of that is baked into the package (scs_entrypoint.py).
+# Users just import from npm or load from CDN.
 import scs_entrypoint as ep
-
-_status = document['scs-status']
-
-def _set_status(msg):
-    try:
-        _status.text = str(msg)
-    except Exception:
-        pass
-
-def _on_renderer_change(ev):
-    # Reload with ?renderer= so the entrypoint resolves it once,
-    # in one place (explicit arg > ?renderer= > SCS_CONFIG > '2d').
-    try:
-        val = document['renderer-select'].value or 'auto'
-        p = window.URLSearchParams.new(window.location.search)
-        p.set('renderer', val)
-        window.location.search = '?' + p.toString()
-    except Exception:
-        pass
-
-def _on_xr(ev):
-    try:
-        ep.startXR()
-        _set_status('XR: ' + str(ep.getXRState()))
-    except Exception as e:
-        _set_status('XR unavailable: ' + str(e))
-
-def _on_fullscreen(ev):
-    try:
-        st = ep.getFullscreenState() or {}
-        if st.get('is_fullscreen'):
-            ep.exitFullscreen()
-        else:
-            ep.enterFullscreen()
-    except Exception as e:
-        _set_status('Fullscreen unavailable: ' + str(e))
-
-def _refresh_status():
-    try:
-        _set_status('renderer=' + str(ep.getRendererKind()) +
-                    ' xr=' + str(ep.getXRState()))
-    except Exception:
-        pass
-
-document['renderer-select'].bind('change', _on_renderer_change)
-document['xr-btn'].bind('click', _on_xr)
-document['fullscreen-btn'].bind('click', _on_fullscreen)
-timer.set_interval(_refresh_status, 500)
-
+# Top level: point to a valid app. boot() reads data-app above.
+# Or: ep.boot("myapp.py") - same, explicit.
 ep.boot()
 </script>
 </body></html>

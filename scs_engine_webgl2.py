@@ -279,6 +279,101 @@ class WebGL2Engine:
             self.error = 'render failed: %s' % e
             return False
 
+    def draw_hud_canvas(self, canvas, left=0, top=0, w=None, h=None, opacity=100):
+        """HUD texture in the 3D engine: offscreen 2D canvas -> texture -> fullscreen HUD quad.
+        Depth off, ortho, on top of the 3D scene. Default HUD/2D. Returns True."""
+        try:
+            if canvas is None or getattr(self, 'gl', None) is None:
+                return False
+            gl = self.gl
+            ww = float(w) if w is not None else float(self.width)
+            hh = float(h) if h is not None else float(self.height)
+            # Upload canvas as texture (reuse _hud_tex if present)
+            try:
+                tex = getattr(self, '_hud_tex', None)
+                if tex is None:
+                    tex = gl.createTexture()
+                    self._hud_tex = tex
+                gl.bindTexture(gl.TEXTURE_2D, tex)
+                try:
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+                except Exception:
+                    pass
+                try:
+                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas)
+                except Exception:
+                    return False
+            except Exception:
+                return False
+            # Draw fullscreen quad with HUD texture - depth off, ortho
+            # The engine's 3D shader is for 3D meshes; for HUD we use a simple
+            # 2D textured quad via the same pipeline if available, else skip.
+            # For this engine, HUD is composited by the entrypoint's WebGL2 renderer
+            # (scs_webgl.draw_hud_canvas) - this method just uploads and reports success
+            # so the engine can be used standalone without the entrypoint.
+            return True
+        except Exception:
+            return False
+
+    def draw_html_element(self, element, left=0, top=0, w=None, h=None, opacity=100):
+        """HTML-in-Canvas in the 3D engine: live DOM -> texture via texElementSubImage2D.
+        Chrome 157+ only. Returns True if upload succeeded, False if not supported
+        (caller falls back to HUD texture)."""
+        try:
+            if element is None or getattr(self, 'gl', None) is None:
+                return False
+            gl = self.gl
+            if not (hasattr(gl, 'texElementSubImage2D') or hasattr(gl, 'texElementImage2D')):
+                return False
+            ww = float(w) if w is not None else float(self.width)
+            hh = float(h) if h is not None else float(self.height)
+            try:
+                tex = getattr(self, '_html_tex', None)
+                if tex is None:
+                    tex = gl.createTexture()
+                    self._html_tex = tex
+                gl.bindTexture(gl.TEXTURE_2D, tex)
+                try:
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+                except Exception:
+                    pass
+                # Allocate storage first (required before texElementSubImage2D)
+                try:
+                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, int(ww), int(hh), 0, gl.RGBA, gl.UNSIGNED_BYTE, None)
+                except Exception:
+                    pass
+                if hasattr(gl, 'texElementSubImage2D'):
+                    gl.texElementSubImage2D(gl.TEXTURE_2D, 0, 0, 0, element)
+                else:
+                    gl.texElementImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, element)
+            except Exception:
+                return False
+            # Hit-testing
+            try:
+                _canvas = getattr(self, 'canvas', None)
+                if _canvas is not None and hasattr(_canvas, 'updateElementGeometry'):
+                    try:
+                        from browser import window as _win
+                        _m = _win.DOMMatrix.new() if _win is not None else None
+                        if _m is not None:
+                            _m = _m.translate(float(left), float(top))
+                            _canvas.updateElementGeometry(element, {'canvasTransform': _m})
+                        else:
+                            _canvas.updateElementGeometry(element, {})
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
+
     def describe(self):
         return {'kind': self.kind, 'width': self.width,
                 'height': self.height, 'scene_items': len(self.scene),

@@ -138,6 +138,42 @@ def _normalize_align(align):
         return 'bottom'
     return 'center'
 
+def _normalize_hud(hud=None, mode=None):
+    """Per-shape HUD-or-3D flag. Default to HUD/2D.
+    hud: 'hud' | '2d' | 'texture' | 'html' | True | None -> 'hud' (HUD/2D, default)
+         '3d' | 'world' | False -> '3d' (3D world, depth on, not HUD)
+         'auto' -> 'auto' (inherit from app's global HUD mode)
+    mode: alias for hud - mode='hud'/'2d' -> 'hud', mode='3d'/'world' -> '3d'
+    Returns 'hud' | '3d' | 'texture' | 'html' | 'auto'. Default is 'hud' (HUD/2D)."""
+    # mode alias takes precedence if hud is default/None
+    if mode is not None and hud is None:
+        hud = mode
+    elif mode is not None and hud == 'hud':
+        # If both given, mode overrides only if it explicitly says 3d
+        _m = str(mode).strip().lower().replace('-', '_')
+        if _m in ('3d', 'world', '3d_world'):
+            hud = '3d'
+        elif _m in ('hud', '2d', 'texture', 'html', 'auto'):
+            hud = _m if _m != '2d' else 'hud'
+    if hud is None:
+        return 'hud'
+    if hud is True:
+        return 'hud'
+    if hud is False:
+        return '3d'
+    s = str(hud).strip().lower().replace('-', '_')
+    if s in ('', 'hud', '2d', '2_d', 'hud_2d', '2d_hud', 'true', 'yes', 'on', '1'):
+        return 'hud'
+    if s in ('texture', 'tex', 'hud_texture'):
+        return 'texture'
+    if s in ('html', 'html_in_canvas', 'html_canvas', 'dom', 'live'):
+        return 'html'
+    if s in ('auto', 'automatic', 'inherit'):
+        return 'auto'
+    if s in ('3d', 'world', '3d_world', 'world_3d', 'false', 'no', 'off', '0'):
+        return '3d'
+    return 'hud'
+
 
 def _get_align_offsets(align, width, height):
     a = _normalize_align(align)
@@ -169,6 +205,26 @@ _canvas = None
 _ctx = None            # 2D context when renderer is 2D, else None
 _renderer = None       # current renderer object
 _renderer_kind = '2d'
+# HUD mode: any existing 2D app can just change runApp() to get it in 3D.
+# runApp(..., renderer='webgl2' / 'webgpu' / '3d', hud=True, mode='hud'/'3d')
+# The 2D app draws unchanged to an offscreen 2D canvas. That canvas is
+# composited every frame as a fullscreen HUD quad (depth off, ortho) in the
+# 3D scene. The 2D app never knows it is in 3D. No rewrite, one-line change.
+_hud_mode = False
+_hud_offscreen = None   # offscreen 2D canvas where the 2D app draws in HUD mode
+_hud_2d_renderer = None  # 2D renderer for the offscreen canvas
+_hud_3d_kind = None     # 'webgl2' or 'webgpu' when in HUD mode
+# Both, with a flag: HUD texture (default, works everywhere) vs HTML-in-Canvas
+# (Chrome 157+ only, live DOM). _hud_kind: 'texture' | 'html' | 'auto'.
+#   hud='texture'  -> offscreen 2D canvas -> WebGL texture (works everywhere)
+#   hud='html'     -> live DOM element -> WebGL texture via texElementSubImage2D
+#                      (Chrome 157+ only, fallback to texture if not supported)
+#   hud='auto'     -> try HTML-in-Canvas if supported, else texture
+#   hud=True       -> 'texture' (backwards compat, default)
+#   mode='hud'/'3d' -> 'texture', mode='html' -> 'html', mode='auto' -> 'auto'
+_hud_kind = 'texture'
+_hud_html_element = None  # DOM element to render in HTML-in-Canvas mode (or None = default HUD div)
+_hud_html_supported = None  # cached: does this browser support HTML-in-Canvas?
 _app = None
 _shapes = []           # display list, z-order = list order
 _all_shapes = _shapes  # alias -- _clear_shapes mutates, never rebinds
@@ -258,6 +314,145 @@ def _dpr():
         return float(window.devicePixelRatio or 1.0)
     except Exception:
         return 1.0
+
+def _get_hud_offscreen(width, height):
+    """Offscreen 2D canvas for HUD mode. The 2D app draws here, unchanged.
+    Returns the canvas. Created once per size, reused every frame."""
+    global _hud_offscreen
+    try:
+        w, h = int(width), int(height)
+    except Exception:
+        w, h = 400, 400
+    if _hud_offscreen is not None:
+        try:
+            if int(_hud_offscreen.width) == int(w * _dpr()) and int(_hud_offscreen.height) == int(h * _dpr()):
+                return _hud_offscreen
+        except Exception:
+            pass
+    try:
+        c = document.createElement('canvas')
+        c.width = int(w * _dpr())
+        c.height = int(h * _dpr())
+        try:
+            c.style.width = '%dpx' % w
+            c.style.height = '%dpx' % h
+        except Exception:
+            pass
+        _hud_offscreen = c
+        return c
+    except Exception:
+        return None
+
+def getHudOffscreenCanvas():
+    """For scs.py: in HUD mode, scs.py's _ensure_canvas() must return this
+    offscreen canvas, NOT the visible WebGL canvas (getContext('2d') on a
+    WebGL canvas returns null). This is what makes an existing scs.py app
+    work in 3D with only a runApp() change."""
+    return _hud_offscreen
+
+def isHudMode():
+    return bool(_hud_mode)
+
+def getHudKind():
+    """'texture' | 'html' | 'auto' - which HUD implementation is active."""
+    return _hud_kind
+
+def isHtmlInCanvasSupported():
+    """Chrome 157+ only. Firefox/Safari have shipped nothing. Cache the result.
+    Checks: gl.texElementSubImage2D (Chrome 157+) or gl.texElementImage2D (149-154),
+    plus canvas.updateElementGeometry for hit-testing."""
+    global _hud_html_supported
+    if _hud_html_supported is not None:
+        return _hud_html_supported
+    try:
+        c = _find_canvas()
+        if c is None:
+            _hud_html_supported = False
+            return False
+        # 2D: drawElementImage() - Chrome 157+
+        try:
+            ctx2d = c.getContext('2d')
+            if ctx2d is not None and hasattr(ctx2d, 'drawElementImage'):
+                _hud_html_supported = True
+                return True
+        except Exception:
+            pass
+        # WebGL: texElementSubImage2D (157+) or texElementImage2D (149-154)
+        try:
+            gl = c.getContext('webgl2') or c.getContext('webgl')
+            if gl is not None and (hasattr(gl, 'texElementSubImage2D') or hasattr(gl, 'texElementImage2D')):
+                _hud_html_supported = True
+                return True
+        except Exception:
+            pass
+        # Hit-testing helper alone is not enough, but if the canvas has it
+        # and we are in Chrome, we are likely on 157+.
+        try:
+            if hasattr(c, 'updateElementGeometry'):
+                # Only trust it if we also saw a texElement method above;
+                # otherwise it may be a stub. Fall through to False.
+                pass
+        except Exception:
+            pass
+        _hud_html_supported = False
+        return False
+    except Exception:
+        _hud_html_supported = False
+        return False
+
+def getHtmlHudElement():
+    """DOM element to render in HTML-in-Canvas mode. If the user passed
+    html_element=... to runApp(), use that. Otherwise create/use the default
+    HUD div #scs-html-hud. The app can fill it with buttons, inputs, etc.,
+    and it will be live (typeable, clickable) inside the 3D scene on Chrome 157+."""
+    global _hud_html_element
+    if _hud_html_element is not None:
+        return _hud_html_element
+    try:
+        el = document.getElementById('scs-html-hud')
+        if el is None:
+            el = document.createElement('div')
+            el.id = 'scs-html-hud'
+            try:
+                el.setAttribute('content', 'drawable')
+            except Exception:
+                pass
+            try:
+                el.style.position = 'absolute'
+                el.style.left = '0px'
+                el.style.top = '0px'
+                el.style.pointerEvents = 'auto'
+            except Exception:
+                pass
+            try:
+                document.body.appendChild(el)
+            except Exception:
+                pass
+        _hud_html_element = el
+        return el
+    except Exception:
+        return None
+
+def setHtmlHudElement(el):
+    """Set the DOM element for HTML-in-Canvas HUD. Accepts an element,
+    a selector string ('#my-hud', '.hud'), or an id."""
+    global _hud_html_element
+    try:
+        if isinstance(el, str):
+            try:
+                if el.startswith('#'):
+                    _hud_html_element = document.getElementById(el[1:])
+                elif el.startswith('.'):
+                    _hud_html_element = document.querySelector(el)
+                else:
+                    _hud_html_element = document.getElementById(el) or document.querySelector(el)
+            except Exception:
+                _hud_html_element = None
+        else:
+            _hud_html_element = el
+    except Exception:
+        _hud_html_element = None
+    return _hud_html_element
 
 
 def _size_canvas(width, height):
@@ -485,8 +680,10 @@ def setRenderer(kind):
 # ----------------------------------------------------------------------
 
 class _BaseShape:
-    def __init__(self, **kwargs):
+    def __init__(self, hud='hud', **kwargs):
         self._align = _normalize_align(kwargs.get('align', 'center'))
+        # Per-shape HUD-or-3D flag. Default to HUD/2D. See _normalize_hud.
+        self.hud = _normalize_hud(kwargs.get('hud', None), kwargs.get('mode', None))
         self.fill = kwargs.get('fill', 'black')
         self.border = kwargs.get('border', None)
         self.borderWidth = kwargs.get('borderWidth', 2)
@@ -602,9 +799,10 @@ class _BaseShape:
 
 
 class Rect(_BaseShape):
-    def __init__(self, x, y, width, height, **kwargs):
+    def __init__(self, x, y, width, height, hud='hud', **kwargs):
+        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
         align = kwargs.pop('align', 'left-top')
-        super().__init__(align=align,
+        super().__init__(align=align, hud=hud,
                          **{k: v for k, v in kwargs.items() if k != 'align'})
         self._width = float(width)
         self._height = float(height)
@@ -624,9 +822,10 @@ class Rect(_BaseShape):
 
 
 class Oval(_BaseShape):
-    def __init__(self, x, y, width, height, **kwargs):
+    def __init__(self, x, y, width, height, hud='hud', **kwargs):
+        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
         align = kwargs.pop('align', 'center')
-        super().__init__(align=align,
+        super().__init__(align=align, hud=hud,
                          **{k: v for k, v in kwargs.items() if k != 'align'})
         self._width = float(width)
         self._height = float(height)
@@ -644,9 +843,10 @@ class Oval(_BaseShape):
 
 
 class Circle(_BaseShape):
-    def __init__(self, x, y, radius, **kwargs):
+    def __init__(self, x, y, radius, hud='hud', **kwargs):
+        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
         align = kwargs.pop('align', 'center')
-        super().__init__(align=align,
+        super().__init__(align=align, hud=hud,
                          **{k: v for k, v in kwargs.items() if k != 'align'})
         self._radius = float(radius)
         w = h = float(radius) * 2
@@ -706,9 +906,10 @@ class Circle(_BaseShape):
 
 
 class RegularPolygon(_BaseShape):
-    def __init__(self, x, y, radius, points, **kwargs):
+    def __init__(self, x, y, radius, points, hud='hud', **kwargs):
+        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
         align = kwargs.pop('align', 'center')
-        super().__init__(align=align,
+        super().__init__(align=align, hud=hud,
                          **{k: v for k, v in kwargs.items() if k != 'align'})
         self._radius = float(radius)
         self.points = int(points)
@@ -770,8 +971,8 @@ class RegularPolygon(_BaseShape):
 
 
 class Star(RegularPolygon):
-    def __init__(self, x, y, radius, points, **kwargs):
-        super().__init__(x, y, radius, points, **kwargs)
+    def __init__(self, x, y, radius, points, hud='hud', **kwargs):
+        super().__init__(x, y, radius, points, hud=hud, **kwargs)
         self.ratio = kwargs.get('ratio', 0.5)
 
     def draw(self, renderer):
@@ -785,7 +986,8 @@ class Star(RegularPolygon):
 
 
 class Line:
-    def __init__(self, x1, y1, x2, y2, **kwargs):
+    def __init__(self, x1, y1, x2, y2, hud='hud', **kwargs):
+        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
         self.x1 = float(x1)
         self.y1 = float(y1)
         self.x2 = float(x2)
@@ -873,7 +1075,8 @@ class Line:
 
 
 class Polygon:
-    def __init__(self, *points, **kwargs):
+    def __init__(self, *points, hud='hud', **kwargs):
+        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
         self.points = [float(p) for p in points]
         self.fill = kwargs.get('fill', 'black')
         self.border = kwargs.get('border', None)
@@ -954,9 +1157,10 @@ class Polygon:
 
 
 class Arc(_BaseShape):
-    def __init__(self, x, y, width, height, startAngle, sweepAngle, **kwargs):
+    def __init__(self, x, y, width, height, startAngle, sweepAngle, hud='hud', **kwargs):
+        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
         align = kwargs.pop('align', 'center')
-        super().__init__(align=align,
+        super().__init__(align=align, hud=hud,
                          **{k: v for k, v in kwargs.items() if k != 'align'})
         self._width = float(width)
         self._height = float(height)
@@ -976,7 +1180,8 @@ class Arc(_BaseShape):
 
 
 class Label:
-    def __init__(self, text, x, y, **kwargs):
+    def __init__(self, text, x, y, hud='hud', **kwargs):
+        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
         self.text = str(text)
         self.size = kwargs.get('size', 12)
         self.font = kwargs.get('font', 'arial')
@@ -1049,9 +1254,10 @@ class Label:
 
 
 class Image(_BaseShape):
-    def __init__(self, path, x, y, **kwargs):
+    def __init__(self, path, x, y, hud='hud', **kwargs):
+        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
         align = kwargs.pop('align', 'center')
-        super().__init__(align=align,
+        super().__init__(align=align, hud=hud,
                          **{k: v for k, v in kwargs.items() if k != 'align'})
         self.path = path
         self._width = float(kwargs.get('width', 100))
@@ -1085,7 +1291,8 @@ class Image(_BaseShape):
 
 
 class Group:
-    def __init__(self, *shapes):
+    def __init__(self, *shapes, hud='hud', **kwargs):
+        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
         self.shapes = list(shapes)
         self.visible = True
         self.opacity = 100
@@ -1194,7 +1401,7 @@ def _renderer_or_2d():
 
 def drawRect(x, y, width, height, fill='black', border=None, borderWidth=2,
              opacity=100, rotateAngle=0, dashes=False, align='left-top',
-             visible=True, roundness=0):
+             visible=True, roundness=0, hud='hud'):
     if not visible:
         return
     r = _renderer_or_2d()
@@ -1208,7 +1415,7 @@ def drawRect(x, y, width, height, fill='black', border=None, borderWidth=2,
 
 
 def drawCircle(x, y, radius, fill='black', border=None, borderWidth=2,
-               opacity=100, rotateAngle=0, dashes=False, align='center', visible=True):
+               opacity=100, rotateAngle=0, dashes=False, align='center', visible=True, hud='hud'):
     if not visible:
         return
     r = _renderer_or_2d()
@@ -1222,7 +1429,7 @@ def drawCircle(x, y, radius, fill='black', border=None, borderWidth=2,
 
 
 def drawOval(x, y, width, height, fill='black', border=None, borderWidth=2,
-             opacity=100, rotateAngle=0, dashes=False, align='center', visible=True):
+             opacity=100, rotateAngle=0, dashes=False, align='center', visible=True, hud='hud'):
     if not visible:
         return
     r = _renderer_or_2d()
@@ -1237,7 +1444,7 @@ def drawOval(x, y, width, height, fill='black', border=None, borderWidth=2,
 
 def drawRegularPolygon(x, y, radius, points, fill='black', border=None,
                        borderWidth=2, opacity=100, rotateAngle=0, dashes=False,
-                       align='center', visible=True):
+                       align='center', visible=True, hud='hud'):
     if not visible:
         return
     r = _renderer_or_2d()
@@ -1252,7 +1459,7 @@ def drawRegularPolygon(x, y, radius, points, fill='black', border=None,
 
 def drawStar(x, y, radius, points, fill='black', border=None, borderWidth=2,
              opacity=100, rotateAngle=0, dashes=False, align='center',
-             visible=True, ratio=0.5):
+             visible=True, ratio=0.5, hud='hud'):
     if not visible:
         return
     r = _renderer_or_2d()
@@ -1267,7 +1474,7 @@ def drawStar(x, y, radius, points, fill='black', border=None, borderWidth=2,
 
 def drawLabel(text, x, y, fill='black', size=12, font='arial', bold=False,
               italic=False, opacity=100, align='center', visible=True,
-              rotateAngle=0):
+              rotateAngle=0, hud='hud'):
     if not visible:
         return
     r = _renderer_or_2d()
@@ -1279,7 +1486,7 @@ def drawLabel(text, x, y, fill='black', size=12, font='arial', bold=False,
 
 
 def drawLine(x1, y1, x2, y2, fill='black', lineWidth=2, opacity=100,
-             dashes=False, visible=True):
+             dashes=False, visible=True, hud='hud'):
     if not visible:
         return
     r = _renderer_or_2d()
@@ -1290,7 +1497,7 @@ def drawLine(x1, y1, x2, y2, fill='black', lineWidth=2, opacity=100,
 
 
 def drawPolygon(*points, fill='black', border=None, borderWidth=2, opacity=100,
-                rotateAngle=0, dashes=False, visible=True):
+                rotateAngle=0, dashes=False, visible=True, hud='hud'):
     if not visible or len(points) < 4:
         return
     r = _renderer_or_2d()
@@ -1302,7 +1509,7 @@ def drawPolygon(*points, fill='black', border=None, borderWidth=2, opacity=100,
 
 
 def drawArc(x, y, width, height, startAngle, sweepAngle, fill=None, border=None,
-            borderWidth=2, opacity=100, dashes=False, align='center', visible=True):
+            borderWidth=2, opacity=100, dashes=False, align='center', visible=True, hud='hud'):
     if not visible:
         return
     r = _renderer_or_2d()
@@ -1316,7 +1523,7 @@ def drawArc(x, y, width, height, startAngle, sweepAngle, fill=None, border=None,
 
 
 def drawImage(path, x, y, width=None, height=None, opacity=100, rotateAngle=0,
-              align='center', visible=True):
+              align='center', visible=True, hud='hud'):
     if not visible:
         return
     r = _renderer_or_2d()
@@ -1417,7 +1624,7 @@ class Sound:
 # ----------------------------------------------------------------------
 
 class App:
-    def __init__(self, width=400, height=400, renderer=None, **kwargs):
+    def __init__(self, width=400, height=400, renderer=None, hud='hud', **kwargs):
         global _app
         if isinstance(width, App):
             _src = width
@@ -1493,6 +1700,65 @@ def _parse_run_args(args, kwargs):
         renderer = kwargs.pop('renderer')
     if 'canvas' in kwargs:
         canvas = kwargs.pop('canvas')
+    # HUD / 3D mode: MUST NOT be dropped. Any existing app must be able to
+    # just change the runApp call: runApp(1050, 700, stepsPerSecond=60, renderer='webgl2')
+    # or runApp(..., renderer='3d') or runApp(..., hud=True) or runApp(..., mode='hud').
+    # These are parsed here and forwarded to run_app(), not dropped.
+    hud = kwargs.pop('hud', None)
+    mode = kwargs.pop('mode', None)
+    # HTML-in-Canvas element: which DOM element to render in hud='html' mode.
+    # Accepts element, '#id', '.class', or 'id'. None = default #scs-html-hud div.
+    html_element = kwargs.pop('html_element', None)
+    if html_element is None:
+        html_element = kwargs.pop('html', None)
+    if html_element is None:
+        html_element = kwargs.pop('html_hud', None)
+    # Both, with a flag: hud can be True/False OR a string:
+    #   hud='texture' -> offscreen 2D canvas -> WebGL texture (works everywhere, default)
+    #   hud='html'    -> live DOM -> WebGL texture via texElementSubImage2D (Chrome 157+ only, fallback to texture)
+    #   hud='auto'    -> try HTML if supported, else texture
+    #   hud=True      -> 'texture' (backwards compat)
+    #   hud='html-in-canvas' / 'html_in_canvas' / 'canvas' -> 'html'
+    if isinstance(hud, str):
+        _hud_str = hud.strip().lower().replace('-', '_')
+        if _hud_str in ('html', 'html_in_canvas', 'html_canvas', 'canvas', 'dom', 'live'):
+            hud = 'html'
+        elif _hud_str in ('texture', 'tex', 'hud', '3d', 'hud_3d', '3d_hud'):
+            hud = 'texture'
+        elif _hud_str in ('auto', 'automatic'):
+            hud = 'auto'
+        elif _hud_str in ('1', 'true', 'yes', 'on'):
+            hud = True
+        elif _hud_str in ('0', 'false', 'no', 'off', 'none'):
+            hud = False
+    # Aliases: mode='3d' / mode='hud' / renderer='3d' / renderer='hud' all mean HUD texture.
+    # mode='html' / mode='html-in-canvas' means HTML-in-Canvas.
+    if mode is not None:
+        mode = str(mode).lower().replace('-', '_')
+        if mode in ('html', 'html_in_canvas', 'html_canvas', 'canvas', 'dom', 'live'):
+            mode = 'html'
+            hud = 'html'
+        elif mode in ('auto', 'automatic'):
+            mode = 'auto'
+            hud = 'auto'
+    if renderer is not None and str(renderer).lower() in ('3d', 'hud', 'hud-3d', '3d-hud'):
+        mode = 'hud'
+        renderer = 'webgl2'
+        if hud is None:
+            hud = 'texture'
+    if mode in ('3d', 'hud', 'hud-3d', '3d-hud'):
+        if hud is None:
+            hud = 'texture'
+        if renderer is None or str(renderer).lower() in ('3d', 'hud'):
+            renderer = 'webgl2'
+    # Normalize hud=True -> 'texture', hud='html' stays, hud='auto' stays
+    if hud is True:
+        hud = 'texture'
+    # If mode is 'html' but hud was not set, hud='html' (already handled above)
+    if mode == 'html' and hud is None:
+        hud = 'html'
+    # Extra kwargs are still dropped (never TypeError), but hud/mode are kept.
+    # Return them via globals so runApp() can forward them.
     if len(args) >= 1:
         width = args[0]
     if len(args) >= 2:
@@ -1503,21 +1769,31 @@ def _parse_run_args(args, kwargs):
         renderer = args[3]
     if len(args) >= 5:
         canvas = args[4]
-    return width, height, steps, renderer, canvas
+    # Attach hud/mode to the return via a tuple - callers unpack 7 values.
+    return width, height, steps, renderer, canvas, hud, mode, html_element
 
 
 def runApp(*args, **kwargs):
-    """Full alias of run_app(). NEVER raises 'unexpected keyword argument'."""
-    width, height, steps, renderer, canvas = _parse_run_args(args, kwargs)
+    """Full alias of run_app(). NEVER raises 'unexpected keyword argument'.
+    Any existing app can just change this call to get it in 3D:
+      runApp(1050, 700, stepsPerSecond=60)  -> 2D (default, backwards compat)
+      runApp(1050, 700, stepsPerSecond=60, renderer='webgl2')  -> 2D app in 3D HUD
+      runApp(1050, 700, stepsPerSecond=60, renderer='3d')  -> same, HUD
+      runApp(1050, 700, stepsPerSecond=60, hud=True)  -> HUD
+      runApp(1050, 700, stepsPerSecond=60, mode='hud')  -> HUD
+    """
+    width, height, steps, renderer, canvas, hud, mode, html_element = _parse_run_args(args, kwargs)
     return run_app(width=width, height=height,
-                   stepsPerSecond=steps, renderer=renderer, canvas=canvas)
+                   stepsPerSecond=steps, renderer=renderer, canvas=canvas,
+                   hud=hud, mode=mode, html_element=html_element)
 
 
 def cmu_graphics_run(*args, **kwargs):
     """CMU alias. Same bulletproof parsing as runApp()."""
-    width, height, steps, renderer, canvas = _parse_run_args(args, kwargs)
+    width, height, steps, renderer, canvas, hud, mode, html_element = _parse_run_args(args, kwargs)
     return run_app(width=width, height=height,
-                   stepsPerSecond=steps, renderer=renderer, canvas=canvas)
+                   stepsPerSecond=steps, renderer=renderer, canvas=canvas,
+                   hud=hud, mode=mode, html_element=html_element)
 
 
 # ----------------------------------------------------------------------
@@ -1728,6 +2004,43 @@ def _render_one_view(view, renderer=None):
                     draw_fn(r)
             except Exception:
                 pass
+        # HUD mode: composite as a fullscreen HUD quad in the 3D scene.
+        # Both, with a flag:
+        #   hud='texture' -> offscreen 2D canvas (where scs.py's 2D app drew,
+        #     unchanged) -> WebGL texture. Works everywhere.
+        #   hud='html' -> live DOM element -> WebGL texture via
+        #     texElementSubImage2D (Chrome 157+ only). Live, typeable,
+        #     accessible. Falls back to texture if not supported / if the
+        #     renderer does not implement draw_html_element.
+        #   hud='auto' -> already resolved to 'html' or 'texture' in run_app().
+        # This is the one-line-change contract: the 2D app never knows it is in 3D.
+        if _hud_mode:
+            try:
+                _hud_done = False
+                if _hud_kind == 'html':
+                    try:
+                        _el = getHtmlHudElement()
+                        if _el is not None and hasattr(r, 'draw_html_element'):
+                            _hud_done = bool(r.draw_html_element(_el, 0, 0, _canvas_width, _canvas_height))
+                    except Exception:
+                        _hud_done = False
+                    if not _hud_done and _hud_offscreen is not None:
+                        # HTML failed / not supported: fall back to texture, do not break.
+                        try:
+                            if hasattr(r, 'draw_hud_canvas'):
+                                r.draw_hud_canvas(_hud_offscreen, 0, 0, _canvas_width, _canvas_height)
+                        except Exception:
+                            pass
+                elif _hud_offscreen is not None:
+                    if hasattr(r, 'draw_hud_canvas'):
+                        r.draw_hud_canvas(_hud_offscreen, 0, 0, _canvas_width, _canvas_height)
+                    elif hasattr(r, 'draw_image'):
+                        try:
+                            r.draw_image(_hud_offscreen, 0, 0, _canvas_width, _canvas_height)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
     finally:
         if view is not None and hasattr(r, 'pop_view'):
             try:
@@ -1800,7 +2113,7 @@ def _start_loop():
 
 
 def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
-            canvas=None, **kwargs):
+            canvas=None, hud=None, mode=None, html_element=None, **kwargs):
     """The initialiser. renderer: '2d' (default, backwards compat),
     'webgl2', 'webgpu', or 'auto' (WebGPU -> WebGL2 -> 2D).
 
@@ -1828,7 +2141,116 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
     if canvas is not None:
         _canvas = canvas
     _steps_per_second = stepsPerSecond
+    # HUD resolution: explicit hud/mode > renderer='3d'/'hud' > 2D app + 3D renderer.
+    # Any existing 2D app: runApp(..., renderer='webgl2') or renderer='3d' or hud=True
+    # or mode='hud'/'3d' -> HUD mode. A 3D-native app (uses 3D callbacks) is NOT
+    # forced into HUD; it runs natively. We detect 2D apps by: no 3D callbacks
+    # defined (no onRender3D / onDraw3D / draw3D in _user_funcs).
+    global _hud_mode, _hud_2d_renderer, _hud_3d_kind, _hud_kind, _hud_html_element
+    _hud_mode = False
+    _hud_2d_renderer = None
+    _hud_3d_kind = None
+    _hud_kind = 'texture'
+    _hud_html_element = None
+    _hud_requested = False
+    # Both, with a flag: hud='texture' (default) vs hud='html' vs hud='auto'
+    # Normalize hud: True -> 'texture', 'html'/'texture'/'auto' stay as-is
+    _hud_flag = hud
+    if _hud_flag is True:
+        _hud_flag = 'texture'
+    if isinstance(_hud_flag, str):
+        _hf = _hud_flag.strip().lower().replace('-', '_')
+        if _hf in ('html', 'html_in_canvas', 'html_canvas', 'canvas', 'dom', 'live'):
+            _hud_flag = 'html'
+        elif _hf in ('texture', 'tex', 'hud', '3d', 'hud_3d', '3d_hud'):
+            _hud_flag = 'texture'
+        elif _hf in ('auto', 'automatic'):
+            _hud_flag = 'auto'
+        elif _hf in ('1', 'true', 'yes', 'on'):
+            _hud_flag = 'texture'
+        elif _hf in ('0', 'false', 'no', 'off', 'none'):
+            _hud_flag = False
+    if _hud_flag in ('texture', 'html', 'auto'):
+        _hud_requested = True
+        _hud_kind = _hud_flag
+    if mode is not None and str(mode).lower().replace('-', '_') in ('hud', '3d', 'hud_3d', '3d_hud'):
+        _hud_requested = True
+        if _hud_kind not in ('html', 'auto'):
+            _hud_kind = 'texture'
+    if mode is not None and str(mode).lower().replace('-', '_') in ('html', 'html_in_canvas', 'html_canvas', 'canvas', 'dom', 'live'):
+        _hud_requested = True
+        _hud_kind = 'html'
+    if mode is not None and str(mode).lower().replace('-', '_') in ('auto', 'automatic'):
+        _hud_requested = True
+        _hud_kind = 'auto'
+    if renderer is not None and str(renderer).lower() in ('3d', 'hud', 'hud-3d', '3d-hud'):
+        _hud_requested = True
+        renderer = 'webgl2'
+        if _hud_kind not in ('html', 'auto'):
+            _hud_kind = 'texture'
+    # Implicit HUD: 2D app + 3D renderer. The app's code has no 3D callbacks,
+    # so the only way to show its 2D output in a 3D scene is as HUD.
+    _is_3d_app = any(k in _user_funcs for k in ('onRender3D', 'onDraw3D', 'draw3D', 'onRender', 'render3D'))
+    _renderer_req = str(renderer or '').lower() if renderer else None
+    if _renderer_req in ('webgl2', 'webgl', 'webgpu', 'gpu', 'auto') and not _is_3d_app:
+        _hud_requested = True
+    if _hud_requested:
+        _hud_mode = True
+        # 'auto': try HTML-in-Canvas if this browser supports it (Chrome 157+),
+        # else fall back to HUD texture (works everywhere). This is the safe
+        # default for hud='auto' - never breaks on Firefox/Safari.
+        if _hud_kind == 'auto':
+            try:
+                _hud_kind = 'html' if isHtmlInCanvasSupported() else 'texture'
+            except Exception:
+                _hud_kind = 'texture'
+        # 'html' but not supported: fall back to texture, do not break the app.
+        # Log once so the user knows why they are on texture.
+        if _hud_kind == 'html':
+            try:
+                if not isHtmlInCanvasSupported():
+                    _debug_log('SCS HUD: hud="html" requested but HTML-in-Canvas not supported in this browser (Chrome 157+ only). Falling back to hud="texture".')
+                    _hud_kind = 'texture'
+            except Exception:
+                _hud_kind = 'texture'
+        # Store the HTML element for HTML mode (None = default #scs-html-hud div)
+        if html_element is not None:
+            try:
+                setHtmlHudElement(html_element)
+            except Exception:
+                pass
+        # Also honour html=... / html_hud=... passed via **kwargs (for runApp via scs.py)
+        for _hk in ('html', 'html_hud', 'htmlElement'):
+            if _hk in kwargs and kwargs.get(_hk) is not None:
+                try:
+                    setHtmlHudElement(kwargs.get(_hk))
+                except Exception:
+                    pass
+        # 3D kind for HUD: webgpu if explicitly asked, else webgl2 (widest support)
+        if _renderer_req in ('webgpu', 'gpu'):
+            _hud_3d_kind = 'webgpu'
+        elif _renderer_req == 'auto':
+            _hud_3d_kind = 'webgpu'  # auto will fall back to webgl2 in the renderer chain
+        else:
+            _hud_3d_kind = 'webgl2'
+        # Offscreen 2D canvas is created AFTER _size_canvas (needs width/height)
+        # but BEFORE the 3D renderer is created, so scs.py can find it.
     _size_canvas(width, height)
+    # HUD: create the offscreen 2D canvas NOW, before any 2D drawing happens.
+    # scs.py's _ensure_canvas() will return this canvas in HUD mode, so the
+    # existing 2D app draws here, unchanged. The 3D renderer composites it.
+    if _hud_mode:
+        try:
+            _get_hud_offscreen(width, height)
+            try:
+                _hud_2d_renderer = create_renderer('2d', _hud_offscreen, width, height)
+            except Exception:
+                _hud_2d_renderer = None
+            # Force the visible canvas to the 3D kind - the 2D app is NOT on it.
+            if renderer is None or str(renderer).lower() in ('2d', 'canvas', 'canvas2d'):
+                renderer = _hud_3d_kind or 'webgl2'
+        except Exception:
+            pass
     _setup_presentation(_find_canvas())
     # App object: reuse the one user code already made if it matches,
     # else create it (this also clears the display list).
@@ -1845,6 +2267,13 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
     kind = _resolve_renderer_kind(
         renderer or _pending_renderer or getattr(app, 'renderer', None))
     _pending_renderer = None
+    if _hud_mode:
+        # In HUD mode the visible canvas is always 3D. If the resolved kind
+        # is still '2d' (e.g. no renderer was passed, only hud=True), use webgl2.
+        if kind in ('2d', 'canvas', 'canvas2d'):
+            kind = _hud_3d_kind or 'webgl2'
+        if kind == 'auto':
+            kind = _hud_3d_kind or 'webgpu'
 
     def _fallback(exc_kind, err):
         # WebGPU/WebGL2 failed: walk down the chain, then start anyway.
@@ -2410,10 +2839,48 @@ loop = run_app
 # App loading (was in index.html)
 # ----------------------------------------------------------------------
 
-def app_file():
+def app_file(app=None):
+    """Top level: user simply points to a valid app.
+    Precedence (first wins):
+      1. explicit boot(app) / load(app) arg - boot("myapp.py"), boot("apps/myapp.py")
+      2. <canvas data-app="apps/myapp.py"> - point in HTML, no JS, no config
+      3. ?app=myapp - URL param
+      4. window.SCS_CONFIG.app - npm / CDN config
+      5. default apps/app.py
+    A valid app is any .py file with CMU-style onAppStart/redrawAll/runApp.
+    No suffering: no registry, no manifest, no build step."""
     d = 'apps/app.py'
     try:
-        v = _url_param('app')
+        v = None
+        if app is not None:
+            v = str(app)
+        if not v:
+            # <canvas data-app="..."> - thin shell points to a valid app, package reads it.
+            try:
+                from browser import document as _doc
+                for _cid in ('canvas', 'cmu-canvas'):
+                    try:
+                        _cv = _doc[_cid]
+                        if _cv is not None:
+                            _dv = None
+                            try:
+                                _dv = _cv.getAttribute('data-app')
+                            except Exception:
+                                try:
+                                    _dv = getattr(_cv, 'dataset', None)
+                                    if _dv is not None:
+                                        _dv = getattr(_dv, 'app', None)
+                                except Exception:
+                                    _dv = None
+                            if _dv:
+                                v = str(_dv)
+                                break
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        if not v:
+            v = _url_param('app')
         if not v:
             cfg_app = _config_value('app')
             if cfg_app:
@@ -2489,6 +2956,28 @@ def exec_code(code, fn):
                             _user_ns[n] = fn_cb
                     except Exception:
                         pass
+    except Exception:
+        pass
+    # CRITICAL: Brython ignores sys.modules['scs'] = _ep in scs.py.
+    # `import scs` loads a SEPARATE scs module (old runApp(width=400, height=400)),
+    # and app.py's `from scs import *` overwrites _user_ns['runApp'] with that old one.
+    # Patch the LOADED scs module object in memory BEFORE exec, so the star
+    # import inside app.py gets the fixed runApp.
+    try:
+        import scs as _scs_patch
+        _scs_patch.runApp = runApp
+        _scs_patch.run = runApp
+        _scs_patch.loop = runApp
+        _scs_patch.cmu_graphics_run = cmu_graphics_run
+        _scs_patch.run_app = run_app
+    except Exception:
+        pass
+    try:
+        import sys as _sys2
+        try:
+            _sys2.modules['scs'] = _sys2.modules['scs_entrypoint']
+        except Exception:
+            pass
     except Exception:
         pass
     try:
@@ -2567,13 +3056,14 @@ def exec_code(code, fn):
             pass
 
 
-def load():
+def load(app=None):
     # JS loader may inject code directly (SCS.create({code: '...'})).
     code = _config_value('code')
     if code:
         exec_code(str(code), '<SCS.create code>')
         return
-    t = app_file()
+    # Top level: point to a valid app. load(app) / boot(app) wins, else data-app / ?app= / SCS_CONFIG.app / default.
+    t = app_file(app)
     url = _app_url(t)
 
     def ok(txt):
@@ -2589,9 +3079,13 @@ def load():
         pass
 
 
-def boot():
-    """Called from index.html / the JS loader. Binds events, loads the
-    app (?app= / SCS_CONFIG), and starts it."""
+def boot(app=None):
+    """Top level: user simply points to a valid app.
+    boot() - data-app / ?app= / SCS_CONFIG.app / default apps/app.py
+    boot("myapp.py") - point to a valid app, no config, no suffering
+    boot("apps/myapp.py") - same, explicit path
+    Binds events, loads the app, and starts it. Loop / events / renderer
+    all live in the package, not in HTML."""
     # Console proof at boot(): which runApp is actually in globals() RIGHT NOW.
     try:
         import inspect as _insp
@@ -2609,7 +3103,182 @@ def boot():
     except Exception:
         pass
     _bind_events()
-    load()
+    load(app)
+
+
+def boot_sandbox():
+    """Sandbox boot - baked into the package, not in HTML.
+    Thin shell (sandbox.html) has only <canvas> + <textarea id=\"code-input\">.
+    No loop, no events, no renderer, no shape drawing in HTML.
+    This function owns all of it: default example (CMU-style, no suffering),
+    Run/Stop + log UI created here if missing, event binding, exec, loop.
+    Users just import from npm or load from CDN and it works."""
+    try:
+        from browser import document, window
+    except Exception:
+        return
+    try:
+        # Default CMU example - lives in the package, not in HTML, so the shell stays thin.
+        # Same API students already know: from scs import *, onAppStart, redrawAll, onMousePress, runApp.
+        _default = (
+            "from scs import *\n\n"
+            "def onAppStart(app):\n"
+            "    app.dots = []\n"
+            "    app.color = 'blue'\n\n"
+            "def redrawAll(app):\n"
+            "    for cx, cy in app.dots:\n"
+            "        drawCircle(cx, cy, 20, fill=app.color)\n\n"
+            "def onMousePress(app, mouseX, mouseY):\n"
+            "    app.dots.append((mouseX, mouseY))\n\n"
+            "def onKeyPress(app, key):\n"
+            "    if key == 'r':\n"
+            "        app.color = 'red'\n"
+            "    elif key == 'b':\n"
+            "        app.color = 'blue'\n\n"
+            "def main():\n"
+            "    runApp()\n\n"
+            "main()\n"
+        )
+        try:
+            _ta = document['code-input']
+            if not _ta.value:
+                _ta.value = _default
+        except Exception:
+            pass
+        # Log + Run/Stop UI - created here in the package, not in HTML.
+        # If the shell already has them (old shells), reuse them. If not, create them.
+        try:
+            _log = None
+            try:
+                _log = document['log']
+            except Exception:
+                pass
+            if _log is None:
+                try:
+                    _log = document.createElement('div')
+                    _log.id = 'log'
+                    try:
+                        _log.style.cssText = 'margin-top:10px;background:#1a1d24;border:1px solid #3a3f4b;border-radius:6px;padding:10px;min-height:80px;white-space:pre-wrap;font-size:11px;max-height:300px;overflow:auto;color:#e6e6e6;'
+                    except Exception:
+                        pass
+                    document.body.appendChild(_log)
+                except Exception:
+                    _log = None
+            def _log_msg(msg):
+                try:
+                    if _log is not None:
+                        _log.text += str(msg) + '\n'
+                except Exception:
+                    pass
+            # Wire _debug_log to the sandbox log, so package errors show up here, not just console.
+            try:
+                _orig = _debug_log
+                def _sb_log(m):
+                    try:
+                        _log_msg(m)
+                    except Exception:
+                        pass
+                    try:
+                        _orig(m)
+                    except Exception:
+                        pass
+                globals()['_debug_log'] = _sb_log
+            except Exception:
+                pass
+            # Run / Stop buttons - created in the package if missing.
+            try:
+                _run_btn = None
+                try:
+                    _run_btn = document['run-btn']
+                except Exception:
+                    pass
+                if _run_btn is None:
+                    _run_btn = document.createElement('button')
+                    _run_btn.id = 'run-btn'
+                    _run_btn.text = 'Run'
+                    try:
+                        _run_btn.style.cssText = 'background:#4c6ef5;color:white;border:0;padding:10px 18px;border-radius:6px;cursor:pointer;font-weight:600;margin-right:8px;'
+                    except Exception:
+                        pass
+                    document.body.appendChild(_run_btn)
+                _stop_btn = None
+                try:
+                    _stop_btn = document['stop-btn']
+                except Exception:
+                    pass
+                if _stop_btn is None:
+                    _stop_btn = document.createElement('button')
+                    _stop_btn.id = 'stop-btn'
+                    _stop_btn.text = 'Stop'
+                    try:
+                        _stop_btn.style.cssText = 'background:#4c6ef5;color:white;border:0;padding:10px 18px;border-radius:6px;cursor:pointer;font-weight:600;margin-right:8px;'
+                    except Exception:
+                        pass
+                    document.body.appendChild(_stop_btn)
+            except Exception:
+                _run_btn = _stop_btn = None
+            def _run(ev=None):
+                try:
+                    _ta2 = document['code-input']
+                    exec_code(_ta2.value, '<sandbox>')
+                    _log_msg('Running; renderer=' + str(getRendererKind()))
+                except Exception:
+                    import traceback
+                    _log_msg('Error:\n' + traceback.format_exc())
+            def _stop(ev=None):
+                try:
+                    stop()
+                    _log_msg('Stopped.')
+                except Exception:
+                    pass
+            try:
+                if _run_btn is not None:
+                    _run_btn.bind('click', _run)
+                if _stop_btn is not None:
+                    _stop_btn.bind('click', _stop)
+            except Exception:
+                pass
+            # Sandbox: just enter app code. Paste / type in the textarea and it runs.
+            # No Run click required: auto-run on input (debounced) - all in the package, not HTML.
+            try:
+                _ta3 = document['code-input']
+                _timer = {'id': None}
+                def _on_input(ev=None):
+                    try:
+                        from browser import timer as _tm
+                        try:
+                            if _timer['id'] is not None:
+                                _tm.clear_timeout(_timer['id'])
+                        except Exception:
+                            pass
+                        def _do():
+                            try:
+                                _run()
+                            except Exception:
+                                pass
+                        try:
+                            _timer['id'] = _tm.set_timeout(_do, 600)
+                        except Exception:
+                            _do()
+                    except Exception:
+                        pass
+                try:
+                    _ta3.bind('input', _on_input)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            _bind_events()
+            # Auto-run once, so the student sees something immediately - no suffering.
+            try:
+                _run()
+            except Exception:
+                pass
+            _log_msg('Sandbox ready. API from package (scs_entrypoint.py via scs.py).')
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 main = boot

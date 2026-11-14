@@ -308,3 +308,72 @@ def make_floor_grid(size=20, step=1):
         pts.extend([-h, 0.0, c, h, 0.0, c])   # line parallel to X
         pts.extend([c, 0.0, -h, c, 0.0, h])   # line parallel to Z
     return pts
+
+
+# ----------------------------------------------------------------------
+# Per-shape HUD-or-3D flag. Default to HUD/2D. Same as scs.py / scs_entrypoint.py.
+# ----------------------------------------------------------------------
+def _normalize_hud(hud=None, mode=None):
+    """Per-shape HUD-or-3D flag. Default to HUD/2D.
+    hud: 'hud'/'2d'/'texture'/'html'/True/None -> 'hud' (HUD/2D, default)
+         '3d'/'world'/False -> '3d' (3D world, depth on)
+         'auto' -> 'auto' (inherit from app)
+    """
+    if mode is not None and hud is None:
+        hud = mode
+    if hud is None:
+        return 'hud'
+    if hud is True:
+        return 'hud'
+    if hud is False:
+        return '3d'
+    s = str(hud).strip().lower().replace('-', '_')
+    if s in ('', 'hud', '2d', '2_d', 'hud_2d', 'true', 'yes', 'on', '1'):
+        return 'hud'
+    if s in ('texture', 'tex', 'hud_texture'):
+        return 'texture'
+    if s in ('html', 'html_in_canvas', 'html_canvas', 'dom', 'live'):
+        return 'html'
+    if s in ('auto', 'automatic', 'inherit'):
+        return 'auto'
+    if s in ('3d', 'world', '3d_world', 'false', 'no', 'off', '0'):
+        return '3d'
+    return 'hud'
+
+
+def is_hud_shape(shape, global_hud_kind='hud'):
+    """Is this shape HUD? Default HUD/2D. shape.hud overrides global.
+    shape.hud: 'hud'/'texture'/'html' -> True, '3d'/'world' -> False,
+    'auto'/None -> inherit from global_hud_kind."""
+    try:
+        h = getattr(shape, 'hud', None)
+    except Exception:
+        h = None
+    if h is None or h == 'auto':
+        return _normalize_hud(global_hud_kind) in ('hud', 'texture', 'html')
+    return _normalize_hud(h) in ('hud', 'texture', 'html')
+
+
+def split_hud_world(shapes, global_hud_kind='hud'):
+    """Split a display list into (world_shapes, hud_shapes) by per-shape hud.
+    Default to HUD/2D: shapes without an explicit hud go to HUD. Render world
+    first (depth on), then HUD (depth off, on top). This is what makes
+    Rect(..., hud='3d') + Rect(..., hud='hud') mix in one scene."""
+    world, hud = [], []
+    for s in shapes:
+        if is_hud_shape(s, global_hud_kind):
+            hud.append(s)
+        else:
+            world.append(s)
+    return world, hud
+
+
+def hud_ortho_matrix(width, height):
+    """Ortho matrix for HUD pass: 2D screen coords -> clip, depth off."""
+    # 2D HUD uses identity in clip space: x in [0,width] -> [-1,1], y in [0,height] -> [1,-1]
+    # Returned as a 4x4 row-major list for the shader to use, or for CPU projection.
+    w, h = float(width), float(height)
+    return [2.0 / w if w else 1.0, 0.0, 0.0, -1.0,
+            0.0, -2.0 / h if h else -1.0, 0.0, 1.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0]

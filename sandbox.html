@@ -1,115 +1,22 @@
 <!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<title>SCS Sandbox</title>
+<html><head><meta charset="UTF-8"><title>SCS Sandbox</title>
 <style>
 body{margin:0;padding:10px;background:#0f1115;color:#e6e6e6;font-family:monospace;display:flex;flex-direction:column;align-items:center;}
-#canvas-container{border:2px solid #3a3f4b;border-radius:8px;background:#000;}
 canvas{display:block;background:black;outline:none;}
-#controls{margin-top:12px;width:1050px;max-width:98vw;}
-textarea{width:100%;height:400px;background:#1a1d24;color:#d6deeb;border:1px solid #3a3f4b;border-radius:6px;padding:12px;font-family:monospace;font-size:11px;}
-button,select{background:#4c6ef5;color:white;border:0;padding:10px 18px;border-radius:6px;cursor:pointer;font-weight:600;margin-right:8px;}
-select{background:#1a1d24;border:1px solid #3a3f4b;}
-#log{margin-top:10px;background:#1a1d24;border:1px solid #3a3f4b;border-radius:6px;padding:10px;min-height:80px;white-space:pre-wrap;font-size:11px;max-height:300px;overflow:auto;}
+#code-input{width:1050px;max-width:98vw;height:400px;background:#1a1d24;color:#d6deeb;border:1px solid #3a3f4b;border-radius:6px;padding:12px;font-family:monospace;font-size:11px;}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython_stdlib.js"></script>
-<script>window.SCS_CONFIG = window.SCS_CONFIG || {};</script>
-<link rel="icon" type="image/png" href="favicon.png">
-<link rel="icon" href="favicon.ico">
 </head>
 <body onload="brython({debug:1, pythonpath:['..', '../scs']})">
-<div id="canvas-container"><canvas id="canvas" width="400" height="400" tabindex="0"></canvas></div>
-<div id="controls">
-<textarea id="code-input">from scs import *
-
-def onAppStart(app):
-    app.dots = []
-    app.color = 'blue'
-
-def redrawAll(app):
-    for cx, cy in app.dots:
-        drawCircle(cx, cy, 20, fill=app.color)
-
-def onMousePress(app, mouseX, mouseY):
-    app.dots.append((mouseX, mouseY))
-
-def onKeyPress(app, key):
-    if key == 'r':
-        app.color = 'red'
-    elif key == 'b':
-        app.color = 'blue'
-
-def main():
-    runApp()
-
-main()
-</textarea>
-<div style="margin-top:8px;"><button id="run-btn">▶ Run</button><button id="stop-btn">■ Stop</button><label>Renderer <select id="renderer-select"><option value="auto">auto</option><option value="2d">2d</option><option value="webgl2">webgl2</option><option value="webgpu">webgpu</option></select></label></div>
-<div id="log"></div>
-</div>
-<script type="text/python" id="main">
-# Thin shell only. No loop, no events, no renderer, no shape drawing here:
-# all of that lives in scs_entrypoint.py. This file wires Run/Stop and
-# the renderer select to the entrypoint. It deliberately does NOT
-# auto-load ?app= -- the sandbox runs textarea code.
-from browser import document
-import traceback
+<canvas id="canvas" width="400" height="400" tabindex="0"></canvas>
+<!-- Sandbox: just enter app code here. Paste CMU-style code, it auto-runs. -->
+<textarea id="code-input" placeholder="Just enter app code here...\n\nfrom scs import *\n\ndef onAppStart(app):\n    app.color = 'blue'\n\ndef redrawAll(app):\n    drawCircle(200, 200, 50, fill=app.color)\n\nrunApp()"></textarea>
+<script type="text/python">
+# Thin shell only. No loop, no events, no renderer, no shape drawing here.
+# All of that is baked into the package (scs_entrypoint.py).
+# Users just import from npm or load from CDN.
 import scs_entrypoint as ep
-
-_log = document['log']
-_code_area = document['code-input']
-
-def log(message):
-    try:
-        _log.text += str(message) + '\n'
-    except Exception:
-        pass
-
-# Surface entrypoint errors in the sandbox log, instead of only console.
-_orig_debug_log = ep._debug_log
-def _sandbox_debug_log(msg):
-    try:
-        log(msg)
-    except Exception:
-        pass
-    try:
-        _orig_debug_log(msg)
-    except Exception:
-        pass
-ep._debug_log = _sandbox_debug_log
-
-def run_sandbox(ev=None):
-    # One call: entrypoint owns exec, user-namespace setup, auto-start,
-    # renderer selection, events, and the loop.
-    try:
-        ep.exec_code(_code_area.value, '<sandbox>')
-        log('Running; renderer=' + str(ep.getRendererKind()))
-    except Exception:
-        log('Error:\n' + traceback.format_exc())
-
-def stop_sandbox(ev=None):
-    ep.stop()
-    log('Stopped.')
-
-def on_renderer_change(ev=None):
-    # setRenderer() applies to the NEXT runApp(); re-run so the
-    # sandbox picks it up immediately.
-    try:
-        ep.setRenderer(document['renderer-select'].value or 'auto')
-    except Exception:
-        pass
-    run_sandbox()
-
-document['run-btn'].bind('click', run_sandbox)
-document['stop-btn'].bind('click', stop_sandbox)
-document['renderer-select'].bind('change', on_renderer_change)
-
-# Events (mouse / keys / touch / resize) only -- no app loading.
-ep._bind_events()
-log('Sandbox ready. The graphics API is loaded from scs_entrypoint.py (via scs.py).')
-log('pythonpath is [.., ../scs]: package branch, publish /. Page URL is /sandbox/, so .. is root, ../scs is /scs/. Root first: scs_3d.py is at /scs_3d.py. scs/ second for the 10 newer modules. Never /sandbox/scs_3d.py.')
+ep.boot_sandbox()
 </script>
-</body>
-</html>
+</body></html>
