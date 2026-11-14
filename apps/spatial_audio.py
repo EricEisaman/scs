@@ -101,55 +101,58 @@ def onAppStart(app):
     app.pulse = 0.0
     app.stepCount = 0
     app.balls = [
-        {'x': -4.5, 'z': 1.5, 'r': 0.65, 'y': 3.0, 'vy': 0.0, 'color': '#ff5a5a'},
-        {'x': 0.0, 'z': 3.5, 'r': 0.5, 'y': 4.5, 'vy': 0.0, 'color': '#ffd23a'},
-        {'x': 4.5, 'z': 0.5, 'r': 0.8, 'y': 2.2, 'vy': 0.0, 'color': '#3affa8'},
+        # Decorative ONLY - not sound sources. Separated in X AND Z so red/green never touch.
+        {'x': -6.0, 'z': -3.0, 'r': 0.60, 'y': 3.0, 'vy': 0.0, 'color': '#ff5a5a'},
+        {'x': 0.0, 'z': 4.0, 'r': 0.50, 'y': 4.5, 'vy': 0.0, 'color': '#ffd23a'},
+        {'x': 6.0, 'z': -3.0, 'r': 0.70, 'y': 2.2, 'vy': 0.0, 'color': '#3affa8'},
     ]
     # ---- HUD shapes: flat, overlay ----
     app.hudTop = Rect(0, 0, 900, 62, fill='black', align='left-top')
-    app.hudTitle = Label('SPATIAL AUDIO -- blue sphere on a 40 x 40 m plane',
-                         20, 18, fill='white', size=18, bold=True,
+    app.hudTitle = Label('SPATIAL AUDIO -- GOLD sphere = sound source (440 Hz) on a 40 x 40 m plane',
+                         20, 18, fill='#FFD700', size=18, bold=True,
                          align='left-top')
     app.hudHelp = Label('WASD move | Q down | Shift sprint | Drag / Arrows look | Space play | E envelope | P pipeline',
-                        20, 42, fill='#a0a0c0', size=12, align='left-top')
-    app.hudDist = Label('', 880, 42, fill='#ffd97a', size=12,
+                        20, 42, fill='#FFD700', size=12, align='left-top')
+    app.hudDist = Label('', 880, 42, fill='#FFD700', size=12, align='right-top')
+    app.hudSourceLegend = Label('GOLD = SOUND SOURCE  |  Red/Yellow/Green = bouncing decoys (no sound)', 20, 64, fill='#FFD700', size=12, bold=True, align='left-top')
                         align='right-top')
     app.statusBar = Rect(40, 430, 820, 32, fill='#26263a', roundness=6,
                          align='left-top')
-    app.statusLabel = Label(app.status, 56, 446, fill='#ffd97a', size=13,
+    app.statusLabel = Label(app.status, 56, 446, fill='#FFD700', size=13,
                             align='left-top')
     app.playBtn = Rect(PLAY_BTN[0], PLAY_BTN[1], PLAY_BTN[2], PLAY_BTN[3],
                        fill='#22aa66', roundness=8, align='left-top')
     app.playLabel = Label('PLAY', PLAY_BTN[0] + 80, PLAY_BTN[1] + 22,
-                          fill='white', size=15, bold=True, align='center')
+                          fill='#FFD700', size=15, bold=True, align='center')
     app.stopBtn = Rect(STOP_BTN[0], STOP_BTN[1], STOP_BTN[2], STOP_BTN[3],
                        fill='#cc3344', roundness=8, align='left-top')
     app.stopLabel = Label('STOP', STOP_BTN[0] + 60, STOP_BTN[1] + 22,
-                          fill='white', size=15, bold=True, align='center')
+                          fill='#FFD700', size=15, bold=True, align='center')
     app.centerBtn = Rect(CENTER_BTN[0], CENTER_BTN[1], CENTER_BTN[2], CENTER_BTN[3],
                          fill='#2e2e4a', roundness=8, align='left-top')
     app.centerLabel = Label('CENTRE SPHERE (C)', CENTER_BTN[0] + 100, CENTER_BTN[1] + 22,
-                            fill='white', size=13, bold=True, align='center')
+                            fill='#FFD700', size=13, bold=True, align='center')
     app.modeBtn = Rect(MODE_BTN[0], MODE_BTN[1], MODE_BTN[2], MODE_BTN[3],
                        fill='#2e2e4a', roundness=8, align='left-top')
     app.modeLabel = Label('MODE: PIPELINE (P)', MODE_BTN[0] + 80, MODE_BTN[1] + 22,
-                          fill='white', size=11, bold=True, align='center')
+                          fill='#FFD700', size=11, bold=True, align='center')
     app.miniMap = Rect(740, 70, 120, 120, fill='#111128', roundness=6,
                        align='left-top')
-    app.miniMapTitle = Label('TOP-DOWN  40m', 800, 80, fill='#8888aa', size=10,
+    app.miniMapTitle = Label('TOP-DOWN  40m', 800, 80, fill='#FFD700', size=10,
                              align='center')
-    app.miniSphere = Circle(800, 120, 6, fill='blue', border='white', borderWidth=1)
+    app.miniSphere = Circle(800, 120, 7, fill='#FFD700', border='white', borderWidth=1)
     app.miniCam = Circle(800, 120, 4, fill='white')
     app.miniArrow = Line(800, 120, 800, 106, fill='white', lineWidth=2)
-    app.readout = Label('', 40, 530, fill='#a0a0c0', size=12,
+    app.readout = Label('', 40, 530, fill='#FFD700', size=12,
                         align='left-top')
     # ---- World shapes: in the 3D world ----
     # World: centerZ set = 3D. HUD above has NO centerZ = HUD. That is the whole rule.
     app.sphereShadow = Oval(450, 280, 70, 14, fill='black', centerZ=0.02)
-    app.sphere = Circle(0, 1, 1.0, fill='blue', border='white', borderWidth=2, centerZ=-2.0)
-    app.sphereHighlight = Circle(435, 265, 12, fill='#88aaff', centerZ=-2.0)
-    app.sphereLabel = Label('440 Hz', 450, 340, fill='white', size=11, bold=True,
+    app.sphere = Circle(0, 1, 1.2, fill='#FFD700', border='white', borderWidth=3, centerZ=-2.0)
+    app.sphereHighlight = Circle(435, 265, 14, fill='white', centerZ=-2.0)
+    app.sphereLabel = Label('SOUND SOURCE - 440 Hz', 450, 340, fill='#FFD700', size=16, bold=True,
                             align='center', centerZ=-2.0)
+    app.sourceFloorMarker = Oval(450, 280, 90, 18, fill=None, border='#FFD700', borderWidth=3, centerZ=0.02)
     app.ballBodies = []
     app.ballHighlights = []
     for b in app.balls:
@@ -342,8 +345,18 @@ def _update_world(app):
     app.sphereHighlight.centerY = sy + 0.3
     app.sphereHighlight.centerZ = sz
     app.sphereLabel.centerX = sx
-    app.sphereLabel.centerY = sy + 1.2
+    app.sphereLabel.centerY = sy + 1.6
     app.sphereLabel.centerZ = sz
+    # Floor marker + drop line follow source - always show where it is on the floor
+    app.sourceFloorMarker.centerX = sx
+    app.sourceFloorMarker.centerY = 0.02
+    app.sourceFloorMarker.centerZ = sz
+    app.sourceFloorMarker.visible = True
+    app.sourceDropLine.x1, app.sourceDropLine.y1 = sx, sy - 0.5
+    app.sourceDropLine.x2, app.sourceDropLine.y2 = sx, 0.02
+    # Drop line needs centerZ to be treated as 3D - use sphere's Z
+    app.sourceDropLine.centerZ = sz
+    app.sourceDropLine.visible = True
     app.sphere.visible = True
     app.sphereHighlight.visible = True
     app.sphereLabel.visible = True
@@ -412,7 +425,7 @@ def redrawAll(app):
 
 def main():
     # Plain CMU: no renderer words, no engine words. Just run it.
-    runApp(900, 560, renderer='webgl2', hud=True)
+    runApp(900, 560)
 
 
 main()
