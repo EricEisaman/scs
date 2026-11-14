@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v3-app-fix'
+__version__ = '2026-11-14-FIXED-v24-cloudy-spatial-2d-bug'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
