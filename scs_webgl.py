@@ -1,3493 +1,1023 @@
 """
-scs_entrypoint.py - SCS entrypoint: API, App, events, loop, app loading.
+scs_webgl.py - SCS WebGL2 renderer + shared GPU geometry compiler.
 
-This file replaces ALL of the Python that used to live in index.html.
-index.html is now ~20 lines: load Brython, load this module, call boot().
+Architecture (from the reference survey in README.md):
 
-    import scs_entrypoint
-    scs_entrypoint.boot()
+  * Two.js / PixiJS / melonJS  -> renderer-agnostic scene graph, one API,
+    AUTO fallback WebGPU -> WebGL2 -> Canvas2D.
+  * Canvas2DtoWebGL (Javi Agenjo) / expo-2d-context -> emulate Canvas2D on
+    WebGL by tessellating fills into triangles, expanding strokes into
+    triangle strips, and rasterising text on an offscreen 2D canvas into
+    a texture atlas. Never reimplement a font rasteriser.
+  * Mapbox earcut / Lyon / Pathfinder / Vello -> fill = triangulation,
+    stroke = stroke-to-fill. WebGPU differs from WebGL2 only in *submission*
+    (WGSL pipelines vs GL calls), not in geometry.
 
-What lives here:
-  * Align logic (exact CMU semantics, creation-time only)
-  * Shape classes (Rect, Oval, Circle, RegularPolygon, Star, Line,
-    Polygon, Arc, Label, Image, Group) -- each with draw(renderer)
-  * Immediate-mode draw* functions -- thin forwards to the renderer
-  * App + runApp/run/loop -- renderer selection happens HERE:
-        runApp(width, height, renderer='2d' | 'webgl2' | 'webgpu' | 'auto')
-        runApp(..., renderer='webgpu')   # WebGPU (async init, NO FALLBACK)
-        runApp(..., renderer='auto')     # WebGPU -> WebGL2 -> 2D
-        ?app=rabbit_sim&renderer=webgpu  # URL param, same selection
-        SCS.create({renderer: 'webgpu'}) # JS / CDN loader, same selection
-  * Events: mouse, drag, keyboard (press/release/hold), resize, touch
-  * Main loop: onStep + redrawAll + shape display list, stepsPerSecond
-  * App loading: ?app= sanitised fetch, exec into a user namespace,
-    auto-start when callbacks are defined (CMU-style, no runApp needed)
+So this module owns the geometry compiler used by BOTH GPU backends:
 
-Renderer contract: every renderer in scs_2d / scs_webgl / scs_webgpu
-implements the same draw_* methods. Shapes and draw* functions never
-touch a canvas context directly -- they only call the renderer.
-That is what makes the API identical on all three backends.
+    parse_color / flatten_* / ear-clip triangulate / stroke_to_fill
+    / expand_dashes / TextAtlas / gradient sampling
 
-Backwards compat: `import scs` still works -- scs.py aliases this module
-(see scs.py). Old globals _canvas, _ctx, _shapes, _app are kept live:
-_ctx is the 2D context when the 2D renderer is active, else None.
+scs_webgpu.py imports the compiler from here and only replaces the
+submission layer (WGSL pipelines, GPUBuffers, GPUTextures). scs_2d.py does
+not use this module at all -- it is the reference Canvas2D backend.
+
+Coordinate system (all renderers): CSS pixels, origin top-left, y down.
+WebGL2 flips y in the vertex shader (clip.y = -clip.y).
 """
 
 import math
-import random as _random
 
 try:
-    from browser import document, window, timer
-except ImportError:  # CPython tests
+    from browser import document, window
+except ImportError:  # CPython tests: stubbed by tests/
     document = None
     window = None
-    timer = None
 
-__all__ = [
-    'Rect', 'Oval', 'Circle', 'RegularPolygon', 'Star', 'Line', 'Polygon',
-    'Arc', 'Label', 'Image', 'Group', 'Sound', 'App',
-    'drawRect', 'drawOval', 'drawCircle', 'drawRegularPolygon', 'drawStar',
-    'drawLine', 'drawPolygon', 'drawArc', 'drawLabel', 'drawImage',
-    'runApp', 'run', 'loop', 'run_app', 'cmu_graphics_run', 'stop', 'boot', 'main',
-    'rgb', 'gradient', 'distance', 'angleTo', 'getPointInDir', 'rounded',
-    'makeList', 'randrange', 'randint', 'random',
-    'getRendererKind', 'create_renderer', 'setRenderer',
-    'getCapability', 'getStats', 'disposeRenderer', 'requestReadback',
-    'getDisplayConfig',
-    # WebXR (scs_xr.py): externally-driven loop, FrameContext, lifecycle.
-    'renderFrame', 'startXR', 'stopXR', 'getXRState', 'getXRCapability',
-    # Integrations (scs_storage / scs_wasm / scs_audio / scs_media / scs_serial):
-    # adapters around the renderer, never inside render().
-    'getAssetCache', 'getPrefs', 'getAudioEngine', 'getMediaAdapter',
-    'getSerialAdapter', 'getUSBAdapter',
-    # Spatial audio + 3D math + separate 3D engines.
-    'getSpatialAudioEngine', 'Camera3D',
-    'getWebGL2Engine', 'getWebGPUEngine',
-    'getSplatRenderer', 'createSplatSchema', 'loadSplatManifest',
-    'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
-]
-
-__version__ = '2026-11-14-runApp-*args-v15-no-canvas-replace'
-
-# Console proof: log version the moment this file is imported by Brython.
-# If the live console does NOT show this line, the browser is NOT running this file.
-try:
-    _ver_msg = '[SCS entrypoint] version=' + __version__
-    print(_ver_msg)  # Brython print -> console, do NOT also console.log
-except Exception:
-    pass
 
 # ----------------------------------------------------------------------
-# Align -- exact CMU semantics
+# Colours
 # ----------------------------------------------------------------------
 
-_VALID_ALIGNS = {
-    'left-top', 'top', 'right-top',
-    'left', 'center', 'right',
-    'left-bottom', 'bottom', 'right-bottom',
-}
-
-_ALIGN_ALIASES = {
-    'lefttop': 'left-top', 'topleft': 'left-top',
-    'righttop': 'right-top', 'topright': 'right-top',
-    'leftbottom': 'left-bottom', 'bottomleft': 'left-bottom',
-    'rightbottom': 'right-bottom', 'bottomright': 'right-bottom',
-    'topcenter': 'top', 'centertop': 'top',
-    'bottomcenter': 'bottom', 'centerbottom': 'bottom',
-    'leftcenter': 'left', 'centerleft': 'left',
-    'rightcenter': 'right', 'centerright': 'right',
-    'centre': 'center', 'middle': 'center', 'centercenter': 'center',
+_NAMED = {
+    'black': (0, 0, 0), 'white': (255, 255, 255),
+    'red': (255, 0, 0), 'green': (0, 128, 0), 'blue': (0, 0, 255),
+    'yellow': (255, 255, 0), 'cyan': (0, 255, 255), 'magenta': (255, 0, 255),
+    'orange': (255, 165, 0), 'purple': (128, 0, 128), 'pink': (255, 192, 203),
+    'brown': (165, 42, 42), 'gray': (128, 128, 128), 'grey': (128, 128, 128),
+    'lime': (0, 255, 0), 'navy': (0, 0, 128), 'teal': (0, 128, 128),
+    'gold': (255, 215, 0), 'silver': (192, 192, 192),
+    'lightgray': (211, 211, 211), 'lightgrey': (211, 211, 211),
+    'darkgray': (169, 169, 169), 'darkgrey': (169, 169, 169),
+    'lightblue': (173, 216, 230), 'lightgreen': (144, 238, 144),
+    'darkred': (139, 0, 0), 'darkgreen': (0, 100, 0), 'darkblue': (0, 0, 139),
+    'crimson': (220, 20, 60), 'coral': (255, 127, 80), 'salmon': (250, 128, 114),
+    'khaki': (240, 230, 140), 'beige': (245, 245, 220), 'ivory': (255, 255, 240),
+    'lavender': (230, 230, 250), 'violet': (238, 130, 238),
+    'indigo': (75, 0, 130), 'maroon': (128, 0, 0), 'olive': (128, 128, 0),
+    'aqua': (0, 255, 255), 'fuchsia': (255, 0, 255), 'limegreen': (50, 205, 50),
+    'skyblue': (135, 206, 235), 'steelblue': (70, 130, 180),
+    'transparent': (0, 0, 0),
 }
 
 
-def _normalize_align(align):
-    if not align:
-        return 'center'
-    a = str(align).strip().lower().replace('_', '-').replace(' ', '-')
-    a_nospace = a.replace('-', '')
-    if a_nospace in _ALIGN_ALIASES:
-        return _ALIGN_ALIASES[a_nospace]
-    if a in _ALIGN_ALIASES:
-        return _ALIGN_ALIASES[a]
-    if a in _VALID_ALIGNS:
-        return a
-    has_left = 'left' in a
-    has_right = 'right' in a
-    has_top = 'top' in a
-    has_bottom = 'bottom' in a
-    if has_left and has_top:
-        return 'left-top'
-    if has_right and has_top:
-        return 'right-top'
-    if has_left and has_bottom:
-        return 'left-bottom'
-    if has_right and has_bottom:
-        return 'right-bottom'
-    if has_left:
-        return 'left'
-    if has_right:
-        return 'right'
-    if has_top:
-        return 'top'
-    if has_bottom:
-        return 'bottom'
-    return 'center'
-
-def _normalize_hud(hud=None, mode=None):
-    """Per-shape HUD-or-3D flag. Default to HUD/2D.
-    hud: 'hud' | '2d' | 'texture' | 'html' | True | None -> 'hud' (HUD/2D, default)
-         '3d' | 'world' | False -> '3d' (3D world, depth on, not HUD)
-         'auto' -> 'auto' (inherit from app's global HUD mode)
-    mode: alias for hud - mode='hud'/'2d' -> 'hud', mode='3d'/'world' -> '3d'
-    Returns 'hud' | '3d' | 'texture' | 'html' | 'auto'. Default is '3d' (hud=False, 3D mode)."""
-    # mode alias takes precedence if hud is default/None
-    if mode is not None and hud is None:
-        hud = mode
-    elif mode is not None and (hud is False or hud == 'hud'):
-        # If both given, mode overrides only if it explicitly says 3d
-        _m = str(mode).strip().lower().replace('-', '_')
-        if _m in ('3d', 'world', '3d_world'):
-            hud = '3d'
-        elif _m in ('hud', '2d', 'texture', 'html', 'auto'):
-            hud = _m if _m != '2d' else 'hud'
-    if hud is None:
-        return '3d'  # default False = 3D mode
-    if hud is True:
-        return 'hud'  # hud=True = overlay
-    if hud is False:
-        return '3d'  # hud=False (default) = 3D mode
-    s = str(hud).strip().lower().replace('-', '_')
-    if s in ('', 'hud', '2d', '2_d', 'hud_2d', '2d_hud', 'true', 'yes', 'on', '1'):
-        return 'hud'
-    if s in ('texture', 'tex', 'hud_texture'):
-        return 'texture'
-    if s in ('html', 'html_in_canvas', 'html_canvas', 'dom', 'live'):
-        return 'html'
-    if s in ('auto', 'automatic', 'inherit'):
-        return 'auto'
-    if s in ('3d', 'world', '3d_world', 'world_3d', 'false', 'no', 'off', '0'):
-        return '3d'
-    return 'hud'
-
-
-def _is_3d_shape(shape):
-    """CMU rule: centerZ set = 3D, no centerZ = HUD. centerZ at END.
-    centerZ wins over hud. hud=False / hud='3d' also counts as 3D for backwards compat.
-    """
-    try:
-        z = getattr(shape, 'centerZ', getattr(shape, 'z', getattr(shape, '_centerZ', getattr(shape, '_z', None))))
-        if z is not None:
-            return True
-        z1 = getattr(shape, 'centerZ1', getattr(shape, 'z1', None))
-        z2 = getattr(shape, 'centerZ2', getattr(shape, 'z2', None))
-        if z1 is not None or z2 is not None:
-            return True
-        h = getattr(shape, 'hud', None)
-        if h == '3d':
-            return True
-        return False
-    except Exception:
-        return False
-
-def _get_shape_z(shape):
-    try:
-        return getattr(shape, 'centerZ', getattr(shape, 'z', getattr(shape, '_centerZ', None)))
-    except Exception:
-        return None
-
-
-
-def _get_align_offsets(align, width, height):
-    a = _normalize_align(align)
-    if a in ('left-top', 'left', 'left-bottom'):
-        ox = 0
-    elif a in ('right-top', 'right', 'right-bottom'):
-        ox = width
-    else:
-        ox = width / 2
-    if a in ('left-top', 'top', 'right-top'):
-        oy = 0
-    elif a in ('left-bottom', 'bottom', 'right-bottom'):
-        oy = height
-    else:
-        oy = height / 2
-    return ox, oy
-
-
-def _resolve_bbox(x, y, width, height, align):
-    ox, oy = _get_align_offsets(align, width, height)
-    return x - ox, y - oy
-
-
-# ----------------------------------------------------------------------
-# Global state (kept live for backwards compat)
-# ----------------------------------------------------------------------
-
-_canvas = None
-_ctx = None            # 2D context when renderer is 2D, else None
-_renderer = None       # current renderer object
-_renderer_kind = '2d'
-_booted_once = False
-# HUD mode: any existing 2D app can just change runApp() to get it in 3D.
-# runApp(..., renderer='webgl2' / 'webgpu' / '3d', hud=True, mode='hud'/'3d')
-# The 2D app draws unchanged to an offscreen 2D canvas. That canvas is
-# composited every frame as a fullscreen HUD quad (depth off, ortho) in the
-# 3D scene. The 2D app never knows it is in 3D. No rewrite, one-line change.
-_hud_mode = False
-_hud_offscreen = None   # offscreen 2D canvas where the 2D app draws in HUD mode
-_hud_2d_renderer = None  # 2D renderer for the offscreen canvas
-_hud_3d_kind = None     # 'webgl2' or 'webgpu' when in HUD mode
-# Both, with a flag: HUD texture (default, works everywhere) vs HTML-in-Canvas
-# (Chrome 157+ only, live DOM). _hud_kind: 'texture' | 'html' | 'auto'.
-#   hud='texture'  -> offscreen 2D canvas -> WebGL texture (works everywhere)
-#   hud='html'     -> live DOM element -> WebGL texture via texElementSubImage2D
-#                      (Chrome 157+ only, NO FALLBACK to texture)
-#   hud='auto'     -> try HTML-in-Canvas if supported, else texture
-#   hud=True       -> 'texture' (backwards compat, default)
-#   mode='hud'/'3d' -> 'texture', mode='html' -> 'html', mode='auto' -> 'auto'
-_hud_kind = 'texture'
-_hud_html_element = None  # DOM element to render in HTML-in-Canvas mode (or None = default HUD div)
-_hud_html_supported = None  # cached: does this browser support HTML-in-Canvas?
-_app = None
-_shapes = []           # display list, z-order = list order
-_all_shapes = _shapes  # alias -- _clear_shapes mutates, never rebinds
-_image_cache = {}
-
-_user_funcs = {}
-_user_ns = {}
-_app_timer = None
-_is_dragging = False
-_pressed_keys = set()
-_canvas_width = 400
-_canvas_height = 400
-_steps_per_second = 30
-_pending_renderer = None
-_xr_manager = None
-_xr_active = False
-_presentation = None
-_presentation_coordinator = None
-_render_scale = 1.0
-_pixel_ratio_cap = None
-_pixel_budget = None
-_controller_manager = None
-_asset_loader = None
-_splat_renderer = None
-
-_CALLBACK_NAMES = (
-    'onAppStart', 'appStarted', 'redrawAll', 'onStep',
-    'onMousePress', 'onMouseRelease', 'onMouseMove', 'onMouseDrag',
-    'onKeyPress', 'onKeyRelease', 'onKeyHold', 'onResize',
-    # WebXR semantic actions (scs_xr): select / squeeze, not mouse.
-    'onXRSelect', 'onXRSqueeze', 'onXRInput',
-)
-
-
-def _clear_shapes():
-    del _shapes[:]
-
-
-_clear_all_shapes = _clear_shapes
-
-
-def _debug_log(msg):
-    # Log ONCE. In Brython, print() already goes to browser console.
-    # Old code did print() + console.log() -> every line twice.
-    try:
-        print(msg)
-    except Exception:
-        pass
-
-
-# ----------------------------------------------------------------------
-# Canvas + renderer selection
-# ----------------------------------------------------------------------
-
-def _find_canvas():
-    global _canvas
-    if _canvas is not None:
-        return _canvas
-    for getter in ('cmu-canvas', 'canvas', 'scs-canvas'):
-        try:
-            c = document.getElementById(getter)
-        except Exception:
-            c = None
-        if c is not None:
-            _canvas = c
-            return c
-    try:
-        c = document.getElementById('canvas')
-    except Exception:
-        c = None
+def parse_color(c):
+    """Return (r, g, b, a) with rgb in 0..1, a in 0..1. Gradient dicts fall
+    back to their first stop (callers that support gradients use
+    gradient_color_at() instead)."""
     if c is None:
-        try:
-            c = document.createElement('canvas')
-            c.id = 'canvas'
-            document.body.appendChild(c)
-        except Exception:
-            c = None
-    _canvas = c
-    return c
+        return (0.0, 0.0, 0.0, 0.0)
+    if isinstance(c, dict):
+        if c.get('_is_grad'):
+            cols = c.get('colors') or ['black']
+            return parse_color(cols[0])
+        return (0.0, 0.0, 0.0, 1.0)
+    if isinstance(c, (list, tuple)):
+        if len(c) == 3:
+            r, g, b = c
+            return (r / 255.0 if r > 1 else float(r),
+                    g / 255.0 if g > 1 else float(g),
+                    b / 255.0 if b > 1 else float(b), 1.0)
+        if len(c) == 4:
+            r, g, b, a = c
+            return (r / 255.0 if r > 1 else float(r),
+                    g / 255.0 if g > 1 else float(g),
+                    b / 255.0 if b > 1 else float(b),
+                    a / 100.0 if a > 1 else float(a))
+        return (0.0, 0.0, 0.0, 1.0)
+    s = str(c).strip().lower()
+    if s in _NAMED:
+        r, g, b = _NAMED[s]
+        return (r / 255.0, g / 255.0, b / 255.0, 0.0 if s == 'transparent' else 1.0)
+    if s.startswith('#'):
+        h = s[1:]
+        if len(h) == 3:
+            h = ''.join(ch * 2 for ch in h)
+        if len(h) == 6:
+            return (int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0,
+                    int(h[4:6], 16) / 255.0, 1.0)
+        if len(h) == 8:
+            return (int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0,
+                    int(h[4:6], 16) / 255.0, int(h[6:8], 16) / 255.0)
+    if s.startswith('rgba'):
+        inner = s[5:-1].split(',')
+        r, g, b, a = (float(v) for v in inner)
+        return (r / 255.0, g / 255.0, b / 255.0, a)
+    if s.startswith('rgb'):
+        inner = s[4:-1].split(',')
+        r, g, b = (float(v) for v in inner)
+        return (r / 255.0, g / 255.0, b / 255.0, 1.0)
+    return (0.0, 0.0, 0.0, 1.0)
 
 
-def _dpr():
-    try:
-        return float(window.devicePixelRatio or 1.0)
-    except Exception:
-        return 1.0
+def _gradient_axis(start, left, top, w, h):
+    """Map SCS gradient start=... to (x0, y0, x1, y1) in bbox coords."""
+    cx, cy = left + w / 2, top + h / 2
+    table = {
+        'top': (cx, top, cx, top + h),
+        'bottom': (cx, top + h, cx, top),
+        'left': (left, cy, left + w, cy),
+        'right': (left + w, cy, left, cy),
+        'left-top': (left, top, left + w, top + h),
+        'top-left': (left, top, left + w, top + h),
+        'right-top': (left + w, top, left, top + h),
+        'top-right': (left + w, top, left, top + h),
+        'left-bottom': (left, top + h, left + w, top),
+        'bottom-left': (left, top + h, left + w, top),
+        'right-bottom': (left + w, top + h, left, top),
+        'bottom-right': (left + w, top + h, left, top),
+        'center': (cx, cy, cx + w, cy),
+    }
+    return table.get(str(start).strip().lower(), (cx, top, cx, top + h))
 
-def _get_hud_offscreen(width, height):
-    """Offscreen 2D canvas for HUD mode. The 2D app draws here, unchanged.
-    Returns the canvas. Created once per size, reused every frame."""
-    global _hud_offscreen
-    try:
-        w, h = int(width), int(height)
-    except Exception:
-        w, h = 400, 400
-    if _hud_offscreen is not None:
-        try:
-            if int(_hud_offscreen.width) == int(w * _dpr()) and int(_hud_offscreen.height) == int(h * _dpr()):
-                return _hud_offscreen
-        except Exception:
-            pass
-    try:
-        c = document.createElement('canvas')
-        c.width = int(w * _dpr())
-        c.height = int(h * _dpr())
-        try:
-            c.style.width = '%dpx' % w
-            c.style.height = '%dpx' % h
-        except Exception:
-            pass
-        _hud_offscreen = c
-        return c
-    except Exception:
-        return None
 
-def getHudOffscreenCanvas():
-    """For scs.py: in HUD mode, scs.py's _ensure_canvas() must return this
-    offscreen canvas, NOT the visible WebGL canvas (getContext('2d') on a
-    WebGL canvas returns null). This is what makes an existing scs.py app
-    work in 3D with only a runApp() change."""
-    return _hud_offscreen
+def gradient_color_at(x, y, fill, bbox):
+    """Per-vertex colour for a fill that may be a gradient dict.
+    bbox = (left, top, w, h). Solid fills return parse_color(fill)."""
+    if not isinstance(fill, dict) or not fill.get('_is_grad'):
+        return parse_color(fill)
+    colors = fill.get('colors') or ['black']
+    if len(colors) == 1:
+        return parse_color(colors[0])
+    left, top, w, h = bbox
+    x0, y0, x1, y1 = _gradient_axis(fill.get('start', 'top'), left, top, w, h)
+    dx, dy = x1 - x0, y1 - y0
+    denom = dx * dx + dy * dy
+    t = 0.0 if denom == 0 else ((x - x0) * dx + (y - y0) * dy) / denom
+    t = max(0.0, min(1.0, t))
+    seg = t * (len(colors) - 1)
+    i = min(int(seg), len(colors) - 2)
+    f = seg - i
+    c0 = parse_color(colors[i])
+    c1 = parse_color(colors[i + 1])
+    return tuple(c0[k] + (c1[k] - c0[k]) * f for k in range(4))
 
-def isHudMode():
-    return bool(_hud_mode)
 
-def getHudKind():
-    """'texture' | 'html' | 'auto' - which HUD implementation is active."""
-    return _hud_kind
+# ----------------------------------------------------------------------
+# Path flattening: curves -> polylines (GPU has no curves)
+# ----------------------------------------------------------------------
 
-def isHtmlInCanvasSupported():
-    """Chrome 157+ only. Firefox/Safari have shipped nothing. Cache the result.
-    Checks: gl.texElementSubImage2D (Chrome 157+) or gl.texElementImage2D (149-154),
-    plus canvas.updateElementGeometry for hit-testing."""
-    global _hud_html_supported
-    if _hud_html_supported is not None:
-        return _hud_html_supported
-    try:
-        c = _find_canvas()
-        if c is None:
-            _hud_html_supported = False
-            return False
-        # 2D: drawElementImage() - Chrome 157+
-        try:
-            ctx2d = c.getContext('2d')
-            if ctx2d is not None and hasattr(ctx2d, 'drawElementImage'):
-                _hud_html_supported = True
-                return True
-        except Exception:
-            pass
-        # WebGL: texElementSubImage2D (157+) or texElementImage2D (149-154)
-        try:
-            gl = c.getContext('webgl2') or c.getContext('webgl')
-            if gl is not None and (hasattr(gl, 'texElementSubImage2D') or hasattr(gl, 'texElementImage2D')):
-                _hud_html_supported = True
-                return True
-        except Exception:
-            pass
-        # Hit-testing helper alone is not enough, but if the canvas has it
-        # and we are in Chrome, we are likely on 157+.
-        try:
-            if hasattr(c, 'updateElementGeometry'):
-                # Only trust it if we also saw a texElement method above;
-                # otherwise it may be a stub. Fall through to False.
-                pass
-        except Exception:
-            pass
-        _hud_html_supported = False
-        return False
-    except Exception:
-        _hud_html_supported = False
-        return False
+def flatten_arc(cx, cy, rx, ry, start_deg, sweep_deg, rotation_deg=0):
+    n = max(8, int(abs(sweep_deg) / 360.0 * 64))
+    rot = math.radians(rotation_deg)
+    cr, sr = math.cos(rot), math.sin(rot)
+    pts = []
+    for i in range(n + 1):
+        a = math.radians(start_deg + sweep_deg * i / n)
+        x, y = cx + rx * math.cos(a), cy + ry * math.sin(a)
+        if rotation_deg:
+            x, y = cx + (x - cx) * cr - (y - cy) * sr, cy + (x - cx) * sr + (y - cy) * cr
+        pts.append((x, y))
+    return pts
 
-def getHtmlHudElement():
-    """DOM element to render in HTML-in-Canvas mode. If the user passed
-    html_element=... to runApp(), use that. Otherwise create/use the default
-    HUD div #scs-html-hud. The app can fill it with buttons, inputs, etc.,
-    and it will be live (typeable, clickable) inside the 3D scene on Chrome 157+."""
-    global _hud_html_element
-    if _hud_html_element is not None:
-        return _hud_html_element
-    try:
-        el = document.getElementById('scs-html-hud')
-        if el is None:
-            el = document.createElement('div')
-            el.id = 'scs-html-hud'
-            try:
-                el.setAttribute('content', 'drawable')
-            except Exception:
-                pass
-            try:
-                el.style.position = 'absolute'
-                el.style.left = '0px'
-                el.style.top = '0px'
-                el.style.pointerEvents = 'auto'
-            except Exception:
-                pass
-            try:
-                document.body.appendChild(el)
-            except Exception:
-                pass
-        _hud_html_element = el
-        return el
-    except Exception:
-        return None
 
-def setHtmlHudElement(el):
-    """Set the DOM element for HTML-in-Canvas HUD. Accepts an element,
-    a selector string ('#my-hud', '.hud'), or an id."""
-    global _hud_html_element
-    try:
-        if isinstance(el, str):
-            try:
-                if el.startswith('#'):
-                    _hud_html_element = document.getElementById(el[1:])
-                elif el.startswith('.'):
-                    _hud_html_element = document.querySelector(el)
-                else:
-                    _hud_html_element = document.getElementById(el) or document.querySelector(el)
-            except Exception:
-                _hud_html_element = None
+def flatten_ellipse(cx, cy, rx, ry, rotation_deg=0):
+    return flatten_arc(cx, cy, rx, ry, 0, 360, rotation_deg)[:-1]
+
+
+def flatten_rounded_rect(left, top, w, h, r):
+    r = max(0.0, min(r, min(w, h) / 2))
+    if r == 0:
+        return [(left, top), (left + w, top), (left + w, top + h), (left, top + h)]
+    pts = []
+    corners = [
+        (left + w - r, top + r, 270, 360),
+        (left + w - r, top + h - r, 0, 90),
+        (left + r, top + h - r, 90, 180),
+        (left + r, top + r, 180, 270),
+    ]
+    for cx, cy, a0, a1 in corners:
+        for i in range(9):
+            a = math.radians(a0 + (a1 - a0) * i / 8)
+            pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+    return pts
+
+
+def rotate_points(pts, cx, cy, angle_deg):
+    if not angle_deg:
+        return list(pts)
+    a = math.radians(angle_deg)
+    ca, sa = math.cos(a), math.sin(a)
+    return [(cx + (x - cx) * ca - (y - cy) * sa,
+             cy + (x - cx) * sa + (y - cy) * ca) for (x, y) in pts]
+
+
+# ----------------------------------------------------------------------
+# Triangulation: ear clipping (Mapbox earcut idea, O(n^2) -- fine for
+# SCS polygons, which are small). Falls back to a fan on degenerate input.
+# ----------------------------------------------------------------------
+
+def _signed_area(pts):
+    return 0.5 * sum(pts[i][0] * pts[(i + 1) % len(pts)][1] -
+                      pts[(i + 1) % len(pts)][0] * pts[i][1]
+                      for i in range(len(pts)))
+
+
+def _point_in_triangle(px, py, ax, ay, bx, by, cx, cy):
+    def sign(x1, y1, x2, y2, x3, y3):
+        return (x1 - x3) * (y2 - y3) - (x2 - x3) * (y1 - y3)
+    d1 = sign(px, py, ax, ay, bx, by)
+    d2 = sign(px, py, bx, by, cx, cy)
+    d3 = sign(px, py, cx, cy, ax, ay)
+    neg = (d1 < -1e-9) or (d2 < -1e-9) or (d3 < -1e-9)
+    pos = (d1 > 1e-9) or (d2 > 1e-9) or (d3 > 1e-9)
+    return not (neg and pos)
+
+
+def triangulate_polygon(pts):
+    """pts: [(x, y), ...] (open ring, no duplicated last point).
+    Returns flat [(x, y), ...] triangle vertices (3 per triangle)."""
+    pts = [(float(x), float(y)) for (x, y) in pts]
+    if len(pts) < 3:
+        return []
+    if len(pts) == 3:
+        return list(pts)
+    # Drop a duplicated closing point if present.
+    if pts[0] == pts[-1]:
+        pts = pts[:-1]
+    if _signed_area(pts) < 0:
+        pts = list(reversed(pts))
+    idx = list(range(len(pts)))
+    out = []
+
+    def is_convex(i0, i1, i2):
+        ax, ay = pts[i0]
+        bx, by = pts[i1]
+        cx, cy = pts[i2]
+        return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax) > 1e-9
+
+    guard = 0
+    while len(idx) > 3 and guard < len(pts) * 4:
+        guard += 1
+        clipped = False
+        for k in range(len(idx)):
+            i0, i1, i2 = idx[k - 1], idx[k], idx[(k + 1) % len(idx)]
+            if not is_convex(i0, i1, i2):
+                continue
+            ax, ay = pts[i0]
+            bx, by = pts[i1]
+            cx, cy = pts[i2]
+            if any(_point_in_triangle(pts[j][0], pts[j][1], ax, ay, bx, by, cx, cy)
+                   for j in idx if j not in (i0, i1, i2)):
+                continue
+            out.extend([pts[i0], pts[i1], pts[i2]])
+            idx.pop(k)
+            clipped = True
+            break
+        if not clipped:
+            break
+    if len(idx) == 3:
+        out.extend([pts[idx[0]], pts[idx[1]], pts[idx[2]]])
+    elif len(idx) > 3:
+        # Degenerate / self-intersecting input: fan fallback (matches what
+        # a naive triangulator would do; 2D backend stays authoritative).
+        for i in range(1, len(idx) - 1):
+            out.extend([pts[idx[0]], pts[idx[i]], pts[idx[i + 1]]])
+    return out
+
+
+# ----------------------------------------------------------------------
+# Stroke -> fill (Lyon / Pathfinder stroke-to-fill, centred stroke like
+# Canvas2D: half the width inside, half outside).
+# ----------------------------------------------------------------------
+
+def _normal(x1, y1, x2, y2):
+    dx, dy = x2 - x1, y2 - y1
+    L = math.hypot(dx, dy) or 1.0
+    return (-dy / L, dx / L)
+
+
+def stroke_to_fill(pts, width, closed=False):
+    """pts: polyline [(x,y)...]. Returns flat triangle vertices."""
+    if len(pts) < 2 or width <= 0:
+        return []
+    hw = width / 2.0
+    n = len(pts)
+    # Offset points per vertex: average of adjacent segment normals.
+    left, right = [], []
+    for i in range(n):
+        if closed:
+            p_prev, p_next = pts[i - 1], pts[(i + 1) % n]
+        elif i == 0:
+            p_prev, p_next = pts[0], pts[1]
+        elif i == n - 1:
+            p_prev, p_next = pts[-2], pts[-1]
         else:
-            _hud_html_element = el
-    except Exception:
-        _hud_html_element = None
-    return _hud_html_element
+            p_prev, p_next = pts[i - 1], pts[i + 1]
+        n1 = _normal(p_prev[0], p_prev[1], pts[i][0], pts[i][1])
+        n2 = _normal(pts[i][0], pts[i][1], p_next[0], p_next[1])
+        nx, ny = n1[0] + n2[0], n1[1] + n2[1]
+        L = math.hypot(nx, ny) or 1.0
+        nx, ny = nx / L, ny / L
+        # Miter length compensation: 1 / cos(half-angle).
+        dot = max(-1.0, min(1.0, (n1[0] * n2[0] + n1[1] * n2[1]) / 2.0 + 0.5))
+        miter = 1.0 / max(0.25, math.sqrt(max(0.0, dot)))
+        miter = min(miter, 4.0)
+        x, y = pts[i]
+        left.append((x + nx * hw * miter, y + ny * hw * miter))
+        right.append((x - nx * hw * miter, y - ny * hw * miter))
+    segs = [(i, (i + 1) % n) for i in range(n)] if closed else \
+        [(i, i + 1) for i in range(n - 1)]
+    out = []
+    for a, b in segs:
+        out.extend([left[a], right[a], left[b],
+                    right[a], right[b], left[b]])
+    return out
 
 
-def _size_canvas(width, height):
-    """Backing store = width*dpr, CSS size = width px. User coords stay
-    in CSS pixels on every renderer."""
-    global _canvas_width, _canvas_height
-    _canvas_width, _canvas_height = int(width), int(height)
-    canvas = _find_canvas()
-    if canvas is None:
-        return
-    dpr = _dpr()
-    try:
-        canvas.width = int(width * dpr)
-        canvas.height = int(height * dpr)
-        canvas.style.width = '%dpx' % int(width)
-        canvas.style.height = '%dpx' % int(height)
-        try:
-            canvas.setAttribute('width', str(int(width * dpr)))
-            canvas.setAttribute('height', str(int(height * dpr)))
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-
-def _url_param(name):
-    try:
-        s = window.location.search
-        if not s:
-            return None
-        p = window.URLSearchParams.new(s)
-        v = p.get(name)
-        return v if v else None
-    except Exception:
-        return None
-
-
-def _js_config():
-    """window.SCS_CONFIG set by the JS / CDN loader (see src/scs-loader.js).
-    Returns a dict-like or None."""
-    try:
-        cfg = getattr(window, 'SCS_CONFIG', None)
-        if cfg is None:
-            return None
-        return cfg
-    except Exception:
-        return None
-
-
-def _config_value(name):
-    cfg = _js_config()
-    if cfg is not None:
-        try:
-            v = getattr(cfg, name, None)
-            if v is not None:
-                return v
-        except Exception:
-            pass
-        try:
-            v = cfg[name]
-            if v is not None:
-                return v
-        except Exception:
-            pass
-    return None
-
-
-def getRendererKind():
-    return _renderer_kind
-
-
-def getCapability():
-    """Negotiated capability set for the active renderer (Decision 2).
-    Returns {} before the first run_app()."""
-    if _renderer is not None and hasattr(_renderer, 'capability'):
-        return _renderer.capability.to_dict()
-    return {}
-
-
-def getStats():
-    """Observability (Decision 20): draws, uploads, pipelines, memory."""
-    if _renderer is not None and hasattr(_renderer, 'get_stats'):
-        return _renderer.get_stats()
-    try:
-        from scs_core import STATS
-        return STATS.to_dict()
-    except Exception:
-        return {}
-
-
-def getDisplayConfig():
-    """CSS size vs backing size vs DPR vs render scale (Decision 17)."""
-    try:
-        from scs_core import DisplayConfig
-        return DisplayConfig(_canvas_width, _canvas_height, dpr=_dpr())
-    except Exception:
-        return None
-
-
-def disposeRenderer():
-    """Explicit disposal (Decision 18): release the current renderer
-    and all tracked resources. The next run_app() recreates it."""
-    global _renderer, _ctx
-    if _renderer is not None:
-        try:
-            _renderer.destroy()
-        except Exception:
-            pass
-    _renderer = None
-    _ctx = None
-
-
-def requestReadback(x, y, w, h):
-    """Async readback (Decision 11): returns a Promise, never blocks.
-    Use for screenshots / picking. WebGPU rejects predictably (see
-    scs_webgpu._readback_promise)."""
-    if _renderer is None or not hasattr(_renderer, '_readback_promise'):
-        raise RuntimeError('No renderer with readback support is active')
-    return _renderer._readback_promise(x, y, w, h)
-
-
-def _import_renderer_module(name):
-    """Import scs_2d / scs_webgl / scs_webgpu, trying both layouts.
-
-    Deployments exist in two shapes: modules at the site root (pythonpath
-    '.') and modules under scs/ (pythonpath 'scs'). Brython's ImportError
-    str() is just the module name ('scs_2d'), which is why the sandbox
-    showed the cryptic `SCS renderer failed (2d): scs_2d`. This helper
-    tries both layouts and raises a RuntimeError that names the file
-    that must be deployed alongside scs_entrypoint.py.
-    """
-    try:
-        if name == 'scs_2d':
-            from scs_2d import Renderer2D
-            return Renderer2D
-        if name == 'scs_webgl':
-            from scs_webgl import RendererWebGL2
-            return RendererWebGL2
-        if name == 'scs_webgpu':
-            from scs_webgpu import RendererWebGPU
-            return RendererWebGPU
-    except Exception as _e1:
-        try:
-            if name == 'scs_2d':
-                from scs.scs_2d import Renderer2D
-                return Renderer2D
-            if name == 'scs_webgl':
-                from scs.scs_webgl import RendererWebGL2
-                return RendererWebGL2
-            if name == 'scs_webgpu':
-                from scs.scs_webgpu import RendererWebGPU
-                return RendererWebGPU
-        except Exception as _e2:
-            raise RuntimeError(
-                '%s.py not importable (tried %s and scs/%s.py). '
-                'Deploy %s.py next to scs_entrypoint.py (or under scs/) '
-                'and hard-refresh. First error: %r; second: %r'
-                % (name, name, name, name, _e1, _e2))
-    raise ValueError('Unknown renderer module %r' % name)
-
-
-def create_renderer(kind, canvas, width, height):
-    """Instantiate a renderer. 'webgpu' is async -- the returned object
-    has .ready == False until on_ready fires; the entrypoint falls back
-    on on_error. Raises on sync failure (2D / WebGL2)."""
-    kind = (kind or '2d').lower()
-    if kind in ('2d', 'canvas', 'canvas2d'):
-        return _import_renderer_module('scs_2d')(canvas, width, height)
-    if kind in ('webgl', 'webgl2', 'webgl-2'):
-        return _import_renderer_module('scs_webgl')(canvas, width, height)
-    if kind in ('webgpu', 'gpu'):
-        return _import_renderer_module('scs_webgpu')(canvas, width, height)
-    raise ValueError('Unknown renderer %r (expected 2d, webgl2, webgpu, auto)' % kind)
-
-
-def _resolve_renderer_kind(requested):
-    """Precedence: explicit arg > ?renderer= > SCS_CONFIG.renderer > '2d'.
-    'auto' = default (2D). No fallback chain."""
-    if requested:
-        return str(requested).lower()
-    url = _url_param('renderer')
-    if url:
-        return str(url).lower()
-    cfg = _config_value('renderer')
-    if cfg:
-        return str(cfg).lower()
-    return '2d'
-
-
-def _activate_renderer(renderer, kind):
-    global _renderer, _renderer_kind, _ctx
-    _renderer = renderer
-    _renderer_kind = kind
-    if kind == '2d' and renderer is not None:
-        _ctx = getattr(renderer, 'ctx', None)
-    else:
-        _ctx = None
-
-
-def _ensure_canvas():
-    # HUD mode: 2D shapes draw to OFFSCREEN, not visible canvas.
-    # If we create a 2d context on the visible canvas here, the browser locks it
-    # to 2d and later WebGL2 creation on the same canvas FAILS (returns null).
-    # That was why v5 still ended as mode=2d even with hud=True.
-    if _hud_mode and _hud_offscreen is not None:
-        return _hud_offscreen
-    global _canvas
-    canvas = _find_canvas()
-    if canvas is None:
-        return None
-    if _renderer is None:
-        _size_canvas(_canvas_width, _canvas_height)
-        try:
-            r = create_renderer('2d', canvas, _canvas_width, _canvas_height)
-            _activate_renderer(r, '2d')
-        except Exception:
-            pass
-    return canvas
-
-
-def setRenderer(kind):
-    """Switch renderer for the NEXT runApp() call (or immediately if an
-    app is already running -- the next frame uses it)."""
-    global _pending_renderer
-    _pending_renderer = _resolve_renderer_kind(kind)
-    return _pending_renderer
+def expand_dashes(pts, dash=(6, 3), closed=False):
+    """Split a polyline into the 'on' sub-polylines of a dash pattern.
+    Returns a list of polylines. Canvas2D setLineDash([6,3]) equivalent."""
+    if not dash:
+        return [list(pts)]
+    pattern = list(dash)
+    out, cur = [], []
+    pat_i, pat_left, on = 0, float(pattern[0]), True
+    segs = [(pts[i], pts[i + 1]) for i in range(len(pts) - 1)]
+    if closed and len(pts) > 2:
+        segs.append((pts[-1], pts[0]))
+    for (x1, y1), (x2, y2) in segs:
+        seg_len = math.hypot(x2 - x1, y2 - y1)
+        t = 0.0
+        while t < seg_len:
+            step = min(pat_left, seg_len - t)
+            if on:
+                f0, f1 = t / seg_len, (t + step) / seg_len
+                p0 = (x1 + (x2 - x1) * f0, y1 + (y2 - y1) * f0)
+                p1 = (x1 + (x2 - x1) * f1, y1 + (y2 - y1) * f1)
+                if not cur:
+                    cur.append(p0)
+                cur.append(p1)
+            else:
+                if cur:
+                    out.append(cur)
+                    cur = []
+            t += step
+            pat_left -= step
+            if pat_left <= 1e-9:
+                pat_i = (pat_i + 1) % len(pattern)
+                pat_left = float(pattern[pat_i])
+                on = not on
+    if cur:
+        out.append(cur)
+    return out
 
 
 # ----------------------------------------------------------------------
-# Shapes
+# Text atlas: rasterise glyphs once on an offscreen 2D canvas, then draw
+# textured quads on the GPU (PixiJS / Canvas2DtoWebGL / expo approach).
 # ----------------------------------------------------------------------
 
-class _BaseShape:
-    def __init__(self, hud=None, centerZ=None, **kwargs):
-        self._align = _normalize_align(kwargs.get('align', 'center'))
-        # Per-shape: centerZ at END wins. No centerZ + no hud = HUD (new rule).
-        # centerZ set = 3D, even centerZ=0. hud=False / hud='3d' still = 3D for backwards compat.
-        _cz = centerZ
-        if _cz is None:
-            _cz = kwargs.get('centerZ', kwargs.get('z', None))
-        self._centerZ = None if _cz is None else float(_cz)
-        self._z = self._centerZ
-        if self._centerZ is not None:
-            self.hud = '3d'
-        elif hud is not None or 'hud' in kwargs or 'mode' in kwargs:
-            self.hud = _normalize_hud(hud if hud is not None else kwargs.get('hud', None), kwargs.get('mode', None))
-        else:
-            self.hud = 'hud'
-        self.fill = kwargs.get('fill', 'black')
-        self.border = kwargs.get('border', None)
-        self.borderWidth = kwargs.get('borderWidth', 2)
-        self.opacity = kwargs.get('opacity', 100)
-        self.rotateAngle = kwargs.get('rotateAngle', 0)
-        self.dashes = kwargs.get('dashes', False)
-        self.visible = kwargs.get('visible', True)
-        self._left = 0
-        self._top = 0
-        self._width = 0
-        self._height = 0
-        self._group = None
-
-    @property
-    def align(self):
-        return self._align
-
-    @align.setter
-    def align(self, _v):
-        raise AttributeError('align is creation-time only in CMU Graphics')
-
-    @property
-    def z(self):
-        return getattr(self, '_z', None)
-
-    @z.setter
-    def z(self, v):
-        self._z = None if v is None else float(v)
-        self._centerZ = self._z
-        if self._z is not None:
-            self.hud = '3d'
-
-    @property
-    def centerZ(self):
-        return getattr(self, '_z', None)
-
-    @centerZ.setter
-    def centerZ(self, v):
-        self._z = None if v is None else float(v)
-        self._centerZ = self._z
-        if self._z is not None:
-            self.hud = '3d'
-
-    @property
-    def left(self):
-        return self._left
-
-    @left.setter
-    def left(self, v):
-        self._left = float(v)
-
-    @property
-    def top(self):
-        return self._top
-
-    @top.setter
-    def top(self, v):
-        self._top = float(v)
-
-    @property
-    def right(self):
-        return self._left + self._width
-
-    @right.setter
-    def right(self, v):
-        self._left = float(v) - self._width
-
-    @property
-    def bottom(self):
-        return self._top + self._height
-
-    @bottom.setter
-    def bottom(self, v):
-        self._top = float(v) - self._height
-
-    @property
-    def centerX(self):
-        return self._left + self._width / 2
-
-    @centerX.setter
-    def centerX(self, v):
-        self._left = float(v) - self._width / 2
-
-    @property
-    def centerY(self):
-        return self._top + self._height / 2
-
-    @centerY.setter
-    def centerY(self, v):
-        self._top = float(v) - self._height / 2
-
-    @property
-    def width(self):
-        return self._width
-
-    @width.setter
-    def width(self, v):
-        cx = self.centerX
-        self._width = float(v)
-        self.centerX = cx
-
-    @property
-    def height(self):
-        return self._height
-
-    @height.setter
-    def height(self, v):
-        cy = self.centerY
-        self._height = float(v)
-        self.centerY = cy
-
-    def toFront(self):
-        if self in _shapes:
-            _shapes.remove(self)
-            _shapes.append(self)
-
-    def toBack(self):
-        if self in _shapes:
-            _shapes.remove(self)
-            _shapes.insert(0, self)
-
-    def contains(self, x, y):
-        return (self._left <= x <= self._left + self._width and
-                self._top <= y <= self._top + self._height)
-
-    def hits(self, x, y):
-        return self.contains(x, y)
-
-    def hitsShape(self, other):
-        try:
-            return not (self.right < other.left or self.left > other.right or
-                        self.bottom < other.top or self.top > other.bottom)
-        except Exception:
-            return False
-
-
-class Rect(_BaseShape):
-    def __init__(self, x, y, width, height, hud=None, centerZ=None, **kwargs):
-        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
-        align = kwargs.pop('align', 'left-top')
-        super().__init__(align=align, hud=hud, centerZ=centerZ,
-                         **{k: v for k, v in kwargs.items() if k != 'align'})
-        self._width = float(width)
-        self._height = float(height)
-        l, t = _resolve_bbox(float(x), float(y), float(width), float(height), align)
-        self._left, self._top = l, t
-        self.roundness = kwargs.get('roundness', 0)
-        _shapes.append(self)
-
-    def draw(self, renderer):
-        if not self.visible:
-            return
-        renderer.draw_rect(self._left, self._top, self._width, self._height,
-                           fill=self.fill, border=self.border,
-                           borderWidth=self.borderWidth, opacity=self.opacity,
-                           rotateAngle=self.rotateAngle, dashes=self.dashes,
-                           roundness=self.roundness)
-
-
-class Oval(_BaseShape):
-    def __init__(self, x, y, width, height, hud=None, centerZ=None, **kwargs):
-        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
-        align = kwargs.pop('align', 'center')
-        super().__init__(align=align, hud=hud, centerZ=centerZ,
-                         **{k: v for k, v in kwargs.items() if k != 'align'})
-        self._width = float(width)
-        self._height = float(height)
-        l, t = _resolve_bbox(float(x), float(y), float(width), float(height), align)
-        self._left, self._top = l, t
-        _shapes.append(self)
-
-    def draw(self, renderer):
-        if not self.visible:
-            return
-        renderer.draw_oval(self.centerX, self.centerY, self._width, self._height,
-                           fill=self.fill, border=self.border,
-                           borderWidth=self.borderWidth, opacity=self.opacity,
-                           rotateAngle=self.rotateAngle, dashes=self.dashes)
-
-
-class Circle(_BaseShape):
-    def __init__(self, x, y, radius, hud=None, centerZ=None, **kwargs):
-        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
-        align = kwargs.pop('align', 'center')
-        super().__init__(align=align, hud=hud, centerZ=centerZ,
-                         **{k: v for k, v in kwargs.items() if k != 'align'})
-        self._radius = float(radius)
-        w = h = float(radius) * 2
-        self._width, self._height = w, h
-        l, t = _resolve_bbox(float(x), float(y), w, h, align)
-        self._left, self._top = l, t
-        _shapes.append(self)
-
-    @property
-    def radius(self):
-        return self._radius
-
-    @radius.setter
-    def radius(self, v):
-        self._radius = float(v)
-        self._width = self._height = float(v) * 2
-
-    @property
-    def centerX(self):
-        return self._left + self._radius
-
-    @centerX.setter
-    def centerX(self, v):
-        self._left = float(v) - self._radius
-
-    @property
-    def centerY(self):
-        return self._top + self._radius
-
-    @centerY.setter
-    def centerY(self, v):
-        self._top = float(v) - self._radius
-
-    @property
-    def width(self):
-        return self._width
-
-    @width.setter
-    def width(self, v):
-        self.radius = float(v) / 2
-
-    @property
-    def height(self):
-        return self._height
-
-    @height.setter
-    def height(self, v):
-        self.radius = float(v) / 2
-
-    def draw(self, renderer):
-        if not self.visible:
-            return
-        renderer.draw_circle(self.centerX, self.centerY, self._radius,
-                             fill=self.fill, border=self.border,
-                             borderWidth=self.borderWidth, opacity=self.opacity,
-                             rotateAngle=self.rotateAngle, dashes=self.dashes)
-
-
-class RegularPolygon(_BaseShape):
-    def __init__(self, x, y, radius, points, hud=None, centerZ=None, **kwargs):
-        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
-        align = kwargs.pop('align', 'center')
-        super().__init__(align=align, hud=hud, centerZ=centerZ,
-                         **{k: v for k, v in kwargs.items() if k != 'align'})
-        self._radius = float(radius)
-        self.points = int(points)
-        w = h = float(radius) * 2
-        self._width, self._height = w, h
-        l, t = _resolve_bbox(float(x), float(y), w, h, align)
-        self._left, self._top = l, t
-        _shapes.append(self)
-
-    @property
-    def radius(self):
-        return self._radius
-
-    @radius.setter
-    def radius(self, v):
-        self._radius = float(v)
-        self._width = self._height = float(v) * 2
-
-    @property
-    def centerX(self):
-        return self._left + self._radius
-
-    @centerX.setter
-    def centerX(self, v):
-        self._left = float(v) - self._radius
-
-    @property
-    def centerY(self):
-        return self._top + self._radius
-
-    @centerY.setter
-    def centerY(self, v):
-        self._top = float(v) - self._radius
-
-    @property
-    def width(self):
-        return self._width
-
-    @width.setter
-    def width(self, v):
-        self.radius = float(v) / 2
-
-    @property
-    def height(self):
-        return self._height
-
-    @height.setter
-    def height(self, v):
-        self.radius = float(v) / 2
-
-    def draw(self, renderer):
-        if not self.visible:
-            return
-        renderer.draw_regular_polygon(
-            self.centerX, self.centerY, self._radius, self.points,
-            fill=self.fill, border=self.border, borderWidth=self.borderWidth,
-            opacity=self.opacity, rotateAngle=self.rotateAngle,
-            dashes=self.dashes)
-
-
-class Star(RegularPolygon):
-    def __init__(self, x, y, radius, points, hud=None, centerZ=None, **kwargs):
-        super().__init__(x, y, radius, points, hud=hud, **kwargs)
-        self.ratio = kwargs.get('ratio', 0.5)
-
-    def draw(self, renderer):
-        if not self.visible:
-            return
-        renderer.draw_star(self.centerX, self.centerY, self._radius,
-                           self.points, fill=self.fill, border=self.border,
-                           borderWidth=self.borderWidth, opacity=self.opacity,
-                           rotateAngle=self.rotateAngle, dashes=self.dashes,
-                           ratio=self.ratio)
-
-
-class Line:
-    def __init__(self, x1, y1, x2, y2, hud=None, centerZ=None, centerZ1=None, centerZ2=None, **kwargs):
-        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
-        _cz2 = centerZ if centerZ is not None else kwargs.get('centerZ', kwargs.get('z', None))
-        self._centerZ = None if _cz2 is None else float(_cz2)
-        self._z = self._centerZ
-        _z1 = centerZ1 if centerZ1 is not None else kwargs.get('centerZ1', kwargs.get('z1', _cz2))
-        _z2 = centerZ2 if centerZ2 is not None else kwargs.get('centerZ2', kwargs.get('z2', _cz2))
-        self.centerZ1 = None if _z1 is None else float(_z1)
-        self.centerZ2 = None if _z2 is None else float(_z2)
-        if self._centerZ is not None:
-            self.hud = '3d'
-        self.x1 = float(x1)
-        self.y1 = float(y1)
-        self.x2 = float(x2)
-        self.y2 = float(y2)
-        self.fill = kwargs.get('fill', 'black')
-        self.lineWidth = kwargs.get('lineWidth', kwargs.get('borderWidth', 2))
-        self.opacity = kwargs.get('opacity', 100)
-        self.visible = kwargs.get('visible', True)
-        self.dashes = kwargs.get('dashes', False)
-        self.rotateAngle = kwargs.get('rotateAngle', 0)
-        _shapes.append(self)
-
-    @property
-    def left(self):
-        return min(self.x1, self.x2)
-
-    @property
-    def right(self):
-        return max(self.x1, self.x2)
-
-    @property
-    def top(self):
-        return min(self.y1, self.y2)
-
-    @property
-    def bottom(self):
-        return max(self.y1, self.y2)
-
-    @property
-    def width(self):
-        return abs(self.x2 - self.x1)
-
-    @property
-    def height(self):
-        return abs(self.y2 - self.y1)
-
-    @property
-    def centerX(self):
-        return (self.x1 + self.x2) / 2
-
-    @centerX.setter
-    def centerX(self, v):
-        dx = float(v) - self.centerX
-        self.x1 += dx
-        self.x2 += dx
-
-    @property
-    def centerY(self):
-        return (self.y1 + self.y2) / 2
-
-    @centerY.setter
-    def centerY(self, v):
-        dy = float(v) - self.centerY
-        self.y1 += dy
-        self.y2 += dy
-
-    def toFront(self):
-        if self in _shapes:
-            _shapes.remove(self)
-            _shapes.append(self)
-
-    def toBack(self):
-        if self in _shapes:
-            _shapes.remove(self)
-            _shapes.insert(0, self)
-
-    def contains(self, x, y):
-        # Distance from point to segment < lineWidth/2 + 1.
-        dx, dy = self.x2 - self.x1, self.y2 - self.y1
-        L2 = dx * dx + dy * dy
-        if L2 == 0:
-            return math.hypot(x - self.x1, y - self.y1) <= self.lineWidth / 2 + 1
-        t = max(0.0, min(1.0, ((x - self.x1) * dx + (y - self.y1) * dy) / L2))
-        return math.hypot(x - (self.x1 + t * dx), y - (self.y1 + t * dy)) <= self.lineWidth / 2 + 1
-
-    def hits(self, x, y):
-        return self.contains(x, y)
-
-    def draw(self, renderer):
-        if not self.visible:
-            return
-        renderer.draw_line(self.x1, self.y1, self.x2, self.y2,
-                           fill=self.fill, lineWidth=self.lineWidth,
-                           opacity=self.opacity, dashes=self.dashes)
-
-
-class Polygon:
-    def __init__(self, *points, hud=None, centerZ=None, **kwargs):
-        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
-        self.points = [float(p) for p in points]
-        self.fill = kwargs.get('fill', 'black')
-        self.border = kwargs.get('border', None)
-        self.borderWidth = kwargs.get('borderWidth', 2)
-        self.opacity = kwargs.get('opacity', 100)
-        self.visible = kwargs.get('visible', True)
-        self.dashes = kwargs.get('dashes', False)
-        self.rotateAngle = kwargs.get('rotateAngle', 0)
-        _shapes.append(self)
-
-    def _xs(self):
-        return self.points[0::2]
-
-    def _ys(self):
-        return self.points[1::2]
-
-    @property
-    def left(self):
-        return min(self._xs()) if self._xs() else 0
-
-    @property
-    def right(self):
-        return max(self._xs()) if self._xs() else 0
-
-    @property
-    def top(self):
-        return min(self._ys()) if self._ys() else 0
-
-    @property
-    def bottom(self):
-        return max(self._ys()) if self._ys() else 0
-
-    @property
-    def width(self):
-        return self.right - self.left
-
-    @property
-    def height(self):
-        return self.bottom - self.top
-
-    @property
-    def centerX(self):
-        return (self.left + self.right) / 2
-
-    @centerX.setter
-    def centerX(self, v):
-        dx = float(v) - self.centerX
-        for i in range(0, len(self.points), 2):
-            self.points[i] += dx
-
-    @property
-    def centerY(self):
-        return (self.top + self.bottom) / 2
-
-    @centerY.setter
-    def centerY(self, v):
-        dy = float(v) - self.centerY
-        for i in range(1, len(self.points), 2):
-            self.points[i] += dy
-
-    def toFront(self):
-        if self in _shapes:
-            _shapes.remove(self)
-            _shapes.append(self)
-
-    def toBack(self):
-        if self in _shapes:
-            _shapes.remove(self)
-            _shapes.insert(0, self)
-
-    def draw(self, renderer):
-        if not self.visible:
-            return
-        renderer.draw_polygon(list(self.points), fill=self.fill,
-                              border=self.border, borderWidth=self.borderWidth,
-                              opacity=self.opacity, rotateAngle=self.rotateAngle,
-                              dashes=self.dashes)
-
-
-class Arc(_BaseShape):
-    def __init__(self, x, y, width, height, startAngle, sweepAngle, hud=None, centerZ=None, **kwargs):
-        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
-        align = kwargs.pop('align', 'center')
-        super().__init__(align=align, hud=hud, centerZ=centerZ,
-                         **{k: v for k, v in kwargs.items() if k != 'align'})
-        self._width = float(width)
-        self._height = float(height)
-        l, t = _resolve_bbox(float(x), float(y), float(width), float(height), align)
-        self._left, self._top = l, t
-        self.startAngle = float(startAngle)
-        self.sweepAngle = float(sweepAngle)
-        _shapes.append(self)
-
-    def draw(self, renderer):
-        if not self.visible:
-            return
-        renderer.draw_arc(self.centerX, self.centerY, self._width, self._height,
-                          self.startAngle, self.sweepAngle, fill=self.fill,
-                          border=self.border, borderWidth=self.borderWidth,
-                          opacity=self.opacity, dashes=self.dashes)
-
-
-class Label:
-    def __init__(self, text, x, y, hud=None, centerZ=None, **kwargs):
-        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
-        _cz2 = centerZ if centerZ is not None else kwargs.get('centerZ', kwargs.get('z', None))
-        self._centerZ = None if _cz2 is None else float(_cz2)
-        self._z = self._centerZ
-        if self._centerZ is not None:
-            self.hud = '3d'
-        self.text = str(text)
-        self.size = kwargs.get('size', 12)
-        self.font = kwargs.get('font', 'arial')
-        self.bold = kwargs.get('bold', False)
-        self.italic = kwargs.get('italic', False)
-        self.fill = kwargs.get('fill', 'black')
-        self.opacity = kwargs.get('opacity', 100)
-        self.visible = kwargs.get('visible', True)
-        self.rotateAngle = kwargs.get('rotateAngle', 0)
-        self._align = _normalize_align(kwargs.get('align', 'center'))
-        self._x = float(x)
-        self._y = float(y)
-        _shapes.append(self)
-
-    @property
-    def align(self):
-        return self._align
-
-    @align.setter
-    def align(self, _v):
-        raise AttributeError('align is creation-time only in CMU Graphics')
-
-    @property
-    def centerX(self):
-        return self._x
-
-    @centerX.setter
-    def centerX(self, v):
-        self._x = float(v)
-
-    @property
-    def centerY(self):
-        return self._y
-
-    @centerY.setter
-    def centerY(self, v):
-        self._y = float(v)
-
-    @property
-    def left(self):
-        return self._x - self.width / 2
-
-    @property
-    def top(self):
-        return self._y - self.height / 2
-
-    @property
-    def right(self):
-        return self._x + self.width / 2
-
-    @property
-    def bottom(self):
-        return self._y + self.height / 2
-
-    @property
-    def width(self):
-        return len(self.text) * self.size * 0.6
-
-    @property
-    def height(self):
-        return float(self.size)
-
-    def draw(self, renderer):
-        if not self.visible:
-            return
-        renderer.draw_label(self.text, self._x, self._y, fill=self.fill,
-                            size=self.size, font=self.font, bold=self.bold,
-                            italic=self.italic, opacity=self.opacity,
-                            align=self._align, rotateAngle=self.rotateAngle)
-
-
-class Image(_BaseShape):
-    def __init__(self, path, x, y, hud=None, centerZ=None, **kwargs):
-        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
-        align = kwargs.pop('align', 'center')
-        super().__init__(align=align, hud=hud, centerZ=centerZ,
-                         **{k: v for k, v in kwargs.items() if k != 'align'})
-        self.path = path
-        self._width = float(kwargs.get('width', 100))
-        self._height = float(kwargs.get('height', 100))
-        l, t = _resolve_bbox(float(x), float(y), self._width, self._height, align)
-        self._left, self._top = l, t
-        _shapes.append(self)
-
-    @property
-    def centerX(self):
-        return self._left + self._width / 2
-
-    @centerX.setter
-    def centerX(self, v):
-        self._left = float(v) - self._width / 2
-
-    @property
-    def centerY(self):
-        return self._top + self._height / 2
-
-    @centerY.setter
-    def centerY(self, v):
-        self._top = float(v) - self._height / 2
-
-    def draw(self, renderer):
-        if not self.visible:
-            return
-        renderer.draw_image(self.path, self._left, self._top,
-                            self._width, self._height,
-                            opacity=self.opacity, rotateAngle=self.rotateAngle)
-
-
-class Group:
-    def __init__(self, *shapes, hud=None, centerZ=None, **kwargs):
-        self.hud = _normalize_hud(hud, kwargs.get('mode', None))
-        self.shapes = list(shapes)
-        self.visible = True
-        self.opacity = 100
-        self.rotateAngle = 0
-        _shapes.append(self)
-
-    def add(self, *shapes):
-        self.shapes.extend(shapes)
-
-    def remove(self, shape):
-        if shape in self.shapes:
-            self.shapes.remove(shape)
-
-    @property
-    def left(self):
-        vals = [s.left for s in self.shapes if hasattr(s, 'left')]
-        return min(vals) if vals else 0
-
-    @property
-    def top(self):
-        vals = [s.top for s in self.shapes if hasattr(s, 'top')]
-        return min(vals) if vals else 0
-
-    @property
-    def right(self):
-        vals = [s.right for s in self.shapes if hasattr(s, 'right')]
-        return max(vals) if vals else 0
-
-    @property
-    def bottom(self):
-        vals = [s.bottom for s in self.shapes if hasattr(s, 'bottom')]
-        return max(vals) if vals else 0
-
-    @property
-    def width(self):
-        return self.right - self.left
-
-    @property
-    def height(self):
-        return self.bottom - self.top
-
-    @property
-    def centerX(self):
-        if not self.shapes:
-            return 0
-        return sum(s.centerX for s in self.shapes if hasattr(s, 'centerX')) / len(self.shapes)
-
-    @centerX.setter
-    def centerX(self, v):
-        dx = float(v) - self.centerX
-        for s in self.shapes:
-            if hasattr(s, 'centerX'):
-                s.centerX += dx
-
-    @property
-    def centerY(self):
-        if not self.shapes:
-            return 0
-        return sum(s.centerY for s in self.shapes if hasattr(s, 'centerY')) / len(self.shapes)
-
-    @centerY.setter
-    def centerY(self, v):
-        dy = float(v) - self.centerY
-        for s in self.shapes:
-            if hasattr(s, 'centerY'):
-                s.centerY += dy
-
-    def toFront(self):
-        if self in _shapes:
-            _shapes.remove(self)
-            _shapes.append(self)
-
-    def toBack(self):
-        if self in _shapes:
-            _shapes.remove(self)
-            _shapes.insert(0, self)
-
-    def draw(self, renderer):
-        if not self.visible:
-            return
-        renderer.push_transform(self.centerX, self.centerY,
-                                self.rotateAngle, self.opacity / 100.0)
-        try:
-            for s in list(self.shapes):
-                try:
-                    draw_fn = getattr(s, 'draw', None)
-                    if draw_fn is not None:
-                        draw_fn(renderer)
-                except Exception:
-                    pass
-        finally:
-            renderer.pop_transform()
+class TextAtlas:
+    def __init__(self, size=2048):
+        self.size = size
+        self.canvas = None
+        self.ctx = None
+        self.cache = {}
+        self.cursor_x = 4
+        self.cursor_y = 4
+        self.row_h = 0
+        self.dirty = True
+        if document is not None:
+            try:
+                self.canvas = document.createElement('canvas')
+                self.canvas.width = size
+                self.canvas.height = size
+                self.ctx = self.canvas.getContext('2d')
+            except Exception:
+                self.canvas = None
+
+    def measure(self, text, font_str):
+        if self.ctx is not None:
+            try:
+                self.ctx.font = font_str
+                m = self.ctx.measureText(str(text))
+                return float(m.width), float(getattr(m, 'actualBoundingBoxAscent', 12) +
+                                             getattr(m, 'actualBoundingBoxDescent', 4))
+            except Exception:
+                pass
+        return len(str(text)) * 7.0, 14.0
+
+    def get_rect(self, text, font_str):
+        """Return (u0, v0, u1, v1, w, h) in atlas UV space. Draws into the
+        atlas on first use. White glyphs: tint is applied in the shader."""
+        key = (str(text), font_str)
+        if key in self.cache:
+            return self.cache[key]
+        w, h = self.measure(text, font_str)
+        w, h = int(math.ceil(w)) + 2, int(math.ceil(h)) + 2
+        if self.cursor_x + w > self.size - 4:
+            self.cursor_x = 4
+            self.cursor_y += self.row_h + 4
+            self.row_h = 0
+        if self.cursor_y + h > self.size - 4:
+            # Atlas full: clear and restart. Geometry built earlier in this
+            # frame keeps stale UVs for one frame (documented); SCS apps
+            # rarely exceed a 2048px atlas of distinct labels.
+            self.cache.clear()
+            self.cursor_x, self.cursor_y, self.row_h = 4, 4, 0
+        x, y = self.cursor_x, self.cursor_y
+        if self.ctx is not None:
+            try:
+                self.ctx.font = font_str
+                self.ctx.fillStyle = 'white'
+                self.ctx.textBaseline = 'top'
+                self.ctx.fillText(str(text), x + 1, y + 1)
+            except Exception:
+                pass
+        self.cursor_x += w + 2
+        self.row_h = max(self.row_h, h)
+        self.dirty = True
+        rect = (x / self.size, y / self.size,
+                (x + w) / self.size, (y + h) / self.size, float(w), float(h))
+        self.cache[key] = rect
+        return rect
 
 
 # ----------------------------------------------------------------------
-# Immediate-mode draw* functions -- forward to the current renderer.
-# (In old scs.py these touched _ctx directly; that is what locked SCS
-# to Canvas2D. They now work on every backend.)
+# Affine transform stack (CPU-side; GPU shaders stay projection-only)
 # ----------------------------------------------------------------------
 
-def _renderer_or_2d():
-    if _renderer is None:
-        _ensure_canvas()
-    return _renderer
+_IDENTITY = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 
 
-def drawRect(x, y, width, height, fill='black', border=None, borderWidth=2,
-             opacity=100, rotateAngle=0, dashes=False, align='left-top',
-             visible=True, roundness=0, hud=False, centerZ=None):
-    if not visible:
-        return
-    r = _renderer_or_2d()
-    if r is None:
-        return
-    left, top = _resolve_bbox(float(x), float(y), float(width), float(height),
-                              _normalize_align(align))
-    r.draw_rect(left, top, float(width), float(height), fill=fill, border=border,
-                borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle,
-                dashes=dashes, roundness=roundness)
+def compose(m1, m2):
+    """m1 * m2 for (a, b, c, d, tx, ty) with x' = a*x + c*y + tx."""
+    a1, b1, c1, d1, t1x, t1y = m1
+    a2, b2, c2, d2, t2x, t2y = m2
+    return (a1 * a2 + c1 * b2, b1 * a2 + d1 * b2,
+            a1 * c2 + c1 * d2, b1 * c2 + d1 * d2,
+            a1 * t2x + c1 * t2y + t1x, b1 * t2x + d1 * t2y + t1y)
 
 
-def drawCircle(x, y, radius, fill='black', border=None, borderWidth=2,
-               opacity=100, rotateAngle=0, dashes=False, align='center', visible=True, hud=False, centerZ=None):
-    if not visible:
-        return
-    r = _renderer_or_2d()
-    if r is None:
-        return
-    w = h = float(radius) * 2
-    left, top = _resolve_bbox(float(x), float(y), w, h, align)
-    r.draw_circle(left + radius, top + radius, float(radius), fill=fill,
-                  border=border, borderWidth=borderWidth, opacity=opacity,
-                  rotateAngle=rotateAngle, dashes=dashes)
+def rotation_matrix(cx, cy, angle_deg):
+    a = math.radians(angle_deg)
+    ca, sa = math.cos(a), math.sin(a)
+    # T(cx,cy) * R * T(-cx,-cy)
+    return (ca, sa, -sa, ca,
+            cx - ca * cx + sa * cy, cy - sa * cx - ca * cy)
 
 
-def drawOval(x, y, width, height, fill='black', border=None, borderWidth=2,
-             opacity=100, rotateAngle=0, dashes=False, align='center', visible=True, hud=False, centerZ=None):
-    if not visible:
-        return
-    r = _renderer_or_2d()
-    if r is None:
-        return
-    left, top = _resolve_bbox(float(x), float(y), float(width), float(height), align)
-    r.draw_oval(left + float(width) / 2, top + float(height) / 2,
-                float(width), float(height), fill=fill, border=border,
-                borderWidth=borderWidth, opacity=opacity, rotateAngle=rotateAngle,
-                dashes=dashes)
+class TransformStack:
+    def __init__(self):
+        self.stack = [(_IDENTITY, 1.0)]
 
+    def push(self, cx, cy, angle_deg, alpha_mult):
+        m, al = self.stack[-1]
+        m2 = compose(m, rotation_matrix(cx, cy, angle_deg)) if angle_deg else m
+        self.stack.append((m2, al * alpha_mult))
 
-def drawRegularPolygon(x, y, radius, points, fill='black', border=None,
-                       borderWidth=2, opacity=100, rotateAngle=0, dashes=False,
-                       align='center', visible=True, hud=False, centerZ=None):
-    if not visible:
-        return
-    r = _renderer_or_2d()
-    if r is None:
-        return
-    w = h = float(radius) * 2
-    left, top = _resolve_bbox(float(x), float(y), w, h, align)
-    r.draw_regular_polygon(left + radius, top + radius, float(radius), points,
-                           fill=fill, border=border, borderWidth=borderWidth,
-                           opacity=opacity, rotateAngle=rotateAngle, dashes=dashes)
+    def pop(self):
+        if len(self.stack) > 1:
+            self.stack.pop()
 
+    @property
+    def matrix(self):
+        return self.stack[-1][0]
 
-def drawStar(x, y, radius, points, fill='black', border=None, borderWidth=2,
-             opacity=100, rotateAngle=0, dashes=False, align='center',
-             visible=True, ratio=0.5, hud=False, centerZ=None):
-    if not visible:
-        return
-    r = _renderer_or_2d()
-    if r is None:
-        return
-    w = h = float(radius) * 2
-    left, top = _resolve_bbox(float(x), float(y), w, h, align)
-    r.draw_star(left + radius, top + radius, float(radius), points, fill=fill,
-                border=border, borderWidth=borderWidth, opacity=opacity,
-                rotateAngle=rotateAngle, dashes=dashes, ratio=ratio)
+    @property
+    def alpha(self):
+        return self.stack[-1][1]
 
-
-def drawLabel(text, x, y, fill='black', size=12, font='arial', bold=False,
-              italic=False, opacity=100, align='center', visible=True,
-              rotateAngle=0, hud=False, centerZ=None):
-    if not visible:
-        return
-    r = _renderer_or_2d()
-    if r is None:
-        return
-    r.draw_label(str(text), float(x), float(y), fill=fill, size=size, font=font,
-                 bold=bold, italic=italic, opacity=opacity, align=align,
-                 rotateAngle=rotateAngle)
-
-
-def drawLine(x1, y1, x2, y2, fill='black', lineWidth=2, opacity=100,
-             dashes=False, visible=True, hud=False, centerZ=None):
-    if not visible:
-        return
-    r = _renderer_or_2d()
-    if r is None:
-        return
-    r.draw_line(float(x1), float(y1), float(x2), float(y2), fill=fill,
-                lineWidth=lineWidth, opacity=opacity, dashes=dashes)
-
-
-def drawPolygon(*points, fill='black', border=None, borderWidth=2, opacity=100,
-                rotateAngle=0, dashes=False, visible=True, hud=False, centerZ=None):
-    if not visible or len(points) < 4:
-        return
-    r = _renderer_or_2d()
-    if r is None:
-        return
-    r.draw_polygon([float(p) for p in points], fill=fill, border=border,
-                   borderWidth=borderWidth, opacity=opacity,
-                   rotateAngle=rotateAngle, dashes=dashes)
-
-
-def drawArc(x, y, width, height, startAngle, sweepAngle, fill=None, border=None,
-            borderWidth=2, opacity=100, dashes=False, align='center', visible=True, hud=False, centerZ=None):
-    if not visible:
-        return
-    r = _renderer_or_2d()
-    if r is None:
-        return
-    left, top = _resolve_bbox(float(x), float(y), float(width), float(height), align)
-    r.draw_arc(left + float(width) / 2, top + float(height) / 2,
-               float(width), float(height), float(startAngle), float(sweepAngle),
-               fill=fill, border=border, borderWidth=borderWidth,
-               opacity=opacity, dashes=dashes)
-
-
-def drawImage(path, x, y, width=None, height=None, opacity=100, rotateAngle=0,
-              align='center', visible=True, hud=False, centerZ=None):
-    if not visible:
-        return
-    r = _renderer_or_2d()
-    if r is None:
-        return
-    w = float(width) if width is not None else 100.0
-    h = float(height) if height is not None else 100.0
-    left, top = _resolve_bbox(float(x), float(y), w, h, align)
-    r.draw_image(path, left, top, w, h, opacity=opacity, rotateAngle=rotateAngle)
+    def apply(self, pts):
+        a, b, c, d, tx, ty = self.matrix
+        return [(a * x + c * y + tx, b * x + d * y + ty) for (x, y) in pts]
 
 
 # ----------------------------------------------------------------------
-# Utilities
+# Batched geometry sink shared by the two GPU renderers.
+# Each renderer subclasses _GPURendererBase and implements _submit().
 # ----------------------------------------------------------------------
 
-def rgb(r, g, b):
-    return 'rgb(%d,%d,%d)' % (int(r), int(g), int(b))
+class _GPURendererBase:
+    kind = 'gpu'
 
-
-def gradient(*colors, start='top'):
-    """Return a gradient dict. All three renderers understand it:
-    2D builds a CanvasGradient, GPU backends sample it per-vertex.
-    (Old scs.py returned only colors[0] -- a gradient that was not
-    a gradient. This is the one intentional behaviour fix.)"""
-    return {'_is_grad': True, 'colors': list(colors), 'start': start}
-
-
-def distance(x1, y1, x2, y2):
-    return math.hypot(x2 - x1, y2 - y1)
-
-
-def angleTo(x1, y1, x2, y2):
-    return math.degrees(math.atan2(y2 - y1, x2 - x1))
-
-
-def getPointInDir(x, y, angle, length):
-    rad = math.radians(angle)
-    return x + length * math.cos(rad), y + length * math.sin(rad)
-
-
-def rounded(n):
-    return round(n)
-
-
-def makeList(n, v=None):
-    return [v] * n if v is not None else [None] * n
-
-
-def randrange(a, b=None):
-    return _random.randrange(a) if b is None else _random.randrange(a, b)
-
-
-def randint(a, b):
-    return _random.randint(a, b)
-
-
-def random(a=None, b=None):
-    if a is None:
-        return _random.random()
-    if b is None:
-        return _random.random() * a
-    return _random.uniform(a, b)
-
-
-# ----------------------------------------------------------------------
-# Sound
-# ----------------------------------------------------------------------
-
-class Sound:
-    def __init__(self, path):
-        self.path = path
-        self._audio = None
-        try:
-            self._audio = window.Audio.new(path)
-        except Exception:
-            pass
-
-    def play(self, loop=False, restart=False):
-        try:
-            if self._audio:
-                self._audio.loop = loop
-                if restart:
-                    self._audio.currentTime = 0
-                self._audio.play()
-        except Exception:
-            pass
-
-    def pause(self):
-        try:
-            if self._audio:
-                self._audio.pause()
-        except Exception:
-            pass
-
-
-# ----------------------------------------------------------------------
-# App
-# ----------------------------------------------------------------------
-
-class App:
-    def __init__(self, width=400, height=400, renderer=None, hud=False, **kwargs):
-        global _app
-        if isinstance(width, App):
-            _src = width
-            width = getattr(_src, 'width', 400)
-            height = getattr(_src, 'height', 400)
-            if renderer is None:
-                renderer = getattr(_src, 'renderer', None)
-            for _k in ('stepsPerSecond', 'background', 'paused'):
-                if _k not in kwargs and hasattr(_src, _k):
-                    kwargs[_k] = getattr(_src, _k)
+    def __init__(self, canvas, width, height):
+        self.canvas = canvas
         self.width = width
         self.height = height
-        self.background = kwargs.get('background', 'white')
-        self.stepsPerSecond = kwargs.get(
-            'stepsPerSecond',
-            kwargs.get('steps_per_second', kwargs.get('fps', 30)))
-        self.paused = kwargs.get('paused', False)
-        self.renderer = renderer  # per-app renderer request (runApp wins)
-        self._onAppStart = None
-        self._onStep = None
-        self._redrawAll = None
-        _app = self
-        _clear_shapes()
-
-    def runApp(self, *args, **kwargs):
-        return runApp(self, *args, **kwargs)
-
-    def run(self, *args, **kwargs):
-        return runApp(self, *args, **kwargs)
-
-    def loop(self, *args, **kwargs):
-        return runApp(self, *args, **kwargs)
-
-
-def _parse_run_args(args, kwargs):
-    """Parse every runApp calling convention in the wild. Precedence:
-    defaults < global _app from prior App(...) < App passed to runApp
-    < explicit kwargs < explicit positionals. Unknown kwargs dropped,
-    never TypeError."""
-    kwargs = dict(kwargs) if kwargs else {}
-    width, height, steps, renderer, canvas = 400, 400, 30, None, None
-    try:
-        if _app is not None:
-            width = getattr(_app, 'width', width)
-            height = getattr(_app, 'height', height)
-            steps = getattr(_app, 'stepsPerSecond', steps)
-            renderer = getattr(_app, 'renderer', renderer)
-    except Exception:
-        pass
-    app_obj = None
-    if args and isinstance(args[0], App):
-        app_obj = args[0]
-        args = args[1:]
-    if app_obj is None and 'app' in kwargs and isinstance(kwargs.get('app'), App):
-        app_obj = kwargs.pop('app')
-    if app_obj is not None:
+        self.dpr = 1.0
         try:
-            width = getattr(app_obj, 'width', width)
-            height = getattr(app_obj, 'height', height)
-            steps = getattr(app_obj, 'stepsPerSecond', steps)
-            renderer = getattr(app_obj, 'renderer', renderer)
+            self.dpr = float(window.devicePixelRatio or 1.0)
         except Exception:
             pass
-    if 'width' in kwargs:
-        width = kwargs.pop('width')
-    if 'height' in kwargs:
-        height = kwargs.pop('height')
-    for _k in ('stepsPerSecond', 'steps_per_second', 'fps', 'frameRate'):
-        if _k in kwargs:
-            steps = kwargs.pop(_k)
-            break
-    if 'renderer' in kwargs:
-        renderer = kwargs.pop('renderer')
-    if 'canvas' in kwargs:
-        canvas = kwargs.pop('canvas')
-    # HUD / 3D mode: MUST NOT be dropped. Any existing app must be able to
-    # just change the runApp call: runApp(1050, 700, stepsPerSecond=60, renderer='webgl2')
-    # or runApp(..., renderer='3d') or runApp(..., hud=True) or runApp(..., mode='hud').
-    # These are parsed here and forwarded to run_app(), not dropped.
-    hud = kwargs.pop('hud', None)
-    mode = kwargs.pop('mode', None)
-    # HTML-in-Canvas element: which DOM element to render in hud='html' mode.
-    # Accepts element, '#id', '.class', or 'id'. None = default #scs-html-hud div.
-    html_element = kwargs.pop('html_element', None)
-    if html_element is None:
-        html_element = kwargs.pop('html', None)
-    if html_element is None:
-        html_element = kwargs.pop('html_hud', None)
-    # Both, with a flag: hud can be True/False OR a string:
-    #   hud='texture' -> offscreen 2D canvas -> WebGL texture (works everywhere, default)
-    #   hud='html'    -> live DOM -> WebGL texture via texElementSubImage2D (Chrome 157+ only, NO FALLBACK to texture)
-    #   hud='auto'    -> try HTML if supported, else texture
-    #   hud=True      -> 'texture' (backwards compat)
-    #   hud='html-in-canvas' / 'html_in_canvas' / 'canvas' -> 'html'
-    if isinstance(hud, str):
-        _hud_str = hud.strip().lower().replace('-', '_')
-        if _hud_str in ('html', 'html_in_canvas', 'html_canvas', 'canvas', 'dom', 'live'):
-            hud = 'html'
-        elif _hud_str in ('texture', 'tex', 'hud', '3d', 'hud_3d', '3d_hud'):
-            hud = 'texture'
-        elif _hud_str in ('auto', 'automatic'):
-            hud = 'auto'
-        elif _hud_str in ('1', 'true', 'yes', 'on'):
-            hud = True
-        elif _hud_str in ('0', 'false', 'no', 'off', 'none'):
-            hud = False
-    # Aliases: mode='3d' / mode='hud' / renderer='3d' / renderer='hud' all mean HUD texture.
-    # mode='html' / mode='html-in-canvas' means HTML-in-Canvas.
-    if mode is not None:
-        mode = str(mode).lower().replace('-', '_')
-        if mode in ('html', 'html_in_canvas', 'html_canvas', 'canvas', 'dom', 'live'):
-            mode = 'html'
-            hud = 'html'
-        elif mode in ('auto', 'automatic'):
-            mode = 'auto'
-            hud = 'auto'
-    if renderer is not None and str(renderer).lower() in ('3d', 'hud', 'hud-3d', '3d-hud'):
-        mode = 'hud'
-        renderer = 'webgl2'
-        if hud is None:
-            hud = 'texture'
-    if mode in ('3d', 'hud', 'hud-3d', '3d-hud'):
-        if hud is None:
-            hud = 'texture'
-        if renderer is None or str(renderer).lower() in ('3d', 'hud'):
-            renderer = 'webgl2'
-    # Normalize hud=True -> 'texture', hud='html' stays, hud='auto' stays
-    if hud is True:
-        hud = 'texture'
-    # If mode is 'html' but hud was not set, hud='html' (already handled above)
-    if mode == 'html' and hud is None:
-        hud = 'html'
-    # Extra kwargs are still dropped (never TypeError), but hud/mode are kept.
-    # Return them via globals so runApp() can forward them.
-    if len(args) >= 1:
-        width = args[0]
-    if len(args) >= 2:
-        height = args[1]
-    if len(args) >= 3:
-        steps = args[2]
-    if len(args) >= 4:
-        renderer = args[3]
-    if len(args) >= 5:
-        canvas = args[4]
-    # Attach hud/mode to the return via a tuple - callers unpack 7 values.
-    return width, height, steps, renderer, canvas, hud, mode, html_element
+        self.transforms = TransformStack()
+        self.atlas = TextAtlas()
+        self._solid = []       # flat [x, y, r, g, b, a, ...]
+        self._tex_batches = {}  # texture_key -> flat [x, y, u, v, r, g, b, a, ...]
+        self._images = {}      # path -> HTMLImageElement
+        self._bg = (1.0, 1.0, 1.0, 1.0)
 
+    # -- frame ------------------------------------------------------
+    def resize(self, width, height):
+        self.width, self.height = width, height
 
-def runApp(*args, **kwargs):
-    """Full alias of run_app(). NEVER raises 'unexpected keyword argument'.
-    Any existing app can just change this call to get it in 3D:
-      runApp(1050, 700, stepsPerSecond=60)  -> 2D (default, backwards compat)
-      runApp(1050, 700, stepsPerSecond=60, renderer='webgl2')  -> 2D app in 3D HUD
-      runApp(1050, 700, stepsPerSecond=60, renderer='3d')  -> same, HUD
-      runApp(1050, 700, stepsPerSecond=60, hud=True)  -> HUD
-      runApp(1050, 700, stepsPerSecond=60, mode='hud')  -> HUD
-    """
-    width, height, steps, renderer, canvas, hud, mode, html_element = _parse_run_args(args, kwargs)
-    return run_app(width=width, height=height,
-                   stepsPerSecond=steps, renderer=renderer, canvas=canvas,
-                   hud=hud, mode=mode, html_element=html_element)
+    def begin_frame(self, background):
+        self._bg = parse_color(background) if background is not None else (1, 1, 1, 1)
+        self._solid = []
+        self._tex_batches = {}
+        self.transforms = TransformStack()
 
+    def end_frame(self):
+        self._submit()
+        self._solid = []
+        self._tex_batches = {}
 
-def cmu_graphics_run(*args, **kwargs):
-    """CMU alias. Same bulletproof parsing as runApp()."""
-    width, height, steps, renderer, canvas, hud, mode, html_element = _parse_run_args(args, kwargs)
-    return run_app(width=width, height=height,
-                   stepsPerSecond=steps, renderer=renderer, canvas=canvas,
-                   hud=hud, mode=mode, html_element=html_element)
+    def push_transform(self, cx, cy, angle_deg, alpha_mult):
+        self.transforms.push(cx, cy, angle_deg, alpha_mult)
 
+    def pop_transform(self):
+        self.transforms.pop()
 
-# ----------------------------------------------------------------------
-# Events (moved verbatim from index.html, plus touch + resize)
-# ----------------------------------------------------------------------
-
-def _call(name, *args):
-    cb = _user_funcs.get(name)
-    if cb is None:
-        return
-    try:
-        cb(*args)
-    except Exception:
-        pass
-
-
-def _pos(ev):
-    canvas = _find_canvas()
-    try:
-        r = canvas.getBoundingClientRect()
-        sx = canvas.width / r.width if r.width else 1
-        sy = canvas.height / r.height if r.height else 1
-        # Backing store is width*dpr; user coords are CSS pixels, so
-        # divide by dpr to map backing-store scale back to CSS pixels.
-        return ((ev.clientX - r.left) * sx / _dpr(),
-                (ev.clientY - r.top) * sy / _dpr())
-    except Exception:
-        return (0, 0)
-
-
-def _mp(ev):
-    global _is_dragging
-    _is_dragging = True
-    try:
-        _find_canvas().focus()
-    except Exception:
-        pass
-    if _app is not None:
-        _call('onMousePress', _app, *_pos(ev))
-
-
-def _mr(ev):
-    global _is_dragging
-    if _app is not None:
-        _call('onMouseRelease', _app, *_pos(ev))
-    _is_dragging = False
-
-
-def _mm(ev):
-    if _app is None:
-        return
-    x, y = _pos(ev)
-    if _is_dragging:
-        _call('onMouseDrag', _app, x, y)
-    _call('onMouseMove', _app, x, y)
-
-
-def _norm_key(raw):
-    if raw == ' ':
-        return 'space'
-    if len(raw) == 1:
-        return raw
-    low = raw.lower()
-    return {'arrowleft': 'left', 'arrowright': 'right',
-            'arrowup': 'up', 'arrowdown': 'down'}.get(low, low)
-
-
-def _kp(ev):
-    if _app is None:
-        return
-    try:
-        ae = document.activeElement
-        if ae is not None and ae.tagName in ('INPUT', 'TEXTAREA', 'SELECT'):
+    # -- emit helpers ----------------------------------------------
+    def _emit_fill(self, pts, fill, bbox, opacity):
+        tris = triangulate_polygon(pts)
+        if not tris:
             return
-    except Exception:
-        pass
-    k = _norm_key(ev.key)
-    if k not in _pressed_keys:
-        _pressed_keys.add(k)
-        _call('onKeyPress', _app, k)
-
-
-def _kr(ev):
-    if _app is None:
-        return
-    k = _norm_key(ev.key)
-    if k in _pressed_keys:
-        _pressed_keys.discard(k)
-    _call('onKeyRelease', _app, k)
-
-
-def _kh():
-    if _app is None:
-        return
-    for k in list(_pressed_keys):
-        _call('onKeyHold', _app, k)
-
-
-def _on_resize(ev=None):
-    if _app is None:
-        return
-    _call('onResize', _app, _canvas_width, _canvas_height)
-
-
-def _touch(ev, kind):
-    try:
-        t = ev.touches[0] if ev.touches and len(ev.touches) else None
-        if t is None:
-            return
-        fake = type('E', (), {})()
-        fake.clientX, fake.clientY = t.clientX, t.clientY
-        if kind == 'start':
-            _mp(fake)
-        elif kind == 'end':
-            _mr(fake)
+        tris = self.transforms.apply(tris)
+        alpha = opacity * self.transforms.alpha
+        if isinstance(fill, dict) and fill.get('_is_grad'):
+            for (x, y) in tris:
+                r, g, b, a = gradient_color_at(x, y, fill, bbox)
+                self._solid.extend([x, y, r, g, b, a * alpha])
         else:
-            _mm(fake)
-        try:
-            ev.preventDefault()
-        except Exception:
-            pass
-    except Exception:
-        pass
+            r, g, b, a = parse_color(fill)
+            a *= alpha
+            for (x, y) in tris:
+                self._solid.extend([x, y, r, g, b, a])
 
+    def _emit_stroke(self, pts, color, width, opacity, dashes, closed):
+        if width <= 0 or color is None:
+            return
+        r, g, b, a = parse_color(color)
+        a *= opacity * self.transforms.alpha
+        lines = expand_dashes(pts, (6, 3) if dashes else None, closed) if dashes else [list(pts)]
+        for line in lines:
+            if len(line) < 2:
+                continue
+            tris = stroke_to_fill(line, width, closed)
+            tris = self.transforms.apply(tris)
+            for (x, y) in tris:
+                self._solid.extend([x, y, r, g, b, a])
 
-_events_bound = False
+    def _emit_textured_quad(self, key, x, y, w, h, u0, v0, u1, v1, tint, opacity):
+        quad = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+        quad = self.transforms.apply(quad)
+        r, g, b, a = parse_color(tint)
+        a *= opacity * self.transforms.alpha
+        (x0, y0), (x1, y1), (x2, y2), (x3, y3) = quad
+        buf = self._tex_batches.setdefault(key, [])
+        buf.extend([x0, y0, u0, v0, r, g, b, a,
+                    x1, y1, u1, v0, r, g, b, a,
+                    x2, y2, u1, v1, r, g, b, a,
+                    x0, y0, u0, v0, r, g, b, a,
+                    x2, y2, u1, v1, r, g, b, a,
+                    x3, y3, u0, v1, r, g, b, a])
 
+    # -- SCS draw API (identical signature on all three renderers) --
+    def draw_rect(self, left, top, w, h, fill='black', border=None,
+                  borderWidth=2, opacity=100, rotateAngle=0, dashes=False,
+                  roundness=0):
+        op = opacity / 100.0
+        pts = flatten_rounded_rect(left, top, w, h, roundness) if roundness else \
+            [(left, top), (left + w, top), (left + w, top + h), (left, top + h)]
+        pts = rotate_points(pts, left + w / 2, top + h / 2, rotateAngle)
+        if fill is not None:
+            self._emit_fill(pts, fill, (left, top, w, h), op)
+        if border is not None:
+            self._emit_stroke(pts + [pts[0]], border, borderWidth, op, dashes, True)
 
-def _bind_events():
-    global _events_bound
-    if _events_bound:
-        return
-    _events_bound = True
-    canvas = _find_canvas()
-    if canvas is None:
-        return
-    try:
-        canvas.bind('mousedown', _mp)
-        canvas.bind('mouseup', _mr)
-        canvas.bind('mousemove', _mm)
-        document.bind('keydown', _kp)
-        document.bind('keyup', _kr)
-        window.bind('resize', _on_resize)
-        canvas.bind('touchstart', lambda ev: _touch(ev, 'start'))
-        canvas.bind('touchmove', lambda ev: _touch(ev, 'move'))
-        canvas.bind('touchend', lambda ev: _touch(ev, 'end'))
-    except Exception:
-        pass
+    def draw_oval(self, cx, cy, w, h, fill='black', border=None,
+                  borderWidth=2, opacity=100, rotateAngle=0, dashes=False):
+        op = opacity / 100.0
+        pts = flatten_ellipse(cx, cy, w / 2, h / 2, rotateAngle)
+        if fill is not None:
+            self._emit_fill(pts, fill, (cx - w / 2, cy - h / 2, w, h), op)
+        if border is not None:
+            self._emit_stroke(pts + [pts[0]], border, borderWidth, op, dashes, True)
 
+    draw_circle = None  # replaced below (needs radius signature)
 
-# ----------------------------------------------------------------------
-# Main loop + run_app (renderer selection happens here)
-# ----------------------------------------------------------------------
+    def draw_circle_impl(self, cx, cy, radius, fill='black', border=None,
+                         borderWidth=2, opacity=100, rotateAngle=0, dashes=False):
+        self.draw_oval(cx, cy, radius * 2, radius * 2, fill, border,
+                        borderWidth, opacity, rotateAngle, dashes)
 
-def stop():
-    global _app_timer
-    if _app_timer is not None:
-        try:
-            timer.clear_interval(_app_timer)
-        except Exception:
-            pass
-        _app_timer = None
+    def draw_regular_polygon(self, cx, cy, radius, points, fill='black',
+                             border=None, borderWidth=2, opacity=100,
+                             rotateAngle=0, dashes=False):
+        op = opacity / 100.0
+        pts = []
+        for i in range(int(points)):
+            a = 2 * math.pi * i / points - math.pi / 2 + math.radians(rotateAngle)
+            pts.append((cx + radius * math.cos(a), cy + radius * math.sin(a)))
+        if fill is not None:
+            self._emit_fill(pts, fill, (cx - radius, cy - radius, radius * 2, radius * 2), op)
+        if border is not None:
+            self._emit_stroke(pts + [pts[0]], border, borderWidth, op, dashes, True)
 
+    def draw_star(self, cx, cy, radius, points, fill='black', border=None,
+                  borderWidth=2, opacity=100, rotateAngle=0, dashes=False, ratio=0.5):
+        op = opacity / 100.0
+        pts = []
+        for i in range(int(points) * 2):
+            r = radius if i % 2 == 0 else radius * ratio
+            a = math.pi * i / points - math.pi / 2 + math.radians(rotateAngle)
+            pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+        if fill is not None:
+            self._emit_fill(pts, fill, (cx - radius, cy - radius, radius * 2, radius * 2), op)
+        if border is not None:
+            self._emit_stroke(pts + [pts[0]], border, borderWidth, op, dashes, True)
 
-def _refresh_user_funcs():
-    global _user_funcs
-    _user_funcs = {n: _user_ns[n] for n in _CALLBACK_NAMES
-                   if callable(_user_ns.get(n))}
+    def draw_arc(self, cx, cy, w, h, startAngle, sweepAngle, fill=None,
+                 border=None, borderWidth=2, opacity=100, dashes=False):
+        op = opacity / 100.0
+        pts = flatten_arc(cx, cy, w / 2, h / 2, startAngle, sweepAngle)
+        if fill is not None:
+            fan = [(cx, cy)] + pts
+            self._emit_fill(fan, fill, (cx - w / 2, cy - h / 2, w, h), op)
+        if border is not None:
+            self._emit_stroke(pts, border, borderWidth, op, dashes, False)
 
+    def draw_polygon(self, points, fill='black', border=None, borderWidth=2,
+                     opacity=100, rotateAngle=0, dashes=False):
+        op = opacity / 100.0
+        pts = [(float(points[i]), float(points[i + 1]))
+               for i in range(0, len(points) - 1, 2)]
+        if not pts:
+            return
+        cx = sum(p[0] for p in pts) / len(pts)
+        cy = sum(p[1] for p in pts) / len(pts)
+        pts = rotate_points(pts, cx, cy, rotateAngle)
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        bbox = (min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))
+        if fill is not None:
+            self._emit_fill(pts, fill, bbox, op)
+        if border is not None:
+            self._emit_stroke(pts + [pts[0]], border, borderWidth, op, dashes, True)
 
-def _step():
-    # Simulation ONLY. Separated from rendering so XR can render N
-    # views without advancing the simulation N times (XR Decision 1).
-    try:
-        _kh()
-        if _app is not None and 'onStep' in _user_funcs and not _app.paused:
-            _call('onStep', _app)
-    except Exception:
-        pass
+    def draw_line(self, x1, y1, x2, y2, fill='black', lineWidth=2,
+                  opacity=100, dashes=False):
+        self._emit_stroke([(x1, y1), (x2, y2)], fill, lineWidth,
+                          opacity / 100.0, dashes, False)
 
+    def draw_label(self, text, x, y, fill='black', size=12, font='arial',
+                   bold=False, italic=False, opacity=100, align='center',
+                   rotateAngle=0):
+        style = ('italic ' if italic else '') + ('bold ' if bold else '')
+        font_str = '%s%dpx %s' % (style, size, font)
+        u0, v0, u1, v1, w, h = self.atlas.get_rect(text, font_str)
+        # CMU align: (x, y) is the anchor; canvas textAlign/textBaseline
+        # equivalents for the GPU quads.
+        a = str(align).lower()
+        if 'left' in a:
+            ox = 0.0
+        elif 'right' in a:
+            ox = -w
+        else:
+            ox = -w / 2
+        if 'top' in a:
+            oy = 0.0
+        elif 'bottom' in a:
+            oy = -h
+        else:
+            oy = -h / 2
+        quad_pts = [(x + ox, y + oy), (x + ox + w, y + oy),
+                    (x + ox + w, y + oy + h), (x + ox, y + oy + h)]
+        quad_pts = rotate_points(quad_pts, x, y, rotateAngle)
+        (x0, y0), (x1, y1), (x2, y2), (x3, y3) = \
+            self.transforms.apply(quad_pts)
+        r, g, b, al = parse_color(fill)
+        al *= (opacity / 100.0) * self.transforms.alpha
+        buf = self._tex_batches.setdefault(('atlas',), [])
+        buf.extend([x0, y0, u0, v0, r, g, b, al,
+                    x1, y1, u1, v0, r, g, b, al,
+                    x2, y2, u1, v1, r, g, b, al,
+                    x0, y0, u0, v0, r, g, b, al,
+                    x2, y2, u1, v1, r, g, b, al,
+                    x3, y3, u0, v1, r, g, b, al])
 
-def _render_one_view(view, renderer=None):
-    # Scene preparation (redrawAll + display list) happens ONCE per
-    # view, with that view's borrowed target + viewport + camera.
-    # Shared uploads / scene prep are NOT duplicated per view beyond
-    # what the view actually needs (XR Decision 6: per-view camera data
-    # is distinct from per-object / per-material data).
-    r = renderer if renderer is not None else _renderer
-    if r is None or _app is None:
-        return
-    target = getattr(view, 'target', None) if view is not None else None
-    viewport = getattr(view, 'viewport', None) if view is not None else None
-    try:
-        r.begin_frame(_app.background, target=target, viewport=viewport)
-    except TypeError:
-        r.begin_frame(_app.background)
-    if view is not None and hasattr(r, 'push_view'):
-        try:
-            r.push_view(view)
-        except Exception:
-            pass
-    try:
-        _call('redrawAll', _app)
-        # PER-SHAPE HUD vs 3D: 3D apps have flat shapes that can be HUD mode OR 3D mode.
-        # hud=False/'texture'/True -> screen-space HUD (draw to _hud_2d_renderer / offscreen)
-        # hud='3d'/'world'/False -> world-space 3D (draw to 3D renderer r, depth on)
-        # 2D apps: no 3D, all shapes draw to r (2D renderer) - no routing needed.
-        # DO NOT recompute _is_3d from callbacks here. run_app already set
-        # _is_3d_app=True for explicit HUD/3D (demo declares itself as 3D).
-        # Recomputing from callbacks overwrote it to False (no onRender3D),
-        # so routing never happened, _hud_shapes_drawn stayed False, HUD never
-        # composited, and nothing rendered. HUD mode IS 3D for routing.
-        _is_3d = bool(getattr(_app, '_is_3d_app', False)) if _app is not None else False
-        if _hud_mode:
-            _is_3d = True
-        # Keep callback check only as an OR, never as an overwrite:
-        try:
-            if any(k in _user_funcs for k in ('onRender3D', 'onDraw3D', 'draw3D', 'onRender', 'render3D')):
-                _is_3d = True
-        except Exception:
-            pass
-        _hud_shapes_drawn = False
-        for s in list(_shapes):
+    def draw_image(self, path, left, top, w, h, opacity=100, rotateAngle=0):
+        # path can be a string URL OR an already-loaded source:
+        # HTMLCanvasElement (HUD offscreen), HTMLImageElement, ImageBitmap.
+        # Old code did img.src = canvas -> "[object HTMLCanvasElement]" 404.
+        # If it's not a string, use it directly, don't create an Image.
+        if not isinstance(path, str):
+            img = path
+            # Canvas / ImageBitmap are already complete
             try:
-                # NO Canvas2D fallback for 3D: a shape with centerZ set
-                # must NOT be drawn as a shaded 2D circle on a 2D renderer.
-                # Fail loud, do not downgrade.
+                iw = float(getattr(img, 'naturalWidth', 0) or getattr(img, 'width', 0) or w)
+                ih = float(getattr(img, 'naturalHeight', 0) or getattr(img, 'height', 0) or h)
+            except Exception:
+                iw, ih = float(w), float(h)
+            if iw == 0 or ih == 0:
+                return
+            self._emit_textured_quad(('image', id(path)), left, top, w, h,
+                                     0.0, 0.0, 1.0, 1.0, 'white', opacity / 100.0)
+            # Store by id so _upload_texture can find the canvas source
+            try:
+                self._images[id(path)] = img
+                # Also map the ('image', id) key to the canvas for _submit
+                self._images[('image', id(path))] = img
+            except Exception:
+                pass
+            return
+        img = self._images.get(path)
+        if img is None:
+            try:
+                img = window.Image.new()
+                img.src = path
+                self._images[path] = img
+            except Exception:
+                return
+        try:
+            complete = bool(getattr(img, 'complete', False))
+        except Exception:
+            complete = False
+        if not complete:
+            return
+        iw = float(getattr(img, 'naturalWidth', 0) or getattr(img, 'width', 0) or w)
+        ih = float(getattr(img, 'naturalHeight', 0) or getattr(img, 'height', 0) or h)
+        if iw == 0 or ih == 0:
+            return
+        self._emit_textured_quad(('image', path), left, top, w, h,
+                                 0.0, 0.0, 1.0, 1.0, 'white', opacity / 100.0)
+        # NOTE: rotateAngle for images is applied by _emit_textured_quad
+        # through the transform stack only for Groups; a rotated standalone
+        # image rotates around its centre via push/pop in the entrypoint
+        # shape draw path. See scs_entrypoint.Image.draw.
+
+    # -- sprites: SAME signature as 2D / WebGPU / WGPU-3D / XR --------
+    # WebGL-2D + WebGPU-2D (both inherit this base) emit a textured quad
+    # immediately. billboard + z are accepted and ignored (no camera).
+    def draw_image_uv(self, path, u0, v0, u1, v1, left, top, w, h,
+                      opacity=100, rotateAngle=0, flip_x=False, flip_y=False,
+                      billboard='none', z=0, tint='white'):
+        # Same canvas-source fix as draw_image: if path is not a string,
+        # it's already a canvas / image / bitmap - use it directly.
+        if not isinstance(path, str):
+            img = path
+            # Emit directly, don't wait for .complete (canvas is always complete)
+            if flip_x:
+                u0, u1 = u1, u0
+            if flip_y:
+                v0, v1 = v1, v0
+            if rotateAngle:
+                cx, cy = float(left) + float(w) / 2, float(top) + float(h) / 2
+                self.push_transform(cx, cy, rotateAngle, 1.0)
                 try:
-                    _rk = getattr(r, 'kind', getattr(r, 'name', ''))
-                    if _is_3d_shape(s) and str(_rk).lower() in ('2d', 'canvas2d'):
-                        raise RuntimeError('3D shape (centerZ set) requires WebGL2 / WebGPU, got 2D renderer. NO Canvas2D fallback.')
-                except RuntimeError:
-                    raise
-                except Exception:
-                    pass
-                draw_fn = getattr(s, 'draw', None)
-                if draw_fn is None:
+                    self._emit_textured_quad(('image', id(path)), left, top, w, h,
+                                             float(u0), float(v0), float(u1), float(v1),
+                                             tint or 'white', opacity / 100.0)
+                finally:
+                    self.pop_transform()
+            else:
+                self._emit_textured_quad(('image', id(path)), left, top, w, h,
+                                         float(u0), float(v0), float(u1), float(v1),
+                                         tint or 'white', opacity / 100.0)
+            try:
+                self._images[id(path)] = img
+            except Exception:
+                pass
+            return
+        img = self._images.get(path)
+        if img is None:
+            try:
+                img = window.Image.new()
+                img.src = path
+                self._images[path] = img
+            except Exception:
+                return
+        try:
+            complete = bool(getattr(img, 'complete', False))
+        except Exception:
+            complete = False
+        if not complete:
+            return
+        if flip_x:
+            u0, u1 = u1, u0
+        if flip_y:
+            v0, v1 = v1, v0
+        if rotateAngle:
+            cx, cy = float(left) + float(w) / 2, float(top) + float(h) / 2
+            self.push_transform(cx, cy, rotateAngle, 1.0)
+            try:
+                self._emit_textured_quad(('image', path), left, top, w, h,
+                                         float(u0), float(v0), float(u1), float(v1),
+                                         tint or 'white', opacity / 100.0)
+            finally:
+                self.pop_transform()
+        else:
+            self._emit_textured_quad(('image', path), left, top, w, h,
+                                     float(u0), float(v0), float(u1), float(v1),
+                                     tint or 'white', opacity / 100.0)
+
+    def draw_sprite(self, image, u0, v0, u1, v1, x, y, w, h,
+                    opacity=100, rotateAngle=0, flip_x=False, flip_y=False,
+                    billboard='none', z=0, tint='white'):
+        left = float(x) - float(w) / 2
+        top = float(y) - float(h) / 2
+        return self.draw_image_uv(image, u0, v0, u1, v1, left, top, w, h,
+                                  opacity=opacity, rotateAngle=rotateAngle,
+                                  flip_x=flip_x, flip_y=flip_y, tint=tint)
+
+    def draw_sprite_sheet(self, sheet, frame, x, y, w=None, h=None,
+                          opacity=100, rotateAngle=0, flip_x=False, flip_y=False,
+                          billboard='none', z=0, tint='white'):
+        fr = sheet.frame(frame)
+        ww = float(w) if w is not None else float(fr.w)
+        hh = float(h) if h is not None else float(fr.h)
+        u0, v0, u1, v1 = fr.uv
+        return self.draw_sprite(sheet.image, u0, v0, u1, v1, x, y, ww, hh,
+                                opacity=opacity, rotateAngle=rotateAngle,
+                                flip_x=flip_x, flip_y=flip_y, billboard=billboard, z=z, tint=tint)
+
+    def _submit(self):
+        raise NotImplementedError
+
+
+# Fix draw_circle name (kept separate for its radius signature).
+_GPURendererBase.draw_circle = _GPURendererBase.draw_circle_impl
+del _GPURendererBase.draw_circle_impl
+
+
+# ----------------------------------------------------------------------
+# WebGL2 renderer
+# ----------------------------------------------------------------------
+
+_SOLID_VS = """
+attribute vec2 a_pos;
+attribute vec4 a_color;
+uniform vec2 u_res;
+varying vec4 v_color;
+void main() {
+  vec2 clip = (a_pos / u_res) * 2.0 - 1.0;
+  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+  v_color = a_color;
+}
+"""
+_SOLID_FS = """
+precision mediump float;
+varying vec4 v_color;
+void main() { gl_FragColor = v_color; }
+"""
+_TEX_VS = """
+attribute vec2 a_pos;
+attribute vec2 a_uv;
+attribute vec4 a_color;
+uniform vec2 u_res;
+varying vec2 v_uv;
+varying vec4 v_color;
+void main() {
+  vec2 clip = (a_pos / u_res) * 2.0 - 1.0;
+  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+  v_uv = a_uv;
+  v_color = a_color;
+}
+"""
+_TEX_FS = """
+precision mediump float;
+uniform sampler2D u_tex;
+uniform float u_mask;
+varying vec2 v_uv;
+varying vec4 v_color;
+void main() {
+  vec4 t = texture2D(u_tex, v_uv);
+  if (u_mask > 0.5) {
+    gl_FragColor = vec4(v_color.rgb, t.a * v_color.a);
+  } else {
+    gl_FragColor = vec4(t.rgb, t.a * v_color.a);
+  }
+}
+"""
+
+
+class RendererWebGL2(_GPURendererBase):
+    kind = 'webgl2'
+
+    def __init__(self, canvas, width, height):
+        super().__init__(canvas, width, height)
+        self.gl = None
+        try:
+            self.gl = canvas.getContext('webgl2')
+        except Exception:
+            self.gl = None
+        if self.gl is None:
+            raise RuntimeError('WebGL2 not available in this browser')
+        gl = self.gl
+        self._prog_solid = self._compile(_SOLID_VS, _SOLID_FS)
+        self._prog_tex = self._compile(_TEX_VS, _TEX_FS)
+        self._buf_solid = gl.createBuffer()
+        self._buf_tex = gl.createBuffer()
+        self._gl_textures = {}  # key -> WebGLTexture
+        self._atlas_tex = None
+        try:
+            gl.enable(gl.BLEND)
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+            gl.disable(gl.DEPTH_TEST)
+        except Exception:
+            pass
+
+    def _compile(self, vs_src, fs_src):
+        gl = self.gl
+        vs = gl.createShader(gl.VERTEX_SHADER)
+        gl.shaderSource(vs, vs_src)
+        gl.compileShader(vs)
+        fs = gl.createShader(gl.FRAGMENT_SHADER)
+        gl.shaderSource(fs, fs_src)
+        gl.compileShader(fs)
+        prog = gl.createProgram()
+        gl.attachShader(prog, vs)
+        gl.attachShader(prog, fs)
+        gl.linkProgram(prog)
+        return prog
+
+    def _upload_texture(self, key, source, is_atlas=False):
+        gl = self.gl
+        tex = self._gl_textures.get(key)
+        if tex is None:
+            tex = gl.createTexture()
+            self._gl_textures[key] = tex
+        gl.bindTexture(gl.TEXTURE_2D, tex)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+        try:
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA,
+                          gl.UNSIGNED_BYTE, source)
+        except Exception:
+            pass
+        return tex
+
+    def _draw_buffer(self, prog, buf, data, stride, with_uv):
+        if not data:
+            return
+        gl = self.gl
+        gl.useProgram(prog)
+        gl.bindBuffer(gl.ARRAY_BUFFER, buf)
+        try:
+            gl.bufferData(gl.ARRAY_BUFFER, window.Float32Array.new(data),
+                          gl.DYNAMIC_DRAW)
+        except Exception:
+            return
+        loc_res = gl.getUniformLocation(prog, 'u_res')
+        gl.uniform2f(loc_res, float(self.width), float(self.height))
+        a_pos = gl.getAttribLocation(prog, 'a_pos')
+        gl.enableVertexAttribArray(a_pos)
+        gl.vertexAttribPointer(a_pos, 2, gl.FLOAT, False, stride * 4, 0)
+        if with_uv:
+            a_uv = gl.getAttribLocation(prog, 'a_uv')
+            gl.enableVertexAttribArray(a_uv)
+            gl.vertexAttribPointer(a_uv, 2, gl.FLOAT, False, stride * 4, 2 * 4)
+            a_col = gl.getAttribLocation(prog, 'a_color')
+            gl.enableVertexAttribArray(a_col)
+            gl.vertexAttribPointer(a_col, 4, gl.FLOAT, False, stride * 4, 4 * 4)
+        else:
+            a_col = gl.getAttribLocation(prog, 'a_color')
+            gl.enableVertexAttribArray(a_col)
+            gl.vertexAttribPointer(a_col, 4, gl.FLOAT, False, stride * 4, 2 * 4)
+        gl.drawArrays(gl.TRIANGLES, 0, len(data) // stride)
+
+    def _submit(self):
+        gl = self.gl
+        try:
+            gl.viewport(0, 0, int(self.width * self.dpr), int(self.height * self.dpr))
+            r, g, b, a = self._bg
+            gl.clearColor(r, g, b, a)
+            gl.clear(gl.COLOR_BUFFER_BIT)
+        except Exception:
+            return
+        self._draw_buffer(self._prog_solid, self._buf_solid, self._solid, 6, False)
+        # Textured batches: atlas (mask) + one batch per image (RGBA).
+        for key, data in list(self._tex_batches.items()):
+            if not data:
+                continue
+            if key == ('atlas',):
+                if self.atlas.canvas is None:
                     continue
-                # Route per shape in 3D apps only
-                if _is_3d and _hud_mode:
-                    # ROUTING RULE (demo's rule, not hud flag):
-                    # No centerZ -> HUD overlay (draw to 2d offscreen)
-                    # centerZ set (even 0) -> 3D world (draw to WebGL2)
-                    # Demo's HUD Rects have no centerZ and no hud=True, so
-                    # old hud-flag routing treated them as 3D and HUD never
-                    # composited. centerZ is the source of truth.
-                    try:
-                        _cz = getattr(s, 'centerZ', None)
-                    except Exception:
-                        _cz = None
-                    # Also check centerZ1/centerZ2 for Lines
-                    if _cz is None:
-                        try:
-                            _cz = getattr(s, 'centerZ1', None)
-                        except Exception:
-                            _cz = None
-                    if _cz is None:
-                        _sh_str = 'hud'
-                    else:
-                        _sh_str = '3d'
-                    if _sh_str in ('hud', 'texture', 'html', 'true', '1', ''):
-                        # Overlay flat shape (hud=True): draw to HUD 2D renderer (offscreen), NOT to 3D renderer
-                        _hr = _hud_2d_renderer
-                        if _hr is not None:
-                            draw_fn(_hr)
-                            _hud_shapes_drawn = True
-                            continue
-                        # No HUD 2D renderer (should not happen in 3D HUD mode) - fall through to 3D
-                        # No fallback content: draw to 3D renderer as HUD quad via r.draw_label etc.
-                        # For now, draw to r (it will handle HUD quads in 3D engine's MSDF path)
-                        draw_fn(r)
-                    else:
-                        # 3D flat shape: world-space, depth on, draw to 3D renderer
-                        draw_fn(r)
+                if self.atlas.dirty:
+                    self._upload_texture(key, self.atlas.canvas)
+                    self.atlas.dirty = False
                 else:
-                    draw_fn(r)
-            except Exception:
-                pass
-        # HUD mode: composite as a fullscreen HUD quad in the 3D scene.
-        # Both, with a flag:
-        #   hud='texture' -> offscreen 2D canvas (where scs.py's 2D app drew,
-        #     unchanged) -> WebGL texture. Works everywhere.
-        #   hud='html' -> live DOM element -> WebGL texture via
-        #     texElementSubImage2D (Chrome 157+ only). Live, typeable,
-        #     accessible. NO FALLBACK to texture if not supported.
-        #   hud='auto' -> already resolved to 'html' or 'texture' in run_app().
-        # This is the one-line-change contract: the 2D app never knows it is in 3D.
-        # Only composite HUD if HUD shapes were actually drawn this frame.
-        # 3D app with only 3D flat shapes (hud='3d') has no HUD to composite.
-        if _hud_mode and _hud_shapes_drawn:
-            try:
-                _hud_done = False
-                # Only composite HUD texture if HUD shapes were drawn (or app explicitly asked for HUD).
-                # NO FALLBACK: hud='html' failing does NOT fall back to texture. Proper HTML or fail.
-                if _hud_kind == 'html':
-                    try:
-                        _el = getHtmlHudElement()
-                        if _el is not None and hasattr(r, 'draw_html_element'):
-                            _hud_done = bool(r.draw_html_element(_el, 0, 0, _canvas_width, _canvas_height))
-                    except Exception:
-                        _hud_done = False
-                    # No fallback to texture - if HTML fails, it fails. No fallback content.
-                    if not _hud_done:
-                        _debug_log('SCS HUD: hud="html" failed - NO FALLBACK to texture. Failing HUD composite.')
-                elif _hud_offscreen is not None:
-                    if hasattr(r, 'draw_hud_canvas'):
-                        r.draw_hud_canvas(_hud_offscreen, 0, 0, _canvas_width, _canvas_height)
-                    elif hasattr(r, 'draw_image'):
-                        try:
-                            r.draw_image(_hud_offscreen, 0, 0, _canvas_width, _canvas_height)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-    finally:
-        if view is not None and hasattr(r, 'pop_view'):
-            try:
-                r.pop_view()
-            except Exception:
-                pass
-    try:
-        r.end_frame()
-    except Exception:
-        pass
-
-
-def _render(frame_ctx=None):
-    # Desktop: a 1-view FrameContext. XR: the supplied FrameContext.
-    # Either way the same code path renders the views.
-    if frame_ctx is None:
-        try:
-            from scs_xr import FrameContext
-            frame_ctx = FrameContext.desktop(_canvas_width, _canvas_height)
-        except Exception:
-            frame_ctx = None
-    if frame_ctx is None or not getattr(frame_ctx, 'views', None):
-        # No views == tracking unavailable (or no app): skip drawing,
-        # keep the loop alive, never throw (XR Decision 10).
-        return
-    for view in frame_ctx.views:
-        _render_one_view(view)
-
-
-def renderFrame(frame_ctx):
-    """Externally-driven rendering (XR Decision 1).
-
-    renderFrame(frameContext) renders the CURRENT app state for the
-    supplied views. It NEVER calls onStep: the caller (desktop loop or
-    XRSession.requestAnimationFrame) already stepped the simulation
-    once. Rendering 2 views must not advance the simulation twice.
-    A FrameContext with no views (getViewerPose() == null) renders
-    nothing and does not throw.
-    """
-    try:
-        _render(frame_ctx)
-    except Exception:
-        pass
-
-
-def _frame():
-    # Internally-owned desktop loop: step once, then render once.
-    # In XR this loop is STOPPED and the session owns scheduling.
-    # Zero-sized container: skip normal rendering (Presentation D4).
-    try:
-        if _presentation_coordinator is not None:
-            cur = _presentation_coordinator.current()
-            if cur is not None and getattr(cur, 'is_zero_sized', False):
-                return
-        _step()
-        _render()
-    except Exception as _e_frame:
-        # Do NOT stop() on a single frame error - one bad frame (audio, etc.)
-        # must not kill rendering forever. Log and keep looping.
-        try:
-            _debug_log('SCS _frame error (continuing): %s: %s' % (type(_e_frame).__name__, _e_frame))
-        except Exception:
-            pass
-
-
-def _start_loop():
-    global _app_timer
-    stop()
-    _frame()
-    iv = int(1000 / _steps_per_second) if _steps_per_second > 0 else 33
-    try:
-        _app_timer = timer.set_interval(_frame, iv)
-    except Exception:
-        pass
-
-
-def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
-            canvas=None, hud=None, mode=None, html_element=None, **kwargs):
-    """The initialiser. renderer: '2d', 'webgl2', or 'webgpu'. NO FALLBACK.
-    NO WebGPU -> WebGL2 -> 2D fallback chain. 'auto' = default (2D, or HUD texture if 3D renderer). If you ask for 'webgl2' and
-    WebGL2 fails, it FAILS. If you ask for 'webgpu' and WebGPU fails, it FAILS.
-    Proper WebGL, proper WebGPU. No silent downgrade, no fallback content.
-
-    Also honours (in order): explicit arg > _pending_renderer from
-    setRenderer() > ?renderer= URL param > SCS_CONFIG.renderer.
-    """
-    global _app, _canvas, _steps_per_second, _pending_renderer
-    if isinstance(width, App):
-        _a = width
-        try:
-            width = getattr(_a, 'width', 400)
-            height = getattr(_a, 'height', height)
-            stepsPerSecond = getattr(_a, 'stepsPerSecond', stepsPerSecond)
-            if renderer is None:
-                renderer = getattr(_a, 'renderer', None)
-        except Exception:
-            pass
-    if 'steps_per_second' in kwargs and stepsPerSecond == 30:
-        stepsPerSecond = kwargs.get('steps_per_second')
-    if 'fps' in kwargs and stepsPerSecond == 30:
-        stepsPerSecond = kwargs.get('fps')
-    # RUN ONCE: DOM guard + timer guard. Second run_app in SAME page load
-    # must be a no-op. Python _app_timer is wiped by Brython re-import,
-    # so check DOM too.
-    try:
-        from browser import document as _doc_run
-        try:
-            if _doc_run.getElementById('scs-running') is not None:
-                return
-            try:
-                _rflag = _doc_run.createElement('div')
-                _rflag.id = 'scs-running'
-                _rflag.style.display = 'none'
-                _doc_run.body.appendChild(_rflag)
-            except Exception:
-                pass
-        except Exception:
-            pass
-    except Exception:
-        pass
-    global _app_timer, _app
-    try:
-        if _app_timer is not None and _app is not None:
-            _debug_log('SCS run_app: already running - ignoring second run_app (run once).')
-            return
-    except Exception:
-        pass
-    _refresh_user_funcs()
-    _bind_events()
-    stop()
-    if canvas is not None:
-        _canvas = canvas
-    _steps_per_second = stepsPerSecond
-    # HUD resolution: explicit hud/mode > renderer='3d'/'hud' > 2D app + 3D renderer.
-    # Any existing 2D app: runApp(..., renderer='webgl2') or renderer='3d' or hud=True
-    # or mode='hud'/'3d' -> HUD mode. A 3D-native app (uses 3D callbacks) is NOT
-    # forced into HUD; it runs natively. We detect 2D apps by: no 3D callbacks
-    # defined (no onRender3D / onDraw3D / draw3D in _user_funcs).
-    global _hud_mode, _hud_2d_renderer, _hud_3d_kind, _hud_kind, _hud_html_element
-    _hud_mode = False
-    _hud_2d_renderer = None
-    _hud_3d_kind = None
-    _hud_kind = 'texture'
-    _hud_html_element = None
-    _hud_requested = False
-    # Both, with a flag: hud='texture' (default) vs hud='html' vs hud='auto'
-    # Normalize hud: True -> 'texture', 'html'/'texture'/'auto' stay as-is
-    _hud_flag = hud
-    if _hud_flag is True:
-        _hud_flag = 'texture'
-    if isinstance(_hud_flag, str):
-        _hf = _hud_flag.strip().lower().replace('-', '_')
-        if _hf in ('html', 'html_in_canvas', 'html_canvas', 'canvas', 'dom', 'live'):
-            _hud_flag = 'html'
-        elif _hf in ('texture', 'tex', 'hud', '3d', 'hud_3d', '3d_hud'):
-            _hud_flag = 'texture'
-        elif _hf in ('auto', 'automatic'):
-            _hud_flag = 'auto'
-        elif _hf in ('1', 'true', 'yes', 'on'):
-            _hud_flag = 'texture'
-        elif _hf in ('0', 'false', 'no', 'off', 'none'):
-            _hud_flag = False
-    if _hud_flag in ('texture', 'html', 'auto'):
-        _hud_requested = True
-        _hud_kind = _hud_flag
-    if mode is not None and str(mode).lower().replace('-', '_') in ('hud', '3d', 'hud_3d', '3d_hud'):
-        _hud_requested = True
-        if _hud_kind not in ('html', 'auto'):
-            _hud_kind = 'texture'
-    if mode is not None and str(mode).lower().replace('-', '_') in ('html', 'html_in_canvas', 'html_canvas', 'canvas', 'dom', 'live'):
-        _hud_requested = True
-        _hud_kind = 'html'
-    if mode is not None and str(mode).lower().replace('-', '_') in ('auto', 'automatic'):
-        _hud_requested = True
-        _hud_kind = 'texture'  # auto = automatic texture, no explicit mode required
-    if renderer is not None and str(renderer).lower() in ('3d', 'hud', 'hud-3d', '3d-hud'):
-        _hud_requested = True
-        renderer = 'webgl2'
-        if _hud_kind not in ('html', 'auto'):
-            _hud_kind = 'texture'
-    # HUD ONLY MAKES SENSE IN 3D APPS. Was inverted before - that was the fuckup.
-    # Old (wrong): 2D app + webgl2 => HUD. That forced every 2D app into an empty
-    # 3D scene just to HUD over it. Nonsense.
-    # Correct: 2D app + webgl2/webgpu => just 2D via WebGL, NO HUD, NO offscreen canvas.
-    # 3D app (has onRender3D / onDraw3D / draw3D) + webgl2/webgpu => HUD is the 2D
-    # overlay (labels, buttons) on top of the 3D scene. THAT is when HUD makes sense.
-    _is_3d_app = any(k in _user_funcs for k in ('onRender3D', 'onDraw3D', 'draw3D', 'onRender', 'render3D'))
-    # NOTE: No shape-based 3D guess here. Flat CMU shapes can be 3D (centerZ set later, or flat in world).
-    # The DEMO must declare itself as 3D: runApp(..., renderer='webgl2'). EntryPoint does NOT guess.
-    # _renderer_req must include setRenderer() / _pending_renderer / App.renderer,
-    # not just the runApp() arg.
-    _renderer_req = str(renderer or _pending_renderer or getattr(_app, 'renderer', None) or '').lower() or None  # FIX: _app, not app - app is defined at line 2394, using app here = UnboundLocalError
-    if not _is_3d_app and _hud_requested:
-        # Explicit hud=True / mode='hud' / renderer='3d' IS a declaration: "I am 3D".
-        # Do NOT ignore it. The demo declares itself as 3D - that wins over
-        # callback guessing. Flat shapes can be 3D, so callback/shape guessing is wrong.
-        # If the app explicitly asked for HUD, it IS a 3D app.
-        _is_3d_app = True
-        _debug_log('SCS HUD: explicit HUD/3D requested - demo declares itself as 3D. Respecting it.')
-    if _renderer_req in ('webgl2', 'webgl', 'webgpu', 'gpu', 'auto') and _is_3d_app:
-        # Implicit HUD: 3D app + 3D renderer => HUD overlay automatically, no explicit mode needed.
-        _hud_requested = True
-        if _hud_kind not in ('html', 'texture'):
-            _hud_kind = 'texture'
-    if _hud_requested:
-        _hud_mode = True
-        # HUD is AUTOMATIC - no explicit mode required. Native cmu_graphics has NO hud param.
-        # runApp(900,560, renderer='webgl2') with a 3D app => HUD texture, automatically.
-        # 2D app + webgl2 => NO HUD, just 2D via WebGL (see above).
-        # hud='auto' = "figure it out" = texture. NOT a fallback chain, NOT an error.
-        # Only hud='html' is explicit: if Chrome 157+ is missing, it FAILS (no fallback to texture).
-        if _hud_kind == 'auto':
-            _hud_kind = 'texture'
-        if _hud_kind == 'html':
-            try:
-                if not isHtmlInCanvasSupported():
-                    _debug_log('SCS HUD: hud="html" requested but HTML-in-Canvas not supported in this browser (Chrome 157+ only). NO FALLBACK to texture. Failing.')
-                    return
-            except Exception:
-                _debug_log('SCS HUD: hud="html" check failed. NO FALLBACK. Failing.')
-                return
-        # Store the HTML element for HTML mode (None = default #scs-html-hud div)
-        if html_element is not None:
-            try:
-                setHtmlHudElement(html_element)
-            except Exception:
-                pass
-        # Also honour html=... / html_hud=... passed via **kwargs (for runApp via scs.py)
-        for _hk in ('html', 'html_hud', 'htmlElement'):
-            if _hk in kwargs and kwargs.get(_hk) is not None:
-                try:
-                    setHtmlHudElement(kwargs.get(_hk))
-                except Exception:
-                    pass
-        # 3D kind for HUD: explicit webgpu => webgpu, else webgl2.
-        # 'auto' = default to webgl2 for HUD - NOT a fallback chain, NOT an error.
-        # Native cmu_graphics has no renderer param, so auto must just work.
-        if _renderer_req in ('webgpu', 'gpu'):
-            _hud_3d_kind = 'webgpu'
-        else:
-            _hud_3d_kind = 'webgl2'
-        # Offscreen 2D canvas is created AFTER _size_canvas (needs width/height)
-        # but BEFORE the 3D renderer is created, so scs.py can find it.
-    _size_canvas(width, height)
-    # HUD: create the offscreen 2D canvas NOW, before any 2D drawing happens.
-    # scs.py's _ensure_canvas() will return this canvas in HUD mode, so the
-    # existing 2D app draws here, unchanged. The 3D renderer composites it.
-    if _hud_mode:
-        try:
-            _get_hud_offscreen(width, height)
-            try:
-                _hud_2d_renderer = create_renderer('2d', _hud_offscreen, width, height)
-            except Exception:
-                _hud_2d_renderer = None
-            # Force the visible canvas to the 3D kind - the 2D app is NOT on it.
-            if renderer is None or str(renderer).lower() in ('2d', 'canvas', 'canvas2d'):
-                renderer = _hud_3d_kind or 'webgl2'
-        except Exception:
-            pass
-    _setup_presentation(_find_canvas())
-    # App object: reuse the one user code already made if it matches,
-    # else create it (this also clears the display list).
-    app = _app
-    if app is None or app.width != width or app.height != height:
-        app = App(width, height)
-    app.stepsPerSecond = stepsPerSecond
-    _app = app
-    _clear_shapes()
-    _call('onAppStart', app)
-    if 'appStarted' in _user_funcs and 'onAppStart' not in _user_funcs:
-        _call('appStarted', app)
-
-    kind = _resolve_renderer_kind(
-        renderer or _pending_renderer or getattr(app, 'renderer', None))
-    _pending_renderer = None
-    if _hud_mode:
-        # In HUD mode the visible canvas is always 3D. If the resolved kind
-        # is still '2d' (e.g. no renderer was passed, only hud=True), use _hud_3d_kind.
-        # 'auto' = default to HUD 3D kind (webgl2) - automatic, no explicit mode required.
-        if kind in ('2d', 'canvas', 'canvas2d', 'auto'):
-            kind = _hud_3d_kind or 'webgl2'
-
-    # NO FALLBACK. Proper WebGL / WebGPU. If the requested renderer fails, FAIL.
-    # _fallback() is deleted - no WebGPU -> WebGL2 -> 2D chain, no silent downgrade.
-    # BUT: 'auto' is NOT an error. Native cmu_graphics has NO renderer param -
-    # runApp() with no renderer must just work and default to 2D. So 'auto' = '2d'.
-    # No fallback chain, just the native default.
-    if kind == 'auto':
-        kind = '2d'
-
-    if kind == 'webgpu':
-        try:
-            r = create_renderer('webgpu', _find_canvas(), width, height)
-        except Exception as e:
-            try:
-                import traceback as _tb
-                _detail = _tb.format_exc()
-            except Exception:
-                _detail = ''
-            _debug_log('SCS renderer failed (webgpu): %s: %r\n%s - NO FALLBACK. Failing.' % (type(e).__name__, e, _detail))
-            return
-        if getattr(r, '_init_error', None) is not None:
-            _debug_log('SCS renderer failed (webgpu): %s - NO FALLBACK. Failing.' % (r._init_error,))
-            return
-
-        def _gpu_ready():
-            _activate_renderer(r, 'webgpu')
-            _start_loop()
-
-        def _gpu_fail(err):
-            _debug_log('SCS renderer failed (webgpu): %s - NO FALLBACK. Failing.' % (err,))
-            return
-
-        r.on_ready = _gpu_ready
-        r.on_error = _gpu_fail
-        return  # loop starts from _gpu_ready
-
-    # DEBUG: log kind before creating main renderer. If this says 2d,
-    # the demo's renderer='webgl2' did not survive to here.
-    try:
-        _debug_log('SCS run_app kind=%s renderer_arg=%s hud_mode=%s hud_3d=%s' % (kind, str(renderer), str(_hud_mode), str(_hud_3d_kind)))
-    except Exception:
-        pass
-    # NO canvas replace. _ensure_canvas already returns HUD offscreen in HUD mode,
-    # so visible canvas never gets a 2d context, so getContext('webgl2') on
-    # the ORIGINAL canvas works. Replacing broke presentation + events and
-    # made ResizeCoordinator think canvas is zero-sized -> _frame early-return -> black.
-    # webgl2 / 2d: explicit, no fallback. If create fails, FAIL.
-    try:
-        r = create_renderer(kind, _find_canvas(), width, height)
-    except Exception as e:
-        try:
-            import traceback as _tb
-            _detail = _tb.format_exc()
-        except Exception:
-            _detail = ''
-        _debug_log('SCS renderer failed (%s): %s: %r\n%s - NO FALLBACK. Failing.' % (kind, type(e).__name__, e, _detail))
-        return
-    _activate_renderer(r, kind)
-    _start_loop()
-
-
-# ----------------------------------------------------------------------
-# WebXR: entry / exit / capability (scs_xr.py owns the concepts;
-# this file owns the loop transfer + app-state wiring)
-# ----------------------------------------------------------------------
-
-def getXRCapability():
-    try:
-        from scs_xr import probe_xr_capability
-        return probe_xr_capability().to_dict()
-    except Exception:
-        return {}
-
-
-def getXRState():
-    if _xr_manager is None:
-        return 'not-started'
-    return _xr_manager.state
-
-
-def startXR(mode='immersive-vr', reference_space_type='local',
-            backend=None):
-    """Enter XR. Async setup: compatibility -> reference space ->
-    layers -> transfer frame scheduling to XRSession.requestAnimationFrame.
-    Unsupported combos fail HERE (init), not mid-frame (XR Decision 5/10).
-    Returns the session manager; its .state tracks the lifecycle.
-    """
-    global _xr_manager, _xr_active
-    try:
-        from scs_xr import XRSessionManager
-    except Exception as e:
-        raise RuntimeError('WebXR module unavailable: %s' % e)
-    backend = backend or ('webgpu' if _renderer_kind == 'webgpu' else 'webgl2')
-    # Presentation for the active backend (capability-tested in enter()).
-    presentation = None
-    try:
-        from scs_xr import WebGLXRPresentation, WebGPUXRPresentation
-        if backend == 'webgpu':
-            presentation = None  # XRGPUBinding is created per-session
-        else:
-            presentation = None  # XRWebGLLayer is created per-session
-    except Exception:
-        pass
-
-    def _on_xr_frame(frame_ctx, xr_frame):
-        # XR owns timing: NO onStep here. The desktop loop already
-        # stepped once per desktop frame; XR frames render only.
-        # Input: semantic actions from tracked sources (XR Decision 9).
-        try:
-            for src in getattr(frame_ctx, 'input_sources', []) or []:
-                if getattr(src, 'select_pressed', False):
-                    _call('onXRSelect', _app, src)
-                if getattr(src, 'squeeze_pressed', False):
-                    _call('onXRSqueeze', _app, src)
-                _call('onXRInput', _app, src)
-        except Exception:
-            pass
-        renderFrame(frame_ctx)
-
-    def _on_xr_exit():
-        global _xr_active
-        _xr_active = False
-        # Symmetric teardown: restore non-XR rendering (XR Decision 10).
-        try:
-            _start_loop()
-        except Exception:
-            pass
-
-    _xr_manager = XRSessionManager(on_frame=_on_xr_frame, on_exit=_on_xr_exit)
-    # Stop the internally-owned loop BEFORE transferring scheduling.
-    stop()
-    _xr_active = True
-    _xr_manager.enter(mode=mode, reference_space_type=reference_space_type,
-                      backend=backend)
-    return _xr_manager
-
-
-def stopXR():
-    """Exit XR and restore non-XR rendering."""
-    global _xr_active
-    if _xr_manager is not None:
-        try:
-            _xr_manager.exit()
-        except Exception:
-            pass
-    _xr_active = False
-
-
-# ----------------------------------------------------------------------
-# Integrations: adapters around the renderer (common contract:
-# explicit ownership, async lifecycle, timestamped data, bounded work)
-# ----------------------------------------------------------------------
-
-def getAssetCache():
-    """Async asset cache (IndexedDB): versioned binary data, never GPU handles."""
-    try:
-        from scs_storage import assets
-        return assets
-    except Exception:
-        return None
-
-
-def getPrefs():
-    """Small preferences only (localStorage, string-only)."""
-    try:
-        from scs_storage import prefs
-        return prefs
-    except Exception:
-        return None
-
-
-def getAudioEngine(context=None):
-    """AudioEngine with a separate clock. If `context` is supplied,
-    the engine does NOT own it (dispose never closes it). Call
-    engine.resume() from a user gesture (autoplay policy)."""
-    try:
-        from scs_audio import AudioEngine
-        return AudioEngine(context=context)
-    except Exception:
-        return None
-
-
-def getMediaAdapter(kind='camera', source=None, **kw):
-    """Media-source adapter: 'camera' (latest buffering), 'video'
-    (element), or 'frames' (VideoFrame producer). The adapter is
-    cached; imported external textures are one-frame-valid."""
-    try:
-        from scs_media import CameraAdapter, VideoElementAdapter, VideoFrameAdapter
-        if kind == 'camera':
-            return CameraAdapter(source, **kw)
-        if kind == 'frames':
-            return VideoFrameAdapter(**kw)
-        return VideoElementAdapter(source, **kw)
-    except Exception:
-        return None
-
-
-def getSerialAdapter(**kw):
-    """Web Serial adapter. Call adapter.request() from a click
-    (user activation required), never from deferred init."""
-    try:
-        from scs_serial import SerialAdapter
-        return SerialAdapter(**kw)
-    except Exception:
-        return None
-
-
-def getUSBAdapter(**kw):
-    """WebUSB adapter -- DISTINCT from Serial, even for a USB device
-    that exposes a serial port."""
-    try:
-        from scs_serial import USBAdapter
-        return USBAdapter(**kw)
-    except Exception:
-        return None
-
-
-# [STRIPPED 70 bytes]
-# Presentation / fullscreen (scs_presentation.py)
-# [STRIPPED 70 bytes]
-
-def getPresentationController():
-    return _presentation
-
-
-def getDisplayMetrics():
-    try:
-        from scs_core import DisplayConfig
-        if _presentation_coordinator is not None:
-            cur = _presentation_coordinator.current()
-            if cur is not None:
-                return cur.to_dict()
-        return DisplayConfig(_canvas_width, _canvas_height,
-                             dpr=_dpr(), render_scale=_render_scale,
-                             pixel_ratio_cap=_pixel_ratio_cap,
-                             pixel_budget=_pixel_budget).to_dict()
-    except Exception:
-        return {}
-
-
-def setRenderScale(scale):
-    global _render_scale
-    _render_scale = float(scale)
-    try:
-        if _presentation_coordinator is not None:
-            cur = _presentation_coordinator.current()
-            if cur is not None:
-                from scs_presentation import DisplayMetrics
-                _presentation_coordinator.force_apply(DisplayMetrics(
-                    cur.css_width, cur.css_height, cur.dpr,
-                    render_scale=_render_scale,
-                    pixel_ratio_cap=_pixel_ratio_cap,
-                    pixel_budget=_pixel_budget))
-    except Exception:
-        pass
-    return _render_scale
-
-
-def setPixelBudget(budget=None, pixel_ratio_cap=None):
-    global _pixel_budget, _pixel_ratio_cap
-    if budget is not None:
-        _pixel_budget = int(budget)
-    if pixel_ratio_cap is not None:
-        _pixel_ratio_cap = float(pixel_ratio_cap)
-    return {'pixel_budget': _pixel_budget, 'pixel_ratio_cap': _pixel_ratio_cap}
-
-
-def enterFullscreen(element=None):
-    """Async presentation mode. MUST be called directly from a user
-    gesture -- never deferred behind asset loading. Fullscreens the
-    presentation CONTAINER, not necessarily the canvas."""
-    if _presentation is None:
-        raise RuntimeError('No presentation controller: call run_app() first.')
-    return _presentation.enter_fullscreen(element)
-
-
-def exitFullscreen():
-    if _presentation is None:
-        return None
-    return _presentation.exit_fullscreen()
-
-
-def getFullscreenState():
-    if _presentation is None:
-        return {'mode': 'embedded', 'is_fullscreen': False,
-                'supports_fullscreen': False}
-    return {'mode': _presentation.current_mode(),
-            'is_fullscreen': _presentation.is_fullscreen(),
-            'supports_fullscreen': _presentation.supports_fullscreen()}
-
-
-def _setup_presentation(canvas):
-    global _presentation, _presentation_coordinator
-    try:
-        from scs_presentation import PresentationController, ResizeCoordinator
-        container = canvas
-        try:
-            parent = getattr(canvas, 'parentElement', None)
-            if parent is not None:
-                container = parent
-        except Exception:
-            pass
-        _presentation = PresentationController(canvas=canvas, container=container)
-        def _apply(metrics):
-            r = _renderer
-            if r is not None and hasattr(r, 'apply_size'):
-                try:
-                    r.apply_size(metrics)
-                except Exception:
-                    pass
-        _presentation_coordinator = ResizeCoordinator(_apply)
-        try:
-            _presentation.observe_resize(_presentation_coordinator)
-        except Exception:
-            pass
-    except Exception:
-        _presentation = None
-        _presentation_coordinator = None
-
-
-def _teardown_presentation():
-    global _presentation, _presentation_coordinator
-    try:
-        if _presentation is not None:
-            _presentation.dispose()
-    except Exception:
-        pass
-    _presentation = None
-    _presentation_coordinator = None
-
-
-# [STRIPPED 70 bytes]
-# Controller / Gamepad (scs_controller.py)
-# [STRIPPED 70 bytes]
-
-def getControllerManager():
-    global _controller_manager
-    if _controller_manager is None:
-        try:
-            from scs_controller import ControllerManager
-            _controller_manager = ControllerManager()
-        except Exception:
-            _controller_manager = None
-    return _controller_manager
-
-
-def getGamepads():
-    try:
-        from browser import window
-        gps = window.navigator.getGamepads()
-        return list(gps) if gps is not None else []
-    except Exception:
-        mgr = getControllerManager()
-        if mgr is not None:
-            try:
-                mgr.mark_blocked()
-            except Exception:
-                pass
-        return []
-
-
-def controllerFeedback(player, kind, intensity=1.0, duration_ms=100):
-    try:
-        mgr = getControllerManager()
-        if mgr is None:
-            return False
-        ctrl = mgr.player_controller(player)
-        if ctrl is None:
-            return False
-        return ctrl.feedback(kind, intensity, duration_ms)
-    except Exception:
-        return False
-
-
-# [STRIPPED 70 bytes]
-# Loader (scs_loader.py) -- see below for getAssetLoader etc.
-# [STRIPPED 70 bytes]
-
-def getAssetLoader():
-    """Singleton AssetLoader (scs_loader). Stages are separate:
-    fetch -> decode -> create runtime resource -> prepare."""
-    global _asset_loader
-    if _asset_loader is None:
-        try:
-            from scs_loader import AssetLoader
-            _asset_loader = AssetLoader()
-        except Exception:
-            _asset_loader = None
-    return _asset_loader
-
-
-def getSpatialAudioEngine(context=None):
-    """SpatialAudioEngine: AudioEngine + PannerNode listener/sources.
-    The listener is the Camera3D -- call engine.update(camera) per
-    step. Returns None if scs_spatial_audio.py is not deployed."""
-    try:
-        from scs_spatial_audio import SpatialAudioEngine
-        return SpatialAudioEngine(context=context)
-    except Exception:
-        return None
-
-
-def Camera3D(*args, **kwargs):
-    """Camera3D from scs_3d.py (position, yaw, pitch, fov)."""
-    try:
-        from scs_3d import Camera3D as _C3D
-        return _C3D(*args, **kwargs)
-    except Exception:
-        return None
-
-
-def getWebGL2Engine(canvas=None, width=900, height=560):
-    """Separate WebGL2 3D engine. Owns its OWN WebGL2 context on its
-    OWN canvas. Does NOT share the 2D renderer's context, loop, or
-    buffers. If it fails, it fails -- no silent fallback to 2D."""
-    try:
-        from scs_engine_webgl2 import WebGL2Engine
-        return WebGL2Engine(canvas=canvas, width=width, height=height)
-    except Exception:
-        return None
-
-
-def getWebGPUEngine(canvas=None, width=900, height=560):
-    """Separate WebGPU 3D engine. Owns its OWN WebGPU context/device.
-    Does NOT share the WebGL2 engine's context or the 2D renderer's.
-    Async init: engine.ready is False until on_ready fires."""
-    try:
-        from scs_engine_webgpu import WebGPU3DEngine
-        return WebGPU3DEngine(canvas=canvas, width=width, height=height)
-    except Exception:
-        return None
-
-
-
-def loadAsset(source, kind='auto', options=None):
-    """Load one asset through the staged pipeline. Returns an
-    AssetHandle with a documented ownership contract, not a raw
-    scene/texture/buffer. Promise stage is PREPARED (see scs_loader)."""
-    loader = getAssetLoader()
-    if loader is None:
-        raise RuntimeError('Asset loader unavailable')
-    return loader.load(source, kind=kind, options=options)
-
-
-def loadGLB(source, options=None):
-    return loadAsset(source, kind='glb', options=options)
-
-
-def loadTexture(source, options=None):
-    return loadAsset(source, kind='texture', options=options)
-
-
-def loadAudio(source, options=None):
-    return loadAsset(source, kind='audio', options=options)
-
-
-# [STRIPPED 70 bytes]
-# Splats (scs_splats.py) -- first-class primitive
-# [STRIPPED 70 bytes]
-
-def getSplatRenderer(backend='webgl2'):
-    """Singleton splat renderer extension. WebGL raster + WebGPU
-    compute behind the same boundary. Custom passes, shared camera /
-    depth, explicit ordering."""
-    global _splat_renderer
-    if _splat_renderer is None:
-        try:
-            from scs_splats import WebGLSplatRenderer, WebGPUSplatRenderer
-            _splat_renderer = WebGPUSplatRenderer() if backend == 'webgpu' \
-                else WebGLSplatRenderer()
-        except Exception:
-            _splat_renderer = None
-    return _splat_renderer
-
-
-def createSplatSchema(sh_degree=0, relightable=False):
-    """Versioned logical schema. Backends pack it; the schema is
-    the contract, not any packed layout."""
-    from scs_splats import SplatSchema
-    s = SplatSchema(version=1, sh_degree=sh_degree)
-    if relightable:
-        s.add_relightable()
-    s.validate()
-    return s
-
-
-def createSplatAsset(schema=None, name='splats'):
-    """A splat asset: schema + chunks + hierarchy + appearance +
-    proxies. Scene membership here; residency in ResidencyManager."""
-    from scs_splats import SplatAsset
-    return SplatAsset(schema or createSplatSchema(), name=name)
-
-
-
-def getPipelineManager():
-    """Singleton PipelineManager (scs_pipeline). Pipelines are owned
-    state, not inline GL calls -- one per backend + material-kind."""
-    global _pipeline_manager
-    try:
-        _pipeline_manager
-    except NameError:
-        _pipeline_manager = None
-    if _pipeline_manager is None:
-        try:
-            from scs_pipeline import PipelineManager
-            _pipeline_manager = PipelineManager()
-        except Exception:
-            _pipeline_manager = None
-    return _pipeline_manager
-
-
-def getMaterialLibrary():
-    """Singleton MaterialLibrary (scs_materials). PBR materials are
-    data -- GLB loader fills it, pipelines bind it."""
-    global _material_library
-    try:
-        _material_library
-    except NameError:
-        _material_library = None
-    if _material_library is None:
-        try:
-            from scs_materials import MaterialLibrary
-            _material_library = MaterialLibrary()
-        except Exception:
-            _material_library = None
-    return _material_library
-
-
-def getPBRMaterial(name='', **kw):
-    """One-liner PBR material: getPBRMaterial('car-paint', base_color=(0.8,0.1,0.1), metallic=0.9, roughness=0.3, clearcoat=1.0)."""
-    try:
-        from scs_materials import PBRMaterial
-        return PBRMaterial(name=name, **kw)
-    except Exception:
-        return None
-
-
-def loadSplatManifest(asset_id, schema, chunk_ids, coarse_chunk_id=None):
-    """Chunked asset manifest + coarse representation before the
-    whole asset is available."""
-    from scs_splats import SplatAssetLoader
-    return SplatAssetLoader().manifest(asset_id, schema, chunk_ids,
-                                       coarse_chunk_id)
-
-
-# Aliases the user namespace expects.
-run = run_app
-loop = run_app
-
-
-# ----------------------------------------------------------------------
-# App loading (was in index.html)
-# ----------------------------------------------------------------------
-
-def app_file(app=None):
-    """Top level: user simply points to a valid app.
-    Precedence (first wins):
-      1. explicit boot(app) / load(app) arg - boot("myapp.py")
-      2. ?app=myapp - URL param, user pointing at top level. MUST win over data-app.
-         BUG FIX: data-app="apps/app.py" in index.html used to win over ?app=fetch_demo,
-         so ?app=fetch_demo showed app.py. ?app= is explicit, data-app is the HTML default.
-      3. window.SCS_CONFIG.app - npm / CDN config
-      4. <canvas data-app="apps/myapp.py"> - fallback in HTML, only if no URL / config
-      5. default apps/app.py
-    A valid app is any .py file with CMU-style onAppStart/redrawAll/runApp.
-    No suffering: no registry, no manifest, no build step."""
-    d = 'apps/app.py'
-    try:
-        v = None
-        if app is not None:
-            v = str(app)
-        if not v:
-            # ?app= FIRST - user pointing at top level in URL. Must win over data-app.
-            v = _url_param('app')
-        if not v:
-            cfg_app = _config_value('app')
-            if cfg_app:
-                v = str(cfg_app)
-        if not v:
-            # <canvas data-app="..."> - HTML default only, if no URL / config / explicit arg.
-            try:
-                from browser import document as _doc
-                for _cid in ('canvas', 'cmu-canvas'):
-                    try:
-                        _cv = _doc[_cid]
-                        if _cv is not None:
-                            _dv = None
-                            try:
-                                _dv = _cv.getAttribute('data-app')
-                            except Exception:
-                                try:
-                                    _dv = getattr(_cv, 'dataset', None)
-                                    if _dv is not None:
-                                        _dv = getattr(_dv, 'app', None)
-                                except Exception:
-                                    _dv = None
-                            if _dv:
-                                v = str(_dv)
-                                break
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-        if not v:
-            return d
-        try:
-            v = window.decodeURIComponent(v)
-        except Exception:
-            pass
-        v = v.strip()
-        if not v or '..' in v or v.startswith('/') or '\\' in v:
-            return d
-        if v.endswith('.py'):
-            v = v[:-3]
-        if v.startswith('apps/'):
-            b = v[5:].split('/')[-1]
-            return 'apps/' + b + '.py'
-        b = v.split('/')[-1]
-        b = ''.join(c for c in b if c.isalnum() or c in '_-')
-        return 'apps/' + b + '.py' if b else d
-    except Exception:
-        return d
-
-
-def _app_url(name):
-    base = _config_value('appBase')
-    if base:
-        return str(base).rstrip('/') + '/' + name
-    return name
-
-
-def exec_code(code, fn):
-    global _user_ns, _user_funcs
-    stop()
-    _clear_shapes()
-    _user_ns = {'__builtins__': __builtins__}
-    for name in __all__:
-        if name in globals():
-            _user_ns[name] = globals()[name]
-    _user_ns['sin'] = math.sin
-    _user_ns['cos'] = math.cos
-    _user_ns['atan2'] = math.atan2
-    _user_ns['sqrt'] = math.sqrt
-    _user_ns['pi'] = math.pi
-    _user_ns['runApp'] = runApp
-    _user_ns['run'] = runApp
-    _user_ns['loop'] = runApp
-    _user_ns['cmu_graphics_run'] = cmu_graphics_run
-    _user_ns['App'] = App
-    _user_ns['getAssetCache'] = getAssetCache
-    _user_ns['getPrefs'] = getPrefs
-    _user_ns['getAudioEngine'] = getAudioEngine
-    _user_ns['getMediaAdapter'] = getMediaAdapter
-    _user_ns['getSerialAdapter'] = getSerialAdapter
-    _user_ns['getUSBAdapter'] = getUSBAdapter
-    _user_ns['renderFrame'] = renderFrame
-    _user_ns['startXR'] = startXR
-    _user_ns['stopXR'] = stopXR
-    _user_ns['getXRState'] = getXRState
-    _user_ns['getXRCapability'] = getXRCapability
-    # JS / CDN bridge: SCS.create({callbacks: {onAppStart, ...}}) passes
-    # JS functions; Brython can call them directly.
-    try:
-        cfg = _js_config()
-        if cfg is not None:
-            cbs = getattr(cfg, 'callbacks', None)
-            if cbs is not None:
-                for n in _CALLBACK_NAMES:
-                    try:
-                        fn_cb = getattr(cbs, n, None)
-                        if callable(fn_cb):
-                            _user_ns[n] = fn_cb
-                    except Exception:
-                        pass
-    except Exception:
-        pass
-    # CRITICAL: Brython ignores sys.modules['scs'] = _ep in scs.py.
-    # `import scs` loads a SEPARATE scs module (old runApp(width=400, height=400)),
-    # and app.py's `from scs import *` overwrites _user_ns['runApp'] with that old one.
-    # Patch the LOADED scs module object in memory BEFORE exec, so the star
-    # import inside app.py gets the fixed runApp.
-    try:
-        import scs as _scs_patch
-        _scs_patch.runApp = runApp
-        _scs_patch.run = runApp
-        _scs_patch.loop = runApp
-        _scs_patch.cmu_graphics_run = cmu_graphics_run
-        _scs_patch.run_app = run_app
-    except Exception:
-        pass
-    try:
-        import sys as _sys2
-        try:
-            _sys2.modules['scs'] = _sys2.modules['scs_entrypoint']
-        except Exception:
-            pass
-    except Exception:
-        pass
-    try:
-        exec(code, _user_ns)
-        _refresh_user_funcs()
-        if _user_funcs:
-            # CMU-style app: callbacks defined, no explicit runApp() call
-            # (or runApp() already started the loop -- starting again is
-            # a no-op because run_app stops the old timer first).
-            w = _config_value('width') or 1050
-            h = _config_value('height') or 700
-            try:
-                w = int(w)
-                h = int(h)
-            except Exception:
-                w, h = 1050, 700
-            # Only auto-start if the loop is not already running.
-            if _app_timer is None:
-                run_app(width=w, height=h)
-    except Exception as e:
-        _debug_log('SCS exec error in %s: %s' % (fn, e))
-        # Prove WHICH runApp app.py actually called: _user_ns['runApp'] may have
-        # been overwritten by `from scs import *` inside app.py with a DIFFERENT
-        # runApp (e.g. from scs.py or cmu_graphics.py) that still has the old
-        # def runApp(width=400, height=400) signature. Log it.
-        try:
-            import inspect as _insp2
-            _ns_run = _user_ns.get('runApp', None)
-            try:
-                _ns_sig = str(_insp2.signature(_ns_run)) if _ns_run is not None else 'None'
-            except Exception:
-                _ns_sig = 'signature-unavailable'
-            _ns_msg = '[SCS] exec failed: _user_ns runApp' + _ns_sig + ' ep.runApp' + str(_insp2.signature(runApp))
-            print(_ns_msg)
-            try:
-                from browser import window as _w3
-                pass  # was console.log - print already logged
-            except Exception:
-                pass
-            # What does `import scs` give RIGHT NOW?
-            try:
-                import scs as _scs_now
-                _scs_sig = str(_insp2.signature(_scs_now.runApp))
-                _scs_msg = '[SCS] import scs runApp' + _scs_sig + ' scs module=' + str(getattr(_scs_now, '__name__', '?')) + ' is_ep=' + str(_scs_now is globals().get('_ep', None) or _scs_now is __import__('scs_entrypoint'))
-                print(_scs_msg)
-                try:
-                    pass  # was console.log - print already logged
-                except Exception:
-                    pass
-            except Exception as _e_scs:
-                print('[SCS] import scs failed: ' + str(_e_scs))
-            # SCS uses the cmu_graphics API, NOT the actual cmu_graphics module.
-            # Never `import cmu_graphics` - there is no cmu_graphics.py on the server,
-            # and trying to fetch it is what caused the 404s. SCS *is* the API.
-            # App code uses `from scs import *`, never `from cmu_graphics import *`.
-            # First line of app code - what does it import?
-            try:
-                _first = str(code)[:300].replace(chr(10), ' | ')
-                _first_msg = '[SCS] app code head: ' + _first
-                print(_first_msg)
-                try:
-                    pass  # was console.log - print already logged
-                except Exception:
-                    pass
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-
-def load(app=None):
-    # JS loader may inject code directly (SCS.create({code: '...'})).
-    code = _config_value('code')
-    if code:
-        exec_code(str(code), '<SCS.create code>')
-        return
-    # Top level: point to a valid app. load(app) / boot(app) wins, else data-app / ?app= / SCS_CONFIG.app / default.
-    t = app_file(app)
-    url = _app_url(t)
-
-    def ok(txt):
-        if txt:
-            # Never exec HTML as Python: 404 / Netlify fallback returns HTML, not .py.
-            _s = str(txt).lstrip()[:200].lower()
-            if _s.startswith('<!doctype html') or _s.startswith('<html'):
-                _debug_log('SCS could not load %s: got HTML (404), not Python. File missing?' % url)
-                return
-            exec_code(txt, t)
-
-    def fail(e):
-        _debug_log('SCS could not load %s: %s' % (url, e))
-
-    def _on_resp(r):
-        # Check ok / status BEFORE reading body. 404 must not be exec'd.
-        try:
-            _ok = getattr(r, 'ok', True)
-            _status = getattr(r, 'status', 200)
-        except Exception:
-            _ok, _status = True, 200
-        if not _ok:
-            _debug_log('SCS could not load %s: HTTP %s (file missing?)' % (url, _status))
-            return
-        try:
-            r.text().then(ok)
-        except Exception as e:
-            fail(e)
-
-    try:
-        window.fetch(url).then(_on_resp).catch(fail)
-    except Exception:
-        pass
-
-
-def boot(app=None):
-    """Top level: user simply points to a valid app.
-    boot() - data-app / ?app= / SCS_CONFIG.app / default apps/app.py
-    boot("myapp.py") - point to a valid app, no config, no suffering
-    boot("apps/myapp.py") - same, explicit path
-    Binds events, loads the app, and starts it. Loop / events / renderer
-    all live in the package, not in HTML."""
-    # Boot-once FIRST, before any log. DOM guard, not Python / window.
-    # Brython re-imports scs_entrypoint (via `from scs import *` in app)
-    # and re-executes top-level, wiping Python globals and window.SCS_BOOTED.
-    # DOM survives. If <div id="scs-booted"> exists, this is the 2nd boot in
-    # the SAME page load - return before anything runs.
-    try:
-        from browser import document as _doc_boot
-        try:
-            if _doc_boot.getElementById('scs-booted') is not None:
-                return
-            try:
-                _flag = _doc_boot.createElement('div')
-                _flag.id = 'scs-booted'
-                _flag.style.display = 'none'
-                _doc_boot.body.appendChild(_flag)
-            except Exception:
-                pass
-        except Exception:
-            pass
-    except Exception:
-        pass
-    # Console proof at boot(): which runApp is actually in globals() RIGHT NOW.
-    try:
-        import inspect as _insp
-        try:
-            _sig = str(_insp.signature(runApp))
-        except Exception:
-            _sig = 'signature-unavailable'
-        _boot_msg = '[SCS entrypoint] boot() version=' + __version__ + ' runApp' + _sig
-        print(_boot_msg)  # Brython print -> console, do NOT also console.log
-    except Exception:
-        pass
-    # (window guard already done at top - do not re-guard here)
-    _bind_events()
-    load(app)
-
-
-def boot_sandbox():
-    """Sandbox boot - baked into the package, not in HTML.
-    Thin shell (sandbox.html) has only <canvas> + <textarea id=\"code-input\">.
-    No loop, no events, no renderer, no shape drawing in HTML.
-    This function owns all of it: default example (CMU-style, no suffering),
-    Run/Stop + log UI created here if missing, event binding, exec, loop.
-    Users just import from npm or load from CDN and it works."""
-    try:
-        from browser import document, window
-    except Exception:
-        return
-    try:
-        # Default CMU example - lives in the package, not in HTML, so the shell stays thin.
-        # Same API students already know: from scs import *, onAppStart, redrawAll, onMousePress, runApp.
-        _default = (
-            "from scs import *\n\n"
-            "def onAppStart(app):\n"
-            "    app.dots = []\n"
-            "    app.color = 'blue'\n\n"
-            "def redrawAll(app):\n"
-            "    for cx, cy in app.dots:\n"
-            "        drawCircle(cx, cy, 20, fill=app.color)\n\n"
-            "def onMousePress(app, mouseX, mouseY):\n"
-            "    app.dots.append((mouseX, mouseY))\n\n"
-            "def onKeyPress(app, key):\n"
-            "    if key == 'r':\n"
-            "        app.color = 'red'\n"
-            "    elif key == 'b':\n"
-            "        app.color = 'blue'\n\n"
-            "def main():\n"
-            "    runApp()\n\n"
-            "main()\n"
-        )
-        try:
-            _ta = document['code-input']
-            if not _ta.value:
-                _ta.value = _default
-        except Exception:
-            pass
-        # Log + Run/Stop UI - created here in the package, not in HTML.
-        # If the shell already has them (old shells), reuse them. If not, create them.
-        try:
-            _log = None
-            try:
-                _log = document['log']
-            except Exception:
-                pass
-            if _log is None:
-                try:
-                    _log = document.createElement('div')
-                    _log.id = 'log'
-                    try:
-                        _log.style.cssText = 'margin-top:10px;background:#1a1d24;border:1px solid #3a3f4b;border-radius:6px;padding:10px;min-height:80px;white-space:pre-wrap;font-size:11px;max-height:300px;overflow:auto;color:#e6e6e6;'
-                    except Exception:
-                        pass
-                    document.body.appendChild(_log)
-                except Exception:
-                    _log = None
-            def _log_msg(msg):
-                try:
-                    if _log is not None:
-                        _log.text += str(msg) + '\n'
-                except Exception:
-                    pass
-            # Wire _debug_log to the sandbox log, so package errors show up here, not just console.
-            try:
-                _orig = _debug_log
-                def _sb_log(m):
-                    try:
-                        _log_msg(m)
-                    except Exception:
-                        pass
-                    try:
-                        _orig(m)
-                    except Exception:
-                        pass
-                globals()['_debug_log'] = _sb_log
-            except Exception:
-                pass
-            # Run / Stop buttons - created in the package if missing.
-            try:
-                _run_btn = None
-                try:
-                    _run_btn = document['run-btn']
-                except Exception:
-                    pass
-                if _run_btn is None:
-                    _run_btn = document.createElement('button')
-                    _run_btn.id = 'run-btn'
-                    _run_btn.text = 'Run'
-                    try:
-                        _run_btn.style.cssText = 'background:#4c6ef5;color:white;border:0;padding:10px 18px;border-radius:6px;cursor:pointer;font-weight:600;margin-right:8px;'
-                    except Exception:
-                        pass
-                    document.body.appendChild(_run_btn)
-                _stop_btn = None
-                try:
-                    _stop_btn = document['stop-btn']
-                except Exception:
-                    pass
-                if _stop_btn is None:
-                    _stop_btn = document.createElement('button')
-                    _stop_btn.id = 'stop-btn'
-                    _stop_btn.text = 'Stop'
-                    try:
-                        _stop_btn.style.cssText = 'background:#4c6ef5;color:white;border:0;padding:10px 18px;border-radius:6px;cursor:pointer;font-weight:600;margin-right:8px;'
-                    except Exception:
-                        pass
-                    document.body.appendChild(_stop_btn)
-            except Exception:
-                _run_btn = _stop_btn = None
-            def _run(ev=None):
-                try:
-                    _ta2 = document['code-input']
-                    exec_code(_ta2.value, '<sandbox>')
-                    _log_msg('Running; renderer=' + str(getRendererKind()))
-                except Exception:
-                    import traceback
-                    _log_msg('Error:\n' + traceback.format_exc())
-            def _stop(ev=None):
-                try:
-                    stop()
-                    _log_msg('Stopped.')
-                except Exception:
-                    pass
-            try:
-                if _run_btn is not None:
-                    _run_btn.bind('click', _run)
-                if _stop_btn is not None:
-                    _stop_btn.bind('click', _stop)
-            except Exception:
-                pass
-            # Sandbox: just enter app code. Paste / type in the textarea and it runs.
-            # No Run click required: auto-run on input (debounced) - all in the package, not HTML.
-            try:
-                _ta3 = document['code-input']
-                _timer = {'id': None}
-                def _on_input(ev=None):
-                    try:
-                        from browser import timer as _tm
-                        try:
-                            if _timer['id'] is not None:
-                                _tm.clear_timeout(_timer['id'])
-                        except Exception:
-                            pass
-                        def _do():
-                            try:
-                                _run()
-                            except Exception:
-                                pass
-                        try:
-                            _timer['id'] = _tm.set_timeout(_do, 600)
-                        except Exception:
-                            _do()
-                    except Exception:
-                        pass
-                try:
-                    _ta3.bind('input', _on_input)
-                except Exception:
-                    pass
-            except Exception:
-                pass
-            _bind_events()
-            # Auto-run once, so the student sees something immediately - no suffering.
-            try:
-                _run()
-            except Exception:
-                pass
-            _log_msg('Sandbox ready. API from package (scs_entrypoint.py via scs.py).')
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-
-main = boot
+                    gl.bindTexture(gl.TEXTURE_2D, self._gl_textures.get(key))
+                gl.useProgram(self._prog_tex)
+                gl.uniform1f(gl.getUniformLocation(self._prog_tex, 'u_mask'), 1.0)
+                gl.activeTexture(gl.TEXTURE0)
+                gl.bindTexture(gl.TEXTURE_2D, self._gl_textures.get(key))
+                gl.uniform1i(gl.getUniformLocation(self._prog_tex, 'u_tex'), 0)
+            else:
+                img = self._images.get(key[1])
+                if img is None:
+                    continue
+                self._upload_texture(key, img)
+                gl.useProgram(self._prog_tex)
+                gl.uniform1f(gl.getUniformLocation(self._prog_tex, 'u_mask'), 0.0)
+                gl.activeTexture(gl.TEXTURE0)
+                gl.bindTexture(gl.TEXTURE_2D, self._gl_textures.get(key))
+                gl.uniform1i(gl.getUniformLocation(self._prog_tex, 'u_tex'), 0)
+            self._draw_buffer(self._prog_tex, self._buf_tex, data, 8, True)
+
+    def destroy(self):
+        self.gl = None
