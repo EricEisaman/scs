@@ -1375,14 +1375,34 @@ class App:
         _clear_shapes()
 
 
-def runApp(width=400, height=400):
-    """Kept for `App(...)` + `runApp()` CMU shape. Real entry is run_app()
-    below, which runApp/run/loop all alias."""
-    run_app(width=width, height=height)
+def runApp(width=400, height=400, stepsPerSecond=30, renderer=None,
+         canvas=None, **kwargs):
+    """Kept for `App(...)` + `runApp()` CMU shape. Full alias of run_app().
+
+    Must keep the full run_app() signature: user code does
+    `from scs import *`, which overwrites the entrypoint's
+    `_user_ns['runApp']` (= run_app) with this module-level name.
+    A narrow (width, height)-only wrapper here is what caused
+    `runApp() got an unexpected keyword argument 'stepsPerSecond'`.
+    """
+    return run_app(width=width, height=height,
+                   stepsPerSecond=stepsPerSecond, renderer=renderer,
+                   canvas=canvas, **kwargs)
 
 
-def cmu_graphics_run(app=None, width=400, height=400):
-    run_app(width=width, height=height)
+def cmu_graphics_run(app=None, width=400, height=400, stepsPerSecond=30,
+                      renderer=None, canvas=None, **kwargs):
+    if app is not None:
+        try:
+            width = getattr(app, 'width', width)
+            height = getattr(app, 'height', height)
+            stepsPerSecond = getattr(app, 'stepsPerSecond', stepsPerSecond)
+            renderer = getattr(app, 'renderer', renderer)
+        except Exception:
+            pass
+    return run_app(width=width, height=height,
+                   stepsPerSecond=stepsPerSecond, renderer=renderer,
+                   canvas=canvas, **kwargs)
 
 
 # ----------------------------------------------------------------------
