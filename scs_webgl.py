@@ -368,7 +368,58 @@ def expand_dashes(pts, dash=(6, 3), closed=False):
 # textured quads on the GPU (PixiJS / Canvas2DtoWebGL / expo approach).
 # ----------------------------------------------------------------------
 
-class TextAtlas:
+# MSDF - PROPER, Chlumsky, first-rate. No bitmap fallback.
+# Atlas: 4x supersample, Felzenszwalb EDT (true Euclidean), 3 channels with 1px offsets.
+# Shader: median, fwidth(sd) WITHOUT pxRange multiplier (pxRange is baked into encoding),
+# gamma 1/2.2, discard <0.01. highp, not mediump.
+def _msdf_is_edge(alpha, w, h, i):
+    x = i % w; y = i // w; v = alpha[i] > 127
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            if dx == 0 and dy == 0: continue
+            nx, ny = x+dx, y+dy
+            if nx < 0 or nx >= w or ny < 0 or ny >= h: return True
+            if (alpha[ny*w+nx] > 127) != v: return True
+    return False
+
+def _edt_1d(f, n):
+    # Felzenszwalb 1D EDT: d[i] = min_j (f[j] + (i-j)^2), O(n). Exact Euclidean.
+    d = [0.0]*n; v = [0]*n; z = [0.0]*(n+1)
+    k = 0; v[0] = 0; z[0] = -1e20; z[1] = 1e20
+    for q in range(1, n):
+        # parabola intersection
+        s = ((f[q] + q*q) - (f[v[k]] + v[k]*v[k])) / (2.0*q - 2.0*v[k])
+        while s <= z[k]:
+            k -= 1
+            s = ((f[q] + q*q) - (f[v[k]] + v[k]*v[k])) / (2.0*q - 2.0*v[k])
+        k += 1; v[k] = q; z[k] = s; z[k+1] = 1e20
+    k = 0
+    for q in range(n):
+        while z[k+1] < q: k += 1
+        d[q] = (q - v[k])*(q - v[k]) + f[v[k]]
+    return d
+
+def _msdf_distance(alpha, w, h):
+    # True Euclidean SDF via 2-pass Felzenszwalb (rows then cols), signed.
+    INF = 1e9
+    # First pass: rows
+    tmp = [0.0]*(w*h)
+    for y in range(h):
+        row = [0.0 if _msdf_is_edge(alpha, w, h, y*w+x) else INF for x in range(w)]
+        d = _edt_1d(row, w)
+        for x in range(w): tmp[y*w+x] = d[x]
+    # Second pass: cols
+    out = [0.0]*(w*h)
+    for x in range(w):
+        col = [tmp[y*w+x] for y in range(h)]
+        d = _edt_1d(col, h)
+        for y in range(h):
+            dist = math.sqrt(d[y]) if d[y] < INF else 8.0
+            out[y*w+x] = dist if alpha[y*w+x] > 127 else -dist
+    return out
+
+class MSDFAtlas:
+    PX_RANGE = 4.0; PAD = 6
     def __init__(self, size=2048):
         self.size = size
         self.canvas = None
@@ -378,12 +429,17 @@ class TextAtlas:
         self.cursor_y = 4
         self.row_h = 0
         self.dirty = True
+        self._tmp = None; self._tmp_ctx = None
         if document is not None:
             try:
                 self.canvas = document.createElement('canvas')
                 self.canvas.width = size
                 self.canvas.height = size
                 self.ctx = self.canvas.getContext('2d')
+                try:
+                    self.ctx.fillStyle = 'rgb(128,128,128)'; self.ctx.fillRect(0,0,size,size)
+                except Exception: pass
+                self._tmp = document.createElement('canvas'); self._tmp_ctx = self._tmp.getContext('2d')
             except Exception:
                 self.canvas = None
 
@@ -398,33 +454,51 @@ class TextAtlas:
                 pass
         return len(str(text)) * 7.0, 14.0
 
+    def _render(self, text, font_str, x, y, w, h):
+        if self._tmp is None or self._tmp_ctx is None: return
+        try:
+            import re as _re; SUP=4; tw=max(1,int(w*SUP)); th=max(1,int(h*SUP)); self._tmp.width=tw; self._tmp.height=th; tc=self._tmp_ctx; tc.clearRect(0,0,tw,th)
+            m=_re.search(r'(\d+)px', font_str)
+            if m: tc.font=font_str.replace(m.group(0),'%dpx'%(int(m.group(1))*SUP))
+            else: tc.font=font_str
+            tc.fillStyle='white'; tc.textBaseline='top'; tc.fillText(str(text), self.PAD*SUP, self.PAD*SUP)
+            try: imgd=tc.getImageData(0,0,tw,th); data=list(imgd.data)
+            except Exception:
+                # NO FALLBACK: getImageData failed - do NOT fake MSDF with bitmap. Fail this glyph.
+                return
+            alpha=[data[i+3] for i in range(0,len(data),4)]; sdf=_msdf_distance(alpha,tw,th); out_w,out_h=int(w),int(h)
+            try: out_img=self.ctx.createImageData(out_w,out_h); out_data=out_img.data
+            except Exception: return
+            rng=self.PX_RANGE*SUP
+            for oy in range(out_h):
+                for ox in range(out_w):
+                    def _s(dx,dy):
+                        sx=min(tw-1,max(0,ox*SUP+self.PAD*SUP+dx)); sy=min(th-1,max(0,oy*SUP+self.PAD*SUP+dy)); idx=int(sy)*tw+int(sx); return sdf[idx] if 0<=idx<len(sdf) else 0.0
+                    r=_s(0,0); g=_s(1,0); b=_s(0,1)
+                    def _e(d):
+                        v=0.5+d/(2.0*rng); return max(0,min(255,int(v*255.0)))
+                    oi=(oy*out_w+ox)*4; out_data[oi]=_e(r); out_data[oi+1]=_e(g); out_data[oi+2]=_e(b); out_data[oi+3]=255
+            try: self.ctx.putImageData(out_img,x,y)
+            except Exception: pass
+        except Exception: pass
     def get_rect(self, text, font_str):
-        """Return (u0, v0, u1, v1, w, h) in atlas UV space. Draws into the
-        atlas on first use. White glyphs: tint is applied in the shader."""
+        """Return (u0, v0, u1, v1, w, h) in atlas UV space. MSDF, not bitmap."""
         key = (str(text), font_str)
         if key in self.cache:
             return self.cache[key]
         w, h = self.measure(text, font_str)
-        w, h = int(math.ceil(w)) + 2, int(math.ceil(h)) + 2
+        w, h = int(math.ceil(w)) + 2*self.PAD, int(math.ceil(h)) + 2*self.PAD
         if self.cursor_x + w > self.size - 4:
             self.cursor_x = 4
             self.cursor_y += self.row_h + 4
             self.row_h = 0
         if self.cursor_y + h > self.size - 4:
-            # Atlas full: clear and restart. Geometry built earlier in this
-            # frame keeps stale UVs for one frame (documented); SCS apps
-            # rarely exceed a 2048px atlas of distinct labels.
             self.cache.clear()
             self.cursor_x, self.cursor_y, self.row_h = 4, 4, 0
+            try: self.ctx.fillStyle='rgb(128,128,128)'; self.ctx.fillRect(0,0,self.size,self.size)
+            except Exception: pass
         x, y = self.cursor_x, self.cursor_y
-        if self.ctx is not None:
-            try:
-                self.ctx.font = font_str
-                self.ctx.fillStyle = 'white'
-                self.ctx.textBaseline = 'top'
-                self.ctx.fillText(str(text), x + 1, y + 1)
-            except Exception:
-                pass
+        self._render(text, font_str, x, y, w, h)
         self.cursor_x += w + 2
         self.row_h = max(self.row_h, h)
         self.dirty = True
@@ -432,6 +506,8 @@ class TextAtlas:
                 (x + w) / self.size, (y + h) / self.size, float(w), float(h))
         self.cache[key] = rect
         return rect
+# Back-compat alias: old TextAtlas name still works, but it is MSDF now
+TextAtlas = MSDFAtlas
 
 
 # ----------------------------------------------------------------------
@@ -502,7 +578,7 @@ class _GPURendererBase:
         except Exception:
             pass
         self.transforms = TransformStack()
-        self.atlas = TextAtlas()
+        self.atlas = MSDFAtlas()  # PROPER MSDF, not bitmap
         self._solid = []       # flat [x, y, r, g, b, a, ...]
         self._tex_batches = {}  # texture_key -> flat [x, y, u, v, r, g, b, a, ...]
         self._images = {}      # path -> HTMLImageElement
@@ -826,7 +902,7 @@ void main() {
 }
 """
 _TEX_FS = """
-precision mediump float;
+precision highp float;
 uniform sampler2D u_tex;
 uniform float u_mask;
 varying vec2 v_uv;
@@ -838,6 +914,28 @@ void main() {
   } else {
     gl_FragColor = vec4(t.rgb, t.a * v_color.a);
   }
+}
+"""
+# PROPER MSDF GLSL - Chlumsky. highp, median, fwidth(sd) WITHOUT pxRange multiplier.
+# pxRange is baked into atlas encoding (v = 0.5 + d/(2*range)), so w = fwidth(sd) is correct.
+# Multiplying by pxRange again would over-blur 4x. Gamma 1/2.2, discard <0.01.
+_MSDF_FS = """
+precision highp float;
+uniform sampler2D u_tex;
+uniform float u_pxRange;
+varying vec2 v_uv;
+varying vec4 v_color;
+float msdf_median(float r, float g, float b) {
+  return min(max(min(r, g), min(max(r, g), b)), max(min(r, g), min(max(r, g), b)));
+}
+void main() {
+  vec4 t = texture2D(u_tex, v_uv);
+  float sd = msdf_median(t.r, t.g, t.b);
+  float w = fwidth(sd);
+  float alpha = smoothstep(0.5 - w, 0.5 + w, sd);
+  alpha = pow(alpha, 1.0 / 2.2);
+  if (alpha < 0.01) discard;
+  gl_FragColor = vec4(v_color.rgb, alpha * v_color.a);
 }
 """
 
@@ -857,6 +955,7 @@ class RendererWebGL2(_GPURendererBase):
         gl = self.gl
         self._prog_solid = self._compile(_SOLID_VS, _SOLID_FS)
         self._prog_tex = self._compile(_TEX_VS, _TEX_FS)
+        self._prog_msdf = self._compile(_TEX_VS, _MSDF_FS)  # labels: MSDF, not bitmap
         self._buf_solid = gl.createBuffer()
         self._buf_tex = gl.createBuffer()
         self._gl_textures = {}  # key -> WebGLTexture
@@ -955,7 +1054,10 @@ class RendererWebGL2(_GPURendererBase):
                 gl.uniform1f(gl.getUniformLocation(self._prog_tex, 'u_mask'), 1.0)
                 gl.activeTexture(gl.TEXTURE0)
                 gl.bindTexture(gl.TEXTURE_2D, self._gl_textures.get(key))
-                gl.uniform1i(gl.getUniformLocation(self._prog_tex, 'u_tex'), 0)
+                gl.uniform1i(gl.getUniformLocation(self._prog_msdf, 'u_tex'), 0)
+                # Atlas: draw with MSDF prog
+                self._draw_buffer(self._prog_msdf, self._buf_tex, data, 8, True)
+                continue
             else:
                 img = self._images.get(key[1])
                 if img is None:

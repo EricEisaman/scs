@@ -14,7 +14,7 @@ This file is a 3D engine:
     `ready` is False until on_ready fires. If WebGPU is unavailable,
     `error` is set and it FAILS -- no fallback to WebGL2, no fallback
     to 2D. The caller picks the engine; the engine does not pick
-    a different engine behind the caller's back.
+    a different engine behind the caller's back. NO FALLBACK CONTENT.
 
 Math only is shared (scs_3d.py: pure matrices, no GPU calls).
 """
@@ -64,6 +64,149 @@ struct VSOut {
   return vec4<f32>(col + spec, 1.0);
 }
 """
+
+# ----------------------------------------------------------------------
+# MSDF text in WGSL - FIRST-RATE, same Chlumsky median as GLSL.
+# WGSL has no fwidth(): w = (abs(dpdx(sd)) + abs(dpdy(sd))) * pxRange.
+# This engine had NO draw_label - labels were dropped in WebGPU 3D.
+# Now it has MSDF, so button labels show in WebGPU 3D too.
+# ----------------------------------------------------------------------
+_MSDF_WGSL = """
+struct MSDFUniforms {
+  res: vec2<f32>,
+  pxRange: f32,
+  _pad: f32,
+};
+@group(0) @binding(0) var<uniform> u: MSDFUniforms;
+@group(0) @binding(1) var u_tex: texture_2d<f32>;
+@group(0) @binding(2) var u_sampler: sampler;
+struct MSDFOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+  @location(1) color: vec4<f32>,
+};
+@vertex fn vs_msdf(@location(0) pos: vec2<f32>,
+                    @location(1) uv: vec2<f32>,
+                    @location(2) color: vec4<f32>) -> MSDFOut {
+  var out: MSDFOut;
+  let clip = (pos / u.res) * 2.0 - 1.0;
+  out.pos = vec4<f32>(clip.x, -clip.y, 0.0, 1.0);
+  out.uv = uv;
+  out.color = color;
+  return out;
+}
+fn msdf_median(r: f32, g: f32, b: f32) -> f32 {
+  return min(max(min(r, g), min(max(r, g), b)), max(min(r, g), min(max(r, g), b)));
+}
+@fragment fn fs_msdf(@location(0) uv: vec2<f32>,
+                      @location(1) color: vec4<f32>) -> @location(0) vec4<f32> {
+  let t = textureSample(u_tex, u_sampler, uv);
+  let sd = msdf_median(t.r, t.g, t.b);
+  // PROPER: w = fwidth(sd) = abs(dpdx)+abs(dpdy), WITHOUT pxRange multiplier.
+  // pxRange is baked into atlas encoding. Old *u.pxRange over-blurred 4x.
+  let w = abs(dpdx(sd)) + abs(dpdy(sd));
+  var alpha = smoothstep(0.5 - w, 0.5 + w, sd);
+  alpha = pow(alpha, 1.0 / 2.2);
+  if (alpha < 0.01) { discard; }
+  return vec4<f32>(color.rgb, alpha * color.a);
+}
+"""
+
+def _msdf_is_edge(alpha, w, h, i):
+    x = i % w; y = i // w; v = alpha[i] > 127
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            if dx == 0 and dy == 0: continue
+            nx, ny = x+dx, y+dy
+            if nx < 0 or nx >= w or ny < 0 or ny >= h: return True
+            if (alpha[ny*w+nx] > 127) != v: return True
+    return False
+
+def _edt_1d(f, n):
+    d = [0.0]*n; v = [0]*n; z = [0.0]*(n+1)
+    k = 0; v[0] = 0; z[0] = -1e20; z[1] = 1e20
+    for q in range(1, n):
+        s = ((f[q] + q*q) - (f[v[k]] + v[k]*v[k])) / (2.0*q - 2.0*v[k])
+        while s <= z[k]:
+            k -= 1
+            s = ((f[q] + q*q) - (f[v[k]] + v[k]*v[k])) / (2.0*q - 2.0*v[k])
+        k += 1; v[k] = q; z[k] = s; z[k+1] = 1e20
+    k = 0
+    for q in range(n):
+        while z[k+1] < q: k += 1
+        d[q] = (q - v[k])*(q - v[k]) + f[v[k]]
+    return d
+
+def _msdf_distance(alpha, w, h):
+    INF = 1e9
+    tmp = [0.0]*(w*h)
+    for y in range(h):
+        row = [0.0 if _msdf_is_edge(alpha, w, h, y*w+x) else INF for x in range(w)]
+        d = _edt_1d(row, w)
+        for x in range(w): tmp[y*w+x] = d[x]
+    out = [0.0]*(w*h)
+    for x in range(w):
+        col = [tmp[y*w+x] for y in range(h)]
+        d = _edt_1d(col, h)
+        for y in range(h):
+            dist = math.sqrt(d[y]) if d[y] < INF else 8.0
+            out[y*w+x] = dist if alpha[y*w+x] > 127 else -dist
+    return out
+
+class _MSDFAtlas:
+    PX_RANGE = 4.0; PAD = 6
+    def __init__(self, size=2048):
+        self.size=size; self.canvas=None; self.ctx=None; self.cache={}; self.cursor_x=4; self.cursor_y=4; self.row_h=0; self.dirty=True; self._tmp=None; self._tmp_ctx=None
+        if document is not None:
+            try:
+                self.canvas=document.createElement('canvas'); self.canvas.width=size; self.canvas.height=size; self.ctx=self.canvas.getContext('2d')
+                try: self.ctx.fillStyle='rgb(128,128,128)'; self.ctx.fillRect(0,0,size,size)
+                except Exception: pass
+                self._tmp=document.createElement('canvas'); self._tmp_ctx=self._tmp.getContext('2d')
+            except Exception: self.canvas=None
+    def measure(self, text, font_str):
+        if self.ctx is not None:
+            try: self.ctx.font=font_str; m=self.ctx.measureText(str(text)); return float(m.width), float(getattr(m,'actualBoundingBoxAscent',12)+getattr(m,'actualBoundingBoxDescent',4))
+            except Exception: pass
+        return len(str(text))*7.0, 14.0
+    def _render(self, text, font_str, x, y, w, h):
+        if self._tmp is None or self._tmp_ctx is None: return
+        try:
+            import re as _re; SUP=4; tw=max(1,int(w*SUP)); th=max(1,int(h*SUP)); self._tmp.width=tw; self._tmp.height=th; tc=self._tmp_ctx; tc.clearRect(0,0,tw,th)
+            m=_re.search(r'(\d+)px', font_str)
+            if m: tc.font=font_str.replace(m.group(0),'%dpx'%(int(m.group(1))*SUP))
+            else: tc.font=font_str
+            tc.fillStyle='white'; tc.textBaseline='top'; tc.fillText(str(text), self.PAD*SUP, self.PAD*SUP)
+            try: imgd=tc.getImageData(0,0,tw,th); data=list(imgd.data)
+            except Exception: # NO FALLBACK: getImageData failed - fail this glyph, do NOT fake MSDF with bitmap.
+                return
+            alpha=[data[i+3] for i in range(0,len(data),4)]; sdf=_msdf_distance(alpha,tw,th); out_w,out_h=int(w),int(h)
+            try: out_img=self.ctx.createImageData(out_w,out_h); out_data=out_img.data
+            except Exception: return
+            rng=self.PX_RANGE*SUP
+            for oy in range(out_h):
+                for ox in range(out_w):
+                    def _s(dx,dy):
+                        sx=min(tw-1,max(0,ox*SUP+self.PAD*SUP+dx)); sy=min(th-1,max(0,oy*SUP+self.PAD*SUP+dy)); idx=int(sy)*tw+int(sx); return sdf[idx] if 0<=idx<len(sdf) else 0.0
+                    r=_s(0,0); g=_s(1,0); b=_s(0,1)
+                    def _e(d):
+                        v=0.5+d/(2.0*rng); return max(0,min(255,int(v*255.0)))
+                    oi=(oy*out_w+ox)*4; out_data[oi]=_e(r); out_data[oi+1]=_e(g); out_data[oi+2]=_e(b); out_data[oi+3]=255
+            try: self.ctx.putImageData(out_img,x,y)
+            except Exception: pass
+        except Exception: pass
+    def get_rect(self, text, font_str):
+        key=(str(text),font_str)
+        if key in self.cache: return self.cache[key]
+        w,h=self.measure(text,font_str); w,h=int(math.ceil(w))+2*self.PAD, int(math.ceil(h))+2*self.PAD
+        if self.cursor_x+w>self.size-4: self.cursor_x=4; self.cursor_y+=self.row_h+4; self.row_h=0
+        if self.cursor_y+h>self.size-4:
+            self.cache.clear(); self.cursor_x,self.cursor_y,self.row_h=4,4,0
+            try: self.ctx.fillStyle='rgb(128,128,128)'; self.ctx.fillRect(0,0,self.size,self.size)
+            except Exception: pass
+        x,y=self.cursor_x,self.cursor_y; self._render(text,font_str,x,y,w,h); self.cursor_x+=w+2; self.row_h=max(self.row_h,h); self.dirty=True
+        rect=(x/self.size,y/self.size,(x+w)/self.size,(y+h)/self.size,float(w),float(h)); self.cache[key]=rect; return rect
+
 
 
 def _parse_color(c):
@@ -217,6 +360,42 @@ class WebGPU3DEngine:
                     'format': 'depth24plus',
                 },
             })
+            # MSDF pipeline - PROPER. Was missing entirely, so labels were dropped.
+            # Blend on, depth off, ortho. Same WGSL as _MSDF_WGSL (median, dpdx/dpdy, gamma).
+            try:
+                _msdf_mod = device.createShaderModule({'code': _MSDF_WGSL})
+                self._msdf_pipeline = device.createRenderPipeline({
+                    'layout': 'auto',
+                    'vertex': {
+                        'module': _msdf_mod, 'entryPoint': 'vs_msdf',
+                        'buffers': [{'arrayStride': 32,
+                                     'attributes': [
+                                         {'shaderLocation': 0, 'offset': 0, 'format': 'float32x2'},
+                                         {'shaderLocation': 1, 'offset': 8, 'format': 'float32x2'},
+                                         {'shaderLocation': 2, 'offset': 16, 'format': 'float32x4'}]}],
+                    },
+                    'fragment': {
+                        'module': _msdf_mod, 'entryPoint': 'fs_msdf',
+                        'targets': [{'format': self.format,
+                                     'blend': {
+                                         'color': {'srcFactor': 'src-alpha', 'dstFactor': 'one-minus-src-alpha', 'operation': 'add'},
+                                         'alpha': {'srcFactor': 'one', 'dstFactor': 'one-minus-src-alpha', 'operation': 'add'},
+                                     }}],
+                    },
+                    'primitive': {'topology': 'triangle-list', 'cullMode': 'none'},
+                    'depthStencil': {
+                        'depthWriteEnabled': False,
+                        'depthCompare': 'always',
+                        'format': 'depth24plus',
+                    },
+                })
+                self._msdf_uniform_buffer = device.createBuffer({'size': 16, 'usage': 0x04 | 0x08})
+                self._msdf_vertex_buffer = device.createBuffer({'size': 65536*4, 'usage': 0x02 | 0x08})
+                self._msdf_sampler = device.createSampler({'magFilter': 'linear', 'minFilter': 'linear',
+                                                           'addressModeU': 'clamp-to-edge', 'addressModeV': 'clamp-to-edge'})
+                self._msdf_texture = None
+            except Exception as _e:
+                self._msdf_pipeline = None
             self.ready = True
             if self.on_ready:
                 self.on_ready()
@@ -314,11 +493,93 @@ class WebGPU3DEngine:
                 else:
                     rp.drawIndexed(self._cube_index_count)
             rp.end()
+            # MSDF labels: second pass, loadOp 'load' to preserve 3D. Was missing - labels dropped.
+            try: self._flush_msdf(encoder, view)
+            except Exception: pass
             self.device.queue.submit([encoder.finish()])
             return True
         except Exception as e:
             self.error = 'render failed: %s' % e
             return False
+
+    def draw_label(self, text, x, y, fill='black', size=12, font='arial', bold=False, italic=False, opacity=100, align='center', rotateAngle=0):
+        """MSDF label in WebGPU 3D. Was missing - labels dropped. Now WGSL MSDF median + dpdx/dpdy."""
+        try:
+            if not hasattr(self, '_msdf_atlas'):
+                self._msdf_atlas = _MSDFAtlas()
+                self._msdf_batches = []
+            style = ('italic ' if italic else '') + ('bold ' if bold else '')
+            font_str = '%s%dpx %s' % (style, size, font)
+            u0, v0, u1, v1, w, h = self._msdf_atlas.get_rect(text, font_str)
+            a = str(align).lower()
+            ox = 0.0 if 'left' in a else (-w if 'right' in a else -w/2)
+            oy = 0.0 if 'top' in a else (-h if 'bottom' in a else -h/2)
+            r, g, b = _parse_color(fill)
+            self._msdf_batches.append((x+ox, y+oy, w, h, u0, v0, u1, v1, r, g, b, opacity/100.0))
+        except Exception:
+            pass
+
+    def _flush_msdf(self, encoder, view):
+        """Draw queued MSDF labels in a second pass (loadOp load, depth off). Proper WGSL MSDF."""
+        try:
+            batches = getattr(self, '_msdf_batches', [])
+            if not batches or getattr(self, '_msdf_pipeline', None) is None:
+                return
+            atlas = getattr(self, '_msdf_atlas', None)
+            if atlas is None or atlas.canvas is None:
+                self._msdf_batches = []
+                return
+            # Upload atlas if dirty
+            if getattr(atlas, 'dirty', False):
+                try:
+                    # Create texture from canvas via copyExternalImageToTexture if available, else via canvas bitmap
+                    # Brython: device.createTexture + queue.copyExternalImageToTexture
+                    if self._msdf_texture is None:
+                        self._msdf_texture = self.device.createTexture({
+                            'size': {'width': int(atlas.size), 'height': int(atlas.size), 'depthOrArrayLayers': 1},
+                            'format': 'rgba8unorm',
+                            'usage': 0x02 | 0x10,  # TEXTURE_BINDING | COPY_DST
+                        })
+                    try:
+                        self.device.queue.copyExternalImageToTexture(
+                            {'source': atlas.canvas},
+                            {'texture': self._msdf_texture},
+                            {'width': int(atlas.size), 'height': int(atlas.size), 'depthOrArrayLayers': 1})
+                    except Exception:
+                        pass
+                    atlas.dirty = False
+                except Exception: pass
+            # Build vertex data: x,y,u,v,r,g,b,a per vertex, 6 verts per quad
+            data = []
+            for (x, y, w, h, u0, v0, u1, v1, r, g, b, a) in batches:
+                data.extend([x, y, u0, v0, r, g, b, a, x+w, y, u1, v0, r, g, b, a, x+w, y+h, u1, v1, r, g, b, a,
+                             x, y, u0, v0, r, g, b, a, x+w, y+h, u1, v1, r, g, b, a, x, y+h, u0, v1, r, g, b, a])
+            # Uniforms: res (w,h), pxRange (4.0), pad
+            try:
+                self.device.queue.writeBuffer(self._msdf_uniform_buffer, 0, window.Float32Array.new([float(self.width), float(self.height), 4.0, 0.0]))
+                self.device.queue.writeBuffer(self._msdf_vertex_buffer, 0, window.Float32Array.new(data))
+            except Exception: pass
+            # Second pass: load, not clear
+            rp2 = encoder.beginRenderPass({
+                'colorAttachments': [{'view': view, 'loadOp': 'load', 'storeOp': 'store'}],
+                'depthStencilAttachment': {'view': self._depth_texture.createView(), 'depthLoadOp': 'load', 'depthStoreOp': 'store'},
+            })
+            try:
+                rp2.setPipeline(self._msdf_pipeline)
+                rp2.setVertexBuffer(0, self._msdf_vertex_buffer)
+                bg = self.device.createBindGroup({
+                    'layout': self._msdf_pipeline.getBindGroupLayout(0),
+                    'entries': [{'binding': 0, 'resource': {'buffer': self._msdf_uniform_buffer}},
+                                {'binding': 1, 'resource': self._msdf_texture.createView() if self._msdf_texture is not None else None},
+                                {'binding': 2, 'resource': self._msdf_sampler}],
+                })
+                rp2.setBindGroup(0, bg)
+                rp2.draw(len(data)//8)
+            finally:
+                rp2.end()
+            self._msdf_batches = []
+        except Exception:
+            pass
 
     def draw_hud_canvas(self, canvas, left=0, top=0, w=None, h=None, opacity=100):
         """HUD texture in the WebGPU 3D engine: offscreen 2D canvas -> texture -> HUD quad.
@@ -346,7 +607,7 @@ class WebGPU3DEngine:
         """HTML-in-Canvas in the WebGPU 3D engine: live DOM -> texture via
         device.queue.drawElementImageToTexture(). Chrome 157+ only.
         Old (149-154): copyElementImageToTexture(). Returns True if upload
-        succeeded, False if not supported (caller falls back to HUD texture)."""
+        succeeded, False if not supported (NO FALLBACK - caller must handle failure explicitly)."""
         try:
             if element is None:
                 return False

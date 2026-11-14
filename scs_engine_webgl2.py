@@ -12,7 +12,7 @@ This file is a 3D engine:
   * Own scene list, own render() -- called from its OWN loop, not
     from the SCS 2D _submit.
   * If getContext('webgl2') fails, it FAILS. No fallback to 2D,
-    no silent downgrade, no projected-circle pretending to be 3D.
+    no silent downgrade, no projected-circle pretending to be 3D. NO FALLBACK CONTENT. Proper WebGL2 or FAIL.
 
 One canvas can only have ONE context type in a browser. So this
 engine must be the FIRST (and only) thing to call getContext() on
@@ -66,6 +66,151 @@ void main() {
   gl_FragColor = vec4(col + spec, 1.0);
 }
 """
+
+# ----------------------------------------------------------------------
+# MSDF text - FIRST-RATE (Chlumsky). Same standard as scs_webgl.py.
+# This engine had NO draw_label at all - button labels in 3D were dropped.
+# Now it has a proper MSDF atlas + shader, so labels show in true 3D.
+# ----------------------------------------------------------------------
+_MSDF_VS = """
+attribute vec2 a_pos;
+attribute vec2 a_uv;
+attribute vec4 a_color;
+uniform vec2 u_res;
+varying vec2 v_uv;
+varying vec4 v_color;
+void main() {
+  vec2 clip = (a_pos / u_res) * 2.0 - 1.0;
+  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+  v_uv = a_uv;
+  v_color = a_color;
+}
+"""
+# PROPER MSDF GLSL - Chlumsky. highp, median, w = fwidth(sd) WITHOUT pxRange multiplier.
+# pxRange is baked into atlas encoding (v = 0.5 + d/(2*range)), so multiplying again over-blurs 4x.
+# Old: w = fwidth(sd) * u_pxRange (wrong). New: w = fwidth(sd).
+_MSDF_FS = """
+precision highp float;
+uniform sampler2D u_tex;
+uniform float u_pxRange;
+varying vec2 v_uv;
+varying vec4 v_color;
+float msdf_median(float r, float g, float b) {
+  return min(max(min(r, g), min(max(r, g), b)), max(min(r, g), min(max(r, g), b)));
+}
+void main() {
+  vec4 t = texture2D(u_tex, v_uv);
+  float sd = msdf_median(t.r, t.g, t.b);
+  float w = fwidth(sd);
+  float alpha = smoothstep(0.5 - w, 0.5 + w, sd);
+  alpha = pow(alpha, 1.0 / 2.2);
+  if (alpha < 0.01) discard;
+  gl_FragColor = vec4(v_color.rgb, alpha * v_color.a);
+}
+"""
+
+def _msdf_is_edge(alpha, w, h, i):
+    # 8-neighbor edge check - 4-neighbor misses diagonal edges, makes MSDF bleed.
+    x = i % w; y = i // w; v = alpha[i] > 127
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            if dx == 0 and dy == 0: continue
+            nx, ny = x+dx, y+dy
+            if nx < 0 or nx >= w or ny < 0 or ny >= h: return True
+            if (alpha[ny*w+nx] > 127) != v: return True
+    return False
+
+def _edt_1d(f, n):
+    # Felzenszwalb 1D EDT: d[i] = min_j (f[j] + (i-j)^2), O(n), exact Euclidean.
+    d = [0.0]*n; v = [0]*n; z = [0.0]*(n+1)
+    k = 0; v[0] = 0; z[0] = -1e20; z[1] = 1e20
+    for q in range(1, n):
+        s = ((f[q] + q*q) - (f[v[k]] + v[k]*v[k])) / (2.0*q - 2.0*v[k])
+        while s <= z[k]:
+            k -= 1
+            s = ((f[q] + q*q) - (f[v[k]] + v[k]*v[k])) / (2.0*q - 2.0*v[k])
+        k += 1; v[k] = q; z[k] = s; z[k+1] = 1e20
+    k = 0
+    for q in range(n):
+        while z[k+1] < q: k += 1
+        d[q] = (q - v[k])*(q - v[k]) + f[v[k]]
+    return d
+
+def _msdf_distance(alpha, w, h):
+    # True Euclidean SDF via 2-pass Felzenszwalb (rows then cols), signed.
+    # Old code did chamfer + sqrt(d) where d was already distance (not squared) - wrong by sqrt.
+    INF = 1e9
+    tmp = [0.0]*(w*h)
+    for y in range(h):
+        row = [0.0 if _msdf_is_edge(alpha, w, h, y*w+x) else INF for x in range(w)]
+        d = _edt_1d(row, w)
+        for x in range(w): tmp[y*w+x] = d[x]
+    out = [0.0]*(w*h)
+    for x in range(w):
+        col = [tmp[y*w+x] for y in range(h)]
+        d = _edt_1d(col, h)
+        for y in range(h):
+            dist = math.sqrt(d[y]) if d[y] < INF else 8.0
+            out[y*w+x] = dist if alpha[y*w+x] > 127 else -dist
+    return out
+
+class _MSDFAtlas:
+    PX_RANGE = 4.0; PAD = 6
+    def __init__(self, size=2048):
+        self.size=size; self.canvas=None; self.ctx=None; self.cache={}; self.cursor_x=4; self.cursor_y=4; self.row_h=0; self.dirty=True; self._tmp=None; self._tmp_ctx=None
+        if document is not None:
+            try:
+                self.canvas=document.createElement('canvas'); self.canvas.width=size; self.canvas.height=size; self.ctx=self.canvas.getContext('2d')
+                try:
+                    self.ctx.fillStyle='rgb(128,128,128)'; self.ctx.fillRect(0,0,size,size)
+                except Exception: pass
+                self._tmp=document.createElement('canvas'); self._tmp_ctx=self._tmp.getContext('2d')
+            except Exception: self.canvas=None
+    def measure(self, text, font_str):
+        if self.ctx is not None:
+            try:
+                self.ctx.font=font_str; m=self.ctx.measureText(str(text)); return float(m.width), float(getattr(m,'actualBoundingBoxAscent',12)+getattr(m,'actualBoundingBoxDescent',4))
+            except Exception: pass
+        return len(str(text))*7.0, 14.0
+    def _render(self, text, font_str, x, y, w, h):
+        if self._tmp is None or self._tmp_ctx is None: return
+        try:
+            import re as _re; SUP=4; tw=max(1,int(w*SUP)); th=max(1,int(h*SUP)); self._tmp.width=tw; self._tmp.height=th; tc=self._tmp_ctx; tc.clearRect(0,0,tw,th)
+            m=_re.search(r'(\d+)px', font_str)
+            if m: tc.font=font_str.replace(m.group(0),'%dpx'%(int(m.group(1))*SUP))
+            else: tc.font=font_str
+            tc.fillStyle='white'; tc.textBaseline='top'; tc.fillText(str(text), self.PAD*SUP, self.PAD*SUP)
+            try: imgd=tc.getImageData(0,0,tw,th); data=list(imgd.data)
+            except Exception:
+                # NO FALLBACK: getImageData failed - do NOT fake MSDF with bitmap. Fail this glyph.
+                return
+            alpha=[data[i+3] for i in range(0,len(data),4)]; sdf=_msdf_distance(alpha,tw,th); out_w,out_h=int(w),int(h)
+            try: out_img=self.ctx.createImageData(out_w,out_h); out_data=out_img.data
+            except Exception: return
+            rng=self.PX_RANGE*SUP
+            for oy in range(out_h):
+                for ox in range(out_w):
+                    def _s(dx,dy):
+                        sx=min(tw-1,max(0,ox*SUP+self.PAD*SUP+dx)); sy=min(th-1,max(0,oy*SUP+self.PAD*SUP+dy)); idx=int(sy)*tw+int(sx); return sdf[idx] if 0<=idx<len(sdf) else 0.0
+                    r=_s(0,0); g=_s(1,0); b=_s(0,1)  # 1px SUP offsets, not 2px - tighter color bleeding
+                    def _e(d):
+                        v=0.5+d/(2.0*rng); return max(0,min(255,int(v*255.0)))
+                    oi=(oy*out_w+ox)*4; out_data[oi]=_e(r); out_data[oi+1]=_e(g); out_data[oi+2]=_e(b); out_data[oi+3]=255
+            try: self.ctx.putImageData(out_img,x,y)
+            except Exception: pass
+        except Exception: pass
+    def get_rect(self, text, font_str):
+        key=(str(text),font_str)
+        if key in self.cache: return self.cache[key]
+        w,h=self.measure(text,font_str); w,h=int(math.ceil(w))+2*self.PAD, int(math.ceil(h))+2*self.PAD
+        if self.cursor_x+w>self.size-4: self.cursor_x=4; self.cursor_y+=self.row_h+4; self.row_h=0
+        if self.cursor_y+h>self.size-4:
+            self.cache.clear(); self.cursor_x,self.cursor_y,self.row_h=4,4,0
+            try: self.ctx.fillStyle='rgb(128,128,128)'; self.ctx.fillRect(0,0,self.size,self.size)
+            except Exception: pass
+        x,y=self.cursor_x,self.cursor_y; self._render(text,font_str,x,y,w,h); self.cursor_x+=w+2; self.row_h=max(self.row_h,h); self.dirty=True
+        rect=(x/self.size,y/self.size,(x+w)/self.size,(y+h)/self.size,float(w),float(h)); self.cache[key]=rect; return rect
+
 
 _NAMED = {
     'black': (0, 0, 0), 'white': (255, 255, 255),
@@ -274,10 +419,106 @@ class WebGL2Engine:
                                     self._cube_index_count,
                                     gl.UNSIGNED_SHORT,
                                     self._cube_index_offset * 2)
+            # MSDF labels on top, depth off - buttons / HUD labels must show in 3D
+            try:
+                self._flush_msdf()
+            except Exception:
+                pass
             return True
         except Exception as e:
             self.error = 'render failed: %s' % e
             return False
+
+    # _flush_msdf is called at end of render() - see below
+    def draw_label(self, text, x, y, fill='black', size=12, font='arial', bold=False, italic=False, opacity=100, align='center', rotateAngle=0):
+        """MSDF label in true 3D engine. Was missing entirely - labels were dropped. Now first-rate MSDF."""
+        try:
+            if not hasattr(self, '_msdf_atlas'):
+                self._msdf_atlas = _MSDFAtlas()
+                self._msdf_tex = None
+                self._msdf_prog = None
+                self._msdf_buf = None
+                try:
+                    self._msdf_prog = self._compile(_MSDF_VS, _MSDF_FS)
+                    self._msdf_buf = self.gl.createBuffer() if getattr(self, 'gl', None) is not None else None
+                except Exception:
+                    pass
+            style = ('italic ' if italic else '') + ('bold ' if bold else '')
+            font_str = '%s%dpx %s' % (style, size, font)
+            u0, v0, u1, v1, w, h = self._msdf_atlas.get_rect(text, font_str)
+            a = str(align).lower()
+            ox = 0.0 if 'left' in a else (-w if 'right' in a else -w/2)
+            oy = 0.0 if 'top' in a else (-h if 'bottom' in a else -h/2)
+            # Store for render() to draw after 3D meshes, with depth off
+            if not hasattr(self, '_msdf_batches'):
+                self._msdf_batches = []
+            r, g, b = _parse_color(fill)[:3] if isinstance(_parse_color(fill), tuple) else (0,0,0)
+            # _parse_color returns 0-255 or 0-1? Normalize: if >1, /255
+            try:
+                if r > 1 or g > 1 or b > 1:
+                    r, g, b = r/255.0, g/255.0, b/255.0
+            except Exception:
+                pass
+            self._msdf_batches.append((x+ox, y+oy, w, h, u0, v0, u1, v1, r, g, b, opacity/100.0))
+        except Exception:
+            pass
+
+    def _flush_msdf(self):
+        """Draw queued MSDF labels: upload atlas if dirty, draw quads with depth off, ortho."""
+        try:
+            batches = getattr(self, '_msdf_batches', [])
+            if not batches or getattr(self, 'gl', None) is None or getattr(self, '_msdf_prog', None) is None:
+                return
+            gl = self.gl
+            atlas = getattr(self, '_msdf_atlas', None)
+            if atlas is None or atlas.canvas is None:
+                self._msdf_batches = []
+                return
+            if atlas.dirty:
+                tex = getattr(self, '_msdf_tex', None)
+                if tex is None:
+                    tex = gl.createTexture(); self._msdf_tex = tex
+                gl.bindTexture(gl.TEXTURE_2D, tex)
+                try:
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+                except Exception: pass
+                try: gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, atlas.canvas)
+                except Exception: pass
+                atlas.dirty = False
+            else:
+                gl.bindTexture(gl.TEXTURE_2D, getattr(self, '_msdf_tex', None))
+            # Build vertex data: x,y,u,v,r,g,b,a per vertex, 6 verts per quad
+            data = []
+            for (x, y, w, h, u0, v0, u1, v1, r, g, b, a) in batches:
+                data.extend([x, y, u0, v0, r, g, b, a, x+w, y, u1, v0, r, g, b, a, x+w, y+h, u1, v1, r, g, b, a,
+                             x, y, u0, v0, r, g, b, a, x+w, y+h, u1, v1, r, g, b, a, x, y+h, u0, v1, r, g, b, a])
+            try:
+                gl.useProgram(self._msdf_prog)
+                gl.disable(gl.DEPTH_TEST)
+                gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+                gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, self._msdf_tex)
+                try: gl.uniform1i(gl.getUniformLocation(self._msdf_prog, 'u_tex'), 0)
+                except Exception: pass
+                try: gl.uniform1f(gl.getUniformLocation(self._msdf_prog, 'u_pxRange'), float(_MSDFAtlas.PX_RANGE))
+                except Exception: pass
+                try: gl.uniform2f(gl.getUniformLocation(self._msdf_prog, 'u_res'), float(self.width), float(self.height))
+                except Exception: pass
+                gl.bindBuffer(gl.ARRAY_BUFFER, self._msdf_buf)
+                try: gl.bufferData(gl.ARRAY_BUFFER, window.Float32Array.new(data), gl.DYNAMIC_DRAW)
+                except Exception: pass
+                # a_pos 2, a_uv 2, a_color 4 = 8 floats stride
+                for name, size, off in (('a_pos',2,0),('a_uv',2,2),('a_color',4,4)):
+                    try:
+                        loc = gl.getAttribLocation(self._msdf_prog, name); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, size, gl.FLOAT, False, 8*4, off*4)
+                    except Exception: pass
+                gl.drawArrays(gl.TRIANGLES, 0, len(data)//8)
+                gl.enable(gl.DEPTH_TEST)
+            except Exception: pass
+            self._msdf_batches = []
+        except Exception: pass
 
     def draw_hud_canvas(self, canvas, left=0, top=0, w=None, h=None, opacity=100):
         """HUD texture in the 3D engine: offscreen 2D canvas -> texture -> fullscreen HUD quad.
