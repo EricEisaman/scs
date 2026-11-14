@@ -8,7 +8,7 @@ index.html is now ~20 lines: load Brython, load this module, call boot().
     scs_entrypoint.boot()
 
 What lives here:
-  * Align logic (exact CMU semantics, creation-time only): BIG DAWG APPROVED
+  * Align logic (exact CMU semantics, creation-time only)
   * Shape classes (Rect, Oval, Circle, RegularPolygon, Star, Line,
     Polygon, Arc, Label, Image, Group) -- each with draw(renderer)
   * Immediate-mode draw* functions -- thin forwards to the renderer
@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v6-boot-once-hud-canvas'
+__version__ = '2026-11-14-runApp-*args-v7-window-boot-guard'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -3242,8 +3242,23 @@ def boot(app=None):
             pass
     except Exception:
         pass
-    # Boot-once: index.html + JS loader both call boot(). Second boot would
-    # stop() the first loop, reset _hud_mode, and re-run as 2d, winning over webgl2.
+    # Boot-once at WINDOW level, not Python-module level.
+    # v6 used _booted_once (Python global). Two separate Brython loads = two
+    # separate globals, so second boot still ran, stopped first loop, reset
+    # _hud_mode, and re-ran as 2d, locking visible canvas to 2d.
+    # window is shared across loads. First boot sets window._scs_booted = True.
+    # Second boot sees it and returns before anything runs.
+    try:
+        from browser import window as _w_boot
+        try:
+            if getattr(_w_boot, '_scs_booted', False):
+                return
+            _w_boot._scs_booted = True
+        except Exception:
+            pass
+    except Exception:
+        pass
+    # Also keep Python guard for same-module double-boot
     global _booted_once
     try:
         if _booted_once:
