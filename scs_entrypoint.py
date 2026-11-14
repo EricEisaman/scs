@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v5-no-shape-guess'
+__version__ = '2026-11-14-runApp-*args-v6-boot-once-hud-canvas'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -232,6 +232,7 @@ _canvas = None
 _ctx = None            # 2D context when renderer is 2D, else None
 _renderer = None       # current renderer object
 _renderer_kind = '2d'
+_booted_once = False
 # HUD mode: any existing 2D app can just change runApp() to get it in 3D.
 # runApp(..., renderer='webgl2' / 'webgpu' / '3d', hud=True, mode='hud'/'3d')
 # The 2D app draws unchanged to an offscreen 2D canvas. That canvas is
@@ -680,6 +681,12 @@ def _activate_renderer(renderer, kind):
 
 
 def _ensure_canvas():
+    # HUD mode: 2D shapes draw to OFFSCREEN, not visible canvas.
+    # If we create a 2d context on the visible canvas here, the browser locks it
+    # to 2d and later WebGL2 creation on the same canvas FAILS (returns null).
+    # That was why v5 still ended as mode=2d even with hud=True.
+    if _hud_mode and _hud_offscreen is not None:
+        return _hud_offscreen
     global _canvas
     canvas = _find_canvas()
     if canvas is None:
@@ -3235,6 +3242,15 @@ def boot(app=None):
             pass
     except Exception:
         pass
+    # Boot-once: index.html + JS loader both call boot(). Second boot would
+    # stop() the first loop, reset _hud_mode, and re-run as 2d, winning over webgl2.
+    global _booted_once
+    try:
+        if _booted_once:
+            return
+        _booted_once = True
+    except NameError:
+        _booted_once = True
     _bind_events()
     load(app)
 
