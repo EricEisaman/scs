@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v20-log-engine-import'
+__version__ = '2026-11-14-runApp-*args-v21-engine-whitelist'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -604,6 +604,17 @@ def _import_renderer_module(name):
     tries both layouts and raises a RuntimeError that names the file
     that must be deployed alongside scs_entrypoint.py.
     """
+    # Engine is a MODULE, not a Renderer class - return the module itself.
+    # v20 failed here: whitelist only knew 2d/webgl/webgpu, so engine import
+    # raised Unknown renderer module and fell back to scs_webgl -> black.
+    if name == 'scs_engine_webgl2':
+        try:
+            import scs_engine_webgl2 as _eng
+            return _eng
+        except Exception:
+            from scs.scs_engine_webgl2 import WebGL2Engine as _E2
+            import scs.scs_engine_webgl2 as _eng2
+            return _eng2
     try:
         if name == 'scs_2d':
             from scs_2d import Renderer2D
@@ -622,6 +633,9 @@ def _import_renderer_module(name):
             if name == 'scs_webgl':
                 from scs.scs_webgl import RendererWebGL2
                 return RendererWebGL2
+            if name == 'scs_engine_webgl2':
+                import scs.scs_engine_webgl2 as _eng3
+                return _eng3
             if name == 'scs_webgpu':
                 from scs.scs_webgpu import RendererWebGPU
                 return RendererWebGPU
