@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-FIXED-v36-app-size-wins-no-ro-override'
+__version__ = '2026-11-14-FIXED-v37-no-resize-ever'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -710,8 +710,11 @@ def _measure_canvas_css():
         return (float(_canvas_width), float(_canvas_height))
 
 def _queue_resize(cssW, cssH, backingW=None, backingH=None):
-    # Coalesce: keep only the LATEST request. _apply_pending_resize runs
-    # before the next frame draw.
+    # v37: NO RESIZING EVER. Fixed-size app: runApp(900,560) is 900x560.
+    # There was never supposed to be a resize pipeline. RO / DPR / presentation
+    # resizing is what blew the canvas up to viewport size and made the
+    # poem text huge and clipped. This is a no-op by design.
+    return
     global _resize_pending
     try:
         _cssW, _cssH = float(cssW), float(cssH)
@@ -727,6 +730,8 @@ def _queue_resize(cssW, cssH, backingW=None, backingH=None):
         pass
 
 def _apply_pending_resize():
+    # v37: NO RESIZING EVER. See _queue_resize.
+    return
     # Called at the START of _frame, before any draw. Applies one coalesced
     # update: buffer only if changed, HUD offscreen + renderer sizes in step,
     # fullscreen button repositioned. Post-resize, the next draw restores
@@ -804,6 +809,8 @@ def _apply_pending_resize():
         pass
 
 def _check_pixel_ratio_change():
+    # v37: NO RESIZING EVER. DPR wobble must not resize the canvas.
+    return
     # Zoom / display-density change with unchanged CSS size: device-pixel
     # observation would catch it, but not all browsers support it. Check DPR
     # every frame in the resize pipeline and queue a buffer-only update.
@@ -821,6 +828,8 @@ def _check_pixel_ratio_change():
         pass
 
 def _on_resize_observer(entries, observer=None):
+    # v37: NO RESIZING EVER.
+    return
     # ResizeObserver: prefer devicePixelContentBoxSize (exact backing size),
     # fallback to contentBoxSize * budgeted ratio, then bounding rect * ratio.
     try:
@@ -862,6 +871,9 @@ def _on_resize_observer(entries, observer=None):
         pass
 
 def _ensure_resize_observer():
+    # v37: NO RESIZING EVER. Do not create a ResizeObserver at all.
+    # Creating it was enough: it fired on load and overwrote the app size.
+    return
     global _resize_observer
     if _resize_observer is not None:
         return
@@ -3507,6 +3519,8 @@ def getFullscreenState():
 
 def _setup_presentation(canvas):
     global _presentation, _presentation_coordinator
+    # v37: NO RESIZING EVER. PresentationController is gone for all apps.
+    return
     # v36: fixed-size app - PresentationController must NOT resize it.
     # It observes the canvas/parent and calls apply_size() with the PAGE
     # size, which overwrites runApp(900,560). Only run it for responsive apps.
