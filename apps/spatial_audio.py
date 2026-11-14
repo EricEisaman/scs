@@ -1,383 +1,505 @@
-# Spatial audio demo -- REAL 3D: a sphere humming on a LARGE PLANE.
+# Spatial audio demo -- THREE modes, ONE rule:
 #
-# Run: ?app=spatial_audio  (or paste into the sandbox)
+#   NO ENGINE SPECIFIED  ->  OLD 2D ENGINE (SCS runApp, no renderer arg).
+#                             This is the compat default. Nothing upgrades
+#                             you silently. The 2D engine draws the scene
+#                             with its own 2D primitives (projected circle
+#                             + grid lines) and says so in the HUD.
+#   ?engine=webgl2     ->  SEPARATE WebGL2 3D engine (scs_engine_webgl2.py).
+#                             Own native WebGL2 context, own loop, NO runApp.
+#   ?engine=webgpu     ->  SEPARATE WebGPU 3D engine (scs_engine_webgpu.py).
+#                             Own native WebGPU context/device, own loop,
+#                             NO runApp.
 #
-# Scene: a BLUE SPHERE sits on a 40 x 40 m plane (its bottom touches
-# y=0). It hums (440 Hz sine). YOU are the listener -- the Camera3D
-# IS the Web Audio AudioListener. The sphere is a pipeline:
+# (?renderer=webgl2 / webgpu is also honoured as an engine request
+# for this demo, so ?app=spatial_audio_demo&renderer=webgl2 works.)
 #
-#   osc -> gain -> envelope -> panner (HRTF, inverse distance)
-#       -> destination     (+ optional reverb send)
-#
-#   WASD ......... move camera / listener (W forward, S back,
-#                  A strafe left, D strafe right)
-#   Q / E ........ down / up
-#   Shift ........ sprint
-#   Mouse drag ... look around
-#   Arrow keys ... look around (no mouse needed)
-#   Space ........ play / stop
-#   1 / 2 / 3 .... move sphere: centre / left / right
-#   C ............ sphere to camera front
-#   E ............ cycle envelope (pad / pluck / piano / bass)
-#   P ............ toggle pipeline <-> classic osc->gain->panner
+# Scene in all three modes: a BLUE SPHERE is the sound source
+# (440 Hz sine). You are the listener -- Camera3D drives BOTH the
+# view (GL or 2D projection) AND the Web Audio listener, so what
+# you see is what you hear.
+#   WASD ....... move   Q/E down/up   Shift sprint
+#   Mouse drag . look   Arrows ...... look
+#   Space / PLAY play/stop   1/2/3 move source   C centre front
 #
 # Walk toward the sphere: louder. Walk past it: left -> right.
-# The HUD shows the same distance / gain / pan the browser hears.
-#
-# Rendering is WEBGL 3D: setRenderer('webgl2') BEFORE runApp, and
-# runApp(900, 560, renderer='webgl2'). No Canvas2D fallback, no faking 3D
-# in 2D. If you see renderer=2d, the app did not ask for WebGL - that's a bug.
 
-from scs import *
-from scs_spatial_audio import SpatialAudioEngine
-from scs_3d import Camera3D
-import math as _math
+try:
+    from browser import document, window
+except ImportError:
+    document = None
+    window = None
 
-SPHERE_START = (0.0, 1.0, -2.0)   # radius 1 -> bottom touches the plane
-SPHERE_PRESETS = {
-    '1': (0.0, 1.0, -2.0),
-    '2': (-6.0, 1.0, -2.0),
-    '3': (6.0, 1.0, -2.0),
-}
-ENVELOPES = ['pad', 'pluck', 'piano', 'bass']
-PLANE_HALF = 20.0   # plane is 40 x 40 m
-GRID_STEP = 4.0
-
-PLAY_BTN = (40, 470, 160, 44)
-STOP_BTN = (212, 470, 120, 44)
-CENTER_BTN = (344, 470, 200, 44)
-MODE_BTN = (556, 470, 160, 44)
+import math
 
 
-def _inside(x, y, box):
-    bx, by, bw, bh = box
-    return bx <= x <= bx + bw and by <= y <= by + bh
-
-
-def _toggle_play(app):
-    if app.src is None:
-        app.status = 'Audio unavailable -- check scs_spatial_audio.py is deployed'
-        return
-    if app.src.playing:
-        app.src.stop()
-        app.playing = False
-        app.status = 'Stopped -- press Space or PLAY to hear the sphere'
-    else:
-        ok = app.src.start()
-        app.playing = bool(ok)
-        if ok:
-            app.status = 'Playing -- walk with WASD, listen for left/right'
-        else:
-            app.status = 'Audio blocked -- click PLAY again (browser gesture)'
-
-
-def _rebuild_source(app):
-    """Rebuild the sphere's source (envelope / pipeline mode changed)."""
-    was_playing = app.playing
-    if app.src is not None:
-        try:
-            app.src.stop()
-        except Exception:
-            pass
-    app.src = app.spatial.create_source(
-        position=app.sphere_pos, freq=440.0, kind='sine',
-        volume=0.5, loop=True, name='sphere',
-        envelope=app.envelope, pipeline=app.use_pipeline)
-    app.playing = False
-    if was_playing:
-        _toggle_play(app)
-
-
-def _project(app, world):
-    """World -> screen (x, y, depth, behind) for the 900x560 canvas."""
-    return app.camera.project(world, 900.0, 560.0)
-
-
-def onAppStart(app):
-    # WEBGL 3D - MUST be WebGL, not 2d. setRenderer applies to this runApp.
-    # The real fix is in main(): runApp(..., renderer='webgl2') + setRenderer before runApp.
-    # This call here is belt-and-braces for the next frame if runApp was called without renderer.
+def _engine_requested():
     try:
-        setRenderer('webgl2')
+        search = str(window.location.search or '').lower()
     except Exception:
-        pass
-    app.background = '#0e0e1a'
-    app.camera = Camera3D(position=(0.0, 2.0, 6.0), yaw=0.0, pitch=-4.0)
-    app.spatial = SpatialAudioEngine()
-    app.sphere_pos = SPHERE_START
-    app.envelope = 'pad'
-    app.use_pipeline = True
-    app.src = None
-    if app.spatial is not None:
-        app.src = app.spatial.create_source(
-            position=app.sphere_pos, freq=440.0, kind='sine',
-            volume=0.5, loop=True, name='sphere',
-            envelope=app.envelope, pipeline=True)
-    app.playing = False
-    app.status = 'Click PLAY (browser requires a click for audio)'
-    app.speed = 0.14
-    app.sprint = 0.34
-    app.sprinting = False
-    app.dragging = False
-    app.lastMouse = None
-    app.pulse = 0.0
-    app.stepCount = 0
+        search = ''
+    if 'engine=webgpu' in search or 'renderer=webgpu' in search:
+        return 'webgpu'
+    if 'engine=webgl2' in search or 'renderer=webgl2' in search:
+        return 'webgl2'
+    # DEFAULT: old 2D engine. Preserve compatibility.
+    return '2d'
 
 
-def onStep(app):
-    app.stepCount += 1
-    if app.playing:
-        app.pulse += 0.12
-    # Sync listener + panner every step -- same camera drives view + audio.
-    if app.spatial is not None:
-        app.spatial.update(app.camera)
+ENGINE = _engine_requested()
+
+PRESETS = {
+    '1': (0.0, 1.5, -2.0),
+    '2': (-4.0, 1.5, -2.0),
+    '3': (4.0, 1.5, -2.0),
+}
 
 
-def onKeyHold(app, key):
-    # Continuous WASD -- the camera IS the listener, so WASD moves
-    # both what you see and what you hear.
-    k = str(key).lower()
-    speed = app.sprint if app.sprinting else app.speed
-    if k == 'w':
-        app.camera.move(forward=speed)
-    elif k == 's':
-        app.camera.move(forward=-speed)
-    elif k == 'a':
-        app.camera.move(right=-speed)
-    elif k == 'd':
-        app.camera.move(right=speed)
-    elif k == 'q':
-        app.camera.move(up=-speed)
-    elif k == 'e' and False:
-        pass  # E is envelope-cycle on press, not up -- see onKeyPress
-    elif k == 'q':
-        app.camera.move(up=-speed)
+# ======================================================================
+# SEPARATE ENGINES: WebGL2 / WebGPU. No runApp, no SCS 2D loop.
+# The engine owns the canvas + context. If it fails, it fails --
+# it does NOT fall back to 2D.
+# ======================================================================
+if ENGINE in ('webgl2', 'webgpu'):
+
+    from scs_3d import Camera3D
+    from scs_spatial_audio import SpatialAudioEngine
+    from scs_engine_webgl2 import WebGL2Engine
+    from scs_engine_webgpu import WebGPU3DEngine
+
+    class Demo:
+        def __init__(self):
+            self.camera = Camera3D(position=(0.0, 2.0, 6.0), yaw=0.0,
+                                   pitch=-4.0)
+            self.spatial = SpatialAudioEngine()
+            self.src = self.spatial.create_source(
+                position=(0.0, 1.5, -2.0), freq=440.0, kind='sine',
+                volume=0.5, loop=True, name='blue sphere')
+            self.playing = False
+            self.status = 'Click PLAY -- browser needs a click for audio'
+            self.held = set()
+            self.sprinting = False
+            self.dragging = False
+            self.last_mouse = None
+            self.pulse = 0.0
+            self.engine = None
+            self.hud_status = None
+            self.hud_stats = None
+            self._pick_engine()
+
+        def _pick_engine(self):
+            canvas = None
+            try:
+                canvas = document.getElementById('canvas')
+            except Exception:
+                canvas = None
+            if ENGINE == 'webgpu':
+                self.engine = WebGPU3DEngine(canvas=canvas, width=900,
+                                             height=560)
+                self.engine.on_ready = self._start_loop
+                self.engine.on_error = self._engine_failed
+                if self.engine.error:
+                    self._engine_failed(self.engine.error)
+            else:
+                self.engine = WebGL2Engine(canvas=canvas, width=900,
+                                           height=560)
+                if self.engine.error:
+                    self._engine_failed(self.engine.error)
+                else:
+                    self._start_loop()
+
+        def _engine_failed(self, err):
+            self.status = ('ENGINE FAILED (%s): %s -- not falling back '
+                           'to 2D. Reload with no ?engine= for 2D.' %
+                           (ENGINE, err))
+            self._build_hud()
+            if self.hud_status is not None:
+                self.hud_status.textContent = self.status
+
+        def _build_hud(self):
+            if document is None:
+                return
+            try:
+                body = document.body
+                wrap = document.createElement('div')
+                wrap.setAttribute('style',
+                    'font-family:sans-serif;color:#fff;max-width:900px;'
+                    'margin:8px auto;')
+                title = document.createElement('div')
+                title.textContent = ('SPATIAL AUDIO -- blue sphere = sound '
+                                     '(engine: %s, separate context)' % ENGINE)
+                title.setAttribute('style',
+                                   'font-size:18px;font-weight:bold;')
+                sub = document.createElement('div')
+                sub.textContent = ('WASD move | Q/E down/up | Shift sprint | '
+                                   'Drag / Arrows look | Space play | '
+                                   '1/2/3 move source | C centre front')
+                sub.setAttribute('style', 'color:#a0a0c0;font-size:13px;')
+                self.hud_status = document.createElement('div')
+                self.hud_status.textContent = self.status
+                self.hud_status.setAttribute(
+                    'style', 'background:#26263a;padding:8px;margin:8px 0;'
+                             'color:#ffd97a;')
+                self.hud_stats = document.createElement('div')
+                self.hud_stats.setAttribute(
+                    'style', 'color:#ffd97a;font-size:13px;')
+                btn = document.createElement('button')
+                btn.textContent = 'PLAY'
+                btn.setAttribute('style',
+                                 'padding:8px 20px;margin-right:8px;')
+                btn.addEventListener('click', self._on_play_click)
+                wrap.appendChild(title)
+                wrap.appendChild(sub)
+                wrap.appendChild(self.hud_status)
+                wrap.appendChild(self.hud_stats)
+                wrap.appendChild(btn)
+                body.insertBefore(wrap, body.firstChild)
+            except Exception:
+                pass
+
+        def _on_play_click(self, _ev=None):
+            self.toggle_play()
+
+        def toggle_play(self):
+            if self.src.playing:
+                self.src.stop()
+                self.playing = False
+                self.status = 'Stopped -- press Space or PLAY'
+            else:
+                ok = self.src.start()
+                self.playing = bool(ok)
+                self.status = ('Playing -- walk with WASD, listen left/right'
+                               if ok else 'Audio blocked -- click PLAY again')
+            if self.hud_status is not None:
+                self.hud_status.textContent = self.status
+
+        def _bind_input(self):
+            if window is None:
+                return
+            try:
+                window.addEventListener('keydown', self._on_key_down)
+                window.addEventListener('keyup', self._on_key_up)
+                c = self.engine.canvas if self.engine else None
+                if c is not None:
+                    c.addEventListener('mousedown', self._on_mouse_down)
+                    window.addEventListener('mousemove', self._on_mouse_move)
+                    window.addEventListener('mouseup', self._on_mouse_up)
+            except Exception:
+                pass
+
+        def _on_key_down(self, ev):
+            k = str(getattr(ev, 'key', '') or '').lower()
+            if k == ' ':
+                self.toggle_play()
+                return
+            if k in PRESETS:
+                self.src.set_position(PRESETS[k])
+                self.status = 'Source moved to %s' % (PRESETS[k],)
+                return
+            if k == 'c':
+                f = self.camera.forward()
+                p = self.camera.position
+                self.src.set_position((p[0] + f[0] * 4.0, 1.5,
+                                       p[2] + f[2] * 4.0))
+                self.status = 'Source moved in front of you'
+                return
+            if k == 'shift':
+                self.sprinting = True
+                return
+            if k == 'arrowleft':
+                self.camera.look(-4.0, 0.0)
+            elif k == 'arrowright':
+                self.camera.look(4.0, 0.0)
+            elif k == 'arrowup':
+                self.camera.look(0.0, 3.0)
+            elif k == 'arrowdown':
+                self.camera.look(0.0, -3.0)
+            else:
+                self.held.add(k)
+
+        def _on_key_up(self, ev):
+            k = str(getattr(ev, 'key', '') or '').lower()
+            if k == 'shift':
+                self.sprinting = False
+            self.held.discard(k)
+
+        def _on_mouse_down(self, ev):
+            self.dragging = True
+            self.last_mouse = (ev.clientX, ev.clientY)
+
+        def _on_mouse_move(self, ev):
+            if self.dragging and self.last_mouse is not None:
+                dx = ev.clientX - self.last_mouse[0]
+                dy = ev.clientY - self.last_mouse[1]
+                self.camera.look(dx * 0.35, -dy * 0.35)
+                self.last_mouse = (ev.clientX, ev.clientY)
+
+        def _on_mouse_up(self, _ev):
+            self.dragging = False
+            self.last_mouse = None
+
+        def _start_loop(self):
+            self._build_hud()
+            self._bind_input()
+            if window is not None:
+                window.requestAnimationFrame(self._frame)
+
+        def _frame(self, _t=None):
+            speed = 0.30 if self.sprinting else 0.12
+            if 'w' in self.held:
+                self.camera.move(forward=speed)
+            if 's' in self.held:
+                self.camera.move(forward=-speed)
+            if 'a' in self.held:
+                self.camera.move(right=-speed)
+            if 'd' in self.held:
+                self.camera.move(right=speed)
+            if 'q' in self.held:
+                self.camera.move(up=-speed)
+            if 'e' in self.held:
+                self.camera.move(up=speed)
+            if self.playing:
+                self.pulse += 0.12
+            self.spatial.update(self.camera)
+            self.engine.clear_scene()
+            self.engine.add_floor(22.0, '#22223a')
+            pulse_r = 0.9 + (0.15 * math.sin(self.pulse)
+                             if self.playing else 0.0)
+            sx, sy, sz = self.src.position
+            self.engine.add_metal_sphere(sx, sy, sz, pulse_r, color='#a8c4ff', roughness=0.12)
+            self.engine.add_box(-3.0, 0.5, -4.0, 1.0, 1.0, 1.0, 'gray')
+            self.engine.add_box(3.0, 0.5, -1.0, 1.0, 1.0, 1.0, 'gray')
+            self.engine.render(self.camera)
+            if self.hud_stats is not None:
+                dist = self.src.distance_to(self.camera.position)
+                gain = self.src.gain_at(self.camera.position)
+                pan = self.src.pan_at(self.camera)
+                p = self.camera.position
+                self.hud_stats.textContent = (
+                    'dist %.2f m  gain %.2f  pan %+.2f  |  '
+                    'cam (%.1f, %.1f, %.1f) yaw %.0f pitch %.0f' %
+                    (dist, gain, pan, p[0], p[1], p[2],
+                     self.camera.yaw, self.camera.pitch))
+            if self.hud_status is not None:
+                self.hud_status.textContent = self.status
+            if window is not None:
+                window.requestAnimationFrame(self._frame)
+
+    Demo()
 
 
-def onKeyPress(app, key):
-    k = str(key).lower()
-    if k == 'shift':
-        app.sprinting = True
-        return
-    if k == ' ':
-        _toggle_play(app)
-        return
-    if k in SPHERE_PRESETS and app.src is not None:
-        app.sphere_pos = SPHERE_PRESETS[k]
-        app.src.set_position(app.sphere_pos)
-        app.status = 'Sphere moved to %s' % (app.sphere_pos,)
-        return
-    if k == 'c' and app.src is not None:
-        f = app.camera.forward()
-        p = app.camera.position
-        app.sphere_pos = (p[0] + f[0] * 4.0, 1.0, p[2] + f[2] * 4.0)
-        app.src.set_position(app.sphere_pos)
-        app.status = 'Sphere moved in front of you'
-        return
-    if k == 'e':
-        i = ENVELOPES.index(app.envelope)
-        app.envelope = ENVELOPES[(i + 1) % len(ENVELOPES)]
-        _rebuild_source(app)
-        app.status = 'Envelope: %s' % app.envelope
-        return
-    if k == 'p':
-        app.use_pipeline = not app.use_pipeline
-        _rebuild_source(app)
-        app.status = 'Source mode: %s' % ('pipeline' if app.use_pipeline else 'classic')
-        return
-    # Q / E as press (in case hold is not delivered): Q down, E is envelope.
-    if k == 'q':
-        app.camera.move(up=-0.14)
-        return
-    # Arrow keys = look (no mouse needed).
-    if k == 'left':
-        app.camera.look(-4.0, 0.0)
-    elif k == 'right':
-        app.camera.look(4.0, 0.0)
-    elif k == 'up':
-        app.camera.look(0.0, 3.0)
-    elif k == 'down':
-        app.camera.look(0.0, -3.0)
+# ======================================================================
+# DEFAULT: OLD 2D ENGINE. No ?engine= -> runApp() with NO renderer arg,
+# so _resolve_renderer_kind() falls through to '2d'. This is the
+# compat path. The scene is drawn with the 2D engine's own primitives.
+# It does NOT pretend to be 3D -- HUD says "2D compat".
+# ======================================================================
+else:
+    from scs import *
 
+    PLAY_BTN = (40, 470, 160, 44)
+    STOP_BTN = (212, 470, 120, 44)
+    CENTER_BTN = (344, 470, 200, 44)
 
-def onKeyRelease(app, key):
-    if str(key).lower() == 'shift':
-        app.sprinting = False
+    def _inside(x, y, box):
+        bx, by, bw, bh = box
+        return bx <= x <= bx + bw and by <= y <= by + bh
 
-
-def onMousePress(app, x, y):
-    if _inside(x, y, PLAY_BTN):
-        _toggle_play(app)
-        return
-    if _inside(x, y, STOP_BTN):
-        if app.src is not None:
+    def _toggle_play_2d(app):
+        if app.src is None:
+            app.status = 'Audio unavailable'
+            return
+        if app.src.playing:
             app.src.stop()
+            app.playing = False
+            app.status = 'Stopped -- press Space or PLAY'
+        else:
+            ok = app.src.start()
+            app.playing = bool(ok)
+            app.status = ('Playing -- walk with WASD, listen left/right'
+                          if ok else
+                          'Audio blocked -- click PLAY again')
+
+    def onAppStart(app):
+        app.background = '#0e0e1a'
+        # NO setRenderer() here. No renderer arg in runApp() below.
+        # No engine specified -> old 2D engine. That is the default.
+        app.camera = Camera3D(position=(0.0, 2.0, 6.0), yaw=0.0,
+                              pitch=-4.0)
+        app.spatial = getSpatialAudioEngine()
+        app.src = None
+        if app.spatial is not None:
+            app.src = app.spatial.create_source(
+                position=(0.0, 1.5, -2.0), freq=440.0, kind='sine',
+                volume=0.5, loop=True, name='blue sphere')
         app.playing = False
-        app.status = 'Stopped'
-        return
-    if _inside(x, y, CENTER_BTN):
-        if app.src is not None:
-            app.sphere_pos = (0.0, 1.0, -2.0)
-            app.src.set_position(app.sphere_pos)
-            app.status = 'Sphere centred'
-        return
-    if _inside(x, y, MODE_BTN):
-        app.use_pipeline = not app.use_pipeline
-        _rebuild_source(app)
-        app.status = 'Source mode: %s' % ('pipeline' if app.use_pipeline else 'classic')
-        return
-    app.dragging = True
-    app.lastMouse = (x, y)
+        app.status = 'Click PLAY (browser needs a click for audio)'
+        app.speed = 0.12
+        app.sprint = 0.30
+        app.sprinting = False
+        app.dragging = False
+        app.lastMouse = None
+        app.pulse = 0.0
 
+    def onStep(app):
+        if app.playing:
+            app.pulse += 0.12
+        if app.spatial is not None:
+            app.spatial.update(app.camera)
 
-def onMouseDrag(app, x, y):
-    if app.dragging and app.lastMouse is not None:
-        dx = x - app.lastMouse[0]
-        dy = y - app.lastMouse[1]
-        # Drag right = turn right, drag up = look up.
-        app.camera.look(dx * 0.35, -dy * 0.35)
+    def onKeyHold(app, key):
+        k = str(key).lower()
+        speed = app.sprint if getattr(app, 'sprinting', False) else app.speed
+        if k == 'w':
+            app.camera.move(forward=speed)
+        elif k == 's':
+            app.camera.move(forward=-speed)
+        elif k == 'a':
+            app.camera.move(right=-speed)
+        elif k == 'd':
+            app.camera.move(right=speed)
+        elif k == 'q':
+            app.camera.move(up=-speed)
+        elif k == 'e':
+            app.camera.move(up=speed)
+
+    def onKeyPress(app, key):
+        k = str(key).lower()
+        if k == 'shift':
+            app.sprinting = True
+            return
+        if k == ' ':
+            _toggle_play_2d(app)
+            return
+        if k in PRESETS and app.src is not None:
+            app.src.set_position(PRESETS[k])
+            app.status = 'Source moved to %s' % (PRESETS[k],)
+            return
+        if k == 'c' and app.src is not None:
+            f = app.camera.forward()
+            p = app.camera.position
+            app.src.set_position((p[0] + f[0] * 4.0, 1.5,
+                                  p[2] + f[2] * 4.0))
+            app.status = 'Source moved in front of you'
+            return
+        if k == 'left':
+            app.camera.look(-4.0, 0.0)
+        elif k == 'right':
+            app.camera.look(4.0, 0.0)
+        elif k == 'up':
+            app.camera.look(0.0, 3.0)
+        elif k == 'down':
+            app.camera.look(0.0, -3.0)
+
+    def onKeyRelease(app, key):
+        if str(key).lower() == 'shift':
+            app.sprinting = False
+
+    def onMousePress(app, x, y):
+        if _inside(x, y, PLAY_BTN):
+            _toggle_play_2d(app)
+            return
+        if _inside(x, y, STOP_BTN):
+            if app.src is not None:
+                app.src.stop()
+            app.playing = False
+            app.status = 'Stopped'
+            return
+        if _inside(x, y, CENTER_BTN):
+            if app.src is not None:
+                app.src.set_position((0.0, 1.5, -2.0))
+                app.status = 'Source centred'
+            return
+        app.dragging = True
         app.lastMouse = (x, y)
 
+    def onMouseDrag(app, x, y):
+        if app.dragging and app.lastMouse is not None:
+            dx = x - app.lastMouse[0]
+            dy = y - app.lastMouse[1]
+            app.camera.look(dx * 0.35, -dy * 0.35)
+            app.lastMouse = (x, y)
 
-def onMouseRelease(app, x, y):
-    app.dragging = False
-    app.lastMouse = None
+    def onMouseRelease(app, x, y):
+        app.dragging = False
+        app.lastMouse = None
 
+    def redrawAll(app):
+        # 2D compat rendering: floor grid as projected 2D lines,
+        # sphere as a projected 2D circle sized by distance.
+        # This IS the old 2D engine doing its job -- not 3D.
+        cam = app.camera
+        W, H = 900, 560
+        # Floor grid
+        for i in range(-10, 11, 2):
+            for (x1, z1, x2, z2) in ((-10, i, 10, i), (i, -10, i, 10)):
+                p1 = cam.project((x1, 0.0, z1), W, H)
+                p2 = cam.project((x2, 0.0, z2), W, H)
+                if not p1[3] and not p2[3]:
+                    drawLine(p1[0], p1[1], p2[0], p2[1],
+                             fill='#3a3a5a', lineWidth=1)
+        # Depth-reference boxes as projected squares
+        for (bx, bz) in ((-3.0, -4.0), (3.0, -1.0)):
+            p = cam.project((bx, 0.5, bz), W, H)
+            if not p[3]:
+                drawRect(p[0] - 18, p[1] - 18, 36, 36, fill='gray')
+        # Sphere as projected circle
+        if app.src is not None:
+            sx, sy, sz = app.src.position
+        else:
+            sx, sy, sz = (0.0, 1.5, -2.0)
+        p = cam.project((sx, sy, sz), W, H)
+        if not p[3]:
+            dist = max(0.1, math.sqrt(
+                (sx - cam.position[0]) ** 2 +
+                (sy - cam.position[1]) ** 2 +
+                (sz - cam.position[2]) ** 2))
+            pr = 0.9 * (H / 2.0) / dist
+            if app.playing:
+                pr *= (1.0 + 0.15 * math.sin(app.pulse))
+            drawCircle(p[0], p[1], max(4.0, pr), fill='blue',
+                       border='black', borderWidth=1)
+            drawCircle(p[0] - pr * 0.3, p[1] - pr * 0.35,
+                       max(1.0, pr * 0.18), fill='white')
+        # HUD
+        drawRect(0, 0, 900, 62, fill='#000000')
+        drawLabel('SPATIAL AUDIO -- 2D COMPAT (no ?engine=, old 2D engine)',
+                  20, 18, fill='white', size=18, bold=True, align='left-top')
+        drawLabel('WASD move | Q/E down/up | Shift sprint | Drag / Arrows look | Space play',
+                  20, 42, fill='#a0a0c0', size=12, align='left-top')
+        drawLabel('Renderer: %s' % getRendererKind(),
+                  880, 18, fill='#ffd97a', size=13, align='right-top')
+        if app.src is not None:
+            dist = app.src.distance_to(app.camera.position)
+            gain = app.src.gain_at(app.camera.position)
+            pan = app.src.pan_at(app.camera)
+            drawLabel('dist %.2f m  gain %.2f  pan %+.2f' % (dist, gain, pan),
+                      880, 42, fill='#ffd97a', size=12, align='right-top')
+        drawRect(40, 430, 820, 32, fill='#26263a', roundness=6)
+        drawLabel(app.status, 56, 446, fill='#ffd97a', size=13,
+                  align='left-top')
+        drawRect(PLAY_BTN[0], PLAY_BTN[1], PLAY_BTN[2], PLAY_BTN[3],
+                 fill='#22aa66' if not app.playing else '#ccaa22',
+                 roundness=8)
+        drawLabel('PLAY' if not app.playing else 'PAUSE',
+                  PLAY_BTN[0] + 80, PLAY_BTN[1] + 22,
+                  fill='white', size=15, bold=True, align='center')
+        drawRect(STOP_BTN[0], STOP_BTN[1], STOP_BTN[2], STOP_BTN[3],
+                 fill='#cc3344', roundness=8)
+        drawLabel('STOP', STOP_BTN[0] + 60, STOP_BTN[1] + 22,
+                  fill='white', size=15, bold=True, align='center')
+        drawRect(CENTER_BTN[0], CENTER_BTN[1], CENTER_BTN[2], CENTER_BTN[3],
+                 fill='#2e2e4a', roundness=8)
+        drawLabel('CENTRE SOURCE (C)', CENTER_BTN[0] + 100,
+                  CENTER_BTN[1] + 22, fill='white', size=13, bold=True,
+                  align='center')
+        p = app.camera.position
+        drawLabel('cam (%.1f, %.1f, %.1f)  yaw %.0f  pitch %.0f'
+                  % (p[0], p[1], p[2], app.camera.yaw, app.camera.pitch),
+                  40, 530, fill='#a0a0c0', size=12, align='left-top')
+        drawLabel('For real 3D: reload with ?engine=webgl2 or ?engine=webgpu',
+                  40, 548, fill='#8888aa', size=11, align='left-top')
 
-def _draw_plane(app):
-    """Large 40x40 plane + grid, projected. The sphere sits on it."""
-    H = PLANE_HALF
-    # Grid lines along X (constant z) and along Z (constant x).
-    z = -H
-    while z <= H + 0.01:
-        x0, y0, _, b0 = _project(app, (-H, 0.0, z))
-        x1, y1, _, b1 = _project(app, (H, 0.0, z))
-        if not (b0 or b1):
-            drawLine(x0, y0, x1, y1, fill='#2a2a4a', lineWidth=1)
-        z += GRID_STEP
-    x = -H
-    while x <= H + 0.01:
-        x0, y0, _, b0 = _project(app, (x, 0.0, -H))
-        x1, y1, _, b1 = _project(app, (x, 0.0, H))
-        if not (b0 or b1):
-            drawLine(x0, y0, x1, y1, fill='#2a2a4a', lineWidth=1)
-        x += GRID_STEP
-    # Plane border (bright, so the 40m extent reads).
-    corners = [(-H, 0.0, -H), (H, 0.0, -H), (H, 0.0, H), (-H, 0.0, H)]
-    pts = [_project(app, c) for c in corners]
-    if not any(p[3] for p in pts):
-        for i in range(4):
-            a, b = pts[i], pts[(i + 1) % 4]
-            drawLine(a[0], a[1], b[0], b[1], fill='#555588', lineWidth=2)
-
-
-def _draw_sphere(app):
-    """Sphere on the plane: shadow ellipse + projected disc."""
-    sx, sy, sz = app.sphere_pos
-    # Shadow: ellipse where the sphere meets the plane.
-    shx, shy, _, sh_behind = _project(app, (sx, 0.02, sz))
-    if not sh_behind:
-        drawOval(shx, shy, 70, 14, fill='#000000')
-    # Body: projected centre, radius shrinks with distance.
-    cx, cy, _depth, behind = _project(app, (sx, sy, sz))
-    if behind:
-        return
-    cam = app.camera.position
-    dist = _math.sqrt((sx - cam[0]) ** 2 + (sy - cam[1]) ** 2 + (sz - cam[2]) ** 2)
-    r = max(8.0, 220.0 / max(dist, 1.0))
-    if app.playing:
-        r += 6 * _math.sin(app.pulse)
-    drawCircle(cx, cy, r, fill='blue', border='white', borderWidth=2)
-    drawCircle(cx - r * 0.3, cy - r * 0.3, r * 0.25, fill='#88aaff')
-    drawLabel('440 Hz', cx, cy + r + 14, fill='white', size=11, bold=True, align='center')
-
-
-def _draw_reference_cubes(app):
-    """Two grey cubes on the plane as depth / scale references."""
-    for cx0, cz0 in ((-6.0, -8.0), (6.0, 2.0)):
-        px, py, _, behind = _project(app, (cx0, 0.5, cz0))
-        if behind:
-            continue
-        cam = app.camera.position
-        dist = _math.sqrt((cx0 - cam[0]) ** 2 + (0.5 - cam[1]) ** 2 + (cz0 - cam[2]) ** 2)
-        s = max(6.0, 60.0 / max(dist, 1.0))
-        drawRect(px - s / 2, py - s / 2, s, s, fill='gray', border='#222222')
-
-
-def redrawAll(app):
-    # ---- 3D scene: rendered by WebGL 3D renderer (renderer=webgl2). ----
-    # Projection here is only for HUD math (distance / pan labels), not for faking 3D in 2D.
-    _draw_plane(app)
-    _draw_reference_cubes(app)
-    _draw_sphere(app)
-    # ---- 2D HUD (on top) ------------------------------------------------
-    drawRect(0, 0, 900, 62, fill='#000000')
-    drawLabel('SPATIAL AUDIO  --  blue sphere on a 40 x 40 m plane',
-              20, 18, fill='white', size=18, bold=True, align='left-top')
-    drawLabel('WASD move  |  Q down  |  Shift sprint  |  Drag / Arrows look  |  Space play  |  E envelope  |  P pipeline',
-              20, 42, fill='#a0a0c0', size=12, align='left-top')
-    drawLabel('Renderer: %s (MUST be webgl2, NOT 2d)' % getRendererKind(),
-              880, 18, fill='#ffd97a', size=13, align='right-top')
-    if app.src is not None:
-        dist = app.src.distance_to(app.camera.position)
-        gain = app.src.gain_at(app.camera.position)
-        pan = app.src.pan_at(app.camera)
-        drawLabel('dist %.2f m   gain %.2f   pan %+.2f  ( -1 left / +1 right )'
-                  % (dist, gain, pan),
-                  880, 42, fill='#ffd97a', size=12, align='right-top')
-    # Status bar.
-    drawRect(40, 430, 820, 32, fill='#26263a', roundness=6)
-    drawLabel(app.status, 56, 446, fill='#ffd97a', size=13, align='left-top')
-    # Buttons.
-    drawRect(PLAY_BTN[0], PLAY_BTN[1], PLAY_BTN[2], PLAY_BTN[3],
-             fill='#22aa66' if not app.playing else '#ccaa22', roundness=8)
-    drawLabel('PLAY' if not app.playing else 'PAUSE',
-              PLAY_BTN[0] + 80, PLAY_BTN[1] + 22,
-              fill='white', size=15, bold=True, align='center')
-    drawRect(STOP_BTN[0], STOP_BTN[1], STOP_BTN[2], STOP_BTN[3],
-             fill='#cc3344', roundness=8)
-    drawLabel('STOP', STOP_BTN[0] + 60, STOP_BTN[1] + 22,
-              fill='white', size=15, bold=True, align='center')
-    drawRect(CENTER_BTN[0], CENTER_BTN[1], CENTER_BTN[2], CENTER_BTN[3],
-             fill='#2e2e4a', roundness=8)
-    drawLabel('CENTRE SPHERE (C)', CENTER_BTN[0] + 100, CENTER_BTN[1] + 22,
-              fill='white', size=13, bold=True, align='center')
-    drawRect(MODE_BTN[0], MODE_BTN[1], MODE_BTN[2], MODE_BTN[3],
-             fill='#2e2e4a', roundness=8)
-    drawLabel('MODE: %s (P)' % ('PIPELINE' if app.use_pipeline else 'CLASSIC'),
-              MODE_BTN[0] + 80, MODE_BTN[1] + 22,
-              fill='white', size=11, bold=True, align='center')
-    # Mini-map: top-down, camera arrow + blue dot. Plane is 40x40.
-    mx, my, mw, mh = 740, 70, 120, 120
-    drawRect(mx, my, mw, mh, fill='#111128', roundness=6)
-    drawLabel('TOP-DOWN  40m', mx + 60, my + 10, fill='#8888aa', size=10, align='center')
-
-    def _map(wx, wz):
-        return (mx + (wx + 20.0) / 40.0 * mw,
-                my + 16 + (wz + 20.0) / 40.0 * (mh - 22))
-    if app.src is not None:
-        sx2, sy2 = _map(app.src.position[0], app.src.position[2])
-        cx2, cy2 = _map(app.camera.position[0], app.camera.position[2])
-        drawCircle(sx2, sy2, 6, fill='blue', border='white', borderWidth=1)
-        drawCircle(cx2, cy2, 4, fill='white')
-        f = app.camera.forward()
-        drawLine(cx2, cy2, cx2 + f[0] * 14, cy2 + f[2] * 14, fill='white', lineWidth=2)
-    # Camera + sphere readout.
-    p = app.camera.position
-    drawLabel('cam (%.1f, %.1f, %.1f)  yaw %.0f  pitch %.0f  |  sphere %s  |  envelope %s'
-              % (p[0], p[1], p[2], app.camera.yaw, app.camera.pitch,
-                 app.sphere_pos, app.envelope),
-              40, 530, fill='#a0a0c0', size=12, align='left-top')
-
-
-def main():
-    # MUST BE IN WEBGL 3D - not 2d. Ask for WebGL BEFORE runApp, and pass it to runApp.
-    # If you see Running; renderer=2d, this file was not asking for WebGL.
-    try:
-        setRenderer('webgl2')
-    except Exception:
-        pass
-    runApp(900, 560, renderer='webgl2')
-
-
-main()
+    # NO renderer arg here. _resolve_renderer_kind() -> '2d' by default.
+    # That is the compat rule: no engine specified = old 2D engine.
+    runApp(900, 560)
