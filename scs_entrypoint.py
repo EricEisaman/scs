@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v19-engine-in-entrypoint'
+__version__ = '2026-11-14-runApp-*args-v20-log-engine-import'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -647,7 +647,18 @@ def create_renderer(kind, canvas, width, height):
         # Engine lives in entrypoint, NEVER in the app. App stays CMU-simple.
         try:
             if _hud_mode or getattr(_app, '_is_3d_app', False):
-                return _import_renderer_module('scs_engine_webgl2').WebGL2Engine(canvas, width, height)
+                try:
+                    _mod = _import_renderer_module('scs_engine_webgl2')
+                except Exception as _ie:
+                    # DO NOT swallow: this is the control-flow branch that
+                    # silently fell back to 2d-on-WebGL in v19.
+                    try:
+                        import traceback as _tb3
+                        _debug_log('SCS engine import FAILED, falling back to scs_webgl: %s\n%s' % (_ie, _tb3.format_exc()))
+                    except Exception:
+                        pass
+                    raise
+                return _mod.WebGL2Engine(canvas, width, height)
         except Exception:
             pass
         return _import_renderer_module('scs_webgl')(canvas, width, height)
