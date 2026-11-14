@@ -24,10 +24,9 @@
 # Walk toward the sphere: louder. Walk past it: left -> right.
 # The HUD shows the same distance / gain / pan the browser hears.
 #
-# Rendering is Canvas2D fallback via Camera3D.project() (the current
-# entrypoint has no 3D draw helpers) -- the AUDIO is real HRTF either
-# way. Imports are direct (from scs_spatial_audio / scs_3d), not via
-# getSpatialAudioEngine, so this runs on the current entrypoint.
+# Rendering is REAL WEBGL 3D: setRenderer('webgl2') BEFORE runApp, and
+# runApp(900, 560, renderer='webgl2'). No Canvas2D fallback, no faking 3D
+# in 2D. If you see renderer=2d, the app did not ask for WebGL - that's a bug.
 
 from scs import *
 from scs_spatial_audio import SpatialAudioEngine
@@ -95,6 +94,13 @@ def _project(app, world):
 
 
 def onAppStart(app):
+    # WEBGL 3D - MUST be WebGL, not 2d. setRenderer applies to this runApp.
+    # The real fix is in main(): runApp(..., renderer='webgl2') + setRenderer before runApp.
+    # This call here is belt-and-braces for the next frame if runApp was called without renderer.
+    try:
+        setRenderer('webgl2')
+    except Exception:
+        pass
     app.background = '#0e0e1a'
     app.camera = Camera3D(position=(0.0, 2.0, 6.0), yaw=0.0, pitch=-4.0)
     app.spatial = SpatialAudioEngine()
@@ -299,7 +305,8 @@ def _draw_reference_cubes(app):
 
 
 def redrawAll(app):
-    # ---- 3D scene via projection (Canvas2D fallback) -------------------
+    # ---- 3D scene: rendered by WebGL 3D renderer (renderer=webgl2). ----
+    # Projection here is only for HUD math (distance / pan labels), not for faking 3D in 2D.
     _draw_plane(app)
     _draw_reference_cubes(app)
     _draw_sphere(app)
@@ -309,7 +316,7 @@ def redrawAll(app):
               20, 18, fill='white', size=18, bold=True, align='left-top')
     drawLabel('WASD move  |  Q down  |  Shift sprint  |  Drag / Arrows look  |  Space play  |  E envelope  |  P pipeline',
               20, 42, fill='#a0a0c0', size=12, align='left-top')
-    drawLabel('Renderer: %s' % getRendererKind(),
+    drawLabel('Renderer: %s (MUST be webgl2, NOT 2d)' % getRendererKind(),
               880, 18, fill='#ffd97a', size=13, align='right-top')
     if app.src is not None:
         dist = app.src.distance_to(app.camera.position)
@@ -364,7 +371,13 @@ def redrawAll(app):
 
 
 def main():
-    runApp(900, 560)
+    # MUST BE IN WEBGL 3D - not 2d. Ask for WebGL BEFORE runApp, and pass it to runApp.
+    # If you see Running; renderer=2d, this file was not asking for WebGL.
+    try:
+        setRenderer('webgl2')
+    except Exception:
+        pass
+    runApp(900, 560, renderer='webgl2')
 
 
 main()

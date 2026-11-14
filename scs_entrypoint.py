@@ -2842,10 +2842,12 @@ loop = run_app
 def app_file(app=None):
     """Top level: user simply points to a valid app.
     Precedence (first wins):
-      1. explicit boot(app) / load(app) arg - boot("myapp.py"), boot("apps/myapp.py")
-      2. <canvas data-app="apps/myapp.py"> - point in HTML, no JS, no config
-      3. ?app=myapp - URL param
-      4. window.SCS_CONFIG.app - npm / CDN config
+      1. explicit boot(app) / load(app) arg - boot("myapp.py")
+      2. ?app=myapp - URL param, user pointing at top level. MUST win over data-app.
+         BUG FIX: data-app="apps/app.py" in index.html used to win over ?app=fetch_demo,
+         so ?app=fetch_demo showed app.py. ?app= is explicit, data-app is fallback.
+      3. window.SCS_CONFIG.app - npm / CDN config
+      4. <canvas data-app="apps/myapp.py"> - fallback in HTML, only if no URL / config
       5. default apps/app.py
     A valid app is any .py file with CMU-style onAppStart/redrawAll/runApp.
     No suffering: no registry, no manifest, no build step."""
@@ -2855,7 +2857,14 @@ def app_file(app=None):
         if app is not None:
             v = str(app)
         if not v:
-            # <canvas data-app="..."> - thin shell points to a valid app, package reads it.
+            # ?app= FIRST - user pointing at top level in URL. Must win over data-app.
+            v = _url_param('app')
+        if not v:
+            cfg_app = _config_value('app')
+            if cfg_app:
+                v = str(cfg_app)
+        if not v:
+            # <canvas data-app="..."> - fallback only, if no URL / config / explicit arg.
             try:
                 from browser import document as _doc
                 for _cid in ('canvas', 'cmu-canvas'):
@@ -2879,12 +2888,6 @@ def app_file(app=None):
                         pass
             except Exception:
                 pass
-        if not v:
-            v = _url_param('app')
-        if not v:
-            cfg_app = _config_value('app')
-            if cfg_app:
-                v = str(cfg_app)
         if not v:
             return d
         try:
@@ -3068,13 +3071,33 @@ def load(app=None):
 
     def ok(txt):
         if txt:
+            # Never exec HTML as Python: 404 / Netlify fallback returns HTML, not .py.
+            _s = str(txt).lstrip()[:200].lower()
+            if _s.startswith('<!doctype html') or _s.startswith('<html'):
+                _debug_log('SCS could not load %s: got HTML (404), not Python. File missing?' % url)
+                return
             exec_code(txt, t)
 
     def fail(e):
         _debug_log('SCS could not load %s: %s' % (url, e))
 
+    def _on_resp(r):
+        # Check ok / status BEFORE reading body. 404 must not be exec'd.
+        try:
+            _ok = getattr(r, 'ok', True)
+            _status = getattr(r, 'status', 200)
+        except Exception:
+            _ok, _status = True, 200
+        if not _ok:
+            _debug_log('SCS could not load %s: HTTP %s (file missing?)' % (url, _status))
+            return
+        try:
+            r.text().then(ok)
+        except Exception as e:
+            fail(e)
+
     try:
-        window.fetch(url).then(lambda r: r.text().then(ok)).catch(fail)
+        window.fetch(url).then(_on_resp).catch(fail)
     except Exception:
         pass
 
