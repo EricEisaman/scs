@@ -8,7 +8,7 @@ index.html is now ~20 lines: load Brython, load this module, call boot().
     scs_entrypoint.boot()
 
 What lives here:
-  * Align logic (exact CMU semantics, creation-time only): BIG DAWG APPROVED
+  * Align logic (exact CMU semantics, creation-time only)
   * Shape classes (Rect, Oval, Circle, RegularPolygon, Star, Line,
     Polygon, Arc, Label, Image, Group) -- each with draw(renderer)
   * Immediate-mode draw* functions -- thin forwards to the renderer
@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-runApp-*args-v3-app-fix'
+__version__ = '2026-11-14-runApp-*args-v5-no-shape-guess'
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
@@ -2319,15 +2319,18 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
     # 3D app (has onRender3D / onDraw3D / draw3D) + webgl2/webgpu => HUD is the 2D
     # overlay (labels, buttons) on top of the 3D scene. THAT is when HUD makes sense.
     _is_3d_app = any(k in _user_funcs for k in ('onRender3D', 'onDraw3D', 'draw3D', 'onRender', 'render3D'))
+    # NOTE: No shape-based 3D guess here. Flat CMU shapes can be 3D (centerZ set later, or flat in world).
+    # The DEMO must declare itself as 3D: runApp(..., renderer='webgl2'). EntryPoint does NOT guess.
     # _renderer_req must include setRenderer() / _pending_renderer / App.renderer,
     # not just the runApp() arg.
     _renderer_req = str(renderer or _pending_renderer or getattr(_app, 'renderer', None) or '').lower() or None  # FIX: _app, not app - app is defined at line 2394, using app here = UnboundLocalError
     if not _is_3d_app and _hud_requested:
-        # Explicit hud=True / mode='hud' on a 2D app - HUD makes no sense, ignore it.
-        # Don't force a 2D app into HUD. Just render 2D.
-        _debug_log('SCS HUD: hud requested on a 2D app (no 3D callbacks) - HUD only makes sense in 3D apps. Ignoring HUD, rendering 2D directly.')
-        _hud_requested = False
-        _hud_kind = 'texture'
+        # Explicit hud=True / mode='hud' / renderer='3d' IS a declaration: "I am 3D".
+        # Do NOT ignore it. The demo declares itself as 3D - that wins over
+        # callback guessing. Flat shapes can be 3D, so callback/shape guessing is wrong.
+        # If the app explicitly asked for HUD, it IS a 3D app.
+        _is_3d_app = True
+        _debug_log('SCS HUD: explicit HUD/3D requested - demo declares itself as 3D. Respecting it.')
     if _renderer_req in ('webgl2', 'webgl', 'webgpu', 'gpu', 'auto') and _is_3d_app:
         # Implicit HUD: 3D app + 3D renderer => HUD overlay automatically, no explicit mode needed.
         _hud_requested = True
