@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-FIXED-v37-no-resize-ever'
+__version__ = '2026-11-14-FIXED-v38-no-responsive-only-fullscreen-resizes'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -447,13 +447,10 @@ def _dpr():
         return 1.0
 
 def _budgeted_ratio():
-    # 3D + 2D: deliberate rendering-resolution budget. Do NOT render at
-    # unrestricted native density on high-DPI (e.g. 3x) displays - cap at 2x.
-    # Backing = CSS * budgeted ratio. Logical (CSS) size is what HUD / mouse use.
-    try:
-        return min(float(window.devicePixelRatio or 1.0), 2.0)
-    except Exception:
-        return 1.0
+    # v38: NO RESPONSIVE. No DPR scaling, no pixel budget.
+    # runApp(900,560) => CSS 900x560, backing 900x560, always.
+    # Only fullscreen may change it (see _on_fullscreen_change).
+    return 1.0
 
 # --- Resize pipeline (v29): CSS drives layout, ResizeObserver drives buffer ---
 # CSS size (content box) is the source of truth. canvas.width/height (backing)
@@ -640,7 +637,7 @@ def _replace_canvas_for_context(kind):
             _new.id = _c.id
         except Exception:
             pass
-        for _attr in ('data-app', 'width', 'height', 'tabindex'):
+        for _attr in ('data-app', 'tabindex'):  # v38: NEVER copy width/height attrs (1050x700 in index.html)
             try:
                 _v = _c.getAttribute(_attr)
                 if _v is not None:
@@ -649,6 +646,12 @@ def _replace_canvas_for_context(kind):
                 pass
         try:
             _new.style.cssText = _c.style.cssText
+        except Exception:
+            pass
+        # v38: new canvas gets runApp size, not index.html attrs.
+        try:
+            _new.width = int(_canvas_width); _new.height = int(_canvas_height)
+            _new.style.width = '%dpx' % int(_canvas_width); _new.style.height = '%dpx' % int(_canvas_height)
         except Exception:
             pass
         _parent.replaceChild(_new, _c)
@@ -685,7 +688,7 @@ def _size_canvas(width, height):
         except Exception:
             pass
         # Buffer: assign only if actually changed (avoids needless reset).
-        _bw, _bh = int(width * _br), int(height * _br)
+        _bw, _bh = int(width), int(height)  # v38: backing == CSS == runApp, no DPR multiply
         if int(canvas.width) != _bw:
             canvas.width = _bw
         if int(canvas.height) != _bh:
@@ -2408,12 +2411,9 @@ def _toggle_fullscreen():
         pass
 
 def _on_fullscreen_change(ev=None):
-    # v29: fullscreen goes through the SAME resize pipeline. Do NOT substitute
-    # screen dims (window.innerWidth) - measure the canvas's resulting layout.
-    # Detect actual state via document.fullscreenElement, not button assumption.
-    # If exiting, restore the orig CSS size; if entering, the wrapper's
-    # :fullscreen CSS makes the canvas fill the wrapper, RO fires, and the
-    # pending resize is applied before the next frame (freshly resized frame).
+    # v38: THE ONLY RESIZE ALLOWED. No RO, no DPR, no presentation.
+    # Enter fullscreen -> canvas = screen size. Exit -> canvas = runApp size exactly.
+    # _fullscreen_orig_w/h are set in run_app() from runApp() args and never change.
     try:
         try:
             _is_fs = document.fullscreenElement is not None
@@ -2422,40 +2422,26 @@ def _on_fullscreen_change(ev=None):
         _c = _find_canvas()
         if _c is None:
             return
-        if not _is_fs:
-            # Exit: restore orig inline style ONLY if we recorded one.
-            # If the host page owned CSS, _fullscreen_orig_style_* is None/empty
-            # and we leave it alone. RO will measure the resulting layout.
+        if _is_fs:
             try:
-                if _fullscreen_orig_style_w:
-                    _c.style.width = _fullscreen_orig_style_w
-                if _fullscreen_orig_style_h:
-                    _c.style.height = _fullscreen_orig_style_h
-            except Exception:
-                pass
-            try:
-                _cssW, _cssH = _measure_canvas_css()
-                _queue_resize(_cssW, _cssH)
+                _w, _h = int(window.innerWidth), int(window.innerHeight)
+                _c.style.width = '%dpx' % _w; _c.style.height = '%dpx' % _h
+                _c.width = _w; _c.height = _h
+                globals()['__dict__']['_canvas_width'] = _w; globals()['__dict__']['_canvas_height'] = _h
             except Exception:
                 pass
         else:
-            # Enter: do NOT set sizes here. Wrapper :fullscreen CSS lays the
-            # canvas out; measure that layout on the next RO / frame tick.
-            # Queue a measurement now in case RO is delayed.
             try:
-                _cssW, _cssH = _measure_canvas_css()
-                _queue_resize(_cssW, _cssH)
+                _w = int(_fullscreen_orig_w) if _fullscreen_orig_w else 900
+                _h = int(_fullscreen_orig_h) if _fullscreen_orig_h else 560
+                _c.style.width = '%dpx' % _w; _c.style.height = '%dpx' % _h
+                _c.width = _w; _c.height = _h
+                globals()['__dict__']['_canvas_width'] = _w; globals()['__dict__']['_canvas_height'] = _h
             except Exception:
                 pass
-        # Force an immediate re-measure on the next frame tick (in case RO
-        # has not fired yet, e.g. CSS transition). _apply_pending_resize in
-        # _frame will apply it before the next draw.
-        try:
-            _apply_pending_resize()
-        except Exception:
-            pass
     except Exception:
         pass
+
 
 def _pos(ev):
     # FIX v27 HUD events: map CSS rect -> logical app size (_canvas_width x
@@ -3518,271 +3504,8 @@ def getFullscreenState():
 
 
 def _setup_presentation(canvas):
-    global _presentation, _presentation_coordinator
-    # v37: NO RESIZING EVER. PresentationController is gone for all apps.
+    # v38: NO RESPONSIVE. No PresentationController, no ResizeCoordinator, no 100vw/100vh.
     return
-    # v36: fixed-size app - PresentationController must NOT resize it.
-    # It observes the canvas/parent and calls apply_size() with the PAGE
-    # size, which overwrites runApp(900,560). Only run it for responsive apps.
-    try:
-        _is_resp3 = bool(_responsive) if '_responsive' in globals() else False
-    except Exception:
-        _is_resp3 = False
-    if not _is_resp3:
-        return
-    try:
-        from scs_presentation import PresentationController, ResizeCoordinator
-        container = canvas
-        try:
-            parent = getattr(canvas, 'parentElement', None)
-            if parent is not None:
-                container = parent
-        except Exception:
-            pass
-        _presentation = PresentationController(canvas=canvas, container=container)
-        def _apply(metrics):
-            r = _renderer
-            if r is not None and hasattr(r, 'apply_size'):
-                try:
-                    r.apply_size(metrics)
-                except Exception:
-                    pass
-        _presentation_coordinator = ResizeCoordinator(_apply)
-        try:
-            _presentation.observe_resize(_presentation_coordinator)
-        except Exception:
-            pass
-    except Exception:
-        _presentation = None
-        _presentation_coordinator = None
-
-
-def _teardown_presentation():
-    global _presentation, _presentation_coordinator
-    try:
-        if _presentation is not None:
-            _presentation.dispose()
-    except Exception:
-        pass
-    _presentation = None
-    _presentation_coordinator = None
-
-
-# [STRIPPED 70 bytes]
-# Controller / Gamepad (scs_controller.py)
-# [STRIPPED 70 bytes]
-
-def getControllerManager():
-    global _controller_manager
-    if _controller_manager is None:
-        try:
-            from scs_controller import ControllerManager
-            _controller_manager = ControllerManager()
-        except Exception:
-            _controller_manager = None
-    return _controller_manager
-
-
-def getGamepads():
-    try:
-        from browser import window
-        gps = window.navigator.getGamepads()
-        return list(gps) if gps is not None else []
-    except Exception:
-        mgr = getControllerManager()
-        if mgr is not None:
-            try:
-                mgr.mark_blocked()
-            except Exception:
-                pass
-        return []
-
-
-def controllerFeedback(player, kind, intensity=1.0, duration_ms=100):
-    try:
-        mgr = getControllerManager()
-        if mgr is None:
-            return False
-        ctrl = mgr.player_controller(player)
-        if ctrl is None:
-            return False
-        return ctrl.feedback(kind, intensity, duration_ms)
-    except Exception:
-        return False
-
-
-# [STRIPPED 70 bytes]
-# Loader (scs_loader.py) -- see below for getAssetLoader etc.
-# [STRIPPED 70 bytes]
-
-def getAssetLoader():
-    """Singleton AssetLoader (scs_loader). Stages are separate:
-    fetch -> decode -> create runtime resource -> prepare."""
-    global _asset_loader
-    if _asset_loader is None:
-        try:
-            from scs_loader import AssetLoader
-            _asset_loader = AssetLoader()
-        except Exception:
-            _asset_loader = None
-    return _asset_loader
-
-
-def getSpatialAudioEngine(context=None):
-    """SpatialAudioEngine: AudioEngine + PannerNode listener/sources.
-    The listener is the Camera3D -- call engine.update(camera) per
-    step. Returns None if scs_spatial_audio.py is not deployed."""
-    try:
-        from scs_spatial_audio import SpatialAudioEngine
-        return SpatialAudioEngine(context=context)
-    except Exception:
-        return None
-
-
-def Camera3D(*args, **kwargs):
-    """Camera3D from scs_3d.py (position, yaw, pitch, fov). Never returns None."""
-    from scs_3d import Camera3D as _C3D
-    return _C3D(*args, **kwargs)
-
-
-def getWebGL2Engine(canvas=None, width=900, height=560):
-    """Separate WebGL2 3D engine. Owns its OWN WebGL2 context on its
-    OWN canvas. Does NOT share the 2D renderer's context, loop, or
-    buffers. If it fails, it fails -- no silent fallback to 2D."""
-    try:
-        from scs_engine_webgl2 import WebGL2Engine
-        return WebGL2Engine(canvas=canvas, width=width, height=height)
-    except Exception:
-        return None
-
-
-def getWebGPUEngine(canvas=None, width=900, height=560):
-    """Separate WebGPU 3D engine. Owns its OWN WebGPU context/device.
-    Does NOT share the WebGL2 engine's context or the 2D renderer's.
-    Async init: engine.ready is False until on_ready fires."""
-    try:
-        from scs_engine_webgpu import WebGPU3DEngine
-        return WebGPU3DEngine(canvas=canvas, width=width, height=height)
-    except Exception:
-        return None
-
-
-
-def loadAsset(source, kind='auto', options=None):
-    """Load one asset through the staged pipeline. Returns an
-    AssetHandle with a documented ownership contract, not a raw
-    scene/texture/buffer. Promise stage is PREPARED (see scs_loader)."""
-    loader = getAssetLoader()
-    if loader is None:
-        raise RuntimeError('Asset loader unavailable')
-    return loader.load(source, kind=kind, options=options)
-
-
-def loadGLB(source, options=None):
-    return loadAsset(source, kind='glb', options=options)
-
-
-def loadTexture(source, options=None):
-    return loadAsset(source, kind='texture', options=options)
-
-
-def loadAudio(source, options=None):
-    return loadAsset(source, kind='audio', options=options)
-
-
-# [STRIPPED 70 bytes]
-# Splats (scs_splats.py) -- first-class primitive
-# [STRIPPED 70 bytes]
-
-def getSplatRenderer(backend='webgl2'):
-    """Singleton splat renderer extension. WebGL raster + WebGPU
-    compute behind the same boundary. Custom passes, shared camera /
-    depth, explicit ordering."""
-    global _splat_renderer
-    if _splat_renderer is None:
-        try:
-            from scs_splats import WebGLSplatRenderer, WebGPUSplatRenderer
-            _splat_renderer = WebGPUSplatRenderer() if backend == 'webgpu' \
-                else WebGLSplatRenderer()
-        except Exception:
-            _splat_renderer = None
-    return _splat_renderer
-
-
-def createSplatSchema(sh_degree=0, relightable=False):
-    """Versioned logical schema. Backends pack it; the schema is
-    the contract, not any packed layout."""
-    from scs_splats import SplatSchema
-    s = SplatSchema(version=1, sh_degree=sh_degree)
-    if relightable:
-        s.add_relightable()
-    s.validate()
-    return s
-
-
-def createSplatAsset(schema=None, name='splats'):
-    """A splat asset: schema + chunks + hierarchy + appearance +
-    proxies. Scene membership here; residency in ResidencyManager."""
-    from scs_splats import SplatAsset
-    return SplatAsset(schema or createSplatSchema(), name=name)
-
-
-
-def getPipelineManager():
-    """Singleton PipelineManager (scs_pipeline). Pipelines are owned
-    state, not inline GL calls -- one per backend + material-kind."""
-    global _pipeline_manager
-    try:
-        _pipeline_manager
-    except NameError:
-        _pipeline_manager = None
-    if _pipeline_manager is None:
-        try:
-            from scs_pipeline import PipelineManager
-            _pipeline_manager = PipelineManager()
-        except Exception:
-            _pipeline_manager = None
-    return _pipeline_manager
-
-
-def getMaterialLibrary():
-    """Singleton MaterialLibrary (scs_materials). PBR materials are
-    data -- GLB loader fills it, pipelines bind it."""
-    global _material_library
-    try:
-        _material_library
-    except NameError:
-        _material_library = None
-    if _material_library is None:
-        try:
-            from scs_materials import MaterialLibrary
-            _material_library = MaterialLibrary()
-        except Exception:
-            _material_library = None
-    return _material_library
-
-
-def getPBRMaterial(name='', **kw):
-    """One-liner PBR material: getPBRMaterial('car-paint', base_color=(0.8,0.1,0.1), metallic=0.9, roughness=0.3, clearcoat=1.0)."""
-    try:
-        from scs_materials import PBRMaterial
-        return PBRMaterial(name=name, **kw)
-    except Exception:
-        return None
-
-
-def loadSplatManifest(asset_id, schema, chunk_ids, coarse_chunk_id=None):
-    """Chunked asset manifest + coarse representation before the
-    whole asset is available."""
-    from scs_splats import SplatAssetLoader
-    return SplatAssetLoader().manifest(asset_id, schema, chunk_ids,
-                                       coarse_chunk_id)
-
-
-# Aliases the user namespace expects.
-run = run_app
-loop = run_app
-
 
 # ----------------------------------------------------------------------
 # App loading (was in index.html)
