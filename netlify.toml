@@ -1,24 +1,31 @@
 # netlify.toml -- SCS on Netlify, static only.
 #
-# Root cause of the live-site error:
+# Production: branch = package, publish = / (base directory).
+# Both are correct and are NOT the bug. Do not change them.
+#
+# Layout in package:
+#   /index.html, /sandbox.html, /scs_entrypoint.py, /scs.py at root
+#   /scs/scs_3d.py, /scs/scs_spatial_audio.py, ... under scs/
+#   /apps/*.py
+#
+# Live-site error was:
 #   brython.min.js: File "./scs_3d.py", line 1, <!DOCTYPE html> ^ SyntaxError
-# Netlify returned index.html for /scs_3d.py. That happens only when
-# the /* -> /index.html rewrite swallows a missing .py 404 and turns
-# it into a 200 HTML response. Brython then parses HTML as Python.
+# Brython tried ./scs_3d.py (pythonpath '.' first). In package that
+# file does not exist at root -- it is scs/scs_3d.py. The old
+# /* -> /index.html rewrite turned that 404 into a 200 HTML response,
+# and Brython parsed HTML as Python.
 #
-# Fix: NO generic /* rewrite. Only explicit rewrites.
-# /?app=... needs no rewrite: path is /, it serves index.html directly.
-# Missing .py must 404, never HTML. Build fails if the .py files are
-# not at publish root, so a broken deploy never ships.
-#
-# Publish is the repo root: index.html, sandbox.html, scs_*.py,
-# apps/ all live here. In Netlify UI, Publish directory must be
-# blank or "." -- if UI says "scs" or "dist", it overrides this file
-# and /scs_3d.py 404s (then used to return index.html).
+# Fix, kept here:
+#   1. NO generic /* rewrite. Missing .py must 404, never HTML.
+#      /?app=... needs no rewrite: path is /, it serves index.html.
+#   2. pythonpath puts scs/ FIRST (index.html, sandbox.html), so
+#      scs_3d resolves to /scs/scs_3d.py on the first try.
+#   3. Build fails if the package-layout files are missing, so a
+#      broken deploy never ships.
 
 [build]
   publish = "."
-  command = "test -f scs_3d.py && test -f scs_entrypoint.py && test -f scs.py && test -f index.html && test -f sandbox.html && echo 'SCS deploy files OK: scs_3d.py scs_entrypoint.py scs.py index.html sandbox.html at publish root' || (echo 'FATAL: Brython .py files missing from publish root. Commit scs_3d.py / scs_entrypoint.py / scs.py at repo root and set Netlify Publish directory to . -- not scs, not dist.' && exit 1)"
+  command = "test -f scs/scs_3d.py && test -f scs_entrypoint.py && test -f scs.py && test -f index.html && test -f sandbox.html && test -d apps && echo 'SCS deploy files OK: package layout, scs/scs_3d.py + scs_entrypoint.py + scs.py + index.html + sandbox.html + apps/' || (echo 'FATAL: package-layout files missing. Expected scs/scs_3d.py (in scs/, not root), scs_entrypoint.py, scs.py, index.html, sandbox.html, apps/ on branch package.' && exit 1)"
 
 # /sandbox -> /sandbox.html. The sandbox page is sandbox.html at the
 # root. These are the ONLY rewrites. No /* rewrite.
@@ -32,11 +39,16 @@
   to = "/sandbox.html"
   status = 200
 
-# .py is source, not a build artifact. Serve as text, never cache:
-# a cached scs_entrypoint.py is how the old runApp(stepsPerSecond)
-# TypeError survived a deploy. Same for .html shells.
+# .py is source, not a build artifact. Serve as text, never cache.
+# Covers root .py AND scs/*.py AND apps/*.py.
 [[headers]]
-  for = "*.py"
+  for = "/*.py"
+  [headers.values]
+    Content-Type = "text/plain; charset=utf-8"
+    Cache-Control = "no-store"
+
+[[headers]]
+  for = "/scs/*.py"
   [headers.values]
     Content-Type = "text/plain; charset=utf-8"
     Cache-Control = "no-store"
