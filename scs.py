@@ -14,3 +14,16 @@ try:
     _sys.modules['scs'] = _ep
 except Exception:
     pass
+
+# v39: scs.run shim - see scs_entrypoint.py. scs is a file, not a package.
+try:
+    import sys as _sys2
+    _sys2.modules['scs.run'] = _ep
+    try:
+        _ep.__path__ = []
+    except Exception:
+        pass
+    _ep.run = _ep
+    _sys2.modules['scs'].run = _ep
+except Exception:
+    pass
