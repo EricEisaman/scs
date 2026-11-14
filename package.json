@@ -1,0 +1,53 @@
+{
+  "name": "scs-graphics",
+  "version": "3.0.0",
+  "description": "Sigma Computer Science - CMU Graphics API for web, 2D, 3D, WebXR under one API. Students first: point to a valid app and it runs, no suffering.",
+  "main": "scs.js",
+  "module": "scs.js",
+  "unpkg": "scs.js",
+  "jsdelivr": "scs.js",
+  "files": [
+    "scs.js",
+    "index.html",
+    "sandbox.html",
+    "scs.py",
+    "scs_entrypoint.py",
+    "scs_2d.py",
+    "scs_webgl.py",
+    "scs_webgpu.py",
+    "scs_3d.py",
+    "scs_core.py",
+    "scs_xr.py",
+    "scs_engine_webgl2.py",
+    "scs_engine_webgpu.py",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "npx serve .",
+    "build": "echo 'No build step - Python package, thin shell only. scs.js + *.py are the package.'",
+    "test": "python3 -m py_compile scs.py scs_entrypoint.py"
+  },
+  "keywords": [
+    "cmu-graphics",
+    "cmu-cs-academy",
+    "graphics",
+    "2d",
+    "3d",
+    "webxr",
+    "education",
+    "brython"
+  ],
+  "author": "SCS",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/scs-graphics/scs"
+  },
+  "homepage": "https://scs-graphics.netlify.app",
+  "bugs": {
+    "url": "https://github.com/scs-graphics/scs/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

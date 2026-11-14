@@ -1,0 +1,60 @@
+# netlify.toml -- SCS on Netlify, static only.
+#
+# Production: branch = package, publish = / (base directory).
+# Both are correct and are NOT the bug. Do not change them.
+#
+# Layout in package (from README Project Structure in this branch):
+#   /scs_3d.py, /scs_entrypoint.py, /scs.py at ROOT
+#   /scs/ holds ONLY the 10 newer modules:
+#     scs_presentation, scs_controller, scs_loader, scs_splats,
+#     scs_storage, scs_wasm, scs_audio, scs_media, scs_serial, scs_xr
+#   scs_3d.py is NOT in scs/. The previous build check required
+#   scs/scs_3d.py ONLY and failed a correct deploy. That was wrong.
+# Build check now accepts scs_3d.py at root OR in scs/ (tolerance),
+# plus the root files + apps/. pythonpath covers both.
+#
+# Live-site error that started this:
+#   brython.min.js: File "./scs_3d.py", line 1, <!DOCTYPE html> ^ SyntaxError
+# was the old /* -> /index.html rewrite turning a .py 404 into HTML.
+# Fix, kept here: NO generic /* rewrite. Missing .py must 404, never HTML.
+# /?app=... needs no rewrite: path is /, it serves index.html.
+
+[build]
+  publish = "."
+  command = "ls -la; ls -la scs/ 2>/dev/null || echo 'no scs/ dir (flat layout, OK)'; (test -f scs/scs_3d.py || test -f scs_3d.py) && test -f scs_entrypoint.py && test -f scs.py && test -f index.html && test -f sandbox.html && test -d apps && echo 'SCS deploy files OK: scs_3d.py found (scs/ OR root) + scs_entrypoint.py + scs.py + index.html + sandbox.html + apps/ on branch package' || (echo 'FATAL: scs_3d.py missing in BOTH scs/scs_3d.py AND scs_3d.py, or scs_entrypoint.py / scs.py / index.html / sandbox.html / apps/ missing on branch package.'; ls -la; ls -la scs/ 2>/dev/null || true; exit 1)"
+
+# /sandbox -> /sandbox.html. The sandbox page is sandbox.html at the
+# root. These are the ONLY rewrites. No /* rewrite.
+[[redirects]]
+  from = "/sandbox"
+  to = "/sandbox.html"
+  status = 200
+
+[[redirects]]
+  from = "/sandbox/"
+  to = "/sandbox.html"
+  status = 200
+
+# .py is source, not a build artifact. Serve as text, never cache.
+# Covers root .py AND scs/*.py AND apps/*.py.
+[[headers]]
+  for = "/*.py"
+  [headers.values]
+    Content-Type = "text/plain; charset=utf-8"
+    Cache-Control = "no-store"
+
+[[headers]]
+  for = "/scs/*.py"
+  [headers.values]
+    Content-Type = "text/plain; charset=utf-8"
+    Cache-Control = "no-store"
+
+[[headers]]
+  for = "*.html"
+  [headers.values]
+    Cache-Control = "no-store"
+
+[[headers]]
+  for = "/apps/*"
+  [headers.values]
+    Cache-Control = "no-store"
