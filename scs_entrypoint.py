@@ -70,7 +70,7 @@ __all__ = [
     # (scs_entrypoint.<name>) and fails with "'scs_entrypoint' is not a package".
 ]
 
-__version__ = '2026-11-15-FIXED-v58-hud-backing-eq-viewport-fullscreen-measured-rect'
+__version__ = '2026-11-15-v59-hud-dpr-backing-texture-linear-texsubimage'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -870,7 +870,20 @@ def _size_canvas(width, height):
         except Exception:
             pass
         # Buffer: assign only if actually changed (avoids needless reset).
-        _bw, _bh = int(width), int(height)  # v38: backing == CSS == runApp, no DPR multiply
+        # v59: backing = CSS * DPR (capped at 2.0 for memory). v38 set
+        # backing == CSS (no DPR), so on a DPR-2 display the 900x560 backing
+        # was upscaled 2x by the browser and EVERYTHING (2D, HUD texture,
+        # 3D) looked blurry. The DPR-aware resize path already used CSS*DPR,
+        # but ResizeObserver is disabled (v37), so backing stayed 1x forever.
+        # Cap at 2.0: Retina is 2x; 5x DPR would balloon the buffer (4500px)
+        # for no visible gain. CSS stays runApp size; only backing changes.
+        # Renderer2D v59 + _get_hud_offscreen already scale by measured
+        # backing/logical, so this needs no other change. Fullscreen (v54)
+        # still leaves backing alone and scales via CSS only.
+        _dpr59 = _br if _br > 0 else 1.0
+        if _dpr59 > 2.0:
+            _dpr59 = 2.0
+        _bw, _bh = int(round(width * _dpr59)), int(round(height * _dpr59))
         if int(canvas.width) != _bw:
             canvas.width = _bw
         if int(canvas.height) != _bh:
@@ -907,7 +920,10 @@ def _queue_resize(cssW, cssH, backingW=None, backingH=None):
             return
         _br = _budgeted_ratio()
         if backingW is None or backingH is None:
-            backingW, backingH = int(round(_cssW * _br)), int(round(_cssH * _br))
+            _br59 = _br if _br > 0 else 1.0
+            if _br59 > 2.0:
+                _br59 = 2.0
+            backingW, backingH = int(round(_cssW * _br59)), int(round(_cssH * _br59))
         else:
             backingW, backingH = int(backingW), int(backingH)
         _resize_pending = (_cssW, _cssH, backingW, backingH)
@@ -1038,7 +1054,10 @@ def _on_resize_observer(entries, observer=None):
                 _cssW, _cssH = _measure_canvas_css()
             if _bw is None or _bh is None:
                 _br = _budgeted_ratio()
-                _bw, _bh = int(round(_cssW * _br)), int(round(_cssH * _br))
+                _br59 = _br if _br > 0 else 1.0
+                if _br59 > 2.0:
+                    _br59 = 2.0
+                _bw, _bh = int(round(_cssW * _br59)), int(round(_cssH * _br59))
             # v36: fixed-size app - RO is advisory only. If CSS box != app
             # size, it is the host page / DevTools, not the app. Ignore it.
             try:
