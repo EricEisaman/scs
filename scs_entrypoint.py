@@ -35,6 +35,7 @@ _ctx is the 2D context when the 2D renderer is active, else None.
 
 import math
 import random as _random
+random = _random  # v46: __all__ contains 'random', must exist as a top-level name
 
 try:
     from browser import document, window, timer
@@ -60,14 +61,15 @@ __all__ = [
     # adapters around the renderer, never inside render().
     'getAssetCache', 'getPrefs', 'getAudioEngine', 'getMediaAdapter',
     'getSerialAdapter', 'getUSBAdapter',
-    # Spatial audio + 3D math + separate 3D engines.
-    'getSpatialAudioEngine', 'Camera3D',
-    'getWebGL2Engine', 'getWebGPUEngine',
-    'getSplatRenderer', 'createSplatSchema', 'loadSplatManifest',
-    'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
+    # v46: REMOVED 10 names that were in __all__ but NEVER defined:
+    # getSpatialAudioEngine, Camera3D, getWebGL2Engine, getWebGPUEngine,
+    # getSplatRenderer, createSplatSchema, loadSplatManifest,
+    # getPipelineManager, getMaterialLibrary, getPBRMaterial.
+    # Brython's `from X import *` tries missing __all__ names as submodules
+    # (scs_entrypoint.<name>) and fails with "'scs_entrypoint' is not a package".
 ]
 
-__version__ = '2026-11-14-FIXED-v45-no-scs-dir-no-sysmodules-hack'
+__version__ = '2026-11-14-FIXED-v46-all-names-exist'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -2320,6 +2322,13 @@ def cmu_graphics_run(*args, **kwargs):
     return run_app(width=width, height=height,
                    stepsPerSecond=steps, renderer=renderer, canvas=canvas,
                    hud=hud, mode=mode, html_element=html_element)
+
+# v46: __all__ contains 'run' and 'loop' - they MUST exist as top-level names.
+# Before this they only existed as methods on a class, so Brython's
+# `from scs_entrypoint import *` tried `scs_entrypoint.run` as a submodule
+# and failed with "'scs_entrypoint' is not a package". These are real aliases now.
+run = runApp
+loop = runApp
 
 
 # ----------------------------------------------------------------------
