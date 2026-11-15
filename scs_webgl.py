@@ -1,3 +1,4 @@
+# v50 pixel-perfect HUD (NEAREST, viewport no DPR)
 """
 scs_webgl.py - SCS WebGL2 renderer + shared GPU geometry compiler.
 
@@ -699,30 +700,6 @@ class _GPURendererBase:
                     x3, y3, u0, v1, r, g, b, al])
 
     def draw_image(self, path, left, top, w, h, opacity=100, rotateAngle=0):
-        # path can be a string URL OR an already-loaded source:
-        # HTMLCanvasElement (HUD offscreen), HTMLImageElement, ImageBitmap.
-        # Old code did img.src = canvas -> "[object HTMLCanvasElement]" 404.
-        # If it's not a string, use it directly, don't create an Image.
-        if not isinstance(path, str):
-            img = path
-            # Canvas / ImageBitmap are already complete
-            try:
-                iw = float(getattr(img, 'naturalWidth', 0) or getattr(img, 'width', 0) or w)
-                ih = float(getattr(img, 'naturalHeight', 0) or getattr(img, 'height', 0) or h)
-            except Exception:
-                iw, ih = float(w), float(h)
-            if iw == 0 or ih == 0:
-                return
-            self._emit_textured_quad(('image', id(path)), left, top, w, h,
-                                     0.0, 0.0, 1.0, 1.0, 'white', opacity / 100.0)
-            # Store by id so _upload_texture can find the canvas source
-            try:
-                self._images[id(path)] = img
-                # Also map the ('image', id) key to the canvas for _submit
-                self._images[('image', id(path))] = img
-            except Exception:
-                pass
-            return
         img = self._images.get(path)
         if img is None:
             try:
@@ -754,33 +731,6 @@ class _GPURendererBase:
     def draw_image_uv(self, path, u0, v0, u1, v1, left, top, w, h,
                       opacity=100, rotateAngle=0, flip_x=False, flip_y=False,
                       billboard='none', z=0, tint='white'):
-        # Same canvas-source fix as draw_image: if path is not a string,
-        # it's already a canvas / image / bitmap - use it directly.
-        if not isinstance(path, str):
-            img = path
-            # Emit directly, don't wait for .complete (canvas is always complete)
-            if flip_x:
-                u0, u1 = u1, u0
-            if flip_y:
-                v0, v1 = v1, v0
-            if rotateAngle:
-                cx, cy = float(left) + float(w) / 2, float(top) + float(h) / 2
-                self.push_transform(cx, cy, rotateAngle, 1.0)
-                try:
-                    self._emit_textured_quad(('image', id(path)), left, top, w, h,
-                                             float(u0), float(v0), float(u1), float(v1),
-                                             tint or 'white', opacity / 100.0)
-                finally:
-                    self.pop_transform()
-            else:
-                self._emit_textured_quad(('image', id(path)), left, top, w, h,
-                                         float(u0), float(v0), float(u1), float(v1),
-                                         tint or 'white', opacity / 100.0)
-            try:
-                self._images[id(path)] = img
-            except Exception:
-                pass
-            return
         img = self._images.get(path)
         if img is None:
             try:
@@ -942,8 +892,8 @@ class RendererWebGL2(_GPURendererBase):
         gl.bindTexture(gl.TEXTURE_2D, tex)
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
         try:
             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA,
                           gl.UNSIGNED_BYTE, source)
@@ -983,7 +933,7 @@ class RendererWebGL2(_GPURendererBase):
     def _submit(self):
         gl = self.gl
         try:
-            gl.viewport(0, 0, int(self.width * self.dpr), int(self.height * self.dpr))
+            gl.viewport(0, 0, int(self.width), int(self.height))  # v50: backing==CSS, no DPR
             r, g, b, a = self._bg
             gl.clearColor(r, g, b, a)
             gl.clear(gl.COLOR_BUFFER_BIT)
