@@ -1,4 +1,4 @@
-# v52 sandbox Run resets run-once + toolbar + v51 pixel-perfect: engine import via import+getattr, DAMAGED kept, HUD pixel-perfect, single-run
+# v53 enableFullscreen forwarded + v52 sandbox Run resets + toolbar + v51 pixel-perfect: engine import via import+getattr, DAMAGED kept, HUD pixel-perfect, single-run
 """
 scs_entrypoint.py - SCS entrypoint: API, App, events, loop, app loading.
 
@@ -70,7 +70,7 @@ __all__ = [
     # (scs_entrypoint.<name>) and fails with "'scs_entrypoint' is not a package".
 ]
 
-__version__ = '2026-11-14-FIXED-v52-sandbox-run-reset'
+__version__ = '2026-11-14-FIXED-v53-enableFullscreen'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -2303,8 +2303,18 @@ def _parse_run_args(args, kwargs):
     # If mode is 'html' but hud was not set, hud='html' (already handled above)
     if mode == 'html' and hud is None:
         hud = 'html'
-    # Extra kwargs are still dropped (never TypeError), but hud/mode are kept.
-    # Return them via globals so runApp() can forward them.
+    # v53: enableFullscreen MUST NOT be dropped. runApp(enableFullscreen=True) was
+    # silently dropped here - _parse_run_args never returned it, runApp never
+    # forwarded it, run_app got enableFullscreen=False, so no button was ever created.
+    _ef = kwargs.pop('enableFullscreen', None)
+    if _ef is None:
+        _ef = kwargs.pop('enable_fullscreen', None)
+    if _ef is None:
+        for _k in ('fullscreenButton', 'fullscreen_button', 'fullscreen'):
+            if _k in kwargs:
+                _ef = kwargs.pop(_k)
+                break
+    # Extra kwargs are still dropped (never TypeError), but hud/mode/enableFullscreen are kept.
     if len(args) >= 1:
         width = args[0]
     if len(args) >= 2:
@@ -2315,8 +2325,8 @@ def _parse_run_args(args, kwargs):
         renderer = args[3]
     if len(args) >= 5:
         canvas = args[4]
-    # Attach hud/mode to the return via a tuple - callers unpack 7 values.
-    return width, height, steps, renderer, canvas, hud, mode, html_element
+    # Return 9 values - callers unpack 9.
+    return width, height, steps, renderer, canvas, hud, mode, html_element, bool(_ef)
 
 
 def runApp(*args, **kwargs):
@@ -2328,18 +2338,20 @@ def runApp(*args, **kwargs):
       runApp(1050, 700, stepsPerSecond=60, hud=True)  -> HUD
       runApp(1050, 700, stepsPerSecond=60, mode='hud')  -> HUD
     """
-    width, height, steps, renderer, canvas, hud, mode, html_element = _parse_run_args(args, kwargs)
+    width, height, steps, renderer, canvas, hud, mode, html_element, _ef = _parse_run_args(args, kwargs)
     return run_app(width=width, height=height,
                    stepsPerSecond=steps, renderer=renderer, canvas=canvas,
-                   hud=hud, mode=mode, html_element=html_element)
+                   hud=hud, mode=mode, html_element=html_element,
+                   enableFullscreen=_ef)
 
 
 def cmu_graphics_run(*args, **kwargs):
     """CMU alias. Same bulletproof parsing as runApp()."""
-    width, height, steps, renderer, canvas, hud, mode, html_element = _parse_run_args(args, kwargs)
+    width, height, steps, renderer, canvas, hud, mode, html_element, _ef = _parse_run_args(args, kwargs)
     return run_app(width=width, height=height,
                    stepsPerSecond=steps, renderer=renderer, canvas=canvas,
-                   hud=hud, mode=mode, html_element=html_element)
+                   hud=hud, mode=mode, html_element=html_element,
+                   enableFullscreen=_ef)
 
 # v46: __all__ contains 'run' and 'loop' - they MUST exist as top-level names.
 # Before this they only existed as methods on a class, so Brython's
