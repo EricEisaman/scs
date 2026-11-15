@@ -1,3 +1,4 @@
+# v48 single-run + pixel-perfect HUD
 """
 scs_entrypoint.py - SCS entrypoint: API, App, events, loop, app loading.
 
@@ -69,7 +70,7 @@ __all__ = [
     # (scs_entrypoint.<name>) and fails with "'scs_entrypoint' is not a package".
 ]
 
-__version__ = '2026-11-14-FIXED-v46-all-names-exist'
+__version__ = '2026-11-14-FIXED-v48-single-run-pixel-perfect'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -3610,6 +3611,20 @@ def _app_url(name):
 
 def exec_code(code, fn):
     global _user_ns, _user_funcs
+    # v48 single-run: Brython can exec the <script> twice (two module instances).
+    # If this exact file was already exec'd, do NOT exec again - that was creating
+    # duplicate shapes / duplicate HUD / duplicate timers (looked like running twice).
+    try:
+        _prev = _scs_get('execed_fn', None)
+        if _prev == str(fn):
+            try:
+                print('[SCS entrypoint] exec_code already ran for %s - ignoring duplicate exec' % (fn,))
+            except Exception:
+                pass
+            return
+        _scs_set('execed_fn', str(fn))
+    except Exception:
+        pass
     stop()
     _clear_shapes()
     _user_ns = {'__builtins__': __builtins__}
