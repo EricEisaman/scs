@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-FIXED-v42-no-silent-swallow'
+__version__ = '2026-11-14-FIXED-v43-log-code-head'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -3667,8 +3667,18 @@ def exec_code(code, fn):
     except Exception:
         pass
     try:
+        # v43: log WHAT code actually ran - callbacks=[] means the fetched file
+        # was not the pasted ofdm.py (no onAppStart in it, or wrong file).
+        try:
+            _debug_log('SCS exec code %s len=%s has_onAppStart=%s has_redrawAll=%s has_W=%s head=%s' % (fn, len(str(code)), ('def onAppStart' in str(code)), ('def redrawAll' in str(code)), ('W,H=1050' in str(code)), str(code)[:200].replace(chr(10), ' | ')))
+        except Exception:
+            pass
         exec(code, _user_ns)
         _refresh_user_funcs()
+        try:
+            _debug_log('SCS after exec %s W_in_ns=%s lerp_in_ns=%s onAppStart_in_ns=%s type=%s' % (fn, ('W' in _user_ns), ('lerp' in _user_ns), ('onAppStart' in _user_ns), str(type(_user_ns.get('onAppStart', None)))))
+        except Exception:
+            pass
         try:
             _debug_log('SCS exec ok %s callbacks=%s' % (fn, sorted(list(_user_funcs.keys()))))
         except Exception:
@@ -3693,7 +3703,7 @@ def exec_code(code, fn):
                 run_app(width=w, height=h)
         else:
             try:
-                _debug_log('SCS exec ok %s but NO callbacks found - not starting. _user_ns keys=%s' % (fn, sorted([k for k in _user_ns.keys() if not k.startswith('_')])[:30]))
+                _debug_log('SCS exec ok %s but NO callbacks found - not starting. ALL _user_ns keys=%s' % (fn, sorted([k for k in _user_ns.keys() if not k.startswith('_')])))
             except Exception:
                 pass
     except Exception as e:
