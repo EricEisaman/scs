@@ -70,7 +70,7 @@ __all__ = [
     # (scs_entrypoint.<name>) and fails with "'scs_entrypoint' is not a package".
 ]
 
-__version__ = '2026-11-15-FIXED-v57-fullscreen-survives-startloop-hud-1to1'
+__version__ = '2026-11-15-FIXED-v58-hud-backing-eq-viewport-fullscreen-measured-rect'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -635,33 +635,44 @@ def _get_hud_offscreen(width, height):
         w, h = int(width), int(height)
     except Exception:
         w, h = 400, 400
-    # v34: offscreen size is CSS size * DPR at creation. Do NOT recreate
-    # just because the budgeted DPR wobbled (1.0 -> 0.5) - that was recreating
-    # the canvas every few frames and desyncing the HUD renderer.
-    # Only recreate if CSS size changed.
+    # v58: HUD texture backing MUST equal the WebGL drawing-buffer
+    # size, or the texture stretches to the viewport and the HUD renders
+    # ~3x huge (spatial_audio: 18px labels at ~3x, black bar ~3x tall).
+    # v57 assumed backing == CSS on both sides, but if the visible canvas
+    # backing is CSS*DPR (browser / stale _size_canvas / fullscreen 9997)
+    # while the offscreen is CSS, the texture is smaller than the viewport
+    # and stretches. Fix: read the visible canvas backing (canvas.width /
+    # canvas.height attributes = drawing buffer) and make the offscreen
+    # backing match it exactly. Logical size stays w x h; Renderer2D
+    # (v58) scales logical -> backing in begin_frame, so HUD stays 1:1
+    # for ANY backing size. Recreate if logical OR backing changed.
+    try:
+        _vc = _find_canvas()
+        _bw = int(getattr(_vc, 'width', 0) or 0) if _vc is not None else 0
+        _bh = int(getattr(_vc, 'height', 0) or 0) if _vc is not None else 0
+    except Exception:
+        _bw = _bh = 0
+    if not _bw or not _bh:
+        _bw, _bh = w, h
     if _hud_offscreen is not None:
         try:
-            # Compare against stored CSS size, not budgeted size.
             _ow = getattr(_hud_offscreen, '_scs_css_w', None)
             _oh = getattr(_hud_offscreen, '_scs_css_h', None)
-            if _ow == w and _oh == h:
+            _obw = getattr(_hud_offscreen, '_scs_backing_w', None)
+            _obh = getattr(_hud_offscreen, '_scs_backing_h', None)
+            if _ow == w and _oh == h and _obw == _bw and _obh == _bh:
                 return _hud_offscreen
         except Exception:
             pass
-    # v57: backing == CSS == runApp size, NO DPR multiply. Main canvas
-    # (_size_canvas, v38) is also backing == CSS. If HUD offscreen is
-    # CSS*DPR (1800x1120 at DPR 2) while the WebGL viewport is CSS
-    # (900x560), the HUD texture stretches and the 18px HUD labels render
-    # ~5x huge and clipped (spatial_audio screenshot). Both sides CSS
-    # means the HUD texture maps 1:1 onto the viewport. Renderer2D already
-    # draws at dpr=1.0 / setTransform(1,0,0,1,0,0), consistent with this.
     try:
         c = document.createElement('canvas')
-        c.width = int(w)
-        c.height = int(h)
+        c.width = int(_bw)
+        c.height = int(_bh)
         try:
             c._scs_css_w = w
             c._scs_css_h = h
+            c._scs_backing_w = int(_bw)
+            c._scs_backing_h = int(_bh)
         except Exception:
             pass
         try:
@@ -2728,11 +2739,11 @@ def _on_fullscreen_change(ev=None):
     #  - HUD: 900 texture drawn onto 9997 viewport = 9997/1800 ~ 5x huge
     #  - Mouse: _pos mapped to 9997 instead of 400, dots inset 25% on each side
     #  - Backing: 400 logical drawn 1:1 on 9997 backing = tiny tile, not fullscreen
-    # Now: _canvas_width/_canvas_height NEVER change in fullscreen. canvas.width/height
-    # (backing) NEVER change. Only canvas.style.width/height change to innerWidth/innerHeight.
-    # _pos then maps (clientX-left) * 400 / rect.width (rect.width = CSS width = innerWidth)
-    # -> 0..400 correctly, no inset. HUD offscreen stays 900x560, drawn 1:1, scaled by CSS
-    # together with the 3D scene - so HUD and spheres scale together, not 5x apart.
+    # v58: _canvas_width/_canvas_height NEVER change in fullscreen. canvas.width/height
+    # (backing) NEVER change. Only canvas.style.width/height change, to the
+    # MEASURED fullscreen-element rect (see below), NOT window.innerWidth.
+    # _pos then maps (clientX-left) * logical / rect.width -> 0..logical correctly.
+    # HUD offscreen backing = drawing-buffer size, drawn 1:1.
     try:
         try:
             _is_fs = document.fullscreenElement is not None
@@ -2745,9 +2756,32 @@ def _on_fullscreen_change(ev=None):
         _oh = int(_fullscreen_orig_h) if _fullscreen_orig_h else int(_canvas_height) if _canvas_height else 560
         if _is_fs:
             try:
-                _w, _h = int(window.innerWidth), int(window.innerHeight)
+                # v58: size from the MEASURED fullscreen-element rect, NOT
+                # window.innerWidth. innerWidth produced 9997x7354 (stale /
+                # zoom / display-move value) and stretched the canvas to
+                # 9997px wide, overflowing the viewport - clicks then mapped
+                # to an inset band (blue-rectangle screenshot) and the
+                # backing ballooned. getBoundingClientRect() of the element
+                # that is actually fullscreen IS the viewport. If the
+                # fullscreen element is the canvas itself, the browser's
+                # :fullscreen UA styles (width:100% !important) already size
+                # it; setting it to its own rect is a no-op. If it is the
+                # wrapper, the canvas fills the wrapper.
+                try:
+                    _fs_el = document.fullscreenElement
+                except Exception:
+                    _fs_el = None
+                _fw = _fh = 0
+                if _fs_el is not None:
+                    try:
+                        _fr = _fs_el.getBoundingClientRect()
+                        _fw, _fh = int(_fr.width), int(_fr.height)
+                    except Exception:
+                        _fw = _fh = 0
+                if not _fw or not _fh:
+                    _fw, _fh = int(window.innerWidth), int(window.innerHeight)
                 # CSS only - backing stays _ow x _oh.
-                _c.style.width = '%dpx' % _w; _c.style.height = '%dpx' % _h
+                _c.style.width = '%dpx' % _fw; _c.style.height = '%dpx' % _fh
             except Exception:
                 pass
         else:
