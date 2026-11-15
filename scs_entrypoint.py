@@ -1,4 +1,4 @@
-# v50 sigma: engine import via import+getattr, DAMAGED kept, HUD pixel-perfect, single-run
+# v52 sandbox Run resets run-once + toolbar + v51 pixel-perfect: engine import via import+getattr, DAMAGED kept, HUD pixel-perfect, single-run
 """
 scs_entrypoint.py - SCS entrypoint: API, App, events, loop, app loading.
 
@@ -70,7 +70,7 @@ __all__ = [
     # (scs_entrypoint.<name>) and fails with "'scs_entrypoint' is not a package".
 ]
 
-__version__ = '2026-11-14-FIXED-v50-sigma'
+__version__ = '2026-11-14-FIXED-v52-sandbox-run-reset'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -450,9 +450,19 @@ def _dpr():
         return 1.0
 
 def _budgeted_ratio():
-    # v38: NO RESPONSIVE. No DPR scaling, no pixel budget.
-    # runApp(900,560) => CSS 900x560, backing 900x560, always.
-    # Only fullscreen may change it (see _on_fullscreen_change).
+    # v51 PIXEL-PERFECT HUD: return ACTUAL devicePixelRatio, not 1.0.
+    # v38 returned 1.0, so HUD offscreen was 900x560 while WebGL drawing
+    # buffer is 900*DPR (4500 if DPR=5). HUD texture (900) drawn onto
+    # 4500 viewport = upscaled 5x, pixelated, huge. That was the screenshot.
+    # HUD offscreen MUST be CSS * DPR, and 2D renderer must scale by DPR,
+    # so HUD is 1:1 in device pixels = 18px CSS looks like 18px CSS.
+    try:
+        if window is not None and hasattr(window, 'devicePixelRatio'):
+            _d = float(window.devicePixelRatio or 1.0)
+            if _d > 0:
+                return _d
+    except Exception:
+        pass
     return 1.0
 
 # --- Resize pipeline (v29): CSS drives layout, ResizeObserver drives buffer ---
@@ -3616,17 +3626,26 @@ def _app_url(name):
     return name
 
 
-def exec_code(code, fn):
+def exec_code(code, fn, force=False):
     global _user_ns, _user_funcs
-    # v50 single-run: ignore duplicate exec of same file (two module instances)
+    # v52: single-run guard stops duplicate exec from two module instances.
+    # BUT sandbox Run MUST re-run: it passes force=True to reset the guard.
+    # Without force, second Run was ignored: "exec_code already ran for <sandbox>".
     try:
-        _prev = _scs_get('execed_fn', None)
-        if _prev == str(fn):
+        if force:
+            # Sandbox Run: explicitly reset run-once so the app re-runs.
             try:
-                print('[SCS entrypoint] exec_code already ran for %s - ignoring duplicate exec' % (fn,))
+                _scs_set('execed_fn', None)
             except Exception:
                 pass
-            return
+        else:
+            _prev = _scs_get('execed_fn', None)
+            if _prev == str(fn):
+                try:
+                    print('[SCS entrypoint] exec_code already ran for %s - ignoring duplicate exec' % (fn,))
+                except Exception:
+                    pass
+                return
         _scs_set('execed_fn', str(fn))
     except Exception:
         pass
@@ -3950,8 +3969,30 @@ def boot_sandbox():
                 globals()['_debug_log'] = _sb_log
             except Exception:
                 pass
-            # Run / Stop buttons - created in the package if missing.
+            # v52: Sandbox toolbar - ONE flex row, BEFORE the textarea, not appended at end.
+            # Old code did document.body.appendChild(Run) + appendChild(Stop) after the log,
+            # so buttons ended up at the bottom, stacked vertically (body is flex column),
+            # far from the code. Now: toolbar div with flex row, gap, centred, inserted
+            # between canvas and textarea. Run = green, Stop = grey, Clear Log = outline.
             try:
+                _toolbar = None
+                try:
+                    _toolbar = document['sandbox-toolbar']
+                except Exception:
+                    pass
+                if _toolbar is None:
+                    _toolbar = document.createElement('div')
+                    _toolbar.id = 'sandbox-toolbar'
+                    try:
+                        _toolbar.style.cssText = 'display:flex;flex-direction:row;gap:10px;justify-content:center;align-items:center;margin:12px 0 10px 0;width:1050px;max-width:98vw;'
+                    except Exception:
+                        pass
+                    # Insert before textarea, not at end of body.
+                    try:
+                        _ta_el = document['code-input']
+                        document.body.insertBefore(_toolbar, _ta_el)
+                    except Exception:
+                        document.body.appendChild(_toolbar)
                 _run_btn = None
                 try:
                     _run_btn = document['run-btn']
@@ -3960,12 +4001,12 @@ def boot_sandbox():
                 if _run_btn is None:
                     _run_btn = document.createElement('button')
                     _run_btn.id = 'run-btn'
-                    _run_btn.text = 'Run'
+                    _run_btn.text = '▶ Run'
                     try:
-                        _run_btn.style.cssText = 'background:#4c6ef5;color:white;border:0;padding:10px 18px;border-radius:6px;cursor:pointer;font-weight:600;margin-right:8px;'
+                        _run_btn.style.cssText = 'background:#22c55e;color:white;border:0;padding:10px 22px;border-radius:6px;cursor:pointer;font-weight:600;font-size:14px;flex:0 0 auto;'
                     except Exception:
                         pass
-                    document.body.appendChild(_run_btn)
+                    _toolbar.appendChild(_run_btn)
                 _stop_btn = None
                 try:
                     _stop_btn = document['stop-btn']
@@ -3974,18 +4015,44 @@ def boot_sandbox():
                 if _stop_btn is None:
                     _stop_btn = document.createElement('button')
                     _stop_btn.id = 'stop-btn'
-                    _stop_btn.text = 'Stop'
+                    _stop_btn.text = '■ Stop'
                     try:
-                        _stop_btn.style.cssText = 'background:#4c6ef5;color:white;border:0;padding:10px 18px;border-radius:6px;cursor:pointer;font-weight:600;margin-right:8px;'
+                        _stop_btn.style.cssText = 'background:#64748b;color:white;border:0;padding:10px 22px;border-radius:6px;cursor:pointer;font-weight:600;font-size:14px;flex:0 0 auto;'
                     except Exception:
                         pass
-                    document.body.appendChild(_stop_btn)
+                    _toolbar.appendChild(_stop_btn)
+                # Clear Log button - same row, not stacked below.
+                _clear_btn = None
+                try:
+                    _clear_btn = document['clear-log-btn']
+                except Exception:
+                    pass
+                if _clear_btn is None:
+                    _clear_btn = document.createElement('button')
+                    _clear_btn.id = 'clear-log-btn'
+                    _clear_btn.text = 'Clear Log'
+                    try:
+                        _clear_btn.style.cssText = 'background:transparent;color:#94a3b8;border:1px solid #3a3f4b;padding:10px 18px;border-radius:6px;cursor:pointer;font-weight:600;font-size:14px;flex:0 0 auto;'
+                    except Exception:
+                        pass
+                    _toolbar.appendChild(_clear_btn)
+                    def _clear_log(ev=None):
+                        try:
+                            if _log is not None:
+                                _log.text = ''
+                        except Exception:
+                            pass
+                    try:
+                        _clear_btn.bind('click', _clear_log)
+                    except Exception:
+                        pass
             except Exception:
                 _run_btn = _stop_btn = None
             def _run(ev=None):
                 try:
                     _ta2 = document['code-input']
-                    exec_code(_ta2.value, '<sandbox>')
+                    # v52: Run MUST reset run-once - otherwise second Run is ignored.
+                    exec_code(_ta2.value, '<sandbox>', force=True)
                     _log_msg('Running; renderer=' + str(getRendererKind()))
                 except Exception:
                     import traceback
@@ -4045,5 +4112,12 @@ def boot_sandbox():
     except Exception:
         pass
 
+
+def reset_run_once():
+    """Clear the run-once guard so the next exec_code re-runs. Used by sandbox Run."""
+    try:
+        _scs_set('execed_fn', None)
+    except Exception:
+        pass
 
 main = boot
