@@ -1,4 +1,4 @@
-# v48 single-run + pixel-perfect HUD
+# v50 sigma: engine import via import+getattr, DAMAGED kept, HUD pixel-perfect, single-run
 """
 scs_entrypoint.py - SCS entrypoint: API, App, events, loop, app loading.
 
@@ -70,7 +70,7 @@ __all__ = [
     # (scs_entrypoint.<name>) and fails with "'scs_entrypoint' is not a package".
 ]
 
-__version__ = '2026-11-14-FIXED-v48-single-run-pixel-perfect'
+__version__ = '2026-11-14-FIXED-v50-sigma'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -1090,7 +1090,14 @@ def create_renderer(kind, canvas, width, height):
         # getContext(webgl2) fails (e.g. canvas already has 2d), fall back
         # to the 2D tessellator so 2D apps still work.
         try:
-            from scs_engine_webgl2 import WebGL2Engine
+            # v50 ROOT FIX: Brython's 'from scs_engine_webgl2 import WebGL2Engine'
+            # tries 'scs_engine_webgl2.WebGL2Engine' as a SUBMODULE first, and fails
+            # with "is not a package" even though the class IS in the file.
+            # Use 'import scs_engine_webgl2' + getattr - never 'from X import Y' for the engine.
+            import scs_engine_webgl2 as _eng_mod
+            WebGL2Engine = getattr(_eng_mod, 'WebGL2Engine', None)
+            if WebGL2Engine is None:
+                raise ImportError('WebGL2Engine not found in scs_engine_webgl2 module')
             _eng = WebGL2Engine(canvas=canvas, width=width, height=height)
             if getattr(_eng, 'error', None) is None and getattr(_eng, 'gl', None) is not None:
                 return _eng
@@ -3611,9 +3618,7 @@ def _app_url(name):
 
 def exec_code(code, fn):
     global _user_ns, _user_funcs
-    # v48 single-run: Brython can exec the <script> twice (two module instances).
-    # If this exact file was already exec'd, do NOT exec again - that was creating
-    # duplicate shapes / duplicate HUD / duplicate timers (looked like running twice).
+    # v50 single-run: ignore duplicate exec of same file (two module instances)
     try:
         _prev = _scs_get('execed_fn', None)
         if _prev == str(fn):
