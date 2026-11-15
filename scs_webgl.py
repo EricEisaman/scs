@@ -1,5 +1,5 @@
 # v59: TextAtlas supersampling (HUD/label resolution) + v51 viewport (drawingBuffer).
-__version__ = 'v59'
+__version__ = 'v60'
 """
 scs_webgl.py - SCS WebGL2 renderer + shared GPU geometry compiler.
 
