@@ -15,7 +15,9 @@
 #   Space play, 1 / 2 / 3 move sphere, C centre, E envelope, P pipeline
 
 from scs import *
-from scs_spatial_audio import SpatialAudioEngine
+# NOTE: do NOT `from scs_spatial_audio import SpatialAudioEngine` here.
+# Brython kills exec'd app code with "'scs_spatial_audio' is not a package".
+# Use getSpatialAudioEngine() (from scs import *, defined in the entrypoint).
 from scs_3d import Camera3D
 import math as _math
 
@@ -142,7 +144,7 @@ def onAppStart(app):
     _log_versions('onAppStart')
     app.background = '#0e0e1a'
     app.camera = Camera3D(position=(0.0, 2.0, 6.0), yaw=0.0, pitch=-4.0)
-    app.spatial = SpatialAudioEngine()
+    app.spatial = getSpatialAudioEngine()
     app.sphere_pos = SPHERE_START
     app.envelope = 'pad'
     app.use_pipeline = True
