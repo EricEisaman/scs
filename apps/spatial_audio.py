@@ -1,18 +1,33 @@
-# Spatial audio - PATINA COPPER sphere humming on a big plane. NOT blue.
-# The GOLD sphere is the SOUND SOURCE (440 Hz). Red/Yellow/Green balls are decoys (no sound).
-# Target: patina copper, defect 0.80, corrosion 1.0, roughness 0.28, metalness 1.0.
-# Light is a CLOUDY SKY (see scs_engine_webgl2.py cloudySky) - overcast, not gradient + softboxes.
-# For kids learning on CMU CS Academy: this is plain CMU Graphics.
-# All flat shapes use the cmu_graphics API. The ONLY extra thing is centerZ at the END.
-# NO Canvas2D fallback. World shapes are REAL 3D (centerZ set), drawn by WebGL2 / WebGPU.
-# We do NOT project them to shaded 2D circles. If the renderer is 2D, a world shape FAILS LOUD.
-#   No centerZ  -> HUD overlay, on top, like a game HUD
-#   centerZ set -> in the 3D world, with depth. centerZ=0 still counts as 3D.
-# Nothing else is new. No renderer words, no engine words.
+# Spatial audio demo -- REAL 3D: a sphere humming on a LARGE PLANE.
+#
+# Run: ?app=spatial_audio  (or paste into the sandbox)
+#
+# Scene: a BLUE SPHERE sits on a 40 x 40 m plane (its bottom touches
+# y=0). It hums (440 Hz sine). YOU are the listener -- the Camera3D
+# IS the Web Audio AudioListener. The sphere is a pipeline:
+#
+#   osc -> gain -> envelope -> panner (HRTF, inverse distance)
+#       -> destination     (+ optional reverb send)
+#
+#   WASD ......... move camera / listener (W forward, S back,
+#                  A strafe left, D strafe right)
+#   Q / E ........ down / up
+#   Shift ........ sprint
+#   Mouse drag ... look around
+#   Arrow keys ... look around (no mouse needed)
+#   Space ........ play / stop
+#   1 / 2 / 3 .... move sphere: centre / left / right
+#   C ............ sphere to camera front
+#   E ............ cycle envelope (pad / pluck / piano / bass)
+#   P ............ toggle pipeline <-> classic osc->gain->panner
 #
 # Walk toward the sphere: louder. Walk past it: left -> right.
-#   WASD move, Q down, Shift sprint, drag / arrows look
-#   Space play, 1 / 2 / 3 move sphere, C centre, E envelope, P pipeline
+# The HUD shows the same distance / gain / pan the browser hears.
+#
+# Rendering is Canvas2D fallback via Camera3D.project() (the current
+# entrypoint has no 3D draw helpers) -- the AUDIO is real HRTF either
+# way. Imports are direct (from scs_spatial_audio / scs_3d), not via
+# getSpatialAudioEngine, so this runs on the current entrypoint.
 
 from scs import *
 from scs_spatial_audio import SpatialAudioEngine
@@ -20,7 +35,19 @@ from scs_3d import Camera3D
 import math as _math
 
 # --- Version logs: logs don't lie ---
-APP_VERSION = '2026-11-14-spatial-audio-v3-3d-patinas'
+# Three versions, one line each, so you can tell which file is actually live:
+#   entrypoint = scs_entrypoint.py (__version__)
+#   renderer   = live renderer kind + capability + stats (0.1 + kind)
+#   app        = this file (APP_VERSION)
+APP_VERSION = '2026-11-14-spatial-audio-v2-3way-log-v46-clean'
+
+# v46-clean: Brython '%.2f' % x crashes on tiny float-error like -1.14e-14
+def _clean(v):
+    try:
+        f = float(v)
+    except Exception:
+        return v
+    return 0.0 if abs(f) < 1e-9 else f
 
 def _log_versions(where):
     _ep_ver = 'unknown'
@@ -45,30 +72,26 @@ def _log_versions(where):
     except Exception:
         _stats = {}
     _msg = '[SCS versions] where=%s entrypoint=%s renderer_version=0.1 renderer_kind=%s renderer_cap=%s renderer_stats=%s app=%s' % (where, _ep_ver, _kind, _cap, _stats, APP_VERSION)
-    # v33: log ONCE. print() already lands in DevTools in Brython, so
-    # print + console.log duplicated every line (looked like double-run).
+    try:
+        print(_msg)
+    except Exception:
+        pass
     try:
         from browser import window as _w
-        if _w is not None and hasattr(_w, 'console'):
-            _w.console.log(_msg)
-        else:
-            print(_msg)
+        _w.console.log(_msg)
     except Exception:
-        try:
-            print(_msg)
-        except Exception:
-            pass
+        pass
 
 _log_versions('import')
 
-SPHERE_START = (0.0, 1.0, -2.0)
+SPHERE_START = (0.0, 1.0, -2.0)   # radius 1 -> bottom touches the plane
 SPHERE_PRESETS = {
     '1': (0.0, 1.0, -2.0),
     '2': (-6.0, 1.0, -2.0),
     '3': (6.0, 1.0, -2.0),
 }
 ENVELOPES = ['pad', 'pluck', 'piano', 'bass']
-PLANE_HALF = 20.0
+PLANE_HALF = 20.0   # plane is 40 x 40 m
 GRID_STEP = 4.0
 
 PLAY_BTN = (40, 470, 160, 44)
@@ -84,22 +107,23 @@ def _inside(x, y, box):
 
 def _toggle_play(app):
     if app.src is None:
-        app.status = 'Audio unavailable'
+        app.status = 'Audio unavailable -- check scs_spatial_audio.py is deployed'
         return
     if app.src.playing:
         app.src.stop()
         app.playing = False
-        app.status = 'Stopped - press Space or PLAY to hear the sphere'
+        app.status = 'Stopped -- press Space or PLAY to hear the sphere'
     else:
         ok = app.src.start()
         app.playing = bool(ok)
         if ok:
-            app.status = 'Playing - walk with WASD, listen for left/right'
+            app.status = 'Playing -- walk with WASD, listen for left/right'
         else:
-            app.status = 'Audio blocked - click PLAY again'
+            app.status = 'Audio blocked -- click PLAY again (browser gesture)'
 
 
 def _rebuild_source(app):
+    """Rebuild the sphere's source (envelope / pipeline mode changed)."""
     was_playing = app.playing
     if app.src is not None:
         try:
@@ -115,11 +139,8 @@ def _rebuild_source(app):
         _toggle_play(app)
 
 
-# NO Canvas2D fallback. All browsers have WebGL.
-# World shapes use WORLD coords directly (centerX = world X, centerY = world Y,
-# centerZ = world Z). The WebGL2 / WebGPU shader does the projection.
-# _project is ONLY for math / tests, never for drawing shaded 2D circles.
 def _project(app, world):
+    """World -> screen (x, y, depth, behind) for the 900x560 canvas."""
     return app.camera.project(world, 900.0, 560.0)
 
 
@@ -138,7 +159,7 @@ def onAppStart(app):
             volume=0.5, loop=True, name='sphere',
             envelope=app.envelope, pipeline=True)
     app.playing = False
-    app.status = 'Click PLAY (browser needs a click for audio)'
+    app.status = 'Click PLAY (browser requires a click for audio)'
     app.speed = 0.14
     app.sprint = 0.34
     app.sprinting = False
@@ -146,84 +167,6 @@ def onAppStart(app):
     app.lastMouse = None
     app.pulse = 0.0
     app.stepCount = 0
-    app.balls = [
-        {'x': -6.0, 'z': -3.0, 'r': 0.60, 'y': 3.0, 'vy': 0.0, 'color': '#B87333', 'defect': 0.72, 'corrosion': 0.0, 'name': 'Copper'},
-        {'x': 0.0, 'z': 4.0, 'r': 0.50, 'y': 4.5, 'vy': 0.0, 'color': '#C9A227', 'defect': 0.68, 'corrosion': 0.0, 'name': 'Brass'},
-        {'x': 6.0, 'z': -3.0, 'r': 0.70, 'y': 2.2, 'vy': 0.0, 'color': '#B87333', 'defect': 0.82, 'corrosion': 1.0, 'name': 'Copper-Patina'},
-    ]
-    # ---- HUD shapes: flat, overlay ----
-    app.hudTop = Rect(0, 0, 900, 62, fill='black', align='left-top')
-    app.hudTitle = Label('SPATIAL AUDIO -- GOLD sphere = sound source (440 Hz) on a 40 x 40 m plane',
-                         20, 18, fill='#FFD700', size=18, bold=True,
-                         align='left-top')
-    app.hudHelp = Label('WASD move | Q down | Shift sprint | Drag / Arrows look | Space play | E envelope | P pipeline',
-                        20, 42, fill='#a0a0c0', size=12, align='left-top')
-    app.hudDist = Label('', 880, 42, fill='#ffd97a', size=12,
-                        align='right-top')
-    app.hudSourceLegend = Label('GOLD = SOUND SOURCE  |  Red/Yellow/Green = bouncing decoys (no sound)', 20, 64, fill='#FFD700', size=12, bold=True, align='left-top')
-    app.statusBar = Rect(40, 430, 820, 32, fill='#26263a', roundness=6,
-                         align='left-top')
-    app.statusLabel = Label(app.status, 56, 446, fill='#ffd97a', size=13,
-                            align='left-top')
-    app.playBtn = Rect(PLAY_BTN[0], PLAY_BTN[1], PLAY_BTN[2], PLAY_BTN[3],
-                       fill='#22aa66', roundness=8, align='left-top')
-    app.playLabel = Label('PLAY', PLAY_BTN[0] + 80, PLAY_BTN[1] + 22,
-                          fill='white', size=15, bold=True, align='center')
-    app.stopBtn = Rect(STOP_BTN[0], STOP_BTN[1], STOP_BTN[2], STOP_BTN[3],
-                       fill='#cc3344', roundness=8, align='left-top')
-    app.stopLabel = Label('STOP', STOP_BTN[0] + 60, STOP_BTN[1] + 22,
-                          fill='white', size=15, bold=True, align='center')
-    app.centerBtn = Rect(CENTER_BTN[0], CENTER_BTN[1], CENTER_BTN[2], CENTER_BTN[3],
-                         fill='#2e2e4a', roundness=8, align='left-top')
-    app.centerLabel = Label('CENTRE SPHERE (C)', CENTER_BTN[0] + 100, CENTER_BTN[1] + 22,
-                            fill='white', size=13, bold=True, align='center')
-    app.modeBtn = Rect(MODE_BTN[0], MODE_BTN[1], MODE_BTN[2], MODE_BTN[3],
-                       fill='#2e2e4a', roundness=8, align='left-top')
-    app.modeLabel = Label('MODE: PIPELINE (P)', MODE_BTN[0] + 80, MODE_BTN[1] + 22,
-                          fill='white', size=11, bold=True, align='center')
-    app.miniMap = Rect(740, 70, 120, 120, fill='#111128', roundness=6,
-                       align='left-top')
-    app.miniMapTitle = Label('TOP-DOWN  40m', 800, 80, fill='#8888aa', size=10,
-                             align='center')
-    app.miniSphere = Circle(800, 120, 6, fill='#FFD700', border='white', borderWidth=1)  # GOLD = sound source, not blue
-    app.miniCam = Circle(800, 120, 4, fill='white')
-    app.miniArrow = Line(800, 120, 800, 106, fill='white', lineWidth=2)
-    app.readout = Label('', 40, 530, fill='#a0a0c0', size=12,
-                        align='left-top')
-    # ---- World shapes: in the 3D world ----
-    # World: centerZ set = 3D. HUD above has NO centerZ = HUD. That is the whole rule.
-    app.sphereShadow = Oval(450, 280, 70, 14, fill='black', centerZ=0.02)
-    # TARGET: patina copper, not flat blue/gold. Cloudy sky is the light (see CLOUDY engine).
-    app.sphere = Circle(0, 1, 1.2, fill='#B87333', border='white', borderWidth=3, centerZ=-2.0)
-    app.sphere.defectLevel = 0.80
-    app.sphere.corrosionEnabled = 1.0
-    app.sphere.metalness = 1.0
-    app.sphere.roughness = 0.28
-    app.sphereHighlight = Circle(435, 265, 12, fill='#88aaff', centerZ=-2.0)
-    app.sphereLabel = Label('SOUND SOURCE - 440 Hz - DAMAGED COPPER', 450, 340, fill='#FFD700', size=11, bold=True,
-                            align='center', centerZ=-2.0)
-    app.ballBodies = []
-    app.ballHighlights = []
-    for b in app.balls:
-        app.ballBodies.append(Oval(0, 1, b['r']*2, b['r']*2, fill=b['color'],
-                                    border='white', borderWidth=1, centerZ=b['z']))
-        app.ballHighlights.append(Circle(435, 265, 10, fill='white', centerZ=b['z']))
-        app.ballBodies[-1].defectLevel = b.get('defect', 0.55)
-        app.ballBodies[-1].corrosionEnabled = b.get('corrosion', 0.0)
-        app.ballBodies[-1].metalness = 1.0
-        app.ballBodies[-1].roughness = 0.32
-    app.cubeShapes = []
-    for _cz in (-8.0, 2.0):
-        app.cubeShapes.append(Rect(450, 280, 40, 40, fill='#8a8f98',
-                                   border='#222222', align='left-top', centerZ=_cz))
-    for _c in app.cubeShapes:
-        _c.defectLevel = 0.50
-        _c.corrosionEnabled = 0.0
-        _c.metalness = 1.0
-        _c.roughness = 0.38
-    app.planeLines = []
-    for _ in range(26):
-        app.planeLines.append(Line(0, 0, 0, 0, fill='#2a2a4a', lineWidth=1, centerZ=0.0))
 
 
 def onStep(app):
@@ -234,19 +177,14 @@ def onStep(app):
         _log_versions('onStep-frame-60')
     if app.playing:
         app.pulse += 0.12
-    for b in app.balls:
-        b['vy'] -= 0.022
-        b['y'] += b['vy']
-        if b['y'] < b['r']:
-            b['y'] = b['r']
-            b['vy'] = -b['vy'] * 0.88
-            if abs(b['vy']) < 0.08:
-                b['vy'] = 0.28 + 0.12 * abs(b['x'])
+    # Sync listener + panner every step -- same camera drives view + audio.
     if app.spatial is not None:
         app.spatial.update(app.camera)
 
 
 def onKeyHold(app, key):
+    # Continuous WASD -- the camera IS the listener, so WASD moves
+    # both what you see and what you hear.
     k = str(key).lower()
     speed = app.sprint if app.sprinting else app.speed
     if k == 'w':
@@ -257,6 +195,10 @@ def onKeyHold(app, key):
         app.camera.move(right=-speed)
     elif k == 'd':
         app.camera.move(right=speed)
+    elif k == 'q':
+        app.camera.move(up=-speed)
+    elif k == 'e' and False:
+        pass  # E is envelope-cycle on press, not up -- see onKeyPress
     elif k == 'q':
         app.camera.move(up=-speed)
 
@@ -272,7 +214,7 @@ def onKeyPress(app, key):
     if k in SPHERE_PRESETS and app.src is not None:
         app.sphere_pos = SPHERE_PRESETS[k]
         app.src.set_position(app.sphere_pos)
-        app.status = 'Sphere moved'
+        app.status = 'Sphere moved to %s' % (app.sphere_pos,)
         return
     if k == 'c' and app.src is not None:
         f = app.camera.forward()
@@ -292,9 +234,11 @@ def onKeyPress(app, key):
         _rebuild_source(app)
         app.status = 'Source mode: %s' % ('pipeline' if app.use_pipeline else 'classic')
         return
+    # Q / E as press (in case hold is not delivered): Q down, E is envelope.
     if k == 'q':
         app.camera.move(up=-0.14)
         return
+    # Arrow keys = look (no mouse needed).
     if k == 'left':
         app.camera.look(-4.0, 0.0)
     elif k == 'right':
@@ -339,6 +283,7 @@ def onMouseDrag(app, x, y):
     if app.dragging and app.lastMouse is not None:
         dx = x - app.lastMouse[0]
         dy = y - app.lastMouse[1]
+        # Drag right = turn right, drag up = look up.
         app.camera.look(dx * 0.35, -dy * 0.35)
         app.lastMouse = (x, y)
 
@@ -348,137 +293,134 @@ def onMouseRelease(app, x, y):
     app.lastMouse = None
 
 
-def _update_world(app):
-    # World shapes use WORLD coords. WebGL2 / WebGPU does the projection.
-    # NO project-to-screen, NO shaded 2D circles, NO Canvas2D fallback.
-    # All browsers have WebGL, so we just set world coords and let the GPU do it.
+def _draw_plane(app):
+    """Large 40x40 plane + grid, projected. The sphere sits on it."""
     H = PLANE_HALF
-    li = 0
+    # Grid lines along X (constant z) and along Z (constant x).
     z = -H
     while z <= H + 0.01:
-        line = app.planeLines[li]
-        li += 1
-        line.visible = True
-        # Line in 3D: x1,y1,centerZ1 -> x2,y2,centerZ2. Y=0 is the plane.
-        line.x1, line.y1 = -H, 0.0
-        line.x2, line.y2 = H, 0.0
-        line.centerZ1 = z
-        line.centerZ2 = z
-        line.centerZ = z
-        line.fill = '#2a2a4a'
-        line.lineWidth = 1
+        x0, y0, _, b0 = _project(app, (-H, 0.0, z))
+        x1, y1, _, b1 = _project(app, (H, 0.0, z))
+        if not (b0 or b1):
+            drawLine(x0, y0, x1, y1, fill='#2a2a4a', lineWidth=1)
         z += GRID_STEP
     x = -H
     while x <= H + 0.01:
-        line = app.planeLines[li]
-        li += 1
-        line.visible = True
-        line.x1, line.y1 = x, 0.0
-        line.x2, line.y2 = x, 0.0
-        line.centerZ1 = -H
-        line.centerZ2 = H
-        line.centerZ = 0.0
-        line.fill = '#2a2a4a'
-        line.lineWidth = 1
+        x0, y0, _, b0 = _project(app, (x, 0.0, -H))
+        x1, y1, _, b1 = _project(app, (x, 0.0, H))
+        if not (b0 or b1):
+            drawLine(x0, y0, x1, y1, fill='#2a2a4a', lineWidth=1)
         x += GRID_STEP
+    # Plane border (bright, so the 40m extent reads).
     corners = [(-H, 0.0, -H), (H, 0.0, -H), (H, 0.0, H), (-H, 0.0, H)]
-    for i in range(4):
-        a, b = corners[i], corners[(i + 1) % 4]
-        line = app.planeLines[li]
-        li += 1
-        line.visible = True
-        line.x1, line.y1 = a[0], a[1]
-        line.x2, line.y2 = b[0], b[1]
-        line.centerZ1 = a[2]
-        line.centerZ2 = b[2]
-        line.centerZ = 0.0
-        line.fill = '#555588'
-        line.lineWidth = 2
-    # Sphere - WORLD coords, WORLD radius. GPU projects.
+    pts = [_project(app, c) for c in corners]
+    if not any(p[3] for p in pts):
+        for i in range(4):
+            a, b = pts[i], pts[(i + 1) % 4]
+            drawLine(a[0], a[1], b[0], b[1], fill='#555588', lineWidth=2)
+
+
+def _draw_sphere(app):
+    """Sphere on the plane: shadow ellipse + projected disc."""
     sx, sy, sz = app.sphere_pos
-    app.sphereShadow.centerX = sx
-    app.sphereShadow.centerY = 0.02
-    app.sphereShadow.centerZ = sz
-    app.sphereShadow.visible = True
-    app.sphere.centerX = sx
-    app.sphere.centerY = sy
-    app.sphere.centerZ = sz
-    app.sphereHighlight.centerX = sx - 0.3
-    app.sphereHighlight.centerY = sy + 0.3
-    app.sphereHighlight.centerZ = sz
-    app.sphereLabel.centerX = sx
-    app.sphereLabel.centerY = sy + 1.2
-    app.sphereLabel.centerZ = sz
-    app.sphere.visible = True
-    app.sphereHighlight.visible = True
-    app.sphereLabel.visible = True
-    # Sphere radius in WORLD units, not screen pixels. Pulse scales world radius.
-    _r = 1.0
+    # Shadow: ellipse where the sphere meets the plane.
+    shx, shy, _, sh_behind = _project(app, (sx, 0.02, sz))
+    if not sh_behind:
+        drawOval(shx, shy, 70, 14, fill='#000000')
+    # Body: projected centre, radius shrinks with distance.
+    cx, cy, _depth, behind = _project(app, (sx, sy, sz))
+    if behind:
+        return
+    cam = app.camera.position
+    dist = _math.sqrt((sx - cam[0]) ** 2 + (sy - cam[1]) ** 2 + (sz - cam[2]) ** 2)
+    r = max(8.0, 220.0 / max(dist, 1.0))
     if app.playing:
-        _r += 0.15 * _math.sin(app.pulse)
-    app.sphere.radius = _r
-    app.sphereHighlight.radius = _r * 0.25
-    # Bouncing balls: Oval bodies, world coords, world size
-    for i, b in enumerate(app.balls):
-        body = app.ballBodies[i]
-        hi = app.ballHighlights[i]
-        body.centerX = b['x']
-        body.centerY = b['y']
-        body.centerZ = b['z']
-        hi.centerX = b['x'] - b['r'] * 0.35
-        hi.centerY = b['y'] + b['r'] * 0.35
-        hi.centerZ = b['z']
-        body.visible = True
-        hi.visible = True
-        squash = 0.82 if (b['y'] < b['r'] + 0.25 and b['vy'] < 0) else 1.0
-        body.width = b['r'] * 2
-        body.height = b['r'] * 2 * squash
-        hi.radius = b['r'] * 0.28
-    # Reference cubes - WORLD coords, WORLD size
-    for i, (cx0, cz0) in enumerate(((-6.0, -8.0), (6.0, 2.0))):
-        cube = app.cubeShapes[i]
-        cube.centerX = cx0
-        cube.centerY = 0.5
-        cube.centerZ = cz0
-        cube.visible = True
-        cube.width = 1.0
-        cube.height = 1.0
+        r += 6 * _math.sin(app.pulse)
+    drawCircle(cx, cy, r, fill='blue', border='white', borderWidth=2)
+    drawCircle(cx - r * 0.3, cy - r * 0.3, r * 0.25, fill='#88aaff')
+    drawLabel('440 Hz', cx, cy + r + 14, fill='white', size=11, bold=True, align='center')
+
+
+def _draw_reference_cubes(app):
+    """Two grey cubes on the plane as depth / scale references."""
+    for cx0, cz0 in ((-6.0, -8.0), (6.0, 2.0)):
+        px, py, _, behind = _project(app, (cx0, 0.5, cz0))
+        if behind:
+            continue
+        cam = app.camera.position
+        dist = _math.sqrt((cx0 - cam[0]) ** 2 + (0.5 - cam[1]) ** 2 + (cz0 - cam[2]) ** 2)
+        s = max(6.0, 60.0 / max(dist, 1.0))
+        drawRect(px - s / 2, py - s / 2, s, s, fill='gray', border='#222222')
 
 
 def redrawAll(app):
-    _update_world(app)
-    # HUD: just update text / fill on shapes we made in onAppStart
+    # ---- 3D scene via projection (Canvas2D fallback) -------------------
+    _draw_plane(app)
+    _draw_reference_cubes(app)
+    _draw_sphere(app)
+    # ---- 2D HUD (on top) ------------------------------------------------
+    drawRect(0, 0, 900, 62, fill='#000000')
+    drawLabel('SPATIAL AUDIO  --  blue sphere on a 40 x 40 m plane',
+              20, 18, fill='white', size=18, bold=True, align='left-top')
+    drawLabel('WASD move  |  Q down  |  Shift sprint  |  Drag / Arrows look  |  Space play  |  E envelope  |  P pipeline',
+              20, 42, fill='#a0a0c0', size=12, align='left-top')
+    drawLabel('Renderer: %s' % getRendererKind(),
+              880, 18, fill='#ffd97a', size=13, align='right-top')
     if app.src is not None:
         dist = app.src.distance_to(app.camera.position)
         gain = app.src.gain_at(app.camera.position)
         pan = app.src.pan_at(app.camera)
-        app.hudDist.text = 'dist %.2f m   gain %.2f   pan %+.2f  ( -1 left / +1 right )' % (dist, gain, pan)
-        mx, my, mw, mh = 740, 70, 120, 120
-        def _map(wx, wz):
-            return (mx + (wx + 20.0) / 40.0 * mw,
-                    my + 16 + (wz + 20.0) / 40.0 * (mh - 22))
+        drawLabel('dist %.2f m   gain %.2f   pan %+.2f  ( -1 left / +1 right )'
+                  % (_clean(dist), _clean(gain), _clean(pan)),
+                  880, 42, fill='#ffd97a', size=12, align='right-top')
+    # Status bar.
+    drawRect(40, 430, 820, 32, fill='#26263a', roundness=6)
+    drawLabel(app.status, 56, 446, fill='#ffd97a', size=13, align='left-top')
+    # Buttons.
+    drawRect(PLAY_BTN[0], PLAY_BTN[1], PLAY_BTN[2], PLAY_BTN[3],
+             fill='#22aa66' if not app.playing else '#ccaa22', roundness=8)
+    drawLabel('PLAY' if not app.playing else 'PAUSE',
+              PLAY_BTN[0] + 80, PLAY_BTN[1] + 22,
+              fill='white', size=15, bold=True, align='center')
+    drawRect(STOP_BTN[0], STOP_BTN[1], STOP_BTN[2], STOP_BTN[3],
+             fill='#cc3344', roundness=8)
+    drawLabel('STOP', STOP_BTN[0] + 60, STOP_BTN[1] + 22,
+              fill='white', size=15, bold=True, align='center')
+    drawRect(CENTER_BTN[0], CENTER_BTN[1], CENTER_BTN[2], CENTER_BTN[3],
+             fill='#2e2e4a', roundness=8)
+    drawLabel('CENTRE SPHERE (C)', CENTER_BTN[0] + 100, CENTER_BTN[1] + 22,
+              fill='white', size=13, bold=True, align='center')
+    drawRect(MODE_BTN[0], MODE_BTN[1], MODE_BTN[2], MODE_BTN[3],
+             fill='#2e2e4a', roundness=8)
+    drawLabel('MODE: %s (P)' % ('PIPELINE' if app.use_pipeline else 'CLASSIC'),
+              MODE_BTN[0] + 80, MODE_BTN[1] + 22,
+              fill='white', size=11, bold=True, align='center')
+    # Mini-map: top-down, camera arrow + blue dot. Plane is 40x40.
+    mx, my, mw, mh = 740, 70, 120, 120
+    drawRect(mx, my, mw, mh, fill='#111128', roundness=6)
+    drawLabel('TOP-DOWN  40m', mx + 60, my + 10, fill='#8888aa', size=10, align='center')
+
+    def _map(wx, wz):
+        return (mx + (wx + 20.0) / 40.0 * mw,
+                my + 16 + (wz + 20.0) / 40.0 * (mh - 22))
+    if app.src is not None:
         sx2, sy2 = _map(app.src.position[0], app.src.position[2])
         cx2, cy2 = _map(app.camera.position[0], app.camera.position[2])
-        app.miniSphere.centerX = sx2
-        app.miniSphere.centerY = sy2
-        app.miniCam.centerX = cx2
-        app.miniCam.centerY = cy2
+        drawCircle(sx2, sy2, 6, fill='blue', border='white', borderWidth=1)
+        drawCircle(cx2, cy2, 4, fill='white')
         f = app.camera.forward()
-        app.miniArrow.x1, app.miniArrow.y1 = cx2, cy2
-        app.miniArrow.x2, app.miniArrow.y2 = cx2 + f[0] * 14, cy2 + f[2] * 14
-    app.statusLabel.text = app.status
-    app.playLabel.text = 'PLAY' if not app.playing else 'PAUSE'
-    app.playBtn.fill = '#22aa66' if not app.playing else '#ccaa22'
-    app.modeLabel.text = 'MODE: %s (P)' % ('PIPELINE' if app.use_pipeline else 'CLASSIC')
+        drawLine(cx2, cy2, cx2 + f[0] * 14, cy2 + f[2] * 14, fill='white', lineWidth=2)
+    # Camera + sphere readout.
     p = app.camera.position
-    app.readout.text = 'cam (%.1f, %.1f, %.1f)  yaw %.0f  pitch %.0f  |  sphere %s  |  envelope %s' % (
-        p[0], p[1], p[2], app.camera.yaw, app.camera.pitch, app.sphere_pos, app.envelope)
+    drawLabel('cam (%.1f, %.1f, %.1f)  yaw %.0f  pitch %.0f  |  sphere %s  |  envelope %s'
+              % (_clean(p[0]), _clean(p[1]), _clean(p[2]), _clean(app.camera.yaw), _clean(app.camera.pitch),
+                 app.sphere_pos, app.envelope),
+              40, 530, fill='#a0a0c0', size=12, align='left-top')
 
 
 def main():
-    # Plain CMU: no renderer words, no engine words. Just run it.
     _log_versions('main-before-runApp')
-    runApp(900, 560, renderer='webgl2')
+    runApp(900, 560)
 
 
 main()
