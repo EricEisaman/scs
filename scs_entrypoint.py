@@ -70,7 +70,7 @@ __all__ = [
     # (scs_entrypoint.<name>) and fails with "'scs_entrypoint' is not a package".
 ]
 
-__version__ = '2026-11-15-FIXED-v54-dom-fullscreen-btn-logical-size'
+__version__ = '2026-11-15-FIXED-v56-clearlog-fullscreen-btn'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -410,6 +410,158 @@ def _debug_log(msg):
         print(msg)
     except Exception:
         pass
+
+_canvas_context_logged_frame = False
+
+def _log_canvas_context(where=''):
+    # v55: print the ACTUAL canvas context, not the intended size.
+    # HUD 5x debug: we kept guessing canvas=900x560, DPR=2, viewport=900.
+    # The real answer is in these numbers: canvas.width (backing) vs
+    # style.width (CSS) vs drawingBufferWidth vs gl.VIEWPORT vs u_res.
+    # If viewport > drawingBuffer, you see only the bottom-left corner,
+    # magnified - that IS the HUD-5x look. If drawingBuffer != canvas.width,
+    # the browser resized the buffer behind us.
+    # Logs ONE line starting [SCS canvas-context] so it is greppable.
+    # Never crashes: every attribute is try/except, falls back to '?' .
+    try:
+        _c = None
+        try:
+            _c = _find_canvas()
+        except Exception:
+            _c = None
+        # --- visible canvas ---
+        _cw, _ch = '?', '?'
+        _sw, _sh = '?', '?'
+        _client_w, _client_h = '?', '?'
+        _rect_w, _rect_h, _rect_l, _rect_t = '?', '?', '?', '?'
+        if _c is not None:
+            try: _cw = int(_c.width)
+            except Exception: pass
+            try: _ch = int(_c.height)
+            except Exception: pass
+            try: _sw = str(getattr(getattr(_c, 'style', None), 'width', '?'))
+            except Exception: pass
+            try: _sh = str(getattr(getattr(_c, 'style', None), 'height', '?'))
+            except Exception: pass
+            try: _client_w = int(_c.clientWidth)
+            except Exception: pass
+            try: _client_h = int(_c.clientHeight)
+            except Exception: pass
+            try:
+                _r = _c.getBoundingClientRect()
+                _rect_w = round(float(_r.width), 1); _rect_h = round(float(_r.height), 1)
+                _rect_l = round(float(_r.left), 1); _rect_t = round(float(_r.top), 1)
+            except Exception: pass
+        # --- window / DPR ---
+        _dpr, _iw, _ih, _vv = '?', '?', '?', '?'
+        try: _dpr = float(window.devicePixelRatio or 1.0)
+        except Exception: pass
+        try: _iw = int(window.innerWidth); _ih = int(window.innerHeight)
+        except Exception: pass
+        try:
+            _vv = window.visualViewport
+            if _vv is not None:
+                _vv = round(float(_vv.scale or 1.0), 3)
+        except Exception: pass
+        # --- entrypoint logical ---
+        _lw = _canvas_width; _lh = _canvas_height
+        _ow = _fullscreen_orig_w; _oh = _fullscreen_orig_h
+        # --- renderer ---
+        _r = _renderer
+        _rk = getattr(_r, 'kind', '?') if _r is not None else 'None'
+        _rw, _rh, _rdpr = '?', '?', '?'
+        _r_same = '?'
+        if _r is not None:
+            try: _rw = int(getattr(_r, 'width', '?'))
+            except Exception: pass
+            try: _rh = int(getattr(_r, 'height', '?'))
+            except Exception: pass
+            try: _rdpr = float(getattr(_r, 'dpr', '?'))
+            except Exception: pass
+            try: _r_same = (getattr(_r, 'canvas', None) is _c)
+            except Exception: pass
+        # --- GL context (actual) ---
+        _gl = getattr(_r, 'gl', None) if _r is not None else None
+        _dbw, _dbh, _vp, _gl_attrs, _gl_type = '?', '?', '?', '?', '?'
+        if _gl is not None:
+            _gl_type = 'webgl2 (renderer.gl)'
+            try: _dbw = int(getattr(_gl, 'drawingBufferWidth', '?'))
+            except Exception: pass
+            try: _dbh = int(getattr(_gl, 'drawingBufferHeight', '?'))
+            except Exception: pass
+            try:
+                _v = _gl.getParameter(_gl.VIEWPORT)
+                _vp = '[%s,%s,%s,%s]' % (int(_v[0]), int(_v[1]), int(_v[2]), int(_v[3]))
+            except Exception: pass
+            try:
+                _a = _gl.getContextAttributes()
+                if _a is not None:
+                    _gl_attrs = 'alpha=%s antialias=%s depth=%s stencil=%s premult=%s' % (
+                        getattr(_a, 'alpha', '?'), getattr(_a, 'antialias', '?'),
+                        getattr(_a, 'depth', '?'), getattr(_a, 'stencil', '?'),
+                        getattr(_a, 'premultipliedAlpha', '?'))
+            except Exception: pass
+        else:
+            # No renderer.gl - probe WITHOUT creating a new context type.
+            # getContext with a different type returns null, does not create.
+            try:
+                _g2 = _c.getContext('webgl2') if _c is not None else None
+                if _g2 is not None:
+                    _gl_type = 'webgl2 (probed)'
+                    try: _dbw = int(getattr(_g2, 'drawingBufferWidth', '?'))
+                    except Exception: pass
+                    try: _dbh = int(getattr(_g2, 'drawingBufferHeight', '?'))
+                    except Exception: pass
+                    try:
+                        _v = _g2.getParameter(_g2.VIEWPORT)
+                        _vp = '[%s,%s,%s,%s]' % (int(_v[0]), int(_v[1]), int(_v[2]), int(_v[3]))
+                    except Exception: pass
+            except Exception: pass
+            if _gl_type == '?':
+                try:
+                    _ctx2 = _c.getContext('2d') if _c is not None else None
+                    if _ctx2 is not None:
+                        _gl_type = '2d'
+                        try:
+                            _tm = _ctx2.getTransform()
+                            _gl_attrs = 'transform=[%s,%s,%s,%s,%s,%s]' % (
+                                round(float(_tm.a), 3), round(float(_tm.b), 3),
+                                round(float(_tm.c), 3), round(float(_tm.d), 3),
+                                round(float(_tm.e), 1), round(float(_tm.f), 1))
+                        except Exception: pass
+                except Exception: pass
+        # --- HUD offscreen ---
+        _hud_w, _hud_h, _hud_css, _hud_rdpr = '?', '?', '?', '?'
+        try:
+            if _hud_offscreen is not None:
+                _hud_w = int(_hud_offscreen.width); _hud_h = int(_hud_offscreen.height)
+                _hud_css = '%sx%s' % (getattr(_hud_offscreen, '_scs_css_w', '?'),
+                                      getattr(_hud_offscreen, '_scs_css_h', '?'))
+        except Exception: pass
+        try:
+            if _hud_2d_renderer is not None:
+                _hud_rdpr = getattr(_hud_2d_renderer, 'dpr', '?')
+        except Exception: pass
+        _msg = ('[SCS canvas-context] where=%s | canvas backing=%sx%s style=%sx%s client=%sx%s rect=%sx%s@%s,%s | '
+                'DPR=%s inner=%sx%s visualViewport.scale=%s | logical=%sx%s orig=%sx%s | '
+                'renderer kind=%s size=%sx%s dpr=%s canvas_is_visible=%s | '
+                'GL type=%s drawingBuffer=%sx%s VIEWPORT=%s attrs=%s | '
+                'HUD mode=%s kind=%s offscreen=%sx%s css=%s hud2d.dpr=%s' % (
+                    where, _cw, _ch, _sw, _sh, _client_w, _client_h, _rect_w, _rect_h, _rect_l, _rect_t,
+                    _dpr, _iw, _ih, _vv, _lw, _lh, _ow, _oh,
+                    _rk, _rw, _rh, _rdpr, _r_same,
+                    _gl_type, _dbw, _dbh, _vp, _gl_attrs,
+                    _hud_mode, _hud_kind, _hud_w, _hud_h, _hud_css, _hud_rdpr))
+        try:
+            _debug_log(_msg)
+        except Exception:
+            pass
+    except Exception as _e:
+        try:
+            _debug_log('[SCS canvas-context] FAILED: %s' % (_e,))
+        except Exception:
+            pass
+
 
 
 # ----------------------------------------------------------------------
@@ -1143,6 +1295,10 @@ def _activate_renderer(renderer, kind):
     # 'SCS renderer version=0.1 mode=...' line came from a cached old file.
     try:
         _debug_log('SCS renderer version=0.1 mode=%s' % (kind,))
+    except Exception:
+        pass
+    try:
+        _log_canvas_context('activate-renderer')
     except Exception:
         pass
     if kind == '2d' and renderer is not None:
@@ -2411,7 +2567,18 @@ def _create_fullscreen_button(w=None, h=None):
             _btn = document.createElement('button')
         except Exception:
             return None
-        _btn.textContent = '\u26f6'
+        _btn.id = 'scs-fullscreen-btn'
+        # v56: Brython DOM uses .text, NOT .textContent. The old line
+        # _btn.textContent = '...' threw here, outer try swallowed it,
+        # button was never appended -> 'no fullscreen DOM element'.
+        # Toolbar buttons in boot_sandbox already use .text and work.
+        try:
+            _btn.text = '\u26f6'
+        except Exception:
+            try:
+                _btn.innerHTML = '\u26f6'
+            except Exception:
+                pass
         _btn.setAttribute('aria-label', 'Toggle fullscreen')
         _btn.setAttribute('title', 'Fullscreen')
         try:
@@ -2454,14 +2621,61 @@ def _create_fullscreen_button(w=None, h=None):
             return None
         _fullscreen_btn = _btn
         _fullscreen_btn_label = None
+        # v56: place over canvas bottom-right, not viewport corner.
+        try:
+            _reposition_fullscreen_button()
+        except Exception:
+            pass
+        # Keep it over the canvas on scroll/resize (bind once).
+        try:
+            global _fullscreen_btn_listeners_bound
+            if not _fullscreen_btn_listeners_bound:
+                _fullscreen_btn_listeners_bound = True
+                try:
+                    window.addEventListener('resize', lambda _e: _reposition_fullscreen_button())
+                except Exception:
+                    pass
+                try:
+                    window.addEventListener('scroll', lambda _e: _reposition_fullscreen_button())
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return _btn
     except Exception:
         return None
 
+_fullscreen_btn_listeners_bound = False
+
 def _reposition_fullscreen_button():
-    # v54: DOM button is position:fixed bottom:16 right:16 - never repositioned.
-    # No-op by design. Kept so old call sites don't break.
-    return
+    # v56: button sits OVER bottom-right of the CANVAS, not viewport corner.
+    # Canvas is centered with a textarea below it in the sandbox - viewport
+    # bottom-right is far from the canvas. So: position:fixed + left/top
+    # computed from canvas.getBoundingClientRect() (viewport coords).
+    # 36px button, 16px inset: left = rect.left + rect.width - 52, same for top.
+    # Called on create, fullscreenchange, resize, scroll.
+    try:
+        _b = _fullscreen_btn
+        _c = _find_canvas()
+        if _b is None or _c is None:
+            return
+        try:
+            _r = _c.getBoundingClientRect()
+            _lx = float(_r.left) + float(_r.width) - 52.0
+            _ty = float(_r.top) + float(_r.height) - 52.0
+        except Exception:
+            return
+        try:
+            _s = _b.style
+            _s.position = 'fixed'
+            _s.left = '%dpx' % int(_lx)
+            _s.top = '%dpx' % int(_ty)
+            _s.right = 'auto'
+            _s.bottom = 'auto'
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 def _toggle_fullscreen():
     # v29: request on the WRAPPER (canvas + controls stay visible), from a
@@ -2536,6 +2750,14 @@ def _on_fullscreen_change(ev=None):
             except Exception:
                 pass
         # _canvas_width/_canvas_height intentionally NOT changed. Backing intentionally NOT changed.
+        try:
+            _reposition_fullscreen_button()
+        except Exception:
+            pass
+        try:
+            _log_canvas_context('fullscreenchange')
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -3082,6 +3304,13 @@ def _frame():
             pass
         _step()
         _render()
+        try:
+            global _canvas_context_logged_frame
+            if not _canvas_context_logged_frame:
+                _canvas_context_logged_frame = True
+                _log_canvas_context('first-frame')
+        except Exception:
+            pass
     except Exception as e:
         # v42: _frame used to stop() the loop on ANY error with no log -
         # one redrawAll exception = black screen forever, no console error.
@@ -4109,16 +4338,53 @@ def boot_sandbox():
                     except Exception:
                         pass
                     _toolbar.appendChild(_clear_btn)
-                    def _clear_log(ev=None):
-                        try:
-                            if _log is not None:
-                                _log.text = ''
-                        except Exception:
-                            pass
+                # v56: handler MUST be bound whether the button came from HTML
+                # or was just created above. Old code defined + bound it INSIDE
+                # the `if _clear_btn is None:` block, so with the HTML toolbar
+                # (sandbox_v53 / deployed /sandbox) the button existed, the
+                # `if` was skipped, no handler was ever bound -> click = nothing.
+                def _clear_log(ev=None):
                     try:
-                        _clear_btn.bind('click', _clear_log)
+                        if _log is not None:
+                            # Clear every way Brython/DOM can hold text.
+                            try:
+                                _log.text = ''
+                            except Exception:
+                                pass
+                            try:
+                                _log.textContent = ''
+                            except Exception:
+                                pass
+                            try:
+                                _log.innerHTML = ''
+                            except Exception:
+                                pass
+                            try:
+                                while getattr(_log, 'firstChild', None) is not None:
+                                    _log.removeChild(_log.firstChild)
+                            except Exception:
+                                pass
                     except Exception:
                         pass
+                    # Do NOT _log_msg('cleared') - that would refill the log
+                    # and look like Clear did nothing. Console only.
+                    try:
+                        window.console.log('[SCS sandbox] Log cleared.')
+                    except Exception:
+                        pass
+                    try:
+                        if ev is not None and hasattr(ev, 'preventDefault'):
+                            ev.preventDefault()
+                    except Exception:
+                        pass
+                try:
+                    _clear_btn.bind('click', _clear_log)
+                except Exception:
+                    pass
+                try:
+                    _clear_btn.onclick = _clear_log
+                except Exception:
+                    pass
             except Exception:
                 _run_btn = _stop_btn = None
             def _run(ev=None):
