@@ -20,7 +20,7 @@ from scs_3d import Camera3D
 import math as _math
 
 # --- Version logs: logs don't lie ---
-APP_VERSION = '2026-11-14-spatial-audio-v3-3d-patinas-v48'
+APP_VERSION = '2026-11-14-spatial-audio-v3-3d-patinas-v50'
 
 # v46-fix: Brython's '%.2f' % x crashes with RangeError when x is a tiny
 # float-error value like -1.14e-14 (BigInt(-1.14e-14) is not an integer).
@@ -55,7 +55,7 @@ def _log_versions(where):
     except Exception:
         _stats = {}
     _msg = '[SCS versions] where=%s entrypoint=%s renderer_version=0.1 renderer_kind=%s renderer_cap=%s renderer_stats=%s app=%s' % (where, _ep_ver, _kind, _cap, _stats, APP_VERSION)
-    # v47: log ONCE via console.log only. print+console.log duplicated every line (looked like double-run).
+    # v50: log ONCE via console.log only (print+console.log duplicated every line)
     try:
         from browser import window as _w
         _w.console.log(_msg)
