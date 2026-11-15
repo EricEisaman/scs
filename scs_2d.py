@@ -1,5 +1,5 @@
 """
-scs_2d.py - SCS Canvas2D renderer (the reference backend).
+scs_2d.py - SCS Canvas2D renderer (the reference backend). v58.
 
 Implements exactly the same draw_* method signatures as the GPU
 renderers in scs_webgl.py / scs_webgpu.py, on top of
@@ -7,10 +7,13 @@ CanvasRenderingContext2D. This is the behavioural ground truth:
 where a GPU backend and this file disagree, this file wins and the
 GPU backend is the bug (see RENDERER_SUPPORT.md).
 
-DPR: the entrypoint sizes the canvas backing store to width*dpr and
-sets style width to width px. This renderer sets ctx.setTransform(dpr,...)
-each frame so user coordinates stay in CSS pixels.
+v58: backing may differ from logical size (drawing buffer = CSS*DPR,
+fullscreen, resized). begin_frame clears the FULL backing with identity
+transform, then sets transform = backing/logical so logical coords fill
+the backing exactly. resize() updates logical size only; backing is
+owned by the entrypoint (_size_canvas / _get_hud_offscreen).
 """
+__version__ = 'v58'
 
 import math
 
@@ -46,29 +49,47 @@ class Renderer2D:
 
     # -- frame ------------------------------------------------------
     def resize(self, width, height):
-        # v35: resize must update backing store + DPR, not just logical size.
-        # Old code kept old width/height for canvas but never updated
-        # canvas.width/height or dpr, so after a resize the 2D renderer drew
-        # at the wrong scale (fetch_demo = black / stretched).
+        # v58: resize updates LOGICAL size only. Backing store is owned by
+        # the caller (entrypoint _size_canvas / _get_hud_offscreen), which
+        # sets it to the drawing-buffer size. Old code forced backing =
+        # logical here, which fought _get_hud_offscreen when the drawing
+        # buffer was larger (DPR / fullscreen) and made the HUD texture
+        # smaller than the viewport -> HUD stretched huge. begin_frame
+        # now scales logical -> backing, so backing and logical may differ.
         self.width, self.height = int(width), int(height)
-        try:
-            self.dpr = 1.0  # v38: no DPR scaling if window is not None else 1.0
-        except Exception:
-            pass
-        try:
-            _bw, _bh = int(self.width * self.dpr), int(self.height * self.dpr)
-            if int(self.canvas.width) != _bw:
-                self.canvas.width = _bw
-            if int(self.canvas.height) != _bh:
-                self.canvas.height = _bh
-        except Exception:
-            pass
+        self.dpr = 1.0
 
     def begin_frame(self, background):
         ctx = self.ctx
-        # v38: NEVER resize canvas in begin_frame. runApp size is fixed.
-        ctx.setTransform(1, 0, 0, 1, 0, 0)  # v38: dpr=1
-        ctx.clearRect(0, 0, self.width, self.height)
+        # v58: logical -> backing scale. The canvas backing store may be
+        # larger than the logical size (drawing buffer = CSS*DPR, or a
+        # fullscreen / resized backing). Old code assumed backing ==
+        # logical (setTransform 1, clear logical rect). If backing was
+        # larger, content only filled the top-left corner of the backing
+        # and the texture was stretched to the viewport -> HUD ~3x huge.
+        # Now: clear the FULL backing with identity transform, then set
+        # transform = backing/logical so all draw_* calls (which use
+        # logical coords) fill the backing exactly. Font sizes scale with
+        # the transform, so an 18px label stays 18 logical px.
+        try:
+            _bw = int(self.canvas.width) or int(self.width)
+        except Exception:
+            _bw = int(self.width)
+        try:
+            _bh = int(self.canvas.height) or int(self.height)
+        except Exception:
+            _bh = int(self.height)
+        _sx = (_bw / float(self.width)) if self.width else 1.0
+        _sy = (_bh / float(self.height)) if self.height else 1.0
+        if not (_sx > 0):
+            _sx = 1.0
+        if not (_sy > 0):
+            _sy = 1.0
+        self._scale_x = _sx
+        self._scale_y = _sy
+        ctx.setTransform(1, 0, 0, 1, 0, 0)
+        ctx.clearRect(0, 0, _bw, _bh)
+        ctx.setTransform(_sx, 0, 0, _sy, 0, 0)
         if background is not None:
             if isinstance(background, dict) and background.get('_is_grad'):
                 grad = self._make_gradient(background, 0, 0, self.width, self.height)
