@@ -67,7 +67,7 @@ __all__ = [
     'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
 ]
 
-__version__ = '2026-11-14-FIXED-v43-log-code-head'
+__version__ = '2026-11-14-FIXED-v45-no-scs-dir-no-sysmodules-hack'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -3658,19 +3658,26 @@ def exec_code(code, fn):
         _scs_patch.run_app = run_app
     except Exception:
         pass
-    try:
-        import sys as _sys2
-        try:
-            _sys2.modules['scs'] = _sys2.modules['scs_entrypoint']
-        except Exception:
-            pass
-    except Exception:
-        pass
+    # v45: DO NOT set sys.modules['scs'] = entrypoint. That makes `import scs`
+    # resolve to a plain module (not a package) and Brython then fails
+    # `from scs import *` with "No module named 'scs.run'; 'scs' is not a package".
+    # Leave `import scs` to load scs.py (the alias above) normally.
     try:
         # v43: log WHAT code actually ran - callbacks=[] means the fetched file
         # was not the pasted ofdm.py (no onAppStart in it, or wrong file).
         try:
             _debug_log('SCS exec code %s len=%s has_onAppStart=%s has_redrawAll=%s has_W=%s head=%s' % (fn, len(str(code)), ('def onAppStart' in str(code)), ('def redrawAll' in str(code)), ('W,H=1050' in str(code)), str(code)[:200].replace(chr(10), ' | ')))
+        except Exception:
+            pass
+        # v44: WRONG-FILE guard. Deployed apps/ofdm.py was 150552 bytes with head
+        # 'scs_entrypoint.py - SCS entrypoint' - i.e. a copy of the entrypoint,
+        # not the OFDM app. Exec'ing it defines boot/app_file/etc, not onAppStart,
+        # so it silently did nothing. Refuse loudly instead.
+        try:
+            _head = str(code)[:600]
+            if 'scs_entrypoint.py - SCS entrypoint' in _head:
+                _debug_log('SCS WRONG FILE: %s is a copy of scs_entrypoint.py, NOT an app. Replace it with the real OFDM app code. Not starting.' % (fn,))
+                return
         except Exception:
             pass
         exec(code, _user_ns)
