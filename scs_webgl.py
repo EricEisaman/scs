@@ -1,4 +1,5 @@
-# v50 pixel-perfect HUD (NEAREST, viewport no DPR)
+# v59: TextAtlas supersampling (HUD/label resolution) + v51 viewport (drawingBuffer).
+__version__ = 'v59'
 """
 scs_webgl.py - SCS WebGL2 renderer + shared GPU geometry compiler.
 
@@ -28,6 +29,7 @@ WebGL2 flips y in the vertex shader (clip.y = -clip.y).
 """
 
 import math
+import re
 
 try:
     from browser import document, window
@@ -379,6 +381,12 @@ class TextAtlas:
         self.cursor_y = 4
         self.row_h = 0
         self.dirty = True
+        # v59 supersample factor for glyph rasterisation. The renderer sets
+        # this each draw_label() from MEASURED backing/logical, so text is
+        # rasterised at device resolution, not logical. Without it, a 20px
+        # label was rasterised at 20px then displayed at 20 logical px =
+        # 40 device px at DPR 2, i.e. upscaled 2x and blurry.
+        self.scale = 1.0
         if document is not None:
             try:
                 self.canvas = document.createElement('canvas')
@@ -402,10 +410,26 @@ class TextAtlas:
     def get_rect(self, text, font_str):
         """Return (u0, v0, u1, v1, w, h) in atlas UV space. Draws into the
         atlas on first use. White glyphs: tint is applied in the shader."""
-        key = (str(text), font_str)
+        try:
+            scale = float(self.scale or 1.0)
+        except Exception:
+            scale = 1.0
+        if scale < 1.0:
+            scale = 1.0
+        if scale > 3.0:
+            scale = 3.0
+        key = (str(text), font_str, round(scale, 3))
         if key in self.cache:
             return self.cache[key]
-        w, h = self.measure(text, font_str)
+        # v59: rasterise at scale x: "bold 20px arial" -> "bold 40px arial" at scale 2.
+        try:
+            scaled_font = re.sub(
+                r'(\d+(?:\.\d+)?)px',
+                lambda m: '%gpx' % (float(m.group(1)) * scale),
+                str(font_str))
+        except Exception:
+            scaled_font = font_str
+        w, h = self.measure(text, scaled_font)
         w, h = int(math.ceil(w)) + 2, int(math.ceil(h)) + 2
         if self.cursor_x + w > self.size - 4:
             self.cursor_x = 4
@@ -420,7 +444,7 @@ class TextAtlas:
         x, y = self.cursor_x, self.cursor_y
         if self.ctx is not None:
             try:
-                self.ctx.font = font_str
+                self.ctx.font = scaled_font
                 self.ctx.fillStyle = 'white'
                 self.ctx.textBaseline = 'top'
                 self.ctx.fillText(str(text), x + 1, y + 1)
@@ -429,8 +453,11 @@ class TextAtlas:
         self.cursor_x += w + 2
         self.row_h = max(self.row_h, h)
         self.dirty = True
+        # v59: w/h returned are LOGICAL (raster / scale); the quad is drawn
+        # at logical size but samples the higher-res raster.
         rect = (x / self.size, y / self.size,
-                (x + w) / self.size, (y + h) / self.size, float(w), float(h))
+                (x + w) / self.size, (y + h) / self.size,
+                float(w) / scale, float(h) / scale)
         self.cache[key] = rect
         return rect
 
@@ -668,6 +695,16 @@ class _GPURendererBase:
                    rotateAngle=0):
         style = ('italic ' if italic else '') + ('bold ' if bold else '')
         font_str = '%s%dpx %s' % (style, size, font)
+        # v59: HUD/label resolution — rasterise glyphs at MEASURED device
+        # scale (backing / logical), not at logical size.
+        try:
+            bw = float(getattr(self.canvas, 'width', 0) or 0)
+            if bw > 0 and self.width > 0:
+                self.atlas.scale = max(1.0, min(3.0, bw / float(self.width)))
+            else:
+                self.atlas.scale = 1.0
+        except Exception:
+            self.atlas.scale = 1.0
         u0, v0, u1, v1, w, h = self.atlas.get_rect(text, font_str)
         # CMU align: (x, y) is the anchor; canvas textAlign/textBaseline
         # equivalents for the GPU quads.
@@ -933,7 +970,15 @@ class RendererWebGL2(_GPURendererBase):
     def _submit(self):
         gl = self.gl
         try:
-            gl.viewport(0, 0, int(self.width), int(self.height))  # v50: backing==CSS, no DPR
+            try:
+                _dbw = int(getattr(gl, 'drawingBufferWidth', 0) or 0)
+                _dbh = int(getattr(gl, 'drawingBufferHeight', 0) or 0)
+            except Exception:
+                _dbw = _dbh = 0
+            if _dbw > 0 and _dbh > 0:
+                gl.viewport(0, 0, _dbw, _dbh)  # v51: drawingBuffer = CSS * DPR
+            else:
+                gl.viewport(0, 0, int(self.width * self.dpr), int(self.height * self.dpr))
             r, g, b, a = self._bg
             gl.clearColor(r, g, b, a)
             gl.clear(gl.COLOR_BUFFER_BIT)
