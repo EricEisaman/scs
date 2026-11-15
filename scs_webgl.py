@@ -696,6 +696,31 @@ class _GPURendererBase:
     def draw_label(self, text, x, y, fill='black', size=12, font='arial',
                    bold=False, italic=False, opacity=100, align='center',
                    rotateAngle=0):
+        # Rasterise glyphs at DEVICE resolution, not logical. The drawing
+        # buffer is width*dpr x height*dpr, but the quad is drawn at
+        # logical size. If the atlas stays at scale 1.0, an 18px label
+        # is rasterised at 18px then upscaled 2x with LINEAR and smeared
+        # -- the unreadable HUD in NOW. Set scale from MEASURED
+        # backing/logical each label, so the glyph is 1:1 at device res.
+        try:
+            dbw = 0
+            _gl = getattr(self, 'gl', None)
+            if _gl is not None:
+                try:
+                    dbw = int(getattr(_gl, 'drawingBufferWidth', 0) or 0)
+                except Exception:
+                    dbw = 0
+            if dbw <= 0:
+                try:
+                    dbw = int(getattr(self.canvas, 'width', 0) or 0)
+                except Exception:
+                    dbw = 0
+            if dbw > 0 and float(self.width) > 0:
+                self.atlas.scale = max(1.0, min(3.0, dbw / float(self.width)))
+            else:
+                self.atlas.scale = max(1.0, min(3.0, float(getattr(self, 'dpr', 1.0) or 1.0)))
+        except Exception:
+            pass
         style = ('italic ' if italic else '') + ('bold ' if bold else '')
         font_str = '%s%dpx %s' % (style, size, font)
         u0, v0, u1, v1, w, h = self.atlas.get_rect(text, font_str)
