@@ -107,6 +107,39 @@ class _FallbackSpatialSource:
             pass
         self._osc = None
         self.playing = False
+    def set_position(self, pos):
+        self.position = tuple(pos)
+        self._sync_panner()
+
+    def distance_to(self, cam_pos):
+        try:
+            dx = float(self.position[0]) - float(cam_pos[0])
+            dy = float(self.position[1]) - float(cam_pos[1])
+            dz = float(self.position[2]) - float(cam_pos[2])
+            return (dx * dx + dy * dy + dz * dz) ** 0.5
+        except Exception:
+            return 0.0
+
+    def gain_at(self, cam_pos):
+        try:
+            d = self.distance_to(cam_pos)
+            return 1.0 / (1.0 + d * 0.3)
+        except Exception:
+            return 0.5
+
+    def pan_at(self, camera):
+        try:
+            r = camera.right()
+            dx = float(self.position[0]) - float(camera.position[0])
+            dz = float(self.position[2]) - float(camera.position[2])
+            pan = dx * float(r[0]) + dz * float(r[2])
+            if pan > 1.0:
+                pan = 1.0
+            if pan < -1.0:
+                pan = -1.0
+            return pan
+        except Exception:
+            return 0.0
 
 class _FallbackSpatialEngine:
     def __init__(self, context=None):
