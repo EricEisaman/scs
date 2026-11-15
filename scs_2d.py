@@ -13,7 +13,7 @@ transform, then sets transform = backing/logical so logical coords fill
 the backing exactly. resize() updates logical size only; backing is
 owned by the entrypoint (_size_canvas / _get_hud_offscreen).
 """
-__version__ = 'v58'
+__version__ = 'v59'
 
 import math
 
@@ -61,7 +61,9 @@ class Renderer2D:
 
     def begin_frame(self, background):
         ctx = self.ctx
-        # v58: logical -> backing scale. The canvas backing store may be
+        # v59: logical -> backing scale (unchanged from v58). begin_frame
+        # measures backing/logical every frame, so it already handles the
+        # v59 DPR backing (CSS*DPR) from _size_canvas with no change here. The canvas backing store may be
         # larger than the logical size (drawing buffer = CSS*DPR, or a
         # fullscreen / resized backing). Old code assumed backing ==
         # logical (setTransform 1, clear logical rect). If backing was
