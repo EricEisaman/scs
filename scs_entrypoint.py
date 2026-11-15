@@ -1,4 +1,4 @@
-# v53 enableFullscreen forwarded + v52 sandbox Run resets + toolbar + v51 pixel-perfect: engine import via import+getattr, DAMAGED kept, HUD pixel-perfect, single-run
+# v54 DOM fullscreen button fixed 36px + logical stays runApp size + mouse 0..400 in fullscreen + HUD 1:1: engine import via import+getattr, DAMAGED kept, HUD pixel-perfect, single-run
 """
 scs_entrypoint.py - SCS entrypoint: API, App, events, loop, app loading.
 
@@ -70,7 +70,7 @@ __all__ = [
     # (scs_entrypoint.<name>) and fails with "'scs_entrypoint' is not a package".
 ]
 
-__version__ = '2026-11-14-FIXED-v53-enableFullscreen'
+__version__ = '2026-11-15-FIXED-v54-dom-fullscreen-btn-logical-size'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -2380,42 +2380,88 @@ def _call(name, *args):
             pass
 
 
-def _fullscreen_btn_rect(w, h):
-    # Minimal: 36x36, 16px margin from bottom-right in logical space.
-    _m, _s = 16.0, 36.0
-    return (float(w) - _m - _s, float(h) - _m - _s, _s, _s)
-
-def _create_fullscreen_button(w, h):
+def _remove_fullscreen_button():
+    # v54: DOM button - remove it on stop / new runApp so we never stack duplicates.
     global _fullscreen_btn, _fullscreen_btn_label
     try:
-        _l, _t, _s, _h = _fullscreen_btn_rect(w, h)
-        # Rect() appends to _shapes - created AFTER onAppStart so it is topmost
-        # (reversed _hud_shape_at checks it first) and draws on top of other HUD.
-        _btn = Rect(_l, _t, _s, _h, fill='#1a1a2a', border='#555566', borderWidth=1, roundness=8, align='left-top')
-        _btn._is_fullscreen_btn = True
-        _lab = Label('\u26f6', _l + _s/2, _t + _s/2, fill='#e6e6e6', size=18, bold=True, align='center')
-        _lab._is_fullscreen_btn = True
+        _b = _fullscreen_btn
+        _fullscreen_btn = None
+        _fullscreen_btn_label = None
+        if _b is not None:
+            try:
+                # DOM element (v54) - remove from DOM. Old canvas Rect (pre-v54) - no-op.
+                if hasattr(_b, 'remove'):
+                    _b.remove()
+                elif hasattr(_b, 'parentNode') and _b.parentNode is not None:
+                    _b.parentNode.removeChild(_b)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+def _create_fullscreen_button(w=None, h=None):
+    # v54: REAL DOM BUTTON, fixed 36x36px, position:fixed bottom:16 right:16.
+    # Never scales with the canvas. Canvas Rect version scaled with the canvas
+    # (36 logical -> 36 * (9997/400) = huge, blurry, looked like shit).
+    # DOM button is always 36 CSS px, in windowed AND fullscreen, on any DPR.
+    global _fullscreen_btn, _fullscreen_btn_label
+    try:
+        _remove_fullscreen_button()
+        try:
+            _btn = document.createElement('button')
+        except Exception:
+            return None
+        _btn.textContent = '\u26f6'
+        _btn.setAttribute('aria-label', 'Toggle fullscreen')
+        _btn.setAttribute('title', 'Fullscreen')
+        try:
+            _s = _btn.style
+            _s.position = 'fixed'
+            _s.width = '36px'
+            _s.height = '36px'
+            _s.bottom = '16px'
+            _s.right = '16px'
+            _s.left = 'auto'
+            _s.top = 'auto'
+            _s.background = '#1a1a2a'
+            _s.color = '#e6e6e6'
+            _s.border = '1px solid #555566'
+            _s.borderRadius = '8px'
+            _s.fontSize = '18px'
+            _s.lineHeight = '36px'
+            _s.textAlign = 'center'
+            _s.padding = '0'
+            _s.margin = '0'
+            _s.boxSizing = 'border-box'
+            _s.cursor = 'pointer'
+            _s.zIndex = '2147483647'
+            _s.display = 'flex'
+            _s.alignItems = 'center'
+            _s.justifyContent = 'center'
+            _s.flexShrink = '0'
+        except Exception:
+            pass
+        try:
+            _btn.addEventListener('click', lambda _e: _toggle_fullscreen())
+        except Exception:
+            try:
+                _btn.onclick = lambda _e: _toggle_fullscreen()
+            except Exception:
+                pass
+        try:
+            document.body.appendChild(_btn)
+        except Exception:
+            return None
         _fullscreen_btn = _btn
-        _fullscreen_btn_label = _lab
+        _fullscreen_btn_label = None
         return _btn
     except Exception:
         return None
 
 def _reposition_fullscreen_button():
-    try:
-        if _fullscreen_btn is None:
-            return
-        _l, _t, _s, _h = _fullscreen_btn_rect(_canvas_width, _canvas_height)
-        _fullscreen_btn._left = _l
-        _fullscreen_btn._top = _t
-        if _fullscreen_btn_label is not None:
-            try:
-                _fullscreen_btn_label.centerX = _l + _s/2
-                _fullscreen_btn_label.centerY = _t + _s/2
-            except Exception:
-                pass
-    except Exception:
-        pass
+    # v54: DOM button is position:fixed bottom:16 right:16 - never repositioned.
+    # No-op by design. Kept so old call sites don't break.
+    return
 
 def _toggle_fullscreen():
     # v29: request on the WRAPPER (canvas + controls stay visible), from a
@@ -2455,9 +2501,18 @@ def _toggle_fullscreen():
         pass
 
 def _on_fullscreen_change(ev=None):
-    # v38: THE ONLY RESIZE ALLOWED. No RO, no DPR, no presentation.
-    # Enter fullscreen -> canvas = screen size. Exit -> canvas = runApp size exactly.
-    # _fullscreen_orig_w/h are set in run_app() from runApp() args and never change.
+    # v54: LOGICAL STAYS runApp SIZE. Canvas scales via CSS only.
+    # User: "logical stays 400x400, canvas just scales up via CSS to fill screen (mouse still 0..400)"
+    # Old code did _c.width = innerWidth (9997) + globals()['__dict__']['_canvas_width'] = 9997
+    # (which didn't even update the real global). That made:
+    #  - HUD: 900 texture drawn onto 9997 viewport = 9997/1800 ~ 5x huge
+    #  - Mouse: _pos mapped to 9997 instead of 400, dots inset 25% on each side
+    #  - Backing: 400 logical drawn 1:1 on 9997 backing = tiny tile, not fullscreen
+    # Now: _canvas_width/_canvas_height NEVER change in fullscreen. canvas.width/height
+    # (backing) NEVER change. Only canvas.style.width/height change to innerWidth/innerHeight.
+    # _pos then maps (clientX-left) * 400 / rect.width (rect.width = CSS width = innerWidth)
+    # -> 0..400 correctly, no inset. HUD offscreen stays 900x560, drawn 1:1, scaled by CSS
+    # together with the 3D scene - so HUD and spheres scale together, not 5x apart.
     try:
         try:
             _is_fs = document.fullscreenElement is not None
@@ -2466,23 +2521,21 @@ def _on_fullscreen_change(ev=None):
         _c = _find_canvas()
         if _c is None:
             return
+        _ow = int(_fullscreen_orig_w) if _fullscreen_orig_w else int(_canvas_width) if _canvas_width else 900
+        _oh = int(_fullscreen_orig_h) if _fullscreen_orig_h else int(_canvas_height) if _canvas_height else 560
         if _is_fs:
             try:
                 _w, _h = int(window.innerWidth), int(window.innerHeight)
+                # CSS only - backing stays _ow x _oh.
                 _c.style.width = '%dpx' % _w; _c.style.height = '%dpx' % _h
-                _c.width = _w; _c.height = _h
-                globals()['__dict__']['_canvas_width'] = _w; globals()['__dict__']['_canvas_height'] = _h
             except Exception:
                 pass
         else:
             try:
-                _w = int(_fullscreen_orig_w) if _fullscreen_orig_w else 900
-                _h = int(_fullscreen_orig_h) if _fullscreen_orig_h else 560
-                _c.style.width = '%dpx' % _w; _c.style.height = '%dpx' % _h
-                _c.width = _w; _c.height = _h
-                globals()['__dict__']['_canvas_width'] = _w; globals()['__dict__']['_canvas_height'] = _h
+                _c.style.width = '%dpx' % _ow; _c.style.height = '%dpx' % _oh
             except Exception:
                 pass
+        # _canvas_width/_canvas_height intentionally NOT changed. Backing intentionally NOT changed.
     except Exception:
         pass
 
@@ -2502,9 +2555,22 @@ def _pos(ev):
         r = canvas.getBoundingClientRect()
         if not r.width or not r.height:
             return (0, 0)
-        # Prefer logical size (set by _size_canvas). Fall back to 900x560 if not yet set.
-        _lw = float(_canvas_width) if _canvas_width else 900.0
-        _lh = float(_canvas_height) if _canvas_height else 560.0
+        # v54: logical = runApp size (_fullscreen_orig_w/h), NEVER viewport size.
+        # In fullscreen rect.width = innerWidth (9997), logical must still be 400/900.
+        # Old code used _canvas_width which _on_fullscreen_change had set to 9997,
+        # so _pos returned 0..9997 and dots landed inset 25% on each side.
+        if _fullscreen_orig_w:
+            _lw = float(_fullscreen_orig_w)
+        elif _canvas_width:
+            _lw = float(_canvas_width)
+        else:
+            _lw = 900.0
+        if _fullscreen_orig_h:
+            _lh = float(_fullscreen_orig_h)
+        elif _canvas_height:
+            _lh = float(_canvas_height)
+        else:
+            _lh = 560.0
         return ((ev.clientX - r.left) * _lw / float(r.width),
                 (ev.clientY - r.top) * _lh / float(r.height))
     except Exception:
@@ -2548,18 +2614,9 @@ def _mp(ev):
     # dragging starts for camera look.
     _x, _y = _pos(ev)
     _hit = _hud_shape_at(_x, _y)
-    # Fullscreen button (enableFullscreen=True) is owned by the entrypoint, NOT
-    # the app. It is a HUD Rect + Label, both tagged _is_fullscreen_btn.
-    # If either is hit, toggle fullscreen, do NOT start drag, do NOT call
-    # the app's onMousePress (the app did not create this button).
-    if _hit is not None and getattr(_hit, '_is_fullscreen_btn', False):
-        _is_dragging = False
-        try:
-            _find_canvas().focus()
-        except Exception:
-            pass
-        _toggle_fullscreen()
-        return
+    # v54: fullscreen button is a DOM button (fixed 36px), NOT in _shapes.
+    # Canvas clicks never hit it - DOM click handler toggles fullscreen.
+    # Old canvas-Rect hit-test removed.
     # Only Rect buttons block drag - Labels are text, they should not block look.
     # If the hit is a Rect (button background), it is a UI element.
     if _hit is not None and type(_hit).__name__ in ('Rect',):
@@ -2697,6 +2754,10 @@ def _bind_events():
 
 def stop():
     global _app_timer
+    try:
+        _remove_fullscreen_button()
+    except Exception:
+        pass
     if _app_timer is not None:
         try:
             timer.clear_interval(_app_timer)
