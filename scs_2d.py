@@ -13,7 +13,7 @@ transform, then sets transform = backing/logical so logical coords fill
 the backing exactly. resize() updates logical size only; backing is
 owned by the entrypoint (_size_canvas / _get_hud_offscreen).
 """
-__version__ = 'v59'
+__version__ = 'v60'
 
 import math
 
