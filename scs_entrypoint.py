@@ -60,21 +60,17 @@ __all__ = [
     'renderFrame', 'startXR', 'stopXR', 'getXRState', 'getXRCapability',
     # Integrations (scs_storage / scs_wasm / scs_audio / scs_media / scs_serial):
     # adapters around the renderer, never inside render().
-    'getAssetCache', 'getPrefs', 'getAudioEngine', 'getSpatialAudioEngine',
-    'getMediaAdapter',
+    'getAssetCache', 'getPrefs', 'getAudioEngine', 'getMediaAdapter',
     'getSerialAdapter', 'getUSBAdapter',
-    # v46: REMOVED 9 names that were in __all__ but NEVER defined:
-    # Camera3D, getWebGL2Engine, getWebGPUEngine,
+    # v46: REMOVED 10 names that were in __all__ but NEVER defined:
+    # getSpatialAudioEngine, Camera3D, getWebGL2Engine, getWebGPUEngine,
     # getSplatRenderer, createSplatSchema, loadSplatManifest,
     # getPipelineManager, getMaterialLibrary, getPBRMaterial.
     # Brython's `from X import *` tries missing __all__ names as submodules
     # (scs_entrypoint.<name>) and fails with "'scs_entrypoint' is not a package".
-    # v60: getSpatialAudioEngine is BACK -- it is now DEFINED (below, lazy
-    # import), so it is safe in __all__. The app must use it, NOT
-    # `from scs_spatial_audio import SpatialAudioEngine` at the top.
 ]
 
-__version__ = '2026-11-15-v61-no-2d-fallback-webgl2-required-audio-getattr-sandbox-auto'
+__version__ = '2026-11-15-FIXED-v58-hud-backing-eq-viewport-fullscreen-measured-rect'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -874,20 +870,7 @@ def _size_canvas(width, height):
         except Exception:
             pass
         # Buffer: assign only if actually changed (avoids needless reset).
-        # v59: backing = CSS * DPR (capped at 2.0 for memory). v38 set
-        # backing == CSS (no DPR), so on a DPR-2 display the 900x560 backing
-        # was upscaled 2x by the browser and EVERYTHING (2D, HUD texture,
-        # 3D) looked blurry. The DPR-aware resize path already used CSS*DPR,
-        # but ResizeObserver is disabled (v37), so backing stayed 1x forever.
-        # Cap at 2.0: Retina is 2x; 5x DPR would balloon the buffer (4500px)
-        # for no visible gain. CSS stays runApp size; only backing changes.
-        # Renderer2D v59 + _get_hud_offscreen already scale by measured
-        # backing/logical, so this needs no other change. Fullscreen (v54)
-        # still leaves backing alone and scales via CSS only.
-        _dpr59 = _br if _br > 0 else 1.0
-        if _dpr59 > 2.0:
-            _dpr59 = 2.0
-        _bw, _bh = int(round(width * _dpr59)), int(round(height * _dpr59))
+        _bw, _bh = int(width), int(height)  # v38: backing == CSS == runApp, no DPR multiply
         if int(canvas.width) != _bw:
             canvas.width = _bw
         if int(canvas.height) != _bh:
@@ -924,10 +907,7 @@ def _queue_resize(cssW, cssH, backingW=None, backingH=None):
             return
         _br = _budgeted_ratio()
         if backingW is None or backingH is None:
-            _br59 = _br if _br > 0 else 1.0
-            if _br59 > 2.0:
-                _br59 = 2.0
-            backingW, backingH = int(round(_cssW * _br59)), int(round(_cssH * _br59))
+            backingW, backingH = int(round(_cssW * _br)), int(round(_cssH * _br))
         else:
             backingW, backingH = int(backingW), int(backingH)
         _resize_pending = (_cssW, _cssH, backingW, backingH)
@@ -1058,10 +1038,7 @@ def _on_resize_observer(entries, observer=None):
                 _cssW, _cssH = _measure_canvas_css()
             if _bw is None or _bh is None:
                 _br = _budgeted_ratio()
-                _br59 = _br if _br > 0 else 1.0
-                if _br59 > 2.0:
-                    _br59 = 2.0
-                _bw, _bh = int(round(_cssW * _br59)), int(round(_cssH * _br59))
+                _bw, _bh = int(round(_cssW * _br)), int(round(_cssH * _br))
             # v36: fixed-size app - RO is advisory only. If CSS box != app
             # size, it is the host page / DevTools, not the app. Ignore it.
             try:
@@ -1286,25 +1263,28 @@ def create_renderer(kind, canvas, width, height):
     if kind in ('2d', 'canvas', 'canvas2d'):
         return _import_renderer_module('scs_2d')(canvas, width, height)
     if kind in ('webgl', 'webgl2', 'webgl-2'):
-        # v61: NO 2D FALLBACK when 3D is specified. 'webgl2' means the
-        # 3D engine (kind webgl2-3d), NOT the 2D tessellator in
-        # scs_webgl.py. If the engine fails (import, getContext null,
-        # .error), FAIL LOUDLY. Do NOT return the 2D tessellator --
-        # that silently downgraded a 3D app to 2D and the user saw
-        # "NOT 3D" with no error. 3D requested = 3D required.
-        # Brython: use 'import scs_engine_webgl2' + getattr, never
-        # 'from X import Y' for the engine (v50 ROOT FIX).
-        import scs_engine_webgl2 as _eng_mod
-        WebGL2Engine = getattr(_eng_mod, 'WebGL2Engine', None)
-        if WebGL2Engine is None:
-            raise ImportError('WebGL2Engine not found in scs_engine_webgl2 module -- NO 2D FALLBACK. 3D was requested, 3D is required.')
-        _eng = WebGL2Engine(canvas=canvas, width=width, height=height)
-        _err = getattr(_eng, 'error', None)
-        if _err is not None:
-            raise RuntimeError('WebGL2 engine failed: %s -- NO 2D FALLBACK. 3D was requested, 3D is required.' % (_err,))
-        if getattr(_eng, 'gl', None) is None:
-            raise RuntimeError('WebGL2 engine has no GL context -- NO 2D FALLBACK. 3D was requested, 3D is required.')
-        return _eng
+        # FIX v25: 'webgl2' means the 3D engine (kind webgl2-3d), NOT the 2D
+        # tessellator in scs_webgl.py. The 3D path in _render_one_view only
+        # runs when kind == 'webgl2-3d'. Try the engine first; if its
+        # getContext(webgl2) fails (e.g. canvas already has 2d), fall back
+        # to the 2D tessellator so 2D apps still work.
+        try:
+            # v50 ROOT FIX: Brython's 'from scs_engine_webgl2 import WebGL2Engine'
+            # tries 'scs_engine_webgl2.WebGL2Engine' as a SUBMODULE first, and fails
+            # with "is not a package" even though the class IS in the file.
+            # Use 'import scs_engine_webgl2' + getattr - never 'from X import Y' for the engine.
+            import scs_engine_webgl2 as _eng_mod
+            WebGL2Engine = getattr(_eng_mod, 'WebGL2Engine', None)
+            if WebGL2Engine is None:
+                raise ImportError('WebGL2Engine not found in scs_engine_webgl2 module')
+            _eng = WebGL2Engine(canvas=canvas, width=width, height=height)
+            if getattr(_eng, 'error', None) is None and getattr(_eng, 'gl', None) is not None:
+                return _eng
+            # Engine failed - fall through to tessellator
+            _debug_log('SCS renderer webgl2 engine failed (%s) - using 2D tessellator' % (getattr(_eng, 'error', 'unknown'),))
+        except Exception as _e_eng:
+            _debug_log('SCS renderer webgl2 engine import failed (%r) - using 2D tessellator' % (_e_eng,))
+        return _import_renderer_module('scs_webgl')(canvas, width, height)
     if kind in ('webgpu', 'gpu'):
         return _import_renderer_module('scs_webgpu')(canvas, width, height)
     raise ValueError('Unknown renderer %r (expected 2d, webgl2, webgpu, auto)' % kind)
@@ -3028,18 +3008,6 @@ def _bind_events():
         canvas.bind('touchend', lambda ev: _touch(ev, 'end'))
     except Exception:
         pass
-    try:
-        # v60: fullscreenchange bound ONCE at boot, NOT gated on
-        # enableFullscreen. run_app only bound it when enableFullscreen=True,
-        # so an app that never passed it (spatial_audio) had NO listener --
-        # Escape fired fullscreenchange with nobody listening, and the
-        # canvas CSS stayed at fullscreen size. Binding here means Escape
-        # restores the canvas even if the app never asked for a button.
-        # addEventListener with the same fn is a no-op if already bound,
-        # so the run_app binding (kept) does not duplicate it.
-        document.addEventListener('fullscreenchange', _on_fullscreen_change)
-    except Exception:
-        pass
 
 
 # ----------------------------------------------------------------------
@@ -3816,51 +3784,6 @@ def getAudioEngine(context=None):
     except Exception:
         return None
 
-def getSpatialAudioEngine():
-    """Spatial audio engine (HRTF panner + listener = Camera3D).
-
-    v61: NEVER `from scs_spatial_audio import SpatialAudioEngine`.
-    Brython's `from X import Y` tries X.Y as a submodule and fails with
-    "is not a package" even though the class IS in the file (same quirk
-    as the v50 WebGL2Engine fix). Use `import scs_spatial_audio` +
-    getattr. If the spatial module is missing, fall back to the base
-    WebAudioEngine (scs_web_audio) with update() patched to
-    update_listener() -- the app still gets real HRTF audio. Returns
-    None (never raises) only if both fail, so the app still renders --
-    audio is optional, rendering is not."""
-    try:
-        import scs_spatial_audio as _sa
-        _cls = getattr(_sa, 'SpatialAudioEngine', None)
-        if _cls is not None:
-            return _cls()
-    except Exception as _e_sa:
-        try:
-            print('[SCS] getSpatialAudioEngine: scs_spatial_audio failed, trying scs_web_audio:', _e_sa)
-        except Exception:
-            pass
-    try:
-        import scs_web_audio as _wa
-        _base_cls = getattr(_wa, 'WebAudioEngine', None)
-        if _base_cls is not None:
-            _eng = _base_cls()
-            if not hasattr(_eng, 'update'):
-                def _update(camera, _e=_eng):
-                    try:
-                        return _e.update_listener(camera)
-                    except Exception:
-                        return False
-                try:
-                    _eng.update = _update
-                except Exception:
-                    pass
-            return _eng
-    except Exception as _e_wa:
-        try:
-            print('[SCS] getSpatialAudioEngine unavailable:', _e_wa)
-        except Exception:
-            pass
-    return None
-
 
 def getMediaAdapter(kind='camera', source=None, **kw):
     """Media-source adapter: 'camera' (latest buffering), 'video'
@@ -4515,18 +4438,13 @@ def boot_sandbox():
                     pass
             except Exception:
                 _run_btn = _stop_btn = None
-            def _run(ev=None, _auto=False):
+            def _run(ev=None):
                 try:
                     _ta2 = document['code-input']
                     # v52: Run MUST reset run-once - otherwise second Run is ignored.
                     exec_code(_ta2.value, '<sandbox>', force=True)
                     _log_msg('Running; renderer=' + str(getRendererKind()))
                 except Exception:
-                    if _auto:
-                        # v61: auto-run on typing -- partial code ("e",
-                        # "enable") raises NameError. That's typing, not a
-                        # bug. Silent. Explicit Run still logs errors.
-                        return
                     import traceback
                     _log_msg('Error:\n' + traceback.format_exc())
             def _stop(ev=None):
@@ -4557,7 +4475,7 @@ def boot_sandbox():
                             pass
                         def _do():
                             try:
-                                _run(_auto=True)
+                                _run()
                             except Exception:
                                 pass
                         try:
@@ -4573,14 +4491,6 @@ def boot_sandbox():
             except Exception:
                 pass
             _bind_events()
-            # v60: sandbox canvas is 400x400 in HTML. Size it explicitly
-            # BEFORE the first auto-run, so the initial render is at
-            # 400x400 (CSS + backing), not at whatever _canvas_width
-            # defaulted to before runApp() ran.
-            try:
-                _size_canvas(400, 400)
-            except Exception:
-                pass
             # Auto-run once, so the student sees something immediately - no suffering.
             try:
                 _run()
