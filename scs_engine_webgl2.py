@@ -9,7 +9,7 @@ HUD: blending ON, viewport = drawing buffer, so HUD does not cover 3D or scale w
 """
 import math
 
-__version__ = 'v59'
+__version__ = 'v60'
 try:
     from browser import document, window
 except ImportError:
