@@ -20,7 +20,7 @@ from scs_3d import Camera3D
 import math as _math
 
 # --- Version logs: logs don't lie ---
-APP_VERSION = '2026-11-14-spatial-audio-v3-3d-patinas-v53'
+APP_VERSION = '2026-11-15-spatial-audio-v3-3d-patinas-v54'
 
 # v46-fix: Brython's '%.2f' % x crashes with RangeError when x is a tiny
 # float-error value like -1.14e-14 (BigInt(-1.14e-14) is not an integer).
