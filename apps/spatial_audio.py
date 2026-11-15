@@ -1,5 +1,7 @@
-# Spatial audio - a blue sphere humming on a big plane.
-# v61: canonical = 3D version (was v2). renderer='webgl2' REQUIRED -- no 2D fallback.
+# Spatial audio - PATINA COPPER sphere humming on a big plane. NOT blue.
+# The GOLD sphere is the SOUND SOURCE (440 Hz). Red/Yellow/Green balls are decoys (no sound).
+# Target: patina copper, defect 0.80, corrosion 1.0, roughness 0.28, metalness 1.0.
+# Light is a CLOUDY SKY (see scs_engine_webgl2.py cloudySky) - overcast, not gradient + softboxes.
 # For kids learning on CMU CS Academy: this is plain CMU Graphics.
 # All flat shapes use the cmu_graphics API. The ONLY extra thing is centerZ at the END.
 # NO Canvas2D fallback. World shapes are REAL 3D (centerZ set), drawn by WebGL2 / WebGPU.
@@ -13,8 +15,59 @@
 #   Space play, 1 / 2 / 3 move sphere, C centre, E envelope, P pipeline
 
 from scs import *
+from scs_spatial_audio import SpatialAudioEngine
 from scs_3d import Camera3D
 import math as _math
+
+# --- Version logs: logs don't lie ---
+APP_VERSION = '2026-11-15-spatial-audio-v3-3d-patinas-v54'
+
+# v46-fix: Brython's '%.2f' % x crashes with RangeError when x is a tiny
+# float-error value like -1.14e-14 (BigInt(-1.14e-14) is not an integer).
+# Snap anything < 1e-9 to exactly 0.0 before formatting.
+def _clean(v):
+    try:
+        f = float(v)
+    except Exception:
+        return v
+    return 0.0 if abs(f) < 1e-9 else f
+
+def _log_versions(where):
+    _ep_ver = 'unknown'
+    try:
+        import scs_entrypoint as _ep
+        _ep_ver = getattr(_ep, '__version__', 'unknown')
+    except Exception as _e_ep:
+        _ep_ver = 'import-failed:%r' % (_e_ep,)
+    _kind = 'unknown'
+    _cap = {}
+    _stats = {}
+    try:
+        _kind = getRendererKind()
+    except Exception as _e_k:
+        _kind = 'getRendererKind-failed:%r' % (_e_k,)
+    try:
+        _cap = getCapability()
+    except Exception:
+        _cap = {}
+    try:
+        _stats = getStats()
+    except Exception:
+        _stats = {}
+    _msg = '[SCS versions] where=%s entrypoint=%s renderer_version=0.1 renderer_kind=%s renderer_cap=%s renderer_stats=%s app=%s' % (where, _ep_ver, _kind, _cap, _stats, APP_VERSION)
+    # v50: log ONCE via console.log only (print+console.log duplicated every line)
+    try:
+        from browser import window as _w
+        _w.console.log(_msg)
+    except Exception:
+        try:
+            print(_msg)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+_log_versions('import')
 
 SPHERE_START = (0.0, 1.0, -2.0)
 SPHERE_PRESETS = {
@@ -79,9 +132,10 @@ def _project(app, world):
 
 
 def onAppStart(app):
+    _log_versions('onAppStart')
     app.background = '#0e0e1a'
     app.camera = Camera3D(position=(0.0, 2.0, 6.0), yaw=0.0, pitch=-4.0)
-    app.spatial = getSpatialAudioEngine()
+    app.spatial = SpatialAudioEngine()
     app.sphere_pos = SPHERE_START
     app.envelope = 'pad'
     app.use_pipeline = True
@@ -101,19 +155,20 @@ def onAppStart(app):
     app.pulse = 0.0
     app.stepCount = 0
     app.balls = [
-        {'x': -4.5, 'z': 1.5, 'r': 0.65, 'y': 3.0, 'vy': 0.0, 'color': '#ff5a5a'},
-        {'x': 0.0, 'z': 3.5, 'r': 0.5, 'y': 4.5, 'vy': 0.0, 'color': '#ffd23a'},
-        {'x': 4.5, 'z': 0.5, 'r': 0.8, 'y': 2.2, 'vy': 0.0, 'color': '#3affa8'},
+        {'x': -6.0, 'z': -3.0, 'r': 0.60, 'y': 3.0, 'vy': 0.0, 'color': '#B87333', 'defect': 0.72, 'corrosion': 0.0, 'name': 'Copper'},
+        {'x': 0.0, 'z': 4.0, 'r': 0.50, 'y': 4.5, 'vy': 0.0, 'color': '#C9A227', 'defect': 0.68, 'corrosion': 0.0, 'name': 'Brass'},
+        {'x': 6.0, 'z': -3.0, 'r': 0.70, 'y': 2.2, 'vy': 0.0, 'color': '#B87333', 'defect': 0.82, 'corrosion': 1.0, 'name': 'Copper-Patina'},
     ]
     # ---- HUD shapes: flat, overlay ----
     app.hudTop = Rect(0, 0, 900, 62, fill='black', align='left-top')
-    app.hudTitle = Label('SPATIAL AUDIO -- blue sphere on a 40 x 40 m plane',
-                         20, 18, fill='white', size=18, bold=True,
+    app.hudTitle = Label('SPATIAL AUDIO -- GOLD sphere = sound source (440 Hz) on a 40 x 40 m plane',
+                         20, 18, fill='#FFD700', size=18, bold=True,
                          align='left-top')
     app.hudHelp = Label('WASD move | Q down | Shift sprint | Drag / Arrows look | Space play | E envelope | P pipeline',
                         20, 42, fill='#a0a0c0', size=12, align='left-top')
     app.hudDist = Label('', 880, 42, fill='#ffd97a', size=12,
                         align='right-top')
+    app.hudSourceLegend = Label('GOLD = SOUND SOURCE  |  Red/Yellow/Green = bouncing decoys (no sound)', 20, 64, fill='#FFD700', size=12, bold=True, align='left-top')
     app.statusBar = Rect(40, 430, 820, 32, fill='#26263a', roundness=6,
                          align='left-top')
     app.statusLabel = Label(app.status, 56, 446, fill='#ffd97a', size=13,
@@ -138,7 +193,7 @@ def onAppStart(app):
                        align='left-top')
     app.miniMapTitle = Label('TOP-DOWN  40m', 800, 80, fill='#8888aa', size=10,
                              align='center')
-    app.miniSphere = Circle(800, 120, 6, fill='blue', border='white', borderWidth=1)
+    app.miniSphere = Circle(800, 120, 6, fill='#FFD700', border='white', borderWidth=1)  # GOLD = sound source, not blue
     app.miniCam = Circle(800, 120, 4, fill='white')
     app.miniArrow = Line(800, 120, 800, 106, fill='white', lineWidth=2)
     app.readout = Label('', 40, 530, fill='#a0a0c0', size=12,
@@ -146,9 +201,14 @@ def onAppStart(app):
     # ---- World shapes: in the 3D world ----
     # World: centerZ set = 3D. HUD above has NO centerZ = HUD. That is the whole rule.
     app.sphereShadow = Oval(450, 280, 70, 14, fill='black', centerZ=0.02)
-    app.sphere = Circle(0, 1, 1.0, fill='blue', border='white', borderWidth=2, centerZ=-2.0)
+    # TARGET: patina copper, not flat blue/gold. Cloudy sky is the light (see CLOUDY engine).
+    app.sphere = Circle(0, 1, 1.2, fill='#B87333', border='white', borderWidth=3, centerZ=-2.0)
+    app.sphere.defectLevel = 0.80
+    app.sphere.corrosionEnabled = 1.0
+    app.sphere.metalness = 1.0
+    app.sphere.roughness = 0.28
     app.sphereHighlight = Circle(435, 265, 12, fill='#88aaff', centerZ=-2.0)
-    app.sphereLabel = Label('440 Hz', 450, 340, fill='white', size=11, bold=True,
+    app.sphereLabel = Label('SOUND SOURCE - 440 Hz - DAMAGED COPPER', 450, 340, fill='#FFD700', size=11, bold=True,
                             align='center', centerZ=-2.0)
     app.ballBodies = []
     app.ballHighlights = []
@@ -156,10 +216,19 @@ def onAppStart(app):
         app.ballBodies.append(Oval(0, 1, b['r']*2, b['r']*2, fill=b['color'],
                                     border='white', borderWidth=1, centerZ=b['z']))
         app.ballHighlights.append(Circle(435, 265, 10, fill='white', centerZ=b['z']))
+        app.ballBodies[-1].defectLevel = b.get('defect', 0.55)
+        app.ballBodies[-1].corrosionEnabled = b.get('corrosion', 0.0)
+        app.ballBodies[-1].metalness = 1.0
+        app.ballBodies[-1].roughness = 0.32
     app.cubeShapes = []
     for _cz in (-8.0, 2.0):
-        app.cubeShapes.append(Rect(450, 280, 40, 40, fill='gray',
+        app.cubeShapes.append(Rect(450, 280, 40, 40, fill='#8a8f98',
                                    border='#222222', align='left-top', centerZ=_cz))
+    for _c in app.cubeShapes:
+        _c.defectLevel = 0.50
+        _c.corrosionEnabled = 0.0
+        _c.metalness = 1.0
+        _c.roughness = 0.38
     app.planeLines = []
     for _ in range(26):
         app.planeLines.append(Line(0, 0, 0, 0, fill='#2a2a4a', lineWidth=1, centerZ=0.0))
@@ -167,6 +236,10 @@ def onAppStart(app):
 
 def onStep(app):
     app.stepCount += 1
+    if app.stepCount == 1:
+        _log_versions('onStep-first-frame')
+    if app.stepCount == 60:
+        _log_versions('onStep-frame-60')
     if app.playing:
         app.pulse += 0.12
     for b in app.balls:
@@ -387,7 +460,7 @@ def redrawAll(app):
         dist = app.src.distance_to(app.camera.position)
         gain = app.src.gain_at(app.camera.position)
         pan = app.src.pan_at(app.camera)
-        app.hudDist.text = 'dist %.2f m   gain %.2f   pan %+.2f  ( -1 left / +1 right )' % (dist, gain, pan)
+        app.hudDist.text = 'dist %.2f m   gain %.2f   pan %+.2f  ( -1 left / +1 right )' % (_clean(dist), _clean(gain), _clean(pan))
         mx, my, mw, mh = 740, 70, 120, 120
         def _map(wx, wz):
             return (mx + (wx + 20.0) / 40.0 * mw,
@@ -407,13 +480,13 @@ def redrawAll(app):
     app.modeLabel.text = 'MODE: %s (P)' % ('PIPELINE' if app.use_pipeline else 'CLASSIC')
     p = app.camera.position
     app.readout.text = 'cam (%.1f, %.1f, %.1f)  yaw %.0f  pitch %.0f  |  sphere %s  |  envelope %s' % (
-        p[0], p[1], p[2], app.camera.yaw, app.camera.pitch, app.sphere_pos, app.envelope)
+        _clean(p[0]), _clean(p[1]), _clean(p[2]), _clean(app.camera.yaw), _clean(app.camera.pitch), app.sphere_pos, app.envelope)
 
 
 def main():
-    # Declares itself as 3D: renderer='webgl2', hud=True. EntryPoint does NOT guess from shapes.
-# Flat CMU shapes can be 3D, so shape-guessing is wrong. Demo must declare itself.
-    runApp(900, 560, renderer='webgl2', hud=True, enableFullscreen=True)  # declares itself as 3D - entrypoint does NOT guess from shapes
+    # Plain CMU: no renderer words, no engine words. Just run it.
+    _log_versions('main-before-runApp')
+    runApp(900, 560, renderer='webgl2')
 
 
 main()
