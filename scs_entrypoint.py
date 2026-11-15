@@ -74,7 +74,7 @@ __all__ = [
     # `from scs_spatial_audio import SpatialAudioEngine` at the top.
 ]
 
-__version__ = '2026-11-15-v60-spatialaudio-getter-fullscreen-boot-sandbox400'
+__version__ = '2026-11-15-v61-no-2d-fallback-webgl2-required-audio-getattr-sandbox-auto'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -1286,28 +1286,25 @@ def create_renderer(kind, canvas, width, height):
     if kind in ('2d', 'canvas', 'canvas2d'):
         return _import_renderer_module('scs_2d')(canvas, width, height)
     if kind in ('webgl', 'webgl2', 'webgl-2'):
-        # FIX v25: 'webgl2' means the 3D engine (kind webgl2-3d), NOT the 2D
-        # tessellator in scs_webgl.py. The 3D path in _render_one_view only
-        # runs when kind == 'webgl2-3d'. Try the engine first; if its
-        # getContext(webgl2) fails (e.g. canvas already has 2d), fall back
-        # to the 2D tessellator so 2D apps still work.
-        try:
-            # v50 ROOT FIX: Brython's 'from scs_engine_webgl2 import WebGL2Engine'
-            # tries 'scs_engine_webgl2.WebGL2Engine' as a SUBMODULE first, and fails
-            # with "is not a package" even though the class IS in the file.
-            # Use 'import scs_engine_webgl2' + getattr - never 'from X import Y' for the engine.
-            import scs_engine_webgl2 as _eng_mod
-            WebGL2Engine = getattr(_eng_mod, 'WebGL2Engine', None)
-            if WebGL2Engine is None:
-                raise ImportError('WebGL2Engine not found in scs_engine_webgl2 module')
-            _eng = WebGL2Engine(canvas=canvas, width=width, height=height)
-            if getattr(_eng, 'error', None) is None and getattr(_eng, 'gl', None) is not None:
-                return _eng
-            # Engine failed - fall through to tessellator
-            _debug_log('SCS renderer webgl2 engine failed (%s) - using 2D tessellator' % (getattr(_eng, 'error', 'unknown'),))
-        except Exception as _e_eng:
-            _debug_log('SCS renderer webgl2 engine import failed (%r) - using 2D tessellator' % (_e_eng,))
-        return _import_renderer_module('scs_webgl')(canvas, width, height)
+        # v61: NO 2D FALLBACK when 3D is specified. 'webgl2' means the
+        # 3D engine (kind webgl2-3d), NOT the 2D tessellator in
+        # scs_webgl.py. If the engine fails (import, getContext null,
+        # .error), FAIL LOUDLY. Do NOT return the 2D tessellator --
+        # that silently downgraded a 3D app to 2D and the user saw
+        # "NOT 3D" with no error. 3D requested = 3D required.
+        # Brython: use 'import scs_engine_webgl2' + getattr, never
+        # 'from X import Y' for the engine (v50 ROOT FIX).
+        import scs_engine_webgl2 as _eng_mod
+        WebGL2Engine = getattr(_eng_mod, 'WebGL2Engine', None)
+        if WebGL2Engine is None:
+            raise ImportError('WebGL2Engine not found in scs_engine_webgl2 module -- NO 2D FALLBACK. 3D was requested, 3D is required.')
+        _eng = WebGL2Engine(canvas=canvas, width=width, height=height)
+        _err = getattr(_eng, 'error', None)
+        if _err is not None:
+            raise RuntimeError('WebGL2 engine failed: %s -- NO 2D FALLBACK. 3D was requested, 3D is required.' % (_err,))
+        if getattr(_eng, 'gl', None) is None:
+            raise RuntimeError('WebGL2 engine has no GL context -- NO 2D FALLBACK. 3D was requested, 3D is required.')
+        return _eng
     if kind in ('webgpu', 'gpu'):
         return _import_renderer_module('scs_webgpu')(canvas, width, height)
     raise ValueError('Unknown renderer %r (expected 2d, webgl2, webgpu, auto)' % kind)
@@ -3822,26 +3819,47 @@ def getAudioEngine(context=None):
 def getSpatialAudioEngine():
     """Spatial audio engine (HRTF panner + listener = Camera3D).
 
-    Lazy import, same pattern as getAudioEngine(). The app must NOT do
-    `from scs_spatial_audio import SpatialAudioEngine` at the top of its
-    file: that fails in Brython with
-    "No module named 'scs_spatial_audio.SpatialAudioEngine';
-    'scs_spatial_audio' is not a package" (Brython's `from X import Y`
-    falls back to importing X.Y as a submodule when Y is not an
-    attribute), and the failure kills the whole exec, so nothing
-    renders. Importing here, from the real scs_entrypoint module,
-    works. Returns None (never raises) if spatial audio is
-    unavailable, so the app still renders -- audio is optional,
-    rendering is not."""
+    v61: NEVER `from scs_spatial_audio import SpatialAudioEngine`.
+    Brython's `from X import Y` tries X.Y as a submodule and fails with
+    "is not a package" even though the class IS in the file (same quirk
+    as the v50 WebGL2Engine fix). Use `import scs_spatial_audio` +
+    getattr. If the spatial module is missing, fall back to the base
+    WebAudioEngine (scs_web_audio) with update() patched to
+    update_listener() -- the app still gets real HRTF audio. Returns
+    None (never raises) only if both fail, so the app still renders --
+    audio is optional, rendering is not."""
     try:
-        from scs_spatial_audio import SpatialAudioEngine
-        return SpatialAudioEngine()
-    except Exception as e:
+        import scs_spatial_audio as _sa
+        _cls = getattr(_sa, 'SpatialAudioEngine', None)
+        if _cls is not None:
+            return _cls()
+    except Exception as _e_sa:
         try:
-            print('[SCS] getSpatialAudioEngine unavailable:', e)
+            print('[SCS] getSpatialAudioEngine: scs_spatial_audio failed, trying scs_web_audio:', _e_sa)
         except Exception:
             pass
-        return None
+    try:
+        import scs_web_audio as _wa
+        _base_cls = getattr(_wa, 'WebAudioEngine', None)
+        if _base_cls is not None:
+            _eng = _base_cls()
+            if not hasattr(_eng, 'update'):
+                def _update(camera, _e=_eng):
+                    try:
+                        return _e.update_listener(camera)
+                    except Exception:
+                        return False
+                try:
+                    _eng.update = _update
+                except Exception:
+                    pass
+            return _eng
+    except Exception as _e_wa:
+        try:
+            print('[SCS] getSpatialAudioEngine unavailable:', _e_wa)
+        except Exception:
+            pass
+    return None
 
 
 def getMediaAdapter(kind='camera', source=None, **kw):
@@ -4497,13 +4515,18 @@ def boot_sandbox():
                     pass
             except Exception:
                 _run_btn = _stop_btn = None
-            def _run(ev=None):
+            def _run(ev=None, _auto=False):
                 try:
                     _ta2 = document['code-input']
                     # v52: Run MUST reset run-once - otherwise second Run is ignored.
                     exec_code(_ta2.value, '<sandbox>', force=True)
                     _log_msg('Running; renderer=' + str(getRendererKind()))
                 except Exception:
+                    if _auto:
+                        # v61: auto-run on typing -- partial code ("e",
+                        # "enable") raises NameError. That's typing, not a
+                        # bug. Silent. Explicit Run still logs errors.
+                        return
                     import traceback
                     _log_msg('Error:\n' + traceback.format_exc())
             def _stop(ev=None):
@@ -4534,7 +4557,7 @@ def boot_sandbox():
                             pass
                         def _do():
                             try:
-                                _run()
+                                _run(_auto=True)
                             except Exception:
                                 pass
                         try:
