@@ -13,7 +13,7 @@ canvas{display:block;background:black;outline:none;}
 </head>
 <body onload="brython({debug:1, pythonpath:['.']})">
 <canvas id="canvas" width="400" height="400" tabindex="0"></canvas>
-<div id="sandbox-toolbar"><button id="run-btn">▶ Run</button><button id="stop-btn">■ Stop</button><button id="clear-log-btn">Clear Log</button></div>
+<div id="sandbox-toolbar"><button id="run-btn">\u25b6 Run</button><button id="stop-btn">\u25a0 Stop</button><button id="clear-log-btn">Clear Log</button></div>
 <!-- Sandbox: just enter app code here. Paste CMU-style code, it auto-runs. -->
 <textarea id="code-input" placeholder="Just enter app code here...\n\nfrom scs import *\n\ndef onAppStart(app):\n    app.color = 'blue'\n\ndef redrawAll(app):\n    drawCircle(200, 200, 50, fill=app.color)\n\nrunApp()"></textarea>
 <div id="log" style="margin-top:10px;background:#1a1d24;border:1px solid #3a3f4b;border-radius:6px;padding:10px;min-height:80px;white-space:pre-wrap;font-size:11px;max-height:300px;overflow:auto;color:#e6e6e6;width:1050px;max-width:98vw;"></div>
