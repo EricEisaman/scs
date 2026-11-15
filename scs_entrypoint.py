@@ -60,17 +60,21 @@ __all__ = [
     'renderFrame', 'startXR', 'stopXR', 'getXRState', 'getXRCapability',
     # Integrations (scs_storage / scs_wasm / scs_audio / scs_media / scs_serial):
     # adapters around the renderer, never inside render().
-    'getAssetCache', 'getPrefs', 'getAudioEngine', 'getMediaAdapter',
+    'getAssetCache', 'getPrefs', 'getAudioEngine', 'getSpatialAudioEngine',
+    'getMediaAdapter',
     'getSerialAdapter', 'getUSBAdapter',
-    # v46: REMOVED 10 names that were in __all__ but NEVER defined:
-    # getSpatialAudioEngine, Camera3D, getWebGL2Engine, getWebGPUEngine,
+    # v46: REMOVED 9 names that were in __all__ but NEVER defined:
+    # Camera3D, getWebGL2Engine, getWebGPUEngine,
     # getSplatRenderer, createSplatSchema, loadSplatManifest,
     # getPipelineManager, getMaterialLibrary, getPBRMaterial.
     # Brython's `from X import *` tries missing __all__ names as submodules
     # (scs_entrypoint.<name>) and fails with "'scs_entrypoint' is not a package".
+    # v60: getSpatialAudioEngine is BACK -- it is now DEFINED (below, lazy
+    # import), so it is safe in __all__. The app must use it, NOT
+    # `from scs_spatial_audio import SpatialAudioEngine` at the top.
 ]
 
-__version__ = '2026-11-15-v59-hud-dpr-backing-texture-linear-texsubimage'
+__version__ = '2026-11-15-v60-spatialaudio-getter-fullscreen-boot-sandbox400'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -3027,6 +3031,18 @@ def _bind_events():
         canvas.bind('touchend', lambda ev: _touch(ev, 'end'))
     except Exception:
         pass
+    try:
+        # v60: fullscreenchange bound ONCE at boot, NOT gated on
+        # enableFullscreen. run_app only bound it when enableFullscreen=True,
+        # so an app that never passed it (spatial_audio) had NO listener --
+        # Escape fired fullscreenchange with nobody listening, and the
+        # canvas CSS stayed at fullscreen size. Binding here means Escape
+        # restores the canvas even if the app never asked for a button.
+        # addEventListener with the same fn is a no-op if already bound,
+        # so the run_app binding (kept) does not duplicate it.
+        document.addEventListener('fullscreenchange', _on_fullscreen_change)
+    except Exception:
+        pass
 
 
 # ----------------------------------------------------------------------
@@ -3803,6 +3819,30 @@ def getAudioEngine(context=None):
     except Exception:
         return None
 
+def getSpatialAudioEngine():
+    """Spatial audio engine (HRTF panner + listener = Camera3D).
+
+    Lazy import, same pattern as getAudioEngine(). The app must NOT do
+    `from scs_spatial_audio import SpatialAudioEngine` at the top of its
+    file: that fails in Brython with
+    "No module named 'scs_spatial_audio.SpatialAudioEngine';
+    'scs_spatial_audio' is not a package" (Brython's `from X import Y`
+    falls back to importing X.Y as a submodule when Y is not an
+    attribute), and the failure kills the whole exec, so nothing
+    renders. Importing here, from the real scs_entrypoint module,
+    works. Returns None (never raises) if spatial audio is
+    unavailable, so the app still renders -- audio is optional,
+    rendering is not."""
+    try:
+        from scs_spatial_audio import SpatialAudioEngine
+        return SpatialAudioEngine()
+    except Exception as e:
+        try:
+            print('[SCS] getSpatialAudioEngine unavailable:', e)
+        except Exception:
+            pass
+        return None
+
 
 def getMediaAdapter(kind='camera', source=None, **kw):
     """Media-source adapter: 'camera' (latest buffering), 'video'
@@ -4510,6 +4550,14 @@ def boot_sandbox():
             except Exception:
                 pass
             _bind_events()
+            # v60: sandbox canvas is 400x400 in HTML. Size it explicitly
+            # BEFORE the first auto-run, so the initial render is at
+            # 400x400 (CSS + backing), not at whatever _canvas_width
+            # defaulted to before runApp() ran.
+            try:
+                _size_canvas(400, 400)
+            except Exception:
+                pass
             # Auto-run once, so the student sees something immediately - no suffering.
             try:
                 _run()
