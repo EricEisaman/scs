@@ -70,7 +70,7 @@ __all__ = [
     # (scs_entrypoint.<name>) and fails with "'scs_entrypoint' is not a package".
 ]
 
-__version__ = '2026-11-15-FIXED-v56-clearlog-fullscreen-btn'
+__version__ = '2026-11-15-FIXED-v57-fullscreen-survives-startloop-hud-1to1'
 
 # v32: ONE window property only: window.scs.
 # Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
@@ -648,11 +648,17 @@ def _get_hud_offscreen(width, height):
                 return _hud_offscreen
         except Exception:
             pass
-    _br = _budgeted_ratio()
+    # v57: backing == CSS == runApp size, NO DPR multiply. Main canvas
+    # (_size_canvas, v38) is also backing == CSS. If HUD offscreen is
+    # CSS*DPR (1800x1120 at DPR 2) while the WebGL viewport is CSS
+    # (900x560), the HUD texture stretches and the 18px HUD labels render
+    # ~5x huge and clipped (spatial_audio screenshot). Both sides CSS
+    # means the HUD texture maps 1:1 onto the viewport. Renderer2D already
+    # draws at dpr=1.0 / setTransform(1,0,0,1,0,0), consistent with this.
     try:
         c = document.createElement('canvas')
-        c.width = int(w * _br)
-        c.height = int(h * _br)
+        c.width = int(w)
+        c.height = int(h)
         try:
             c._scs_css_w = w
             c._scs_css_h = h
@@ -3327,6 +3333,17 @@ def _start_loop():
     # The window flag + runApp 500ms guard above are the real dedup; here we
     # just ensure we don't start a second interval from THIS instance.
     stop()
+    # v57: stop() above calls _remove_fullscreen_button(). run_app created the
+    # button BEFORE _start_loop, so stop() deleted it ~0ms after creation -
+    # that is why there was never a fullscreen DOM element, even after the
+    # v56 .text fix. Recreate it here, AFTER stop(), so it survives.
+    # Covers both paths: 2d/webgl2 (run_app -> _start_loop) and webgpu
+    # (_gpu_ready -> _start_loop -> stop()).
+    try:
+        if _fullscreen_enabled:
+            _create_fullscreen_button(_canvas_width, _canvas_height)
+    except Exception:
+        pass
     _frame()
     iv = int(1000 / _steps_per_second) if _steps_per_second > 0 else 33
     try:
