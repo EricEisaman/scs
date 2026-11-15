@@ -1,411 +1,499 @@
+# Spatial audio - PATINA COPPER sphere humming on a big plane. NOT blue.
+# The GOLD sphere is the SOUND SOURCE (440 Hz). Red/Yellow/Green balls are decoys (no sound).
+# Target: patina copper, defect 0.80, corrosion 1.0, roughness 0.28, metalness 1.0.
+# Light is a CLOUDY SKY (see scs_engine_webgl2.py cloudySky) - overcast, not gradient + softboxes.
+# For kids learning on CMU CS Academy: this is plain CMU Graphics.
+# All flat shapes use the cmu_graphics API. The ONLY extra thing is centerZ at the END.
+# NO Canvas2D fallback. World shapes are REAL 3D (centerZ set), drawn by WebGL2 / WebGPU.
+# We do NOT project them to shaded 2D circles. If the renderer is 2D, a world shape FAILS LOUD.
+#   No centerZ  -> HUD overlay, on top, like a game HUD
+#   centerZ set -> in the 3D world, with depth. centerZ=0 still counts as 3D.
+# Nothing else is new. No renderer words, no engine words.
+#
+# Walk toward the sphere: louder. Walk past it: left -> right.
+#   WASD move, Q down, Shift sprint, drag / arrows look
+#   Space play, 1 / 2 / 3 move sphere, C centre, E envelope, P pipeline
 
-"""
-scs_spatial_audio.py - 3D spatial audio for SCS, now as PIPELINES.
+from scs import *
+from scs_spatial_audio import SpatialAudioEngine
+from scs_3d import Camera3D
+import math as _math
 
-Rebuilt on the CANONICAL interface in scs_web_audio.py. The public API
-is unchanged:
+# --- Version logs: logs don't lie ---
+APP_VERSION = '2026-11-15-spatial-audio-v59-hud-dpr-backing-texture-linear'
 
-    from scs_spatial_audio import SpatialAudioEngine, SpatialSoundSource
-    audio = SpatialAudioEngine()
-    audio.resume()  # from a user gesture
-    src = audio.create_source(position=(2, 1.5, 0), freq=440)
-    src.start()
-    audio.update(camera)  # Camera3D IS the listener
+# v46-fix: Brython's '%.2f' % x crashes with RangeError when x is a tiny
+# float-error value like -1.14e-14 (BigInt(-1.14e-14) is not an integer).
+# Snap anything < 1e-9 to exactly 0.0 before formatting.
+def _clean(v):
+    try:
+        f = float(v)
+    except Exception:
+        return v
+    return 0.0 if abs(f) < 1e-9 else f
 
-The listener IS the Camera3D from scs_3d.py. The same camera that
-drives the GL view matrix drives the Web Audio listener, so what you
-see is what you hear.
-
-Batch 3: a spatial source IS a pipeline.
-
-    src = audio.create_source(position=(2, 1.5, 0), freq=440,
-                              envelope='pluck', pipeline=True)
-    src.start()  # builds + starts its pipeline
-    src.set_position((3, 1.5, 0))  # moves the pipeline's panner too
-
-    pipe = audio.create_spatial_pipeline('lead', position=(2, 1.5, 0),
-                                         freq=440, envelope='pad')
-    pipe.add_filter('lowpass', frequency=1200)
-    pipe.add_effect('reverb', decay=2.0)
-    pipe.build(audio)
-    pipe.start()
-
-Pipeline shape for a spatial source:
-
-    osc -> gain (volume, mapped) -> envelope (gain + CurveEnvelope)
-         -> filter / effects -> panner (HRTF, inverse distance)
-         -> destination
-
-    + parallel sends (e.g. reverb send) -> destination
-
-Moving the source updates the pipeline's panner node. The engine's
-update(camera) updates the listener AND every spatial pipeline's
-panner, so a moving source stays in the right place while the
-camera moves.
-
-Web Audio primitives used (all real, no fake):
-  * PannerNode -- per-source position, HRTF, inverse distance model
-  * AudioListener -- position + forward + up, from the camera
-  * OscillatorNode / GainNode -- the sound itself
-"""
-
-from scs_web_audio import (
-    SpatialSoundSource as _BaseSpatialSoundSource,
-    WebAudioEngine,
-    inverse_distance_gain,
-    _set_param, _set_3d_position,
-)
-
-try:
-    from scs_audio_envelopes import CurveEnvelope, ADSREnvelope, adsr_envelope, envelope_preset
-except Exception:
-    CurveEnvelope = ADSREnvelope = adsr_envelope = envelope_preset = None
-
-try:
-    from scs_audio_mapping import VolumeMapper
-except Exception:
-    VolumeMapper = None
-
-try:
-    from scs_audio_pipelines import AudioSrcPipeline, AudioSrc
-except Exception:
-    AudioSrcPipeline = AudioSrc = None
-
-
-def _resolve_envelope(envelope, engine=None):
-    """'pluck' | CurveEnvelope | None -> CurveEnvelope or None."""
-    if envelope is None:
-        return None
-    if isinstance(envelope, str):
-        # Registered on the engine? Else a preset.
-        if engine is not None:
-            try:
-                env = engine.get_envelope(envelope)
-                if env is not None:
-                    return env
-            except Exception:
-                pass
-        if envelope_preset is not None:
-            try:
-                return envelope_preset(envelope)
-            except Exception:
-                return None
-        return None
-    return envelope
-
-
-class SpatialSoundSource(_BaseSpatialSoundSource):
-    """A 3D source that can also be a node-based pipeline.
-
-    Same API as scs_web_audio.SpatialSoundSource, plus:
-      as_pipeline() / build_pipeline() -- src as AudioSrcPipeline
-      set_volume_mapped(control) -- volume via VolumeMapper
-    When a pipeline exists, start()/stop()/set_position() drive the
-    pipeline; otherwise they use the original osc->gain->panner path.
-    """
-
-    def __init__(self, engine, position=(0.0, 1.5, 0.0), freq=440.0,
-                 kind='sine', volume=0.5, loop=True,
-                 ref_distance=1.0, max_distance=30.0, rolloff=1.0,
-                 name='source', patch=None, effects=None,
-                 envelope=None, pipeline=None, volume_mapper=None):
-        super().__init__(engine, position=position, freq=freq, kind=kind,
-                         volume=volume, loop=loop,
-                         ref_distance=ref_distance, max_distance=max_distance,
-                         rolloff=rolloff, name=name, patch=patch, effects=effects)
-        self._envelope = _resolve_envelope(envelope, engine)
-        self._pipeline = pipeline  # AudioSrcPipeline or None
-        self._volume_mapper = volume_mapper  # VolumeMapper or None
-        self._pipeline_built = False
-
-    # -- pipeline ------------------------------------------------------
-    def as_pipeline(self):
-        """Build (or return) this source as an AudioSrcPipeline.
-
-        Shape: osc -> gain(volume) -> envelope? -> effects? -> panner
-        -> destination. The panner stage is named 'panner' so
-        set_position() can find it.
-        """
-        if self._pipeline is not None:
-            return self._pipeline
-        if AudioSrcPipeline is None:
-            raise ImportError('scs_audio_pipelines not available')
-        pipe = AudioSrcPipeline(self.name, src='oscillator',
-                                freq=self.freq, type=self.kind)
-        # Volume as a gain stage (linear gain, like the original path).
-        pipe.add_gain(self.volume, name='volume')
-        if self._envelope is not None:
-            pipe.add_envelope(self._envelope, name='envelope')
-        # Effects: an EffectChain / AudioEffect / list of them.
-        effs = self.effects
-        if effs is not None:
-            if isinstance(effs, (list, tuple)):
-                for e in effs:
-                    pipe.add_effect(e)
-            else:
-                try:
-                    # EffectChain: add each effect in it.
-                    for e in getattr(effs, 'effects', []):
-                        pipe.add_effect(e)
-                except Exception:
-                    pipe.add_effect(effs)
-        # Panner LAST before destination: HRTF + inverse distance.
-        # PipelineStage('panner') creates a PannerNode via
-        # engine.create_node('panner'); position is set after build().
-        pipe.add_stage('panner', name='panner')
-        self._pipeline = pipe
-        # Keep the engine registry in sync when the engine has one.
+def _log_versions(where):
+    _ep_ver = 'unknown'
+    try:
+        import scs_entrypoint as _ep
+        _ep_ver = getattr(_ep, '__version__', 'unknown')
+    except Exception as _e_ep:
+        _ep_ver = 'import-failed:%r' % (_e_ep,)
+    _kind = 'unknown'
+    _cap = {}
+    _stats = {}
+    try:
+        _kind = getRendererKind()
+    except Exception as _e_k:
+        _kind = 'getRendererKind-failed:%r' % (_e_k,)
+    try:
+        _cap = getCapability()
+    except Exception:
+        _cap = {}
+    try:
+        _stats = getStats()
+    except Exception:
+        _stats = {}
+    _msg = '[SCS versions] where=%s entrypoint=%s renderer_version=0.1 renderer_kind=%s renderer_cap=%s renderer_stats=%s app=%s' % (where, _ep_ver, _kind, _cap, _stats, APP_VERSION)
+    # v50: log ONCE via console.log only (print+console.log duplicated every line)
+    try:
+        import scs_entrypoint as _ep2
+        _fn = getattr(_ep2, '_log_canvas_context', None)
+        if callable(_fn):
+            _fn('app-log-versions:' + where)
+    except Exception:
+        pass
+    try:
+        from browser import window as _w
+        _w.console.log(_msg)
+    except Exception:
         try:
-            if self.engine is not None and hasattr(self.engine, '_pipelines'):
-                self.engine._pipelines[pipe.name] = pipe
+            print(_msg)
         except Exception:
             pass
-        return pipe
+    except Exception:
+        pass
 
-    def build_pipeline(self, destination=None):
-        """Build the pipeline and set the panner position."""
-        pipe = self.as_pipeline()
-        if self.engine is None:
-            raise RuntimeError('Spatial source needs an engine to build')
-        built = pipe.build(self.engine, destination=destination)
-        self._pipeline_built = True
-        self._sync_panner()
-        return built
+_log_versions('import')
 
-    def _sync_panner(self):
-        """Push self.position onto the pipeline's panner node."""
-        if self._pipeline is None or not self._pipeline_built:
-            return False
-        try:
-            built = self._pipeline._built or {}
-            stages = built.get('stages') or []
-            # Panner is the last stage.
-            panner = stages[-1] if stages else None
-            if panner is not None:
-                # PannerNode: set 3D position via _set_3d_position.
-                try:
-                    _set_3d_position(panner, self.position)
-                except Exception:
-                    pass
-                # Also set distance-model params on the panner.
-                for attr, val in (('refDistance', self.ref_distance),
-                                  ('maxDistance', self.max_distance),
-                                  ('rolloffFactor', self.rolloff)):
-                    try:
-                        setattr(panner, attr, float(val))
-                    except Exception:
-                        pass
-                try:
-                    panner.panningModel = 'HRTF'
-                except Exception:
-                    pass
-                try:
-                    panner.distanceModel = 'inverse'
-                except Exception:
-                    pass
-                return True
-        except Exception:
-            pass
-        return False
+SPHERE_START = (0.0, 1.0, -2.0)
+SPHERE_PRESETS = {
+    '1': (0.0, 1.0, -2.0),
+    '2': (-6.0, 1.0, -2.0),
+    '3': (6.0, 1.0, -2.0),
+}
+ENVELOPES = ['pad', 'pluck', 'piano', 'bass']
+PLANE_HALF = 20.0
+GRID_STEP = 4.0
 
-    def set_position(self, pos):
-        super().set_position(pos)
-        self._sync_panner()
-        return self.position
-
-    # -- volume mapping --------------------------------------------------
-    def set_volume_mapped(self, control, mapper=None):
-        """Set volume from a control (0..1 or MIDI 0..127) via a
-        VolumeMapper. Returns the gain."""
-        vm = mapper or self._volume_mapper
-        if vm is None:
-            if VolumeMapper is not None:
-                vm = VolumeMapper(curve='perceptual', name=self.name + ':volume')
-                self._volume_mapper = vm
-            else:
-                self.volume = float(control)
-                return self.volume
-        self.volume = float(vm.map(control))
-        # Push onto live nodes (original path + pipeline path).
-        if self._nodes is not None:
-            try:
-                self._nodes['gain'].gain.value = self.volume
-            except Exception:
-                pass
-        if self._pipeline is not None and self._pipeline._built is not None:
-            try:
-                vol_stage = self._pipeline.get_stage('volume')
-                if vol_stage is not None and vol_stage._node is not None:
-                    vol_stage._node.gain.value = self.volume
-            except Exception:
-                pass
-        return self.volume
-
-    # -- start / stop: pipeline when present, else original path --------
-    def start(self, at=None):
-        if self._pipeline is not None or self._envelope is not None:
-            # Pipeline path: build (if needed) + start.
-            if self.engine is None:
-                return False
-            try:
-                self.engine.resume()
-            except Exception:
-                pass
-            if not self._pipeline_built:
-                self.build_pipeline()
-            pipe = self._pipeline
-            # Retune.
-            try:
-                if pipe._built and pipe._built.get('src') is not None:
-                    pipe._built['src'].frequency.value = self.freq
-            except Exception:
-                pass
-            ok = pipe.start(when=at)
-            self.playing = bool(ok)
-            return ok
-        return super().start(at=at)
-
-    def stop(self):
-        if self._pipeline is not None and self._pipeline_built:
-            try:
-                self._pipeline.stop()
-            except Exception:
-                pass
-            self.playing = False
-            return True
-        return super().stop()
-
-    def describe(self):
-        d = super().describe()
-        d.update({'envelope': getattr(self._envelope, 'name', None) if self._envelope else None,
-                  'has_pipeline': self._pipeline is not None,
-                  'pipeline_built': self._pipeline_built})
-        return d
+PLAY_BTN = (40, 470, 160, 44)
+STOP_BTN = (212, 470, 120, 44)
+CENTER_BTN = (344, 470, 200, 44)
+MODE_BTN = (556, 470, 160, 44)
 
 
-class SpatialAudioEngine(WebAudioEngine):
-    """WebAudioEngine + listener + N spatial sources (as pipelines).
+def _inside(x, y, box):
+    bx, by, bw, bh = box
+    return bx <= x <= bx + bw and by <= y <= by + bh
 
-    Same interface as every other engine's ``.audio`` (it IS a
-    WebAudioEngine), plus the spatial aliases old code uses:
-    create_source() / update() / start_all() / stop_all().
-    Batch 3: create_source(..., pipeline=True, envelope='pluck') and
-    create_spatial_pipeline() return node-based pipelines.
-    """
 
-    def __init__(self, context=None, engine=None):
-        if engine is not None:
-            super().__init__(context=getattr(engine, 'context', context))
-            # Adopt ALL registries, including Batch 3 ones.
-            for attr in ('_patches', '_effects', '_chains', '_timelines',
-                         '_sources', '_envelopes', '_volume_mappers',
-                         '_mappings', '_mapping_chains', '_pipelines', '_mixers'):
-                try:
-                    setattr(self, attr, getattr(engine, attr, getattr(self, attr)))
-                except Exception:
-                    pass
-            self.engine = engine
+def _toggle_play(app):
+    if app.src is None:
+        app.status = 'Audio unavailable'
+        return
+    if app.src.playing:
+        app.src.stop()
+        app.playing = False
+        app.status = 'Stopped - press Space or PLAY to hear the sphere'
+    else:
+        ok = app.src.start()
+        app.playing = bool(ok)
+        if ok:
+            app.status = 'Playing - walk with WASD, listen for left/right'
         else:
-            super().__init__(context=context)
-            self.engine = self
+            app.status = 'Audio blocked - click PLAY again'
 
-    # -- spatial sources (subclass, pipeline-aware) -----------------------
-    def create_spatial_source(self, position=(0.0, 1.5, 0.0), **kwargs):
-        # Pull pipeline-only kwargs out before constructing.
-        envelope = kwargs.pop('envelope', None)
-        pipeline = kwargs.pop('pipeline', None)
-        volume_mapper = kwargs.pop('volume_mapper', None)
-        use_pipeline = False
-        if pipeline is True:
-            use_pipeline = True
-            pipeline = None
-        src = SpatialSoundSource(self, position=position,
-                                 envelope=envelope, pipeline=pipeline,
-                                 volume_mapper=volume_mapper, **kwargs)
-        self._sources.append(src)
-        if use_pipeline:
-            src.as_pipeline()
-        return src
 
-    def create_source(self, position=(0.0, 1.5, 0.0), **kwargs):
-        return self.create_spatial_source(position=position, **kwargs)
-
-    def create_spatial_pipeline(self, name, position=(0.0, 1.5, 0.0), **kwargs):
-        """Create a spatial source AND its pipeline. Returns the pipeline.
-
-        create_spatial_pipeline('lead', position=(2, 1.5, 0), freq=440,
-                                envelope='pad')
-        pipe.add_filter('lowpass', frequency=1200)
-        pipe.build(engine)
-        pipe.start()
-        The pipeline is registered as engine.get_pipeline(name), and
-        its SpatialSoundSource is pipe.spatial_source.
-        """
-        # Split pipeline-stage kwargs from source kwargs.
-        freq = kwargs.pop('freq', 440.0)
-        kind = kwargs.pop('kind', 'sine')
-        volume = kwargs.pop('volume', 0.5)
-        envelope = kwargs.pop('envelope', None)
-        src = SpatialSoundSource(self, position=position, freq=freq,
-                                 kind=kind, volume=volume,
-                                 envelope=envelope, name=str(name), **kwargs)
-        self._sources.append(src)
-        pipe = src.as_pipeline()
-        pipe.name = str(name)
+def _rebuild_source(app):
+    was_playing = app.playing
+    if app.src is not None:
         try:
-            pipe.spatial_source = src
+            app.src.stop()
         except Exception:
             pass
-        # Extra pipeline stages passed as kwargs? e.g. filter=True
-        # is not supported -- use pipe.add_*() after creation.
-        try:
-            self._pipelines[str(name)] = pipe
-        except Exception:
-            pass
-        return pipe
-
-    def get_spatial_pipeline(self, name):
-        pipe = self.get_pipeline(name) if hasattr(self, 'get_pipeline') else None
-        return pipe
-
-    # -- aliases old code uses -------------------------------------
-    def update(self, camera):
-        """Sync listener + panners from the camera. Call once per step."""
-        ok = self.update_listener(camera)
-        # Pipeline panners: update_listener only sees _nodes sources,
-        # so push positions onto pipeline panners too.
-        for src in list(self._sources):
-            try:
-                if isinstance(src, SpatialSoundSource):
-                    src._sync_panner()
-            except Exception:
-                pass
-        return ok
-
-    def start_all(self):
-        return self.start_all_sources()
-
-    def stop_all(self):
-        return self.stop_all_sources()
-
-    @property
-    def sources(self):
-        return self._sources
+    app.src = app.spatial.create_source(
+        position=app.sphere_pos, freq=440.0, kind='sine',
+        volume=0.5, loop=True, name='sphere',
+        envelope=app.envelope, pipeline=app.use_pipeline)
+    app.playing = False
+    if was_playing:
+        _toggle_play(app)
 
 
-_shared_spatial = None
+# NO Canvas2D fallback. All browsers have WebGL.
+# World shapes use WORLD coords directly (centerX = world X, centerY = world Y,
+# centerZ = world Z). The WebGL2 / WebGPU shader does the projection.
+# _project is ONLY for math / tests, never for drawing shaded 2D circles.
+def _project(app, world):
+    return app.camera.project(world, 900.0, 560.0)
 
 
-def shared_spatial_engine():
-    global _shared_spatial
-    if _shared_spatial is None:
-        _shared_spatial = SpatialAudioEngine()
-    return _shared_spatial
+def onAppStart(app):
+    _log_versions('onAppStart')
+    app.background = '#0e0e1a'
+    app.camera = Camera3D(position=(0.0, 2.0, 6.0), yaw=0.0, pitch=-4.0)
+    app.spatial = SpatialAudioEngine()
+    app.sphere_pos = SPHERE_START
+    app.envelope = 'pad'
+    app.use_pipeline = True
+    app.src = None
+    if app.spatial is not None:
+        app.src = app.spatial.create_source(
+            position=app.sphere_pos, freq=440.0, kind='sine',
+            volume=0.5, loop=True, name='sphere',
+            envelope=app.envelope, pipeline=True)
+    app.playing = False
+    app.status = 'Click PLAY (browser needs a click for audio)'
+    app.speed = 0.14
+    app.sprint = 0.34
+    app.sprinting = False
+    app.dragging = False
+    app.lastMouse = None
+    app.pulse = 0.0
+    app.stepCount = 0
+    app.balls = [
+        {'x': -6.0, 'z': -3.0, 'r': 0.60, 'y': 3.0, 'vy': 0.0, 'color': '#B87333', 'defect': 0.72, 'corrosion': 0.0, 'name': 'Copper'},
+        {'x': 0.0, 'z': 4.0, 'r': 0.50, 'y': 4.5, 'vy': 0.0, 'color': '#C9A227', 'defect': 0.68, 'corrosion': 0.0, 'name': 'Brass'},
+        {'x': 6.0, 'z': -3.0, 'r': 0.70, 'y': 2.2, 'vy': 0.0, 'color': '#B87333', 'defect': 0.82, 'corrosion': 1.0, 'name': 'Copper-Patina'},
+    ]
+    # ---- HUD shapes: flat, overlay ----
+    app.hudTop = Rect(0, 0, 900, 62, fill='black', align='left-top')
+    app.hudTitle = Label('SPATIAL AUDIO -- GOLD sphere = sound source (440 Hz) on a 40 x 40 m plane',
+                         20, 18, fill='#FFD700', size=18, bold=True,
+                         align='left-top')
+    app.hudHelp = Label('WASD move | Q down | Shift sprint | Drag / Arrows look | Space play | E envelope | P pipeline',
+                        20, 42, fill='#a0a0c0', size=12, align='left-top')
+    app.hudDist = Label('', 880, 42, fill='#ffd97a', size=12,
+                        align='right-top')
+    app.hudSourceLegend = Label('GOLD = SOUND SOURCE  |  Red/Yellow/Green = bouncing decoys (no sound)', 20, 64, fill='#FFD700', size=12, bold=True, align='left-top')
+    app.statusBar = Rect(40, 430, 820, 32, fill='#26263a', roundness=6,
+                         align='left-top')
+    app.statusLabel = Label(app.status, 56, 446, fill='#ffd97a', size=13,
+                            align='left-top')
+    app.playBtn = Rect(PLAY_BTN[0], PLAY_BTN[1], PLAY_BTN[2], PLAY_BTN[3],
+                       fill='#22aa66', roundness=8, align='left-top')
+    app.playLabel = Label('PLAY', PLAY_BTN[0] + 80, PLAY_BTN[1] + 22,
+                          fill='white', size=15, bold=True, align='center')
+    app.stopBtn = Rect(STOP_BTN[0], STOP_BTN[1], STOP_BTN[2], STOP_BTN[3],
+                       fill='#cc3344', roundness=8, align='left-top')
+    app.stopLabel = Label('STOP', STOP_BTN[0] + 60, STOP_BTN[1] + 22,
+                          fill='white', size=15, bold=True, align='center')
+    app.centerBtn = Rect(CENTER_BTN[0], CENTER_BTN[1], CENTER_BTN[2], CENTER_BTN[3],
+                         fill='#2e2e4a', roundness=8, align='left-top')
+    app.centerLabel = Label('CENTRE SPHERE (C)', CENTER_BTN[0] + 100, CENTER_BTN[1] + 22,
+                            fill='white', size=13, bold=True, align='center')
+    app.modeBtn = Rect(MODE_BTN[0], MODE_BTN[1], MODE_BTN[2], MODE_BTN[3],
+                       fill='#2e2e4a', roundness=8, align='left-top')
+    app.modeLabel = Label('MODE: PIPELINE (P)', MODE_BTN[0] + 80, MODE_BTN[1] + 22,
+                          fill='white', size=11, bold=True, align='center')
+    app.miniMap = Rect(740, 70, 120, 120, fill='#111128', roundness=6,
+                       align='left-top')
+    app.miniMapTitle = Label('TOP-DOWN  40m', 800, 80, fill='#8888aa', size=10,
+                             align='center')
+    app.miniSphere = Circle(800, 120, 6, fill='#FFD700', border='white', borderWidth=1)  # GOLD = sound source, not blue
+    app.miniCam = Circle(800, 120, 4, fill='white')
+    app.miniArrow = Line(800, 120, 800, 106, fill='white', lineWidth=2)
+    app.readout = Label('', 40, 530, fill='#a0a0c0', size=12,
+                        align='left-top')
+    # ---- World shapes: in the 3D world ----
+    # World: centerZ set = 3D. HUD above has NO centerZ = HUD. That is the whole rule.
+    app.sphereShadow = Oval(450, 280, 70, 14, fill='black', centerZ=0.02)
+    # TARGET: patina copper, not flat blue/gold. Cloudy sky is the light (see CLOUDY engine).
+    app.sphere = Circle(0, 1, 1.2, fill='#B87333', border='white', borderWidth=3, centerZ=-2.0)
+    app.sphere.defectLevel = 0.80
+    app.sphere.corrosionEnabled = 1.0
+    app.sphere.metalness = 1.0
+    app.sphere.roughness = 0.28
+    app.sphereHighlight = Circle(435, 265, 12, fill='#88aaff', centerZ=-2.0)
+    app.sphereLabel = Label('SOUND SOURCE - 440 Hz - DAMAGED COPPER', 450, 340, fill='#FFD700', size=11, bold=True,
+                            align='center', centerZ=-2.0)
+    app.ballBodies = []
+    app.ballHighlights = []
+    for b in app.balls:
+        app.ballBodies.append(Oval(0, 1, b['r']*2, b['r']*2, fill=b['color'],
+                                    border='white', borderWidth=1, centerZ=b['z']))
+        app.ballHighlights.append(Circle(435, 265, 10, fill='white', centerZ=b['z']))
+        app.ballBodies[-1].defectLevel = b.get('defect', 0.55)
+        app.ballBodies[-1].corrosionEnabled = b.get('corrosion', 0.0)
+        app.ballBodies[-1].metalness = 1.0
+        app.ballBodies[-1].roughness = 0.32
+    app.cubeShapes = []
+    for _cz in (-8.0, 2.0):
+        app.cubeShapes.append(Rect(450, 280, 40, 40, fill='#8a8f98',
+                                   border='#222222', align='left-top', centerZ=_cz))
+    for _c in app.cubeShapes:
+        _c.defectLevel = 0.50
+        _c.corrosionEnabled = 0.0
+        _c.metalness = 1.0
+        _c.roughness = 0.38
+    app.planeLines = []
+    for _ in range(26):
+        app.planeLines.append(Line(0, 0, 0, 0, fill='#2a2a4a', lineWidth=1, centerZ=0.0))
 
 
-__all__ = [
-    'SpatialSoundSource', 'SpatialAudioEngine',
-    'inverse_distance_gain', 'shared_spatial_engine',
-    'CurveEnvelope', 'ADSREnvelope', 'adsr_envelope', 'envelope_preset',
-    'VolumeMapper', 'AudioSrcPipeline', 'AudioSrc',
-]
+def onStep(app):
+    app.stepCount += 1
+    if app.stepCount == 1:
+        _log_versions('onStep-first-frame')
+    if app.stepCount == 60:
+        _log_versions('onStep-frame-60')
+    if app.playing:
+        app.pulse += 0.12
+    for b in app.balls:
+        b['vy'] -= 0.022
+        b['y'] += b['vy']
+        if b['y'] < b['r']:
+            b['y'] = b['r']
+            b['vy'] = -b['vy'] * 0.88
+            if abs(b['vy']) < 0.08:
+                b['vy'] = 0.28 + 0.12 * abs(b['x'])
+    if app.spatial is not None:
+        app.spatial.update(app.camera)
+
+
+def onKeyHold(app, key):
+    k = str(key).lower()
+    speed = app.sprint if app.sprinting else app.speed
+    if k == 'w':
+        app.camera.move(forward=speed)
+    elif k == 's':
+        app.camera.move(forward=-speed)
+    elif k == 'a':
+        app.camera.move(right=-speed)
+    elif k == 'd':
+        app.camera.move(right=speed)
+    elif k == 'q':
+        app.camera.move(up=-speed)
+
+
+def onKeyPress(app, key):
+    k = str(key).lower()
+    if k == 'shift':
+        app.sprinting = True
+        return
+    if k == ' ':
+        _toggle_play(app)
+        return
+    if k in SPHERE_PRESETS and app.src is not None:
+        app.sphere_pos = SPHERE_PRESETS[k]
+        app.src.set_position(app.sphere_pos)
+        app.status = 'Sphere moved'
+        return
+    if k == 'c' and app.src is not None:
+        f = app.camera.forward()
+        p = app.camera.position
+        app.sphere_pos = (p[0] + f[0] * 4.0, 1.0, p[2] + f[2] * 4.0)
+        app.src.set_position(app.sphere_pos)
+        app.status = 'Sphere moved in front of you'
+        return
+    if k == 'e':
+        i = ENVELOPES.index(app.envelope)
+        app.envelope = ENVELOPES[(i + 1) % len(ENVELOPES)]
+        _rebuild_source(app)
+        app.status = 'Envelope: %s' % app.envelope
+        return
+    if k == 'p':
+        app.use_pipeline = not app.use_pipeline
+        _rebuild_source(app)
+        app.status = 'Source mode: %s' % ('pipeline' if app.use_pipeline else 'classic')
+        return
+    if k == 'q':
+        app.camera.move(up=-0.14)
+        return
+    if k == 'left':
+        app.camera.look(-4.0, 0.0)
+    elif k == 'right':
+        app.camera.look(4.0, 0.0)
+    elif k == 'up':
+        app.camera.look(0.0, 3.0)
+    elif k == 'down':
+        app.camera.look(0.0, -3.0)
+
+
+def onKeyRelease(app, key):
+    if str(key).lower() == 'shift':
+        app.sprinting = False
+
+
+def onMousePress(app, x, y):
+    if _inside(x, y, PLAY_BTN):
+        _toggle_play(app)
+        return
+    if _inside(x, y, STOP_BTN):
+        if app.src is not None:
+            app.src.stop()
+        app.playing = False
+        app.status = 'Stopped'
+        return
+    if _inside(x, y, CENTER_BTN):
+        if app.src is not None:
+            app.sphere_pos = (0.0, 1.0, -2.0)
+            app.src.set_position(app.sphere_pos)
+            app.status = 'Sphere centred'
+        return
+    if _inside(x, y, MODE_BTN):
+        app.use_pipeline = not app.use_pipeline
+        _rebuild_source(app)
+        app.status = 'Source mode: %s' % ('pipeline' if app.use_pipeline else 'classic')
+        return
+    app.dragging = True
+    app.lastMouse = (x, y)
+
+
+def onMouseDrag(app, x, y):
+    if app.dragging and app.lastMouse is not None:
+        dx = x - app.lastMouse[0]
+        dy = y - app.lastMouse[1]
+        app.camera.look(dx * 0.35, -dy * 0.35)
+        app.lastMouse = (x, y)
+
+
+def onMouseRelease(app, x, y):
+    app.dragging = False
+    app.lastMouse = None
+
+
+def _update_world(app):
+    # World shapes use WORLD coords. WebGL2 / WebGPU does the projection.
+    # NO project-to-screen, NO shaded 2D circles, NO Canvas2D fallback.
+    # All browsers have WebGL, so we just set world coords and let the GPU do it.
+    H = PLANE_HALF
+    li = 0
+    z = -H
+    while z <= H + 0.01:
+        line = app.planeLines[li]
+        li += 1
+        line.visible = True
+        # Line in 3D: x1,y1,centerZ1 -> x2,y2,centerZ2. Y=0 is the plane.
+        line.x1, line.y1 = -H, 0.0
+        line.x2, line.y2 = H, 0.0
+        line.centerZ1 = z
+        line.centerZ2 = z
+        line.centerZ = z
+        line.fill = '#2a2a4a'
+        line.lineWidth = 1
+        z += GRID_STEP
+    x = -H
+    while x <= H + 0.01:
+        line = app.planeLines[li]
+        li += 1
+        line.visible = True
+        line.x1, line.y1 = x, 0.0
+        line.x2, line.y2 = x, 0.0
+        line.centerZ1 = -H
+        line.centerZ2 = H
+        line.centerZ = 0.0
+        line.fill = '#2a2a4a'
+        line.lineWidth = 1
+        x += GRID_STEP
+    corners = [(-H, 0.0, -H), (H, 0.0, -H), (H, 0.0, H), (-H, 0.0, H)]
+    for i in range(4):
+        a, b = corners[i], corners[(i + 1) % 4]
+        line = app.planeLines[li]
+        li += 1
+        line.visible = True
+        line.x1, line.y1 = a[0], a[1]
+        line.x2, line.y2 = b[0], b[1]
+        line.centerZ1 = a[2]
+        line.centerZ2 = b[2]
+        line.centerZ = 0.0
+        line.fill = '#555588'
+        line.lineWidth = 2
+    # Sphere - WORLD coords, WORLD radius. GPU projects.
+    sx, sy, sz = app.sphere_pos
+    app.sphereShadow.centerX = sx
+    app.sphereShadow.centerY = 0.02
+    app.sphereShadow.centerZ = sz
+    app.sphereShadow.visible = True
+    app.sphere.centerX = sx
+    app.sphere.centerY = sy
+    app.sphere.centerZ = sz
+    app.sphereHighlight.centerX = sx - 0.3
+    app.sphereHighlight.centerY = sy + 0.3
+    app.sphereHighlight.centerZ = sz
+    app.sphereLabel.centerX = sx
+    app.sphereLabel.centerY = sy + 1.2
+    app.sphereLabel.centerZ = sz
+    app.sphere.visible = True
+    app.sphereHighlight.visible = True
+    app.sphereLabel.visible = True
+    # Sphere radius in WORLD units, not screen pixels. Pulse scales world radius.
+    _r = 1.0
+    if app.playing:
+        _r += 0.15 * _math.sin(app.pulse)
+    app.sphere.radius = _r
+    app.sphereHighlight.radius = _r * 0.25
+    # Bouncing balls: Oval bodies, world coords, world size
+    for i, b in enumerate(app.balls):
+        body = app.ballBodies[i]
+        hi = app.ballHighlights[i]
+        body.centerX = b['x']
+        body.centerY = b['y']
+        body.centerZ = b['z']
+        hi.centerX = b['x'] - b['r'] * 0.35
+        hi.centerY = b['y'] + b['r'] * 0.35
+        hi.centerZ = b['z']
+        body.visible = True
+        hi.visible = True
+        squash = 0.82 if (b['y'] < b['r'] + 0.25 and b['vy'] < 0) else 1.0
+        body.width = b['r'] * 2
+        body.height = b['r'] * 2 * squash
+        hi.radius = b['r'] * 0.28
+    # Reference cubes - WORLD coords, WORLD size
+    for i, (cx0, cz0) in enumerate(((-6.0, -8.0), (6.0, 2.0))):
+        cube = app.cubeShapes[i]
+        cube.centerX = cx0
+        cube.centerY = 0.5
+        cube.centerZ = cz0
+        cube.visible = True
+        cube.width = 1.0
+        cube.height = 1.0
+
+
+def redrawAll(app):
+    _update_world(app)
+    # HUD: just update text / fill on shapes we made in onAppStart
+    if app.src is not None:
+        dist = app.src.distance_to(app.camera.position)
+        gain = app.src.gain_at(app.camera.position)
+        pan = app.src.pan_at(app.camera)
+        app.hudDist.text = 'dist %.2f m   gain %.2f   pan %+.2f  ( -1 left / +1 right )' % (_clean(dist), _clean(gain), _clean(pan))
+        mx, my, mw, mh = 740, 70, 120, 120
+        def _map(wx, wz):
+            return (mx + (wx + 20.0) / 40.0 * mw,
+                    my + 16 + (wz + 20.0) / 40.0 * (mh - 22))
+        sx2, sy2 = _map(app.src.position[0], app.src.position[2])
+        cx2, cy2 = _map(app.camera.position[0], app.camera.position[2])
+        app.miniSphere.centerX = sx2
+        app.miniSphere.centerY = sy2
+        app.miniCam.centerX = cx2
+        app.miniCam.centerY = cy2
+        f = app.camera.forward()
+        app.miniArrow.x1, app.miniArrow.y1 = cx2, cy2
+        app.miniArrow.x2, app.miniArrow.y2 = cx2 + f[0] * 14, cy2 + f[2] * 14
+    app.statusLabel.text = app.status
+    app.playLabel.text = 'PLAY' if not app.playing else 'PAUSE'
+    app.playBtn.fill = '#22aa66' if not app.playing else '#ccaa22'
+    app.modeLabel.text = 'MODE: %s (P)' % ('PIPELINE' if app.use_pipeline else 'CLASSIC')
+    p = app.camera.position
+    app.readout.text = 'cam (%.1f, %.1f, %.1f)  yaw %.0f  pitch %.0f  |  sphere %s  |  envelope %s' % (
+        _clean(p[0]), _clean(p[1]), _clean(p[2]), _clean(app.camera.yaw), _clean(app.camera.pitch), app.sphere_pos, app.envelope)
+
+
+def main():
+    # Plain CMU: no renderer words, no engine words. Just run it.
+    _log_versions('main-before-runApp')
+    runApp(900, 560, renderer='webgl2')
+
+
+main()
