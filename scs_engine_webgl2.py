@@ -1,4 +1,4 @@
-# v50 DAMAGED_METAL + pixel-perfect HUD (viewport no DPR, HUD NEAREST) + import-safe
+# v59: HUD texture LINEAR + texSubImage2D reuse + v51 viewport (drawingBuffer) + DAMAGED_METAL PBR + import-safe
 """
 scs_engine_webgl2_DAMAGED_METAL.py -- WebGL2 engine with DAMAGED METAL PBR shader.
 Implements the full shader contract (see _VS/_FS comments).
@@ -8,6 +8,8 @@ Spheres are DAMAGED METAL: metallic=1.0, baseColor = metal F0, defectLevel per s
 HUD: blending ON, viewport = drawing buffer, so HUD does not cover 3D or scale wrong.
 """
 import math
+
+__version__ = 'v59'
 try:
     from browser import document, window
 except ImportError:
@@ -364,7 +366,7 @@ class WebGL2Engine:
             else:
                 _dpr2 = 1.0
                 try:
-                    _dpr2 = min(float(window.devicePixelRatio or 1.0), 2.0)
+                    _dpr2 = float(window.devicePixelRatio or 1.0)  # v51: actual DPR, no cap
                 except Exception:
                     pass
                 gl.viewport(0, 0, int(self.width * _dpr2), int(self.height * _dpr2))
@@ -509,12 +511,32 @@ class WebGL2Engine:
                 try:
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)  # v50 pixel-perfect HUD
-                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)  # v50 pixel-perfect HUD
+                    # v59: LINEAR, not NEAREST. NEAREST is only pixel-perfect at
+                    # exactly 1:1; at fractional DPR / browser zoom / fullscreen CSS
+                    # stretch it turns HUD text blocky. LINEAR filters smoothly
+                    # and looks higher-res in practice.
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
                 except Exception:
                     pass
+                # v59: reuse texture storage. texImage2D every frame
+                # reallocates the texture (900x560x4 = 2MB/frame at 30fps).
+                # First upload or size change allocates; same-size frames
+                # use texSubImage2D (no realloc, less GC / GPU churn).
                 try:
-                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas)
+                    _cw = int(getattr(canvas, 'width', 0) or 0)
+                    _ch = int(getattr(canvas, 'height', 0) or 0)
+                    _tw = getattr(self, '_hud_tex_w', None)
+                    _th = getattr(self, '_hud_tex_h', None)
+                    if _tw == _cw and _th == _ch and _cw > 0 and _ch > 0:
+                        try:
+                            gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, canvas)
+                        except Exception:
+                            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas)
+                    else:
+                        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas)
+                        self._hud_tex_w = _cw
+                        self._hud_tex_h = _ch
                 except Exception:
                     return False
             except Exception:
@@ -549,10 +571,10 @@ class WebGL2Engine:
                     gl.viewport(0, 0, _dbw2, _dbh2)
                 else:
                     try:
-                        _dpr = min(float(window.devicePixelRatio or 1.0), 2.0)
+                        _dpr = float(window.devicePixelRatio or 1.0)  # v51: actual DPR
                     except Exception:
                         _dpr = 1.0
-                    gl.viewport(0, 0, int(self.width), int(self.height))  # v50: backing==CSS, no DPR multiply
+                    gl.viewport(0, 0, int(self.width * _dpr), int(self.height * _dpr))  # v51: fallback when drawingBuffer is 0 - use DPR, not CSS
                 gl.disable(gl.DEPTH_TEST)
                 gl.enable(gl.BLEND)
                 gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
