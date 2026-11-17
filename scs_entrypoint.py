@@ -48,14 +48,17 @@ except ImportError:  # CPython tests
 __all__ = [
     'Rect', 'Oval', 'Circle', 'RegularPolygon', 'Star', 'Line', 'Polygon',
     'Arc', 'Label', 'Image', 'Group', 'Sound', 'App',
+    'Mesh3D', 'Cube3D', 'Sphere3D',
     'drawRect', 'drawOval', 'drawCircle', 'drawRegularPolygon', 'drawStar',
-    'drawLine', 'drawPolygon', 'drawArc', 'drawLabel', 'drawImage',
+    'drawLine', 'drawPolygon', 'drawArc', 'drawLabel', 'drawImage', 'drawShape',
     'runApp', 'run', 'loop', 'run_app', 'cmu_graphics_run', 'stop', 'boot', 'main',
     'rgb', 'gradient', 'distance', 'angleTo', 'getPointInDir', 'rounded',
     'makeList', 'randrange', 'randint', 'random',
     'getRendererKind', 'create_renderer', 'setRenderer',
     'getCapability', 'getStats', 'disposeRenderer', 'requestReadback',
     'getDisplayConfig',
+    # 3D and Camera (scs_3d.py)
+    'Camera3D', 'setCamera', 'clearScreen',
     # WebXR (scs_xr.py): externally-driven loop, FrameContext, lifecycle.
     'renderFrame', 'startXR', 'stopXR', 'getXRState', 'getXRCapability',
     # Integrations (scs_storage / scs_wasm / scs_audio / scs_media / scs_serial):
@@ -2030,6 +2033,132 @@ class Image(_BaseShape):
                             opacity=self.opacity, rotateAngle=self.rotateAngle)
 
 
+class Mesh3D(_BaseShape):
+    """3D mesh primitive: vertices (flat [x,y,z,nx,ny,nz,...]) + indices."""
+    def __init__(self, vertices=None, indices=None, centerX=0, centerY=0, centerZ=0, **kwargs):
+        align = kwargs.pop('align', 'center')
+        super().__init__(align=align, hud='3d', centerZ=centerZ,
+                         **{k: v for k, v in kwargs.items() if k != 'align'})
+        self.vertices = list(vertices) if vertices else []
+        self.indices = list(indices) if indices else []
+        self._centerX = float(centerX)
+        self._centerY = float(centerY)
+        self._centerZ = float(centerZ)
+        self.stroke = kwargs.get('stroke', None)
+        self.strokeWidth = kwargs.get('strokeWidth', 1)
+        _shapes.append(self)
+
+    @property
+    def centerX(self):
+        return self._centerX
+
+    @centerX.setter
+    def centerX(self, v):
+        self._centerX = float(v)
+
+    @property
+    def centerY(self):
+        return self._centerY
+
+    @centerY.setter
+    def centerY(self, v):
+        self._centerY = float(v)
+
+    def draw(self, renderer):
+        if not self.visible:
+            return
+        draw_fn = getattr(renderer, 'draw_mesh3d', None)
+        if draw_fn is not None:
+            draw_fn(self.vertices, self.indices,
+                   centerX=self._centerX, centerY=self._centerY, centerZ=self._centerZ,
+                   fill=self.fill, stroke=self.stroke, strokeWidth=self.strokeWidth,
+                   opacity=self.opacity)
+
+
+class Cube3D(_BaseShape):
+    """3D unit cube primitive."""
+    def __init__(self, centerX=0, centerY=0, centerZ=0, width=1, height=1, depth=1, **kwargs):
+        align = kwargs.pop('align', 'center')
+        super().__init__(align=align, hud='3d', centerZ=centerZ,
+                         **{k: v for k, v in kwargs.items() if k != 'align'})
+        self._centerX = float(centerX)
+        self._centerY = float(centerY)
+        self._centerZ = float(centerZ)
+        self._width = float(width)
+        self._height = float(height)
+        self._depth = float(depth)
+        self.stroke = kwargs.get('stroke', None)
+        self.strokeWidth = kwargs.get('strokeWidth', 1)
+        _shapes.append(self)
+
+    @property
+    def centerX(self):
+        return self._centerX
+
+    @centerX.setter
+    def centerX(self, v):
+        self._centerX = float(v)
+
+    @property
+    def centerY(self):
+        return self._centerY
+
+    @centerY.setter
+    def centerY(self, v):
+        self._centerY = float(v)
+
+    def draw(self, renderer):
+        if not self.visible:
+            return
+        draw_fn = getattr(renderer, 'draw_cube3d', None)
+        if draw_fn is not None:
+            draw_fn(self._centerX, self._centerY, self._centerZ,
+                   self._width, self._height, self._depth,
+                   fill=self.fill, stroke=self.stroke, strokeWidth=self.strokeWidth,
+                   opacity=self.opacity)
+
+
+class Sphere3D(_BaseShape):
+    """3D sphere primitive."""
+    def __init__(self, centerX=0, centerY=0, centerZ=0, radius=1, **kwargs):
+        align = kwargs.pop('align', 'center')
+        super().__init__(align=align, hud='3d', centerZ=centerZ,
+                         **{k: v for k, v in kwargs.items() if k != 'align'})
+        self._centerX = float(centerX)
+        self._centerY = float(centerY)
+        self._centerZ = float(centerZ)
+        self._radius = float(radius)
+        self.stroke = kwargs.get('stroke', None)
+        self.strokeWidth = kwargs.get('strokeWidth', 1)
+        _shapes.append(self)
+
+    @property
+    def centerX(self):
+        return self._centerX
+
+    @centerX.setter
+    def centerX(self, v):
+        self._centerX = float(v)
+
+    @property
+    def centerY(self):
+        return self._centerY
+
+    @centerY.setter
+    def centerY(self, v):
+        self._centerY = float(v)
+
+    def draw(self, renderer):
+        if not self.visible:
+            return
+        draw_fn = getattr(renderer, 'draw_sphere3d', None)
+        if draw_fn is not None:
+            draw_fn(self._centerX, self._centerY, self._centerZ,
+                   self._radius,
+                   fill=self.fill, stroke=self.stroke, strokeWidth=self.strokeWidth,
+                   opacity=self.opacity)
+
+
 class Group:
     def __init__(self, *shapes, hud=None, centerZ=None, **kwargs):
         self.hud = _normalize_hud(hud, kwargs.get('mode', None))
@@ -2278,6 +2407,17 @@ def drawImage(path, x, y, width=None, height=None, opacity=100, rotateAngle=0,
     r.draw_image(path, left, top, w, h, opacity=opacity, rotateAngle=rotateAngle)
 
 
+def drawShape(shape):
+    """Draw a shape object (calls its draw method)."""
+    if shape is not None and hasattr(shape, 'draw'):
+        r = _renderer_or_2d()
+        if r is not None:
+            try:
+                shape.draw(r)
+            except Exception as e:
+                print(f'[drawShape error] {e}')
+
+
 # ----------------------------------------------------------------------
 # Utilities
 # ----------------------------------------------------------------------
@@ -2292,6 +2432,34 @@ def gradient(*colors, start='top'):
     (Old scs.py returned only colors[0] -- a gradient that was not
     a gradient. This is the one intentional behaviour fix.)"""
     return {'_is_grad': True, 'colors': list(colors), 'start': start}
+
+
+# 3D Camera and rendering control
+_current_camera = None
+
+def setCamera(camera):
+    """Set the current 3D camera for rendering. Pass None to return to 2D/HUD mode."""
+    global _current_camera
+    _current_camera = camera
+    r = _renderer_or_2d()
+    if r is not None:
+        set_fn = getattr(r, 'set_camera', None)
+        if set_fn is not None:
+            set_fn(camera)
+
+def clearScreen(fill='white'):
+    """Clear the screen to a solid color."""
+    r = _renderer_or_2d()
+    if r is not None:
+        clear_fn = getattr(r, 'clear_screen', None)
+        if clear_fn is not None:
+            clear_fn(fill)
+
+# Import Camera3D for top-level access
+try:
+    from scs_3d import Camera3D
+except ImportError:
+    Camera3D = None
 
 
 def distance(x1, y1, x2, y2):
@@ -3090,12 +3258,12 @@ def _render_one_view(view, renderer=None):
             # never did, so _update_world never ran, sphere positions never
             # updated, and HUD labels never updated. Non-engine path calls
             # redrawAll - engine path must too.
+            r.clear_scene()
+            # r.add_floor(40, '#22223a')  # Disabled: app provides terrain mesh
             try:
                 _call('redrawAll', _app)
             except Exception:
                 pass
-            r.clear_scene()
-            r.add_floor(40, '#22223a')
             for s in list(_shapes):
                 try:
                     if not getattr(s, 'visible', True):
@@ -3103,10 +3271,13 @@ def _render_one_view(view, renderer=None):
                     _cz = getattr(s, 'centerZ', None)
                     if _cz is None:
                         continue
+                    # Skip 3D shapes - they already called draw() during redrawAll
+                    _cls = type(s).__name__
+                    if _cls in ('Mesh3D', 'Cube3D', 'Sphere3D'):
+                        continue
                     _cx = float(getattr(s, 'centerX', 0) or 0)
                     _cy = float(getattr(s, 'centerY', 0) or 0)
                     _fill = getattr(s, 'fill', 'blue') or 'blue'
-                    _cls = type(s).__name__
                     if _cls in ('Rect',):
                         r.add_box(_cx, _cy, float(_cz), float(getattr(s, 'width', 1) or 1), float(getattr(s, 'height', 1) or 1), 1.0, _fill, metalness=float(getattr(s, 'metalness', 1.0) or 1.0), roughness=float(getattr(s, 'roughness', 0.38) or 0.38), defectLevel=float(getattr(s, 'defectLevel', 0.5) or 0.5))
                     else:

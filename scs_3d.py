@@ -66,6 +66,116 @@ def v3_distance(a, b):
 
 
 # ----------------------------------------------------------------------
+# Quaternion (plain tuples: (w, x, y, z), where w is scalar part)
+# Used for terrain-aligned cube rotation.
+# ----------------------------------------------------------------------
+
+def quat(w=1.0, x=0.0, y=0.0, z=0.0):
+    """Create a quaternion (w, x, y, z) where w is the scalar part."""
+    return (float(w), float(x), float(y), float(z))
+
+
+def quat_identity():
+    """Identity quaternion (no rotation)."""
+    return (1.0, 0.0, 0.0, 0.0)
+
+
+def quat_from_axis_angle(axis, angle_rad):
+    """Create quaternion from axis (normalized) and angle in radians."""
+    axis = v3_normalize(axis)
+    half_angle = angle_rad * 0.5
+    s = math.sin(half_angle)
+    return (math.cos(half_angle), axis[0] * s, axis[1] * s, axis[2] * s)
+
+
+def quat_mul(q1, q2):
+    """Multiply two quaternions: q1 * q2."""
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    return (
+        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
+    )
+
+
+def quat_conjugate(q):
+    """Conjugate of quaternion (inverse for unit quaternions)."""
+    return (q[0], -q[1], -q[2], -q[3])
+
+
+def quat_normalize(q):
+    """Normalize quaternion to unit length."""
+    w, x, y, z = q
+    l = math.sqrt(w * w + x * x + y * y + z * z)
+    if l == 0:
+        return (1.0, 0.0, 0.0, 0.0)
+    return (w / l, x / l, y / l, z / l)
+
+
+def quat_rotate_v3(q, v):
+    """Rotate vector v by quaternion q."""
+    q = quat_normalize(q)
+    # Convert vector to pure quaternion (w=0)
+    v_quat = (0.0, v[0], v[1], v[2])
+    # Rotate: q * v * q^-1
+    result = quat_mul(q, quat_mul(v_quat, quat_conjugate(q)))
+    return (result[1], result[2], result[3])
+
+
+def quat_slerp(q1, q2, t):
+    """Spherical linear interpolation between two quaternions."""
+    q1 = quat_normalize(q1)
+    q2 = quat_normalize(q2)
+    
+    dot = q1[0] * q2[0] + q1[1] * q2[1] + q1[2] * q2[2] + q1[3] * q2[3]
+    
+    if dot < 0:
+        q2 = (-q2[0], -q2[1], -q2[2], -q2[3])
+        dot = -dot
+    
+    dot = max(-1.0, min(1.0, dot))
+    theta = math.acos(dot)
+    sin_theta = math.sin(theta)
+    
+    if sin_theta == 0:
+        return q1
+    
+    w1 = math.sin((1 - t) * theta) / sin_theta
+    w2 = math.sin(t * theta) / sin_theta
+    
+    return (
+        w1 * q1[0] + w2 * q2[0],
+        w1 * q1[1] + w2 * q2[1],
+        w1 * q1[2] + w2 * q2[2],
+        w1 * q1[3] + w2 * q2[3]
+    )
+
+
+def quat_to_euler_ypr(q):
+    """Convert quaternion to Euler angles (yaw, pitch, roll) in radians."""
+    w, x, y, z = quat_normalize(q)
+    
+    # Roll (X axis rotation)
+    sinr_cosp = 2 * (w * x + y * z)
+    cosr_cosp = 1 - 2 * (x * x + y * y)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+    
+    # Pitch (Y axis rotation)
+    sinp = 2 * (w * y - z * x)
+    sinp = max(-1.0, min(1.0, sinp))
+    pitch = math.asin(sinp)
+    
+    # Yaw (Z axis rotation)
+    siny_cosp = 2 * (w * z + x * y)
+    cosy_cosp = 1 - 2 * (y * y + z * z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    
+    return (yaw, pitch, roll)
+
+
+# ----------------------------------------------------------------------
 # Mat4 -- column-major, OpenGL layout, flat list of 16 floats.
 # mat4_mul(a, b) returns a * b (b applied first, then a).
 # ----------------------------------------------------------------------

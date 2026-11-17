@@ -70,13 +70,17 @@ class WebGL2Engine:
         self.gl = None
         self.program = None
         self.scene = []  # [{kind, pos, scale, color}]
+        self._debug_kinds = {}
         self.clear_color = (0.05, 0.05, 0.10, 1.0)
         self.light = (0.5, 1.0, 0.5)
         self._buf_v = None
         self._buf_i = None
+        self._buf_v_mesh = None  # Separate buffer for mesh data
+        self._buf_i_mesh = None
         self._sphere_index_count = 0
         self._cube_index_count = 0
         self._cube_index_offset = 0
+        self._mesh_registry = {}  # {mesh_id: {'offset': int, 'count': int}}
         self.error = None
         if self.canvas is None:
             self.canvas = self._find_canvas()
@@ -121,6 +125,15 @@ class WebGL2Engine:
             gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,
                           window.Uint16Array.new(all_idx),
                           gl.STATIC_DRAW)
+            
+            # Create separate buffers for mesh data (dynamic)
+            self._buf_v_mesh = gl.createBuffer()
+            self._buf_i_mesh = gl.createBuffer()
+            gl.bindBuffer(gl.ARRAY_BUFFER, self._buf_v_mesh)
+            gl.bufferData(gl.ARRAY_BUFFER, 1024 * 1024, gl.DYNAMIC_DRAW)  # 1MB for mesh vertices
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, self._buf_i_mesh)
+            gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, 512 * 1024, gl.DYNAMIC_DRAW)  # 512KB for mesh indices
+            
             gl.enable(gl.DEPTH_TEST)
             gl.depthFunc(gl.LESS)
             gl.enable(gl.CULL_FACE)
@@ -325,21 +338,127 @@ class WebGL2Engine:
         if material == 'metal':
             metalness = 1.0
             roughness = 0.25
-        self.scene.append({'kind': 'cube',
-                           'pos': (float(x), float(y), float(z)),
-                           'scale': (float(sx), float(sy), float(sz)),
-                           'color': color,
-                           'metalness': float(metalness),
-                           'roughness': float(roughness),
-                           'defectLevel': float(defectLevel),
-                           'corrosionEnabled': float(corrosionEnabled),
-                           'corrosionColor': corrosionColor,
-                           'featureScale': float(featureScale)})
-        return self.scene[-1]
+        item = {'kind': 'cube',
+                   'pos': (float(x), float(y), float(z)),
+                   'scale': (float(sx), float(sy), float(sz)),
+                   'color': color,
+                   'metalness': float(metalness),
+                   'roughness': float(roughness),
+                   'defectLevel': float(defectLevel),
+                   'corrosionEnabled': float(corrosionEnabled),
+                   'corrosionColor': corrosionColor,
+                   'featureScale': float(featureScale)}
+        self.scene.append(item)
+        return item
 
     def add_floor(self, size=22.0, color='#22223a'):
         # Flat box as the floor -- dielectric, rough, so metal sphere pops against it.
         return self.add_box(0.0, -0.05, 0.0, size, 0.1, size, color, metalness=0.0, roughness=0.95)
+
+    # 3D Shape drawing methods (called by Mesh3D, Cube3D, Sphere3D)
+    def draw_cube3d(self, cx, cy, cz, width, height, depth, fill='gray', stroke=None, strokeWidth=1, opacity=100):
+        """Draw a cube at world position."""
+        self.add_box(float(cx), float(cy), float(cz),
+                    float(width) / 2, float(height) / 2, float(depth) / 2,
+                    color=fill, metalness=0.0, roughness=0.85)
+
+    def draw_sphere3d(self, cx, cy, cz, radius, fill='blue', stroke=None, strokeWidth=1, opacity=100):
+        """Draw a sphere at world position."""
+        self.add_sphere(float(cx), float(cy), float(cz),
+                       float(radius), color=fill)
+
+    def draw_mesh3d(self, vertices, indices, centerX=0, centerY=0, centerZ=0, fill='gray', stroke=None, strokeWidth=1, opacity=100):
+        """Draw a custom mesh by storing in scene."""
+        if not vertices or not indices:
+            return
+        print(f'[draw_mesh3d called] verts={len(vertices)} indices={len(indices)}')
+        self.scene.append({
+            'kind': 'mesh',
+            'pos': (float(centerX), float(centerY), float(centerZ)),
+            'scale': (1.0, 1.0, 1.0),
+            'color': fill,
+            'metalness': 0.0,
+            'roughness': 0.8,
+            'vertices': list(vertices),
+            'indices': list(indices),
+        })
+
+
+    # Camera and screen control
+    def set_camera(self, camera):
+        """Set the active camera for rendering."""
+        self.camera = camera
+
+    def clear_screen(self, fill='white'):
+        """Set the clear color for the screen."""
+        try:
+            r, g, b = self._parse_color_tuple(fill)
+            self.clear_color = (r, g, b, 1.0)
+        except Exception:
+            self.clear_color = (0.1, 0.1, 0.1, 1.0)
+
+    def _parse_color_tuple(self, color):
+        """Parse a color and return (r, g, b) tuple in [0, 1]."""
+        if isinstance(color, (tuple, list)) and len(color) >= 3:
+            return (float(color[0]), float(color[1]), float(color[2]))
+        try:
+            # Simple hex color parsing
+            if isinstance(color, str):
+                if color.startswith('#'):
+                    color = color[1:]
+                r = int(color[0:2], 16) / 255.0
+                g = int(color[2:4], 16) / 255.0
+                b = int(color[4:6], 16) / 255.0
+                return (r, g, b)
+        except Exception:
+            pass
+        # Default gray
+        return (0.5, 0.5, 0.5)
+
+    # HUD drawing methods (fallback for 2D overlays)
+    # These are no-ops in WebGL2 mode; HUD shapes should be drawn to _hud_2d_renderer instead.
+    # But if they reach here (e.g. HUD 2D renderer not ready), silently ignore.
+    def draw_label(self, text, x, y, fill='black', size=12, font='arial',
+                   bold=False, italic=False, opacity=100, align='center',
+                   rotateAngle=0):
+        """Draw text label (HUD). Fallback no-op for WebGL2."""
+        pass
+
+    def draw_rect(self, left, top, w, h, fill='black', border=None, borderWidth=1, opacity=100, rotateAngle=0):
+        """Draw rectangle (HUD). Fallback no-op for WebGL2."""
+        pass
+
+    def draw_oval(self, cx, cy, w, h, fill='black', border=None, borderWidth=1, opacity=100, rotateAngle=0):
+        """Draw oval (HUD). Fallback no-op for WebGL2."""
+        pass
+
+    def draw_circle(self, cx, cy, radius, fill='black', border=None, borderWidth=1, opacity=100):
+        """Draw circle (HUD). Fallback no-op for WebGL2."""
+        pass
+
+    def draw_regular_polygon(self, cx, cy, radius, points, fill='black', border=None, borderWidth=2, opacity=100):
+        """Draw regular polygon (HUD). Fallback no-op for WebGL2."""
+        pass
+
+    def draw_star(self, cx, cy, radius, points, fill='black', border=None, borderWidth=2, opacity=100):
+        """Draw star (HUD). Fallback no-op for WebGL2."""
+        pass
+
+    def draw_arc(self, cx, cy, w, h, startAngle, sweepAngle, fill=None, border='black', borderWidth=2, opacity=100):
+        """Draw arc (HUD). Fallback no-op for WebGL2."""
+        pass
+
+    def draw_polygon(self, points, fill='black', border=None, borderWidth=2, opacity=100):
+        """Draw polygon (HUD). Fallback no-op for WebGL2."""
+        pass
+
+    def draw_line(self, x1, y1, x2, y2, fill='black', lineWidth=2, opacity=100):
+        """Draw line (HUD). Fallback no-op for WebGL2."""
+        pass
+
+    def draw_image(self, path, left, top, w, h, opacity=100, rotateAngle=0):
+        """Draw image (HUD). Fallback no-op for WebGL2."""
+        pass
 
     # -- render -----------------------------------------------------
     def render(self, camera):
@@ -427,6 +546,11 @@ class WebGL2Engine:
             # Warm key light - makes chrome read warm on one side, cool on the other.
             gl.uniform3f(u_light_col, 1.0, 0.95, 0.88)
             for item in self.scene:
+                # Debug: count items by kind
+                kind = item.get('kind', 'unknown')
+                if kind not in self._debug_kinds:
+                    self._debug_kinds[kind] = 0
+                self._debug_kinds[kind] += 1
                 model = mat4_mul(mat4_translate(*item['pos']),
                                  mat4_scale(*item['scale']))
                 mv = mat4_mul(view, model)
@@ -489,15 +613,58 @@ class WebGL2Engine:
                             gl.uniform1i(u_brdf, 1)
                 except Exception:
                     pass
-                if item['kind'] == 'sphere':
+                
+                # Handle different mesh types
+                if item['kind'] == 'mesh':
+                    # Custom mesh - use separate buffers
+                    vertices = item.get('vertices', [])
+                    indices = item.get('indices', [])
+                    print(f'[Mesh render] vertices={len(vertices)} indices={len(indices)}')
+                    if vertices and indices:
+                        try:
+                            # Bind mesh buffers
+                            gl.bindBuffer(gl.ARRAY_BUFFER, self._buf_v_mesh)
+                            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, self._buf_i_mesh)
+                            
+                            # Upload mesh data
+                            gl.bufferSubData(gl.ARRAY_BUFFER, 0, 
+                                           window.Float32Array.new(vertices))
+                            
+                            # Clamp indices to Uint16 range
+                            indices_clamped = []
+                            for idx in indices:
+                                indices_clamped.append(min(int(idx), 65535))
+                            gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0,
+                                           window.Uint16Array.new(indices_clamped))
+                            
+                            # Setup vertex attributes for mesh buffers
+                            gl.vertexAttribPointer(a_pos, 3, gl.FLOAT, False, 6 * 4, 0)
+                            gl.vertexAttribPointer(a_norm, 3, gl.FLOAT, False, 6 * 4, 3 * 4)
+                            
+                            # Draw mesh
+                            print(f'[Mesh draw] drawing {len(indices_clamped)} indices')
+                            gl.drawElements(gl.TRIANGLES, len(indices_clamped),
+                                          gl.UNSIGNED_SHORT, 0)
+                            
+                            # Re-bind sphere/cube buffers for next iterations
+                            gl.bindBuffer(gl.ARRAY_BUFFER, self._buf_v)
+                            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, self._buf_i)
+                            gl.vertexAttribPointer(a_pos, 3, gl.FLOAT, False, 6 * 4, 0)
+                            gl.vertexAttribPointer(a_norm, 3, gl.FLOAT, False, 6 * 4, 3 * 4)
+                        except Exception as e:
+                            print('[Mesh3D error] %s' % str(e))
+                elif item['kind'] == 'sphere':
+                    print(f'[Render] sphere')
                     gl.drawElements(gl.TRIANGLES,
                                     self._sphere_index_count,
                                     gl.UNSIGNED_SHORT, 0)
-                else:
+                else:  # 'cube'
+                    print(f'[Render] cube offset={self._cube_index_offset * 2} count={self._cube_index_count}')
                     gl.drawElements(gl.TRIANGLES,
                                     self._cube_index_count,
                                     gl.UNSIGNED_SHORT,
                                     self._cube_index_offset * 2)
+            print(f'[Frame] Scene items: {self._debug_kinds}')
             return True
         except Exception as e:
             self.error = 'render failed: %s' % e

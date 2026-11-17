@@ -456,6 +456,7 @@ Click for new joke. No backend.
     ├── proc_audio_demo.py  → Procedural audio workbench
     ├── rabbit_sim.py       → Rabbit Meadow Population Dynamics
     ├── swila.py
+    ├── follow_cam.py       → 3D Follow Camera + Procedural Terrain (NEW)
     ├── presentation_demo.py → Fullscreen / presentation (new)
     ├── controller_demo.py   → Gamepad / controller (new)
     ├── loader_demo.py       → Asset loader (new)
@@ -467,6 +468,29 @@ Click for new joke. No backend.
 No root `app.py` duplication. Real apps are **only** in `apps/`.
 
 ### 🧪 Apps Included
+
+#### `apps/follow_cam.py` — 3D Follow Camera + Procedural Terrain (NEW!)
+Post-apocalyptic exploration with smooth follow camera and procedurally generated terrain.
+
+Features:
+- **100×100 procedural terrain** with layered Perlin-like noise height map
+- **Smooth follow camera** that trails the cube with configurable distance and height offset
+- **WASD + QE controls**: W/S move forward/back, A/D rotate, Q/E strafe, Space jump
+- **Physics simulation**: gravity, velocity, cube-terrain collision detection (bilinear height sampling)
+- **HUD overlay**: real-time minimap showing player position and terrain bounds
+- **3D position display**: X/Y/Z coordinates update as the cube moves
+- **Post-apocalyptic aesthetic**: rust brown, weathered concrete, oxidized metal, warning orange
+
+Controls: `WASD` movement, `A/D` rotation, `Q/E` strafing, `Space` jump
+
+This app demonstrates the new 3D shape primitives:
+- `Mesh3D`: custom vertex/index mesh (used for procedural terrain)
+- `Cube3D`: axis-aligned cube in 3D world space
+- `Sphere3D`: sphere geometry in 3D world space
+- `Camera3D`: smooth chase camera with configurable lag
+- `setCamera()` / `clearScreen()`: camera and screen control
+
+Open with `/?app=follow_cam`.
 
 #### `apps/app.py` — Joukowski Conformal-Mapping Wind Tunnel
 Exact-method aerofoil design. 1050×700. Drag the gold handle to change camber, W/S for circulation, A/D for angle of attack.
@@ -604,8 +628,10 @@ SCS implements the CMU Graphics exact API plus fixes:
 | Area | Details |
 |------|---------|
 | Shapes | `Rect`, `Oval`, `Circle`, `Line`, `Polygon`, `RegularPolygon`, `Star`, `Label`, `Arc`, `Group`, `Image` |
-| Draw | `drawRect`, `drawOval`, `drawCircle`, `drawLine`, `drawPolygon`, `drawLabel`, `drawArc`, `drawImage` — all accept `align`, `opacity`, `rotateAngle`, `visible`, `dashes` |
-| Props | `fill`, `border`, `borderWidth`, `opacity`, `rotateAngle`, `align` (`center`, `left`, `right`, `top`, `bottom`, `leftTop`, etc.), `roundness`, `dashes` are general |
+| **3D Shapes** | **`Mesh3D`, `Cube3D`, `Sphere3D`** (WebGL2+; set `centerZ` to enable 3D mode) |
+| Draw | `drawRect`, `drawOval`, `drawCircle`, `drawLine`, `drawPolygon`, `drawLabel`, `drawArc`, `drawImage`, `drawShape` — all accept `align`, `opacity`, `rotateAngle`, `visible`, `dashes` |
+| **3D Camera** | **`Camera3D(position, yaw, pitch, fov, near, far)`**, **`setCamera(camera)`**, **`clearScreen(fill)`** |
+| Props | `fill`, `border`, `borderWidth`, `opacity`, `rotateAngle`, `align` (`center`, `left`, `right`, `top`, `bottom`, `leftTop`, etc.), `roundness`, `dashes` are general; `centerZ` enables 3D for shapes |
 | App | `App(width, height)`, `app.width`, `app.height`, `app.background`, `stepsPerSecond`, `paused` |
 | Events | `onAppStart`, `onStep`, `redrawAll`, `onMousePress/Release/Drag/Move`, `onKeyPress/Release/Hold`, `onResize` |
 | Utils | `rgb(r,g,b)`, `gradient(*colors, start=)`, `distance()`, `angleTo()`, `getPointInDir()`, `rounded()`, `makeList()` |
