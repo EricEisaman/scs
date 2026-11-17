@@ -614,6 +614,31 @@ def _ensure_app_wrapper():
         except Exception:
             pass
         return _app_wrapper
+    # FIX: wrapper never existed, so _toggle_fullscreen() always hit
+    # `if _w is None: return` and the click did nothing. Create it.
+    try:
+        _parent = _c.parentNode
+        if _parent is None:
+            return None
+        _w = document.createElement('div')
+        _w.id = 'scs-app-wrapper'
+        try:
+            _w.style.position = 'relative'
+            _w.style.display = 'inline-block'
+            _w.style.margin = '0'
+            _w.style.padding = '0'
+            _w.style.lineHeight = '0'
+        except Exception:
+            pass
+        try:
+            _parent.insertBefore(_w, _c)
+            _w.appendChild(_c)
+        except Exception:
+            return None
+        _app_wrapper = _w
+        return _w
+    except Exception:
+        return None
 
 def _dpr():
     try:
