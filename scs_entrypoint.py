@@ -2773,18 +2773,58 @@ def _on_fullscreen_change(ev=None):
         _ow = int(_fullscreen_orig_w) if _fullscreen_orig_w else int(_canvas_width) if _canvas_width else 900
         _oh = int(_fullscreen_orig_h) if _fullscreen_orig_h else int(_canvas_height) if _canvas_height else 560
         if _is_fs:
-            # FIX: never measure the canvas to size itself.
-            # In fullscreen the canvas IS the fullscreen element, so
-            # its rect is still the old windowed size. Reading it and
-            # writing it back locks it at 400px centered.
-            # Use viewport units and let the CSS :fullscreen rule own it.
-            # This also avoids reading window.innerWidth, which fed back
-            # into itself and produced the stale 9997 value.
             try:
-                _c.style.width = '100vw'
-                _c.style.height = '100vh'
-                _c.style.margin = '0'
+                try:
+                    _vw = int(document.documentElement.clientWidth) or int(window.innerWidth)
+                    _vh = int(document.documentElement.clientHeight) or int(window.innerHeight)
+                except Exception:
+                    _vw, _vh = int(window.innerWidth), int(window.innerHeight)
+                # Letterbox, no stretch. Scale is same for X and Y.
+                _scale = min(_vw / float(_ow), _vh / float(_oh))
+                _fw = int(round(_ow * _scale))
+                _fh = int(round(_oh * _scale))
+                _c.style.width = '%dpx' % _fw
+                _c.style.height = '%dpx' % _fh
+                _c.style.margin = 'auto'
                 _c.style.padding = '0'
+                # Backing MUST equal CSS. Otherwise viewport > buffer = magnified HUD.
+                # Logical stays _ow/_oh, do NOT touch _canvas_width/_canvas_height here.
+                try:
+                    if int(_c.width) != _fw:
+                        _c.width = _fw
+                except Exception:
+                    pass
+                try:
+                    if int(_c.height) != _fh:
+                        _c.height = _fh
+                except Exception:
+                    pass
+                try:
+                    def _fs_rerun(*_a):
+                        try:
+                            if document.fullscreenElement is None:
+                                return
+                            _vw2 = int(document.documentElement.clientWidth) or int(window.innerWidth)
+                            _vh2 = int(document.documentElement.clientHeight) or int(window.innerHeight)
+                            _s2 = min(_vw2 / float(_ow), _vh2 / float(_oh))
+                            _fw2 = int(round(_ow * _s2))
+                            _fh2 = int(round(_oh * _s2))
+                            _c.style.width = '%dpx' % _fw2
+                            _c.style.height = '%dpx' % _fh2
+                            _c.style.margin = 'auto'
+                            try:
+                                if int(_c.width) != _fw2:
+                                    _c.width = _fw2
+                                if int(_c.height) != _fh2:
+                                    _c.height = _fh2
+                            except Exception:
+                                pass
+                            _reposition_fullscreen_button()
+                        except Exception:
+                            pass
+                    window.requestAnimationFrame(_fs_rerun)
+                except Exception:
+                    pass
             except Exception:
                 pass
         else:
@@ -2792,10 +2832,16 @@ def _on_fullscreen_change(ev=None):
                 _c.style.width = '%dpx' % _ow
                 _c.style.height = '%dpx' % _oh
                 _c.style.margin = '0 auto'
+                try:
+                    if int(_c.width) != _ow:
+                        _c.width = _ow
+                    if int(_c.height) != _oh:
+                        _c.height = _oh
+                except Exception:
+                    pass
             except Exception:
                 pass
         try:
-            # Defer until after fullscreen layout is applied.
             try:
                 window.requestAnimationFrame(lambda *_a: _reposition_fullscreen_button())
             except Exception:
@@ -2808,7 +2854,6 @@ def _on_fullscreen_change(ev=None):
             pass
     except Exception:
         pass
-
 
 def _pos(ev):
     # FIX v27 HUD events: map CSS rect -> logical app size (_canvas_width x
