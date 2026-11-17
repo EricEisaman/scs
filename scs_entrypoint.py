@@ -2762,18 +2762,6 @@ def _toggle_fullscreen():
         pass
 
 def _on_fullscreen_change(ev=None):
-    # v54: LOGICAL STAYS runApp SIZE. Canvas scales via CSS only.
-    # User: "logical stays 400x400, canvas just scales up via CSS to fill screen (mouse still 0..400)"
-    # Old code did _c.width = innerWidth (9997) + globals()['__dict__']['_canvas_width'] = 9997
-    # (which didn't even update the real global). That made:
-    #  - HUD: 900 texture drawn onto 9997 viewport = 9997/1800 ~ 5x huge
-    #  - Mouse: _pos mapped to 9997 instead of 400, dots inset 25% on each side
-    #  - Backing: 400 logical drawn 1:1 on 9997 backing = tiny tile, not fullscreen
-    # v58: _canvas_width/_canvas_height NEVER change in fullscreen. canvas.width/height
-    # (backing) NEVER change. Only canvas.style.width/height change, to the
-    # MEASURED fullscreen-element rect (see below), NOT window.innerWidth.
-    # _pos then maps (clientX-left) * logical / rect.width -> 0..logical correctly.
-    # HUD offscreen backing = drawing-buffer size, drawn 1:1.
     try:
         try:
             _is_fs = document.fullscreenElement is not None
@@ -2785,43 +2773,33 @@ def _on_fullscreen_change(ev=None):
         _ow = int(_fullscreen_orig_w) if _fullscreen_orig_w else int(_canvas_width) if _canvas_width else 900
         _oh = int(_fullscreen_orig_h) if _fullscreen_orig_h else int(_canvas_height) if _canvas_height else 560
         if _is_fs:
+            # FIX: never measure the canvas to size itself.
+            # In fullscreen the canvas IS the fullscreen element, so
+            # its rect is still the old windowed size. Reading it and
+            # writing it back locks it at 400px centered.
+            # Use viewport units and let the CSS :fullscreen rule own it.
+            # This also avoids reading window.innerWidth, which fed back
+            # into itself and produced the stale 9997 value.
             try:
-                # v58: size from the MEASURED fullscreen-element rect, NOT
-                # window.innerWidth. innerWidth produced 9997x7354 (stale /
-                # zoom / display-move value) and stretched the canvas to
-                # 9997px wide, overflowing the viewport - clicks then mapped
-                # to an inset band (blue-rectangle screenshot) and the
-                # backing ballooned. getBoundingClientRect() of the element
-                # that is actually fullscreen IS the viewport. If the
-                # fullscreen element is the canvas itself, the browser's
-                # :fullscreen UA styles (width:100% !important) already size
-                # it; setting it to its own rect is a no-op. If it is the
-                # wrapper, the canvas fills the wrapper.
-                try:
-                    _fs_el = document.fullscreenElement
-                except Exception:
-                    _fs_el = None
-                _fw = _fh = 0
-                if _fs_el is not None:
-                    try:
-                        _fr = _fs_el.getBoundingClientRect()
-                        _fw, _fh = int(_fr.width), int(_fr.height)
-                    except Exception:
-                        _fw = _fh = 0
-                if not _fw or not _fh:
-                    _fw, _fh = int(window.innerWidth), int(window.innerHeight)
-                # CSS only - backing stays _ow x _oh.
-                _c.style.width = '%dpx' % _fw; _c.style.height = '%dpx' % _fh
+                _c.style.width = '100vw'
+                _c.style.height = '100vh'
+                _c.style.margin = '0'
+                _c.style.padding = '0'
             except Exception:
                 pass
         else:
             try:
-                _c.style.width = '%dpx' % _ow; _c.style.height = '%dpx' % _oh
+                _c.style.width = '%dpx' % _ow
+                _c.style.height = '%dpx' % _oh
+                _c.style.margin = '0 auto'
             except Exception:
                 pass
-        # _canvas_width/_canvas_height intentionally NOT changed. Backing intentionally NOT changed.
         try:
-            _reposition_fullscreen_button()
+            # Defer until after fullscreen layout is applied.
+            try:
+                window.requestAnimationFrame(lambda *_a: _reposition_fullscreen_button())
+            except Exception:
+                _reposition_fullscreen_button()
         except Exception:
             pass
         try:
