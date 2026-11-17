@@ -2762,6 +2762,10 @@ def _toggle_fullscreen():
         pass
 
 def _on_fullscreen_change(ev=None):
+    # LOGICAL STAYS runApp SIZE. Backing NEVER changes here. Only CSS changes.
+    # Viewport is layout viewport, NOT window.innerWidth (9997 when canvas
+    # overflows) and NOT fullscreenElement rect (self-referential when the
+    # fullscreen element IS the canvas).
     try:
         try:
             _is_fs = document.fullscreenElement is not None
@@ -2774,78 +2778,42 @@ def _on_fullscreen_change(ev=None):
         _oh = int(_fullscreen_orig_h) if _fullscreen_orig_h else int(_canvas_height) if _canvas_height else 560
         if _is_fs:
             try:
+                _vw = float(document.documentElement.clientWidth) or 0.0
+                _vh = float(document.documentElement.clientHeight) or 0.0
+            except Exception:
+                _vw = _vh = 0.0
+            if not _vw or not _vh:
                 try:
-                    _vw = int(document.documentElement.clientWidth) or int(window.innerWidth)
-                    _vh = int(document.documentElement.clientHeight) or int(window.innerHeight)
+                    _vw = float(window.innerWidth)
+                    _vh = float(window.innerHeight)
                 except Exception:
-                    _vw, _vh = int(window.innerWidth), int(window.innerHeight)
-                # Letterbox, no stretch. Scale is same for X and Y.
-                _scale = min(_vw / float(_ow), _vh / float(_oh))
-                _fw = int(round(_ow * _scale))
-                _fh = int(round(_oh * _scale))
-                _c.style.width = '%dpx' % _fw
-                _c.style.height = '%dpx' % _fh
+                    _vw, _vh = float(_ow), float(_oh)
+            # Letterbox, no stretch: fit logical inside viewport, keep aspect.
+            _scale = min(_vw / float(_ow), _vh / float(_oh)) if _ow and _oh else 1.0
+            _cssW = int(round(_ow * _scale))
+            _cssH = int(round(_oh * _scale))
+            # Fixed + inset 0 + margin auto + letterboxed size centers it.
+            # Without this, the canvas stays top-left at 9997px and rect.left
+            # goes negative, which is the inset dot in your screenshot.
+            try:
+                _c.style.position = 'fixed'
+                _c.style.inset = '0'
                 _c.style.margin = 'auto'
-                _c.style.padding = '0'
-                # Backing MUST equal CSS. Otherwise viewport > buffer = magnified HUD.
-                # Logical stays _ow/_oh, do NOT touch _canvas_width/_canvas_height here.
-                try:
-                    if int(_c.width) != _fw:
-                        _c.width = _fw
-                except Exception:
-                    pass
-                try:
-                    if int(_c.height) != _fh:
-                        _c.height = _fh
-                except Exception:
-                    pass
-                try:
-                    def _fs_rerun(*_a):
-                        try:
-                            if document.fullscreenElement is None:
-                                return
-                            _vw2 = int(document.documentElement.clientWidth) or int(window.innerWidth)
-                            _vh2 = int(document.documentElement.clientHeight) or int(window.innerHeight)
-                            _s2 = min(_vw2 / float(_ow), _vh2 / float(_oh))
-                            _fw2 = int(round(_ow * _s2))
-                            _fh2 = int(round(_oh * _s2))
-                            _c.style.width = '%dpx' % _fw2
-                            _c.style.height = '%dpx' % _fh2
-                            _c.style.margin = 'auto'
-                            try:
-                                if int(_c.width) != _fw2:
-                                    _c.width = _fw2
-                                if int(_c.height) != _fh2:
-                                    _c.height = _fh2
-                            except Exception:
-                                pass
-                            _reposition_fullscreen_button()
-                        except Exception:
-                            pass
-                    window.requestAnimationFrame(_fs_rerun)
-                except Exception:
-                    pass
+                _c.style.width = '%dpx' % _cssW
+                _c.style.height = '%dpx' % _cssH
             except Exception:
                 pass
         else:
             try:
+                _c.style.position = ''
+                _c.style.inset = ''
+                _c.style.margin = '0 auto'
                 _c.style.width = '%dpx' % _ow
                 _c.style.height = '%dpx' % _oh
-                _c.style.margin = '0 auto'
-                try:
-                    if int(_c.width) != _ow:
-                        _c.width = _ow
-                    if int(_c.height) != _oh:
-                        _c.height = _oh
-                except Exception:
-                    pass
             except Exception:
                 pass
         try:
-            try:
-                window.requestAnimationFrame(lambda *_a: _reposition_fullscreen_button())
-            except Exception:
-                _reposition_fullscreen_button()
+            _reposition_fullscreen_button()
         except Exception:
             pass
         try:
