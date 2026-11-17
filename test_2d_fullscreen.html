@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>2D App Fullscreen Mouse Test</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px 0 0 0;
+            background: #0f1115;
+            text-align: center;
+        }
+        canvas {
+            display: block;
+            background: black;
+            outline: none;
+            margin: 0 auto;
+        }
+        #info {
+            color: white;
+            font-family: monospace;
+            margin-top: 20px;
+            padding: 10px;
+        }
+    </style>
+</head>
+<body onload="brython({debug:0, pythonpath:['.']})">
+    <canvas id="canvas" data-app="test_2d_fullscreen.py" width="400" height="400" tabindex="0"></canvas>
+    <div id="info">
+        <p>Click on the canvas to see mouse coordinates. Use the fullscreen button in the bottom-right.</p>
+        <p>In fullscreen, clicks on the buttons should still work correctly.</p>
+        <p>Open browser console (F12) to see click coordinates being printed.</p>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython_stdlib.js"></script>
+    <script type="text/python">
+        import scs_entrypoint as ep
+        ep.boot()
+    </script>
+</body>
+</html>
