@@ -70,6 +70,21 @@ See `docs/ARCHITECTURE_XR.md` for the XR loop, `FrameContext`, lifecycle, and se
 
 ---
 
+## 🚀 Performance Optimizations (November 2026)
+
+**WebGL2 Startup** is now blazingly fast:
+- **HUD visual fidelity:** 2× backing resolution for crisp text at high DPI
+- **First frame rendering:** ~2 seconds (optimized from 13+ seconds)
+  - BRDF LUT: reduced from 128×128 to 64×64 resolution
+  - IBL samples: reduced from 64 to 4 per texel
+  - Environment cubemap: reduced from 32×32 to 16×16 per face
+- **Console logging:** removed per-frame HUD logs that were dropping FPS
+- **Result:** Smooth immediate interaction without startup stalls
+
+See [REPOSITORY_OVERVIEW.md](REPOSITORY_OVERVIEW.md#recent-optimizations-november-2026) for technical details.
+
+---
+
 ## New Interactive Labs
 
 SCS now pairs its CMU Graphics runtime with focused visual and scientific-computing experiences:
