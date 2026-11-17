@@ -4132,7 +4132,7 @@ def exec_code(code, fn, force=False):
                     _debug_log('SCS auto-start %s %sx%s' % (fn, w, h))
                 except Exception:
                     pass
-                run_app(width=w, height=h)
+                run_app(width=w, height=h, enableFullscreen=True)
         else:
             try:
                 _debug_log('SCS exec ok %s but NO callbacks found - not starting. ALL _user_ns keys=%s' % (fn, sorted([k for k in _user_ns.keys() if not k.startswith('_')])))
