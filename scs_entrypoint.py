@@ -600,20 +600,20 @@ def _ensure_app_wrapper():
     _c = _find_canvas()
     if _c is None:
         return None
+    try:
+        _p = _c.parentElement
+        if _p is not None and _p.id == 'scs-app-wrapper':
+            _app_wrapper = _p
+            return _p
+    except Exception:
+        pass
     if _app_wrapper is not None and _app_wrapper.parentNode is not None:
+        try:
+            if _c.parentNode is not _app_wrapper:
+                _app_wrapper.appendChild(_c)
+        except Exception:
+            pass
         return _app_wrapper
-    _w = document.createElement('div')
-    _w.id = 'scs-app-wrapper'
-    _w.style.display = 'flex'
-    _w.style.alignItems = 'center'
-    _w.style.justifyContent = 'center'
-    _w.style.width = '100%'
-    _w.style.height = '100%'
-    _w.style.background = 'black'
-    _c.parentNode.insertBefore(_w, _c)
-    _w.appendChild(_c)
-    _app_wrapper = _w
-    return _w
 
 def _dpr():
     try:
@@ -1132,32 +1132,6 @@ def _ensure_resize_observer():
             pass
     except Exception:
         pass
-
-def _ensure_app_wrapper():
-    # v30: NON-INVASIVE for apps already in the wild in standard web pages.
-    # Do NOT create a div, do NOT move the canvas, do NOT inject CSS.
-    # Moving the canvas or injecting !important fullscreen CSS breaks the
-    # host page's own layout (flex/grid, responsive rules, other content).
-    # HUD controls are drawn INSIDE the canvas, so fullscreening the canvas
-    # itself keeps them visible. Use the existing parent ONLY if it holds
-    # just the canvas (a dedicated container); otherwise use the canvas.
-    try:
-        _c = _find_canvas()
-        if _c is None:
-            return None
-        _p = _c.parentElement
-        if _p is not None:
-            try:
-                # Dedicated container = only the canvas inside (ignore text nodes).
-                _kids = [ _n for _n in list(_p.childNodes) if getattr(_n, 'nodeType', 3) == 1 ]
-                if len(_kids) == 1 and _kids[0] is _c:
-                    return _p
-            except Exception:
-                pass
-        return _c
-    except Exception:
-        return None
-
 
 def _url_param(name):
     try:
@@ -2748,10 +2722,25 @@ def _toggle_fullscreen():
     _w = _ensure_app_wrapper()
     if _w is None:
         return
-    if document.fullscreenElement is _w:
-        document.exitFullscreen()
-    else:
-        _w.requestFullscreen()
+    try:
+        _fs = document.fullscreenElement
+    except Exception:
+        _fs = None
+    if _fs is not None:
+        try:
+            document.exitFullscreen()
+        except Exception:
+            pass
+        return
+    try:
+        _p = _w.requestFullscreen()
+        try:
+            if _p is not None and hasattr(_p, 'catch'):
+                _p.catch(lambda _e: None)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 def _on_fullscreen_change(ev=None):
     _c = _find_canvas()
@@ -2761,8 +2750,20 @@ def _on_fullscreen_change(ev=None):
     if document.fullscreenElement is _w:
         _ow = _fullscreen_orig_w
         _oh = _fullscreen_orig_h
-        _vw = _w.clientWidth or document.documentElement.clientWidth
-        _vh = _w.clientHeight or document.documentElement.clientHeight
+        _vw = _w.clientWidth or 0
+        _vh = _w.clientHeight or 0
+        if not _vw or not _vh:
+            try:
+                _vw = int(window.innerWidth) or 0
+                _vh = int(window.innerHeight) or 0
+            except Exception:
+                pass
+        if not _vw or not _vh:
+            try:
+                window.requestAnimationFrame(lambda _t: _on_fullscreen_change())
+            except Exception:
+                pass
+            return
         _s = min(_vw / _ow, _vh / _oh)
         _c.style.position = ''
         _c.style.inset = ''
