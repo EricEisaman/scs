@@ -2414,8 +2414,8 @@ def drawShape(shape):
         if r is not None:
             try:
                 shape.draw(r)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f'[drawShape error] {e}')
 
 
 # ----------------------------------------------------------------------
@@ -3258,12 +3258,12 @@ def _render_one_view(view, renderer=None):
             # never did, so _update_world never ran, sphere positions never
             # updated, and HUD labels never updated. Non-engine path calls
             # redrawAll - engine path must too.
+            r.clear_scene()
+            # r.add_floor(40, '#22223a')  # Disabled: app provides terrain mesh
             try:
                 _call('redrawAll', _app)
             except Exception:
                 pass
-            r.clear_scene()
-            r.add_floor(40, '#22223a')
             for s in list(_shapes):
                 try:
                     if not getattr(s, 'visible', True):
@@ -3271,10 +3271,13 @@ def _render_one_view(view, renderer=None):
                     _cz = getattr(s, 'centerZ', None)
                     if _cz is None:
                         continue
+                    # Skip 3D shapes - they already called draw() during redrawAll
+                    _cls = type(s).__name__
+                    if _cls in ('Mesh3D', 'Cube3D', 'Sphere3D'):
+                        continue
                     _cx = float(getattr(s, 'centerX', 0) or 0)
                     _cy = float(getattr(s, 'centerY', 0) or 0)
                     _fill = getattr(s, 'fill', 'blue') or 'blue'
-                    _cls = type(s).__name__
                     if _cls in ('Rect',):
                         r.add_box(_cx, _cy, float(_cz), float(getattr(s, 'width', 1) or 1), float(getattr(s, 'height', 1) or 1), 1.0, _fill, metalness=float(getattr(s, 'metalness', 1.0) or 1.0), roughness=float(getattr(s, 'roughness', 0.38) or 0.38), defectLevel=float(getattr(s, 'defectLevel', 0.5) or 0.5))
                     else:
