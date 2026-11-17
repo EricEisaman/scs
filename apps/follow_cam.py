@@ -244,7 +244,7 @@ def onAppStart(app):
     app.pos_label = Label(
         "X: 0.0  Y: 0.0  Z: 0.0",
         50, 100,
-        fontSize=16,
+        size=16,
         fill='white',
         hud=True,
     )
@@ -451,7 +451,7 @@ def redrawAll(app):
     
     # Draw instructions
     info_text = "WASD: Move  Q/E: Strafe  A/D: Rotate  Space: Jump"
-    drawLabel(info_text, 450, 20, fontSize=14, fill='white')
+    drawLabel(info_text, 450, 20, size=14, fill='white')
 
 
 runApp(width=900, height=560, enableFullscreen=True)
