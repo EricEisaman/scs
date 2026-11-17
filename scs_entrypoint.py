@@ -2503,6 +2503,7 @@ def _parse_run_args(args, kwargs):
     # v53: enableFullscreen MUST NOT be dropped. runApp(enableFullscreen=True) was
     # silently dropped here - _parse_run_args never returned it, runApp never
     # forwarded it, run_app got enableFullscreen=False, so no button was ever created.
+    # v54+: enableFullscreen defaults to True. Apps must explicitly set False to disable.
     _ef = kwargs.pop('enableFullscreen', None)
     if _ef is None:
         _ef = kwargs.pop('enable_fullscreen', None)
@@ -2523,6 +2524,9 @@ def _parse_run_args(args, kwargs):
     if len(args) >= 5:
         canvas = args[4]
     # Return 9 values - callers unpack 9.
+    # Default enableFullscreen to True if not specified (None)
+    if _ef is None:
+        _ef = True
     return width, height, steps, renderer, canvas, hud, mode, html_element, bool(_ef)
 
 
@@ -3411,7 +3415,7 @@ def _start_loop():
 
 
 def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
-            canvas=None, hud=None, mode=None, html_element=None, enableFullscreen=False, **kwargs):
+            canvas=None, hud=None, mode=None, html_element=None, enableFullscreen=True, **kwargs):
     """The initialiser. renderer: '2d', 'webgl2', or 'webgpu'. NO FALLBACK.
     NO WebGPU -> WebGL2 -> 2D fallback chain. 'auto' = default (2D, or HUD texture if 3D renderer). If you ask for 'webgl2' and
     WebGL2 fails, it FAILS. If you ask for 'webgpu' and WebGPU fails, it FAILS.
