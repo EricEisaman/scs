@@ -2,16 +2,16 @@ from scs import *
 
 #MODEL - initialize state for 2 shapes stored in variables
 def onAppStart(app):
-    app.rectX = 1050/2
-    app.rectY = 700/2
-    app.rectW = 500
-    app.rectH = 200
+    app.rectX = 400/2
+    app.rectY = 400/2
+    app.rectW = 300
+    app.rectH = 100
     app.rectFill = 'red'
     app.angle = 0
     
-    app.circleX = 1050/2
-    app.circleY = 700/2
-    app.circleR = 100
+    app.circleX = 400/2
+    app.circleY = 400/2
+    app.circleR = 10
 
 #CONTROLLER - automatic updates
 def onStep(app):
