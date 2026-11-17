@@ -1,0 +1,40 @@
+# render.docker.yaml -- Render DOCKER deploy. Dynamic server.
+#
+# Use this file when you want the dynamic server: uvicorn
+# app.main:app serves the UI + the API (chat proxy, session).
+# This file is the ONLY place the backend env vars live.
+#
+# What this runs: ./Dockerfile
+#   Backend: scs-datastar-extension/ -> /app/ (app.main)
+#   Frontend: index.html + scs_*.py + apps/ -> /app/static/
+#   app.main must mount it:
+#     app.mount("/", StaticFiles(directory="static", html=True), name="static")
+#   /healthz must exist in app.main -- Render health-checks it.
+#
+# To deploy: Render -> New -> Blueprint -> pick this repo ->
+# set Blueprint file to render.docker.yaml.
+# For static client-only instead, use Blueprint file render.yaml.
+
+services:
+  - type: web
+    name: scs-207
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /healthz
+    autoDeploy: false
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PORT
+        value: "10000"
+      - key: ALLOWED_ORIGINS
+        value: "https://ericeisaman.github.io,https://scs-207.onrender.com,http://localhost:8000,https://scs-2qah.onrender.com"
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: CHAT_UPSTREAM_URL
+        value: https://chat-slayer.onrender.com
+      - key: CHAT_PROXY_PREFIX
+        value: /chat-api
+      - key: CHAT_CLIENT_ID
+        value: web-demo

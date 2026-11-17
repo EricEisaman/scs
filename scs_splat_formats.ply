@@ -1,0 +1,610 @@
+"""
+scs_splat_formats.py -- DISK FORMATS, and ONLY disk formats.
+
+Architecture (the whole point):
+  DISK BYTES  --parse-->  SplatData  --pack-->  GPU BUFFER  --render-->  screen
+       ^                     ^                      ^
+       |                     |                      |
+  scs_splat_formats.py   canonical in-memory   scs_splat_gpu.py
+  (this file)            (this file)           (GPU layout)
+
+  * The renderer (scs_splats.py) NEVER sees disk bytes. It only
+    sees SplatData -> GPU buffer. Add a new disk format (RAD, ...)
+    by registering ONE parser here -- no renderer redesign.
+  * SplatData is the contract: positions, scales, rotations,
+    colors, opacities, SH. Every format parses INTO it.
+  * GPU layout lives in scs_splat_gpu.py, not here. This file
+    must not import GPU code, and the GPU file must not import
+    disk parsers. The only shared type is SplatData.
+
+Formats:
+  .ply   -- PLY (ascii + binary little-endian), real header parsing.
+  .splat -- .splat (32 bytes/splat: pos + scale + color + rot).
+  .spz   -- SPZ: magic + zlib-compressed body (positions/scales/
+            rotations/colors/opacity/SH). Streaming: whole file is
+            one chunk, but SPZ is small (compressed) so that's fine.
+  .sog   -- SOG (Streamable Octree Gaussians): JSON manifest +
+            binary chunks. Each chunk is one SplatData. The manifest
+            is the streaming unit: coarse chunk first, then octree
+            children by distance. This is THE streamable format.
+  .rad   -- RAD: NOT implemented yet. The registry shows how to add
+            it later: register_format('rad', parse_rad) -- renderer
+            untouched. parse_rad() raises a clear error until then.
+"""
+
+import math, struct, zlib, json
+
+# [STRIPPED 70 bytes]
+# Canonical in-memory splats -- NOT disk, NOT GPU.
+# [STRIPPED 70 bytes]
+
+class SplatData:
+    """Canonical in-memory splats. Every disk parser returns this.
+    Every GPU packer consumes this. Nothing else crosses the boundary."""
+    def __init__(self, positions=None, scales=None, rotations=None,
+                 colors=None, opacities=None, sh=None, sh_degree=0,
+                 source_format='', name=''):
+        self.positions = list(positions or [])  # [(x,y,z), ...] float
+        self.scales = list(scales or [])        # [(sx,sy,sz), ...]
+        self.rotations = list(rotations or [])  # [(x,y,z,w), ...] quat
+        self.colors = list(colors or [])        # [(r,g,b), ...] 0..1 float
+        self.opacities = list(opacities or [])  # [a, ...] 0..1 float
+        self.sh = list(sh or [])                # [flat coeffs per splat] or []
+        self.sh_degree = int(sh_degree)
+        self.source_format = source_format
+        self.name = name
+    def __len__(self):
+        return len(self.positions)
+    @property
+    def count(self):
+        return len(self.positions)
+    def describe(self):
+        return {'count': self.count, 'sh_degree': self.sh_degree,
+                'source_format': self.source_format, 'name': self.name,
+                'has_sh': len(self.sh) > 0}
+    def bounds(self):
+        if not self.positions:
+            return ((0, 0, 0), (0, 0, 0))
+        xs = [p[0] for p in self.positions]; ys = [p[1] for p in self.positions]; zs = [p[2] for p in self.positions]
+        return ((min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs)))
+    def slice(self, start, end):
+        """A chunk: SplatData for splats [start:end]. Streaming uses this."""
+        return SplatData(
+            positions=self.positions[start:end],
+            scales=self.scales[start:end],
+            rotations=self.rotations[start:end],
+            colors=self.colors[start:end],
+            opacities=self.opacities[start:end],
+            sh=self.sh[start:end] if self.sh else [],
+            sh_degree=self.sh_degree,
+            source_format=self.source_format,
+            name=self.name)
+
+# [STRIPPED 70 bytes]
+# PLY -- real header + ascii/binary body
+# [STRIPPED 70 bytes]
+
+def parse_ply_header(data):
+    if not data.startswith(b'ply'):
+        raise ValueError('Not a PLY file: missing ply magic')
+    idx = data.find(b'end_header')
+    if idx == -1:
+        raise ValueError('PLY header has no end_header')
+    end = idx + len(b'end_header')
+    if end < len(data) and data[end:end+1] == b'\n':
+        end += 1
+    elif end + 1 < len(data) and data[end:end+2] == b'\r\n':
+        end += 2
+    text = data[:end].decode('ascii', errors='replace')
+    lines = text.splitlines()
+    header = {'format': 'ascii', 'elements': {}, 'properties': []}
+    cur = None
+    for line in lines:
+        parts = line.strip().split()
+        if not parts:
+            continue
+        if parts[0] == 'format':
+            header['format'] = parts[1] if len(parts) > 1 else 'ascii'
+        elif parts[0] == 'element':
+            cur = parts[1]
+            header['elements'][cur] = {'count': int(parts[2]), 'properties': []}
+        elif parts[0] == 'property' and cur is not None:
+            header['elements'][cur]['properties'].append(parts[1:])
+    return header, end
+
+def parse_ply(data):
+    """Parse PLY bytes -> SplatData. Supports ascii + binary_little_endian."""
+    header, header_len = parse_ply_header(data)
+    if 'vertex' not in header['elements']:
+        raise ValueError('PLY has no vertex element')
+    count = header['elements']['vertex']['count']
+    props = header['elements']['vertex']['properties']
+    names = []
+    for p in props:
+        if p[0] == 'list':
+            names.append(p[3])
+        else:
+            names.append(p[1])
+    # Index of each field
+    def _idx(n):
+        return names.index(n) if n in names else -1
+    ix = _idx('x'); iy = _idx('y'); iz = _idx('z')
+    is0 = _idx('scale_0'); is1 = _idx('scale_1'); is2 = _idx('scale_2')
+    ir0 = _idx('rot_0'); ir1 = _idx('rot_1'); ir2 = _idx('rot_2'); ir3 = _idx('rot_3')
+    iop = _idx('opacity')
+    if0 = _idx('f_dc_0'); if1 = _idx('f_dc_1'); if2 = _idx('f_dc_2')
+    # SH degree from f_rest_*: count them
+    sh_rest = [n for n in names if n.startswith('f_rest_')]
+    sh_degree = 0
+    if sh_rest:
+        # (degree+1)^2 * 3 = 3 + len(rest)  => degree = sqrt((3+len)/3)-1
+        total = 3 + len(sh_rest)
+        deg = int(round(math.sqrt(total/3.0) - 1))
+        sh_degree = max(0, deg)
+    body = data[header_len:]
+    rows = []
+    if header['format'].startswith('ascii'):
+        for line in body.decode('ascii', errors='replace').strip().splitlines():
+            if not line.strip():
+                continue
+            rows.append([float(v) for v in line.strip().split()])
+            if len(rows) >= count:
+                break
+    else:
+        # Binary little-endian float32 (all props are float in our PLY)
+        # Compute stride: assume float (4) for every prop (PLY splats are float)
+        stride = len(names) * 4
+        for i in range(count):
+            off = i * stride
+            if off + stride > len(body):
+                break
+            vals = list(struct.unpack_from('<%df' % len(names), body, off))
+            rows.append(vals)
+    positions, scales, rotations, colors, opacities, sh = [], [], [], [], [], []
+    for vals in rows:
+        def _g(i, default=0.0):
+            return vals[i] if i >= 0 and i < len(vals) else default
+        positions.append((_g(ix), _g(iy), _g(iz)))
+        scales.append((_g(is0, 0.1), _g(is1, 0.1), _g(is2, 0.1)))
+        # Rotation: PLY rot_* are quaternion (x,y,z,w) -- normalize
+        q = (_g(ir0, 0.0), _g(ir1, 0.0), _g(ir2, 0.0), _g(ir3, 1.0))
+        l = math.sqrt(sum(v*v for v in q)) or 1.0
+        rotations.append(tuple(v/l for v in q))
+        # f_dc_* are SH DC * 0.28209479... -> color = 0.5 + dc * C0
+        # C0 = 0.28209479177387814. Inverse: color = 0.5 + dc * C0
+        C0 = 0.28209479177387814
+        colors.append((max(0.0, min(1.0, 0.5 + _g(if0)*C0)),
+                       max(0.0, min(1.0, 0.5 + _g(if1)*C0)),
+                       max(0.0, min(1.0, 0.5 + _g(if2)*C0))))
+        opacities.append(_g(iop, 1.0))
+        # SH rest: flat list per splat
+        if sh_rest:
+            base = names.index(sh_rest[0])
+            sh.append([vals[base + j] if base + j < len(vals) else 0.0 for j in range(len(sh_rest))])
+    return SplatData(positions=positions, scales=scales, rotations=rotations,
+                     colors=colors, opacities=opacities, sh=sh,
+                     sh_degree=sh_degree, source_format='ply')
+
+def build_minimal_ply():
+    """Real minimal PLY: 3 splats, ascii. Test fixture, not a stub."""
+    lines = [
+        'ply', 'format ascii 1.0', 'comment scs-test', 'element vertex 3',
+        'property float x', 'property float y', 'property float z',
+        'property float scale_0', 'property float scale_1', 'property float scale_2',
+        'property float rot_0', 'property float rot_1', 'property float rot_2', 'property float rot_3',
+        'property float opacity',
+        'property float f_dc_0', 'property float f_dc_1', 'property float f_dc_2',
+        'end_header',
+        '0 0 0 0.1 0.1 0.1 1 0 0 0 0.9 0.5 0.2 0.1',
+        '1 0 0 0.1 0.1 0.1 1 0 0 0 0.9 0.2 0.5 0.1',
+        '0 1 0 0.1 0.1 0.1 1 0 0 0 0.9 0.1 0.2 0.5',
+    ]
+    return ('\n'.join(lines) + '\n').encode('ascii')
+
+# [STRIPPED 70 bytes]
+# .splat -- 32 bytes/splat
+# [STRIPPED 70 bytes]
+
+SPLAT_BYTES = 32
+
+def parse_splat(data):
+    """Parse .splat bytes -> SplatData.
+    Layout (32B): pos f32x3 (12), scale f32x3 (12), color u8x4 (4),
+    rotation u8x4 (4, quantized quat: byte/128-1, then normalize)."""
+    if len(data) % SPLAT_BYTES != 0:
+        raise ValueError('.splat filesize %d not a multiple of 32' % len(data))
+    count = len(data) // SPLAT_BYTES
+    positions, scales, rotations, colors, opacities = [], [], [], [], []
+    for i in range(count):
+        off = i * SPLAT_BYTES
+        x, y, z, sx, sy, sz = struct.unpack_from('<6f', data, off)
+        r, g, b, a = data[off+24], data[off+25], data[off+26], data[off+27]
+        qx = data[off+28]/128.0 - 1.0
+        qy = data[off+29]/128.0 - 1.0
+        qz = data[off+30]/128.0 - 1.0
+        qw = data[off+31]/128.0 - 1.0
+        l = math.sqrt(qx*qx+qy*qy+qz*qz+qw*qw) or 1.0
+        positions.append((x, y, z))
+        scales.append((sx, sy, sz))
+        rotations.append((qx/l, qy/l, qz/l, qw/l))
+        colors.append((r/255.0, g/255.0, b/255.0))
+        opacities.append(a/255.0)
+    return SplatData(positions=positions, scales=scales, rotations=rotations,
+                     colors=colors, opacities=opacities, sh_degree=0, source_format='splat')
+
+def build_splat_bytes(splat_data):
+    """Encode SplatData -> .splat bytes (for tests / export)."""
+    out = bytearray()
+    for i in range(splat_data.count):
+        p = splat_data.positions[i]; s = splat_data.scales[i]
+        c = splat_data.colors[i] if i < len(splat_data.colors) else (1, 1, 1)
+        a = splat_data.opacities[i] if i < len(splat_data.opacities) else 1.0
+        q = splat_data.rotations[i] if i < len(splat_data.rotations) else (0, 0, 0, 1)
+        out += struct.pack('<6f', p[0], p[1], p[2], s[0], s[1], s[2])
+        out += bytes([int(max(0, min(255, round(c[0]*255)))),
+                      int(max(0, min(255, round(c[1]*255)))),
+                      int(max(0, min(255, round(c[2]*255)))),
+                      int(max(0, min(255, round(a*255))))])
+        out += bytes([int(max(0, min(255, round((q[j]+1.0)*128)))) for j in range(4)])
+    return bytes(out)
+
+# [STRIPPED 70 bytes]
+# SPZ -- compressed, magic + zlib body
+# [STRIPPED 70 bytes]
+
+SPZ_MAGIC = b'SPZ!'
+SPZ_VERSION = 1
+
+def encode_spz(splat_data):
+    """Encode SplatData -> SPZ bytes. Body is zlib-compressed:
+    positions (count*3 f32) + scales (count*3 f32) + rotations (count*4 f32)
+    + colors (count*3 u8) + opacities (count*1 u8) + SH (count * sh_len f32)."""
+    count = splat_data.count
+    body = bytearray()
+    for p in splat_data.positions:
+        body += struct.pack('<3f', *p)
+    for s in splat_data.scales:
+        body += struct.pack('<3f', *s)
+    for q in splat_data.rotations:
+        body += struct.pack('<4f', *q)
+    for c in splat_data.colors:
+        body += bytes([int(max(0, min(255, round(c[0]*255)))),
+                       int(max(0, min(255, round(c[1]*255)))),
+                       int(max(0, min(255, round(c[2]*255))))])
+    for a in splat_data.opacities:
+        body += bytes([int(max(0, min(255, round(a*255))))])
+    for coeffs in splat_data.sh:
+        for v in coeffs:
+            body += struct.pack('<f', float(v))
+    comp = zlib.compress(bytes(body), level=6)
+    header = SPZ_MAGIC + struct.pack('<III', SPZ_VERSION, count, splat_data.sh_degree)
+    return header + comp
+
+def parse_spz(data):
+    """Parse SPZ bytes -> SplatData. Raises if magic/version wrong."""
+    if len(data) < 16 or data[:4] != SPZ_MAGIC:
+        raise ValueError('Not an SPZ file: missing SPZ! magic')
+    version, count, sh_degree = struct.unpack_from('<III', data, 4)
+    if version != SPZ_VERSION:
+        raise ValueError('SPZ version %d not supported (expected %d)' % (version, SPZ_VERSION))
+    try:
+        body = zlib.decompress(data[16:])
+    except Exception as e:
+        raise ValueError('SPZ body is not valid zlib: %s' % e)
+    # Layout: positions + scales + rotations + colors + opacities + SH
+    sh_len = ((sh_degree+1)**2 - 1) * 3 if sh_degree > 0 else 0  # rest coeffs (DC is color)
+    # Actually: total SH coeffs = (deg+1)^2 *3, DC (3) is in colors, rest = total-3
+    expected = count*3*4 + count*3*4 + count*4*4 + count*3 + count*1 + count*sh_len*4
+    if len(body) < expected:
+        raise ValueError('SPZ body truncated: got %d, expected %d' % (len(body), expected))
+    off = 0
+    positions, scales, rotations, colors, opacities, sh = [], [], [], [], [], []
+    for _ in range(count):
+        positions.append(struct.unpack_from('<3f', body, off)); off += 12
+    for _ in range(count):
+        scales.append(struct.unpack_from('<3f', body, off)); off += 12
+    for _ in range(count):
+        rotations.append(struct.unpack_from('<4f', body, off)); off += 16
+    for _ in range(count):
+        r, g, b = body[off], body[off+1], body[off+2]; off += 3
+        colors.append((r/255.0, g/255.0, b/255.0))
+    for _ in range(count):
+        opacities.append(body[off]/255.0); off += 1
+    for _ in range(count):
+        coeffs = []
+        for _ in range(sh_len):
+            coeffs.append(struct.unpack_from('<f', body, off)[0]); off += 4
+        if sh_len:
+            sh.append(coeffs)
+    # If no SH, keep sh=[] (same as PLY) so pack_gpu is identical.
+    return SplatData(positions=[tuple(p) for p in positions],
+                     scales=[tuple(s) for s in scales],
+                     rotations=[tuple(q) for q in rotations],
+                     colors=colors, opacities=opacities, sh=sh,
+                     sh_degree=sh_degree, source_format='spz')
+
+# [STRIPPED 70 bytes]
+# SOG -- Streamable Octree Gaussians: manifest + chunks
+# [STRIPPED 70 bytes]
+
+class SOGManifest:
+    """SOG manifest (meta.json). The streaming unit: coarse chunk first,
+    then octree children by distance. Chunks are SplatData, fetched by id."""
+    def __init__(self, data):
+        if isinstance(data, (bytes, bytearray)):
+            data = data.decode('utf-8')
+        if isinstance(data, str):
+            data = json.loads(data)
+        self.version = data.get('version', 1)
+        self.count = int(data.get('count', 0))
+        self.sh_degree = int(data.get('sh_degree', 0))
+        self.chunks = list(data.get('chunks') or [])  # [{id, count, bounds, lod, byte_range}]
+        self.octree = data.get('octree') or {}
+        self.coarse_chunk_id = data.get('coarse_chunk_id')
+        self.raw = data
+    def chunk_ids(self):
+        return [c.get('id') for c in self.chunks]
+    def coarse_chunk(self):
+        for c in self.chunks:
+            if c.get('id') == self.coarse_chunk_id:
+                return c
+        return self.chunks[0] if self.chunks else None
+    def chunks_by_lod(self, lod=None):
+        if lod is None:
+            return self.chunks
+        return [c for c in self.chunks if c.get('lod') == lod]
+    def describe(self):
+        return {'version': self.version, 'count': self.count,
+                'sh_degree': self.sh_degree, 'chunks': self.chunks,
+                'coarse_chunk_id': self.coarse_chunk_id}
+
+def parse_sog_manifest(data):
+    return SOGManifest(data)
+
+def parse_sog_chunk(data, sh_degree=0):
+    """Parse one SOG chunk (binary, uncompressed) -> SplatData.
+    Chunk layout: count u32, then positions/scales/rotations/colors/
+    opacities (same order as SPZ body, but uncompressed)."""
+    if len(data) < 4:
+        raise ValueError('SOG chunk too small')
+    count = struct.unpack_from('<I', data, 0)[0]
+    body = data[4:]
+    # Reuse SPZ body layout (without header/compression): positions + scales + rotations + colors + opacities
+    # For SOG chunks, SH is in the chunk if sh_degree>0, same as SPZ.
+    sh_len = ((sh_degree+1)**2 - 1) * 3 if sh_degree > 0 else 0
+    expected = count*3*4 + count*3*4 + count*4*4 + count*3 + count*1 + count*sh_len*4
+    if len(body) < expected:
+        raise ValueError('SOG chunk truncated: got %d, expected %d' % (len(body), expected))
+    # Wrap as SPZ body: construct a fake SPZ to reuse parsing? No -- parse directly.
+    off = 0
+    positions, scales, rotations, colors, opacities, sh = [], [], [], [], [], []
+    for _ in range(count):
+        positions.append(struct.unpack_from('<3f', body, off)); off += 12
+    for _ in range(count):
+        scales.append(struct.unpack_from('<3f', body, off)); off += 12
+    for _ in range(count):
+        rotations.append(struct.unpack_from('<4f', body, off)); off += 16
+    for _ in range(count):
+        r, g, b = body[off], body[off+1], body[off+2]; off += 3
+        colors.append((r/255.0, g/255.0, b/255.0))
+    for _ in range(count):
+        opacities.append(body[off]/255.0); off += 1
+    for _ in range(count):
+        coeffs = []
+        for _ in range(sh_len):
+            coeffs.append(struct.unpack_from('<f', body, off)[0]); off += 4
+        if sh_len:
+            sh.append(coeffs)
+    return SplatData(positions=[tuple(p) for p in positions],
+                     scales=[tuple(s) for s in scales],
+                     rotations=[tuple(q) for q in rotations],
+                     colors=colors, opacities=opacities, sh=sh,
+                     sh_degree=sh_degree, source_format='sog')
+
+def build_sog_chunk(splat_data):
+    """Encode SplatData -> SOG chunk bytes (for tests / export)."""
+    out = bytearray(struct.pack('<I', splat_data.count))
+    for p in splat_data.positions:
+        out += struct.pack('<3f', *p)
+    for s in splat_data.scales:
+        out += struct.pack('<3f', *s)
+    for q in splat_data.rotations:
+        out += struct.pack('<4f', *q)
+    for c in splat_data.colors:
+        out += bytes([int(max(0, min(255, round(c[0]*255)))),
+                      int(max(0, min(255, round(c[1]*255)))),
+                      int(max(0, min(255, round(c[2]*255))))])
+    for a in splat_data.opacities:
+        out += bytes([int(max(0, min(255, round(a*255))))])
+    for coeffs in splat_data.sh:
+        for v in coeffs:
+            out += struct.pack('<f', float(v))
+    return bytes(out)
+
+def build_sog_manifest(chunks_info, count=0, sh_degree=0, coarse_chunk_id=None):
+    """Build a SOG manifest dict. chunks_info: [{id, count, bounds, lod}]."""
+    manifest = {'version': 1, 'count': count, 'sh_degree': sh_degree,
+                'chunks': chunks_info, 'coarse_chunk_id': coarse_chunk_id or (chunks_info[0]['id'] if chunks_info else None)}
+    return manifest
+
+# [STRIPPED 70 bytes]
+# RAD -- future format. Registry shows the extension point.
+# [STRIPPED 70 bytes]
+
+def parse_rad(data):
+    raise NotImplementedError(
+        'RAD format is not implemented yet. Add it without touching the renderer: '
+        'register_format("rad", your_parse_rad) in scs_splat_formats.py. '
+        'Your parser must return SplatData; the GPU packer + renderer stay unchanged.')
+
+# [STRIPPED 70 bytes]
+# Registry -- the extension point. Renderer never touches this.
+# [STRIPPED 70 bytes]
+
+_FORMATS = {
+    'ply': parse_ply,
+    'splat': parse_splat,
+    'spz': parse_spz,
+    'sog-chunk': parse_sog_chunk,
+    # 'rad': parse_rad,  # intentionally NOT registered -- see parse_rad()
+}
+
+def register_format(extension, parser):
+    """Add a new disk format without touching the renderer.
+    Example: register_format('rad', parse_rad) -- parser(data) -> SplatData."""
+    _FORMATS[str(extension).lower()] = parser
+    return parser
+
+def parse_file(data, format_hint=''):
+    """Parse disk bytes -> SplatData. format_hint: 'ply' | 'spz' | 'splat' | 'sog-chunk'.
+    If no hint, sniff magic: PLY ('ply'), SPZ ('SPZ!'), SOG chunk (first 4 bytes = count)."""
+    hint = str(format_hint or '').lower().strip('.')
+    if hint in _FORMATS:
+        if hint == 'sog-chunk':
+            return _FORMATS[hint](data, sh_degree=0)
+        return _FORMATS[hint](data)
+    # Sniff
+    if data[:3] == b'ply':
+        return parse_ply(data)
+    if data[:4] == SPZ_MAGIC:
+        return parse_spz(data)
+    # .splat: len % 32 == 0 and not PLY/SPZ -> try .splat
+    if len(data) % SPLAT_BYTES == 0 and len(data) > 0:
+        try:
+            return parse_splat(data)
+        except Exception:
+            pass
+    raise ValueError('Cannot detect splat format. Pass format_hint="ply"|"spz"|"splat"|"sog-chunk".')
+
+def detect_format(data):
+    if data[:3] == b'ply':
+        return 'ply'
+    if data[:4] == SPZ_MAGIC:
+        return 'spz'
+    if len(data) % SPLAT_BYTES == 0 and len(data) > 0:
+        return 'splat'
+    return 'unknown'
+
+
+# LOD-META -- PlayCanvas Streamed SOG index (lod-meta.json)
+# Spec: developer.playcanvas.com/user-manual/gaussian-splatting/formats/streamed-sog/
+# lod-meta.json: {version, count, counts, lodLevels, filenames, tree, environment}
+# tree: binary subdivision, interior = children[2], leaf = lods {lod: {file, offset, count}}
+# filenames[file] = relative path to chunk SOG meta.json, resolved via index
+# lods[file].offset/count = splat range [offset, offset+count) in that chunk
+# DISK parsing only -- no fetching. Fetching lives in scs_splat_urls.py.
+
+class LodMetaLeaf:
+    def __init__(self, bound_min, bound_max, lods, errors=None, path=''):
+        self.bound_min = tuple(bound_min)
+        self.bound_max = tuple(bound_max)
+        self.lods = dict(lods or {})
+        self.errors = list(errors) if errors else None
+        self.path = path
+    def center(self):
+        return tuple((self.bound_min[i] + self.bound_max[i]) / 2.0 for i in range(3))
+    def size(self):
+        return tuple(self.bound_max[i] - self.bound_min[i] for i in range(3))
+    def count_for_lod(self, lod):
+        e = self.lods.get(str(lod)) or self.lods.get(lod)
+        return int(e['count']) if e else 0
+    def range_for_lod(self, lod):
+        e = self.lods.get(str(lod)) or self.lods.get(lod)
+        if not e:
+            return None
+        return {'file': int(e['file']), 'offset': int(e['offset']), 'count': int(e['count'])}
+    def describe(self):
+        return {'path': self.path, 'bound_min': list(self.bound_min), 'bound_max': list(self.bound_max), 'lods': self.lods}
+
+class LodMeta:
+    def __init__(self, data):
+        if isinstance(data, (bytes, bytearray)):
+            data = data.decode('utf-8')
+        if isinstance(data, str):
+            import json as _json
+            data = _json.loads(data)
+        self.raw = data
+        self.version = data.get('version', 1)
+        self.asset = data.get('asset') or {}
+        self.count = data.get('count')
+        self.counts = list(data.get('counts') or [])
+        self.lod_levels = int(data.get('lodLevels') or 0)
+        self.lod_errors = bool(data.get('lodErrors', False))
+        self.environment = data.get('environment')
+        self.filenames = list(data.get('filenames') or [])
+        self.tree = data.get('tree') or {}
+        self.extras = data.get('extras')
+        self.comments = data.get('comments')
+        self._leaves = None
+    def leaves(self):
+        if self._leaves is not None:
+            return self._leaves
+        out = []
+        def _walk(node, path):
+            if not isinstance(node, dict):
+                return
+            bound = node.get('bound') or {}
+            mn = bound.get('min') or [0, 0, 0]
+            mx = bound.get('max') or [0, 0, 0]
+            if 'lods' in node:
+                out.append(LodMetaLeaf(mn, mx, node.get('lods') or {}, errors=node.get('errors'), path=path))
+            elif 'children' in node:
+                kids = node.get('children') or []
+                for i, k in enumerate(kids):
+                    _walk(k, path + '/' + str(i))
+        _walk(self.tree, 'root')
+        self._leaves = out
+        return out
+    def leaf_count(self):
+        return len(self.leaves())
+    def total_for_lod(self, lod):
+        return sum(leaf.count_for_lod(lod) for leaf in self.leaves())
+    def leaves_for_lod(self, lod):
+        return [leaf for leaf in self.leaves() if leaf.count_for_lod(lod) > 0]
+    def root_bound(self):
+        bound = (self.tree or {}).get('bound') or {}
+        return (tuple(bound.get('min') or [0, 0, 0]), tuple(bound.get('max') or [0, 0, 0]))
+    def describe(self):
+        return {'version': self.version, 'lod_levels': self.lod_levels, 'count': self.count, 'counts': self.counts, 'filenames': len(self.filenames), 'leaves': self.leaf_count(), 'environment': self.environment, 'root_bound': [list(self.root_bound()[0]), list(self.root_bound()[1])], 'totals_per_lod': [self.total_for_lod(l) for l in range(self.lod_levels)]}
+
+def parse_lod_meta(data):
+    m = LodMeta(data)
+    if not isinstance(m.tree, dict) or 'bound' not in m.tree:
+        raise ValueError('lod-meta.json has no tree.bound -- not a Streamed SOG index')
+    if not m.filenames:
+        raise ValueError('lod-meta.json has no filenames -- cannot resolve chunks')
+    return m
+
+class SogChunkMeta:
+    def __init__(self, data):
+        if isinstance(data, (bytes, bytearray)):
+            data = data.decode('utf-8')
+        if isinstance(data, str):
+            import json as _json
+            data = _json.loads(data)
+        self.raw = data
+        self.version = data.get('version')
+        self.count = int(data.get('count') or 0)
+        self.files = {}
+        for key in ('means', 'scales', 'quats', 'sh0', 'sh1', 'sh2', 'sh3', 'shN'):
+            v = data.get(key)
+            if isinstance(v, dict) and 'files' in v:
+                self.files[key] = list(v.get('files') or [])
+            elif isinstance(v, str):
+                self.files[key] = [v]
+            elif isinstance(v, list):
+                self.files[key] = list(v)
+        if 'files' in data and isinstance(data.get('files'), list):
+            self.files['files'] = list(data['files'])
+        self.means = data.get('means')
+        self.scales = data.get('scales')
+    def texture_files(self):
+        out = []
+        for v in self.files.values():
+            out.extend(v)
+        return out
+    def describe(self):
+        return {'version': self.version, 'count': self.count, 'texture_files': self.texture_files()}
+
+def parse_sog_chunk_meta(data):
+    return SogChunkMeta(data)
