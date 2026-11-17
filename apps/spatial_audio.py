@@ -503,7 +503,7 @@ def redrawAll(app):
 def main():
     # Plain CMU: no renderer words, no engine words. Just run it.
     _log_versions('main-before-runApp')
-    runApp(900, 560, renderer='webgl2')
+    runApp(900, 560, renderer='webgl2', enableFullscreen=True)
 
 
 main()
