@@ -2811,43 +2811,32 @@ def _on_fullscreen_change(ev=None):
                 if not _fw or not _fh:
                     _fw, _fh = int(window.innerWidth), int(window.innerHeight)
                 # CSS only - backing stays _ow x _oh.
-                # v61: Set fullscreen element to fill viewport. If wrapper is fullscreen,
-                # set wrapper to fill viewport AND set canvas width/height to match.
-                # Canvas margins must be cleared so it doesn't center inside wrapper.
+                # v62: Use cssText to set all styles at once, ensuring they stick.
+                # Canvas must fill viewport to ensure correct mouse coordinate mapping.
                 try:
                     _fs_el = document.fullscreenElement
                 except Exception:
                     _fs_el = None
                 try:
                     if _fs_el is not None and _fs_el is not _c:
-                        # Wrapper is fullscreen: size wrapper to viewport, canvas to wrapper
-                        _fs_el.style.width = '%dpx' % _fw
-                        _fs_el.style.height = '%dpx' % _fh
-                        _fs_el.style.margin = '0'
-                        _fs_el.style.padding = '0'
-                    # Always clear canvas margins in fullscreen
-                    _c.style.width = '%dpx' % _fw
-                    _c.style.height = '%dpx' % _fh
-                    _c.style.margin = '0'  # Override margin: 0 auto
+                        # Wrapper is fullscreen: size wrapper to viewport
+                        _fs_el.style.cssText = 'width: %dpx; height: %dpx; margin: 0; padding: 0; box-sizing: border-box;' % (_fw, _fh)
+                    # Always fill viewport with canvas - canvas MUST NOT be centered!
+                    _c.style.cssText = 'display: block; width: %dpx; height: %dpx; margin: 0; padding: 0; box-sizing: border-box;' % (_fw, _fh)
                 except Exception:
                     pass
             except Exception:
                 pass
         else:
             try:
-                _c.style.width = '%dpx' % _ow
-                _c.style.height = '%dpx' % _oh
-                _c.style.margin = ''  # Restore margin: 0 auto
+                _c.style.cssText = 'display: block; width: %dpx; height: %dpx;' % (_ow, _oh)
                 try:
                     _fs_el = document.fullscreenElement
                 except Exception:
                     _fs_el = None
                 if _fs_el is not None and _fs_el is not _c:
                     # Exiting fullscreen: restore wrapper styles
-                    _fs_el.style.width = ''
-                    _fs_el.style.height = ''
-                    _fs_el.style.margin = ''
-                    _fs_el.style.padding = ''
+                    _fs_el.style.cssText = ''
             except Exception:
                 pass
         # _canvas_width/_canvas_height intentionally NOT changed. Backing intentionally NOT changed.
