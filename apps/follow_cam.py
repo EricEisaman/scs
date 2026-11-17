@@ -178,6 +178,9 @@ def sample_terrain_height(vertices, grid_size, cell_size, world_x, world_z):
 def onAppStart(app):
     """Initialize terrain, cube, camera, and HUD."""
     
+    # Request WebGL2 3D renderer
+    app.renderer = 'webgl2'
+    
     # Terrain parameters
     app.grid_size = 100
     app.cell_size = 2.0
