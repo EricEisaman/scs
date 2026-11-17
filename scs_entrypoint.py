@@ -2856,38 +2856,47 @@ def _on_fullscreen_change(ev=None):
         pass
 
 def _pos(ev):
-    # FIX v27 HUD events: map CSS rect -> logical app size (_canvas_width x
-    # _canvas_height), NOT via backing-store canvas.width / DPR. Old code did
-    # (clientX-left)*canvas.width/r.width/dpr. canvas.width = _canvas_width*dpr
-    # at _size_canvas time, so if DPR changes after sizing (DevTools emulation,
-    # zoom, display move), the division is wrong and clicks drift off the HUD
-    # buttons. Logical size is the same space HUD Rects are drawn in (Rect(40,470,160,44)
-    # means app x=40..200, y=470..514), so this is the space onMousePress expects.
-    # Y is top-down in both: CSS y=0 is top, app y=0 is top, HUD texture V=0 is top
-    # (see engine draw_hud_canvas: top vertex has V=0). No Y flip.
+    # 1. Screen -> CSS offset: dx = ev.clientX - rect.left
+    # 2. Ratio = internal / rendered CSS:
+    #      sx = canvas.width  / rect.width
+    #      sy = canvas.height / rect.height
+    #    rect = canvas.getBoundingClientRect() (rendered CSS, includes
+    #    letterbox / stretch / zoom / scroll / fullscreen)
+    #    canvas.width/height = internal resolution (drawing buffer)
+    # 3. Screen -> internal: x_internal = dx * sx
+    # 4. Internal -> logical: x = x_internal * (_canvas_width / canvas.width)
+    #    Logical is the space draw_* and HUD Rects live in.
     canvas = _find_canvas()
     try:
         r = canvas.getBoundingClientRect()
         if not r.width or not r.height:
             return (0, 0)
-        # v54: logical = runApp size (_fullscreen_orig_w/h), NEVER viewport size.
-        # In fullscreen rect.width = innerWidth (9997), logical must still be 400/900.
-        # Old code used _canvas_width which _on_fullscreen_change had set to 9997,
-        # so _pos returned 0..9997 and dots landed inset 25% on each side.
-        if _fullscreen_orig_w:
-            _lw = float(_fullscreen_orig_w)
-        elif _canvas_width:
-            _lw = float(_canvas_width)
-        else:
-            _lw = 900.0
-        if _fullscreen_orig_h:
-            _lh = float(_fullscreen_orig_h)
-        elif _canvas_height:
-            _lh = float(_canvas_height)
-        else:
-            _lh = 560.0
-        return ((ev.clientX - r.left) * _lw / float(r.width),
-                (ev.clientY - r.top) * _lh / float(r.height))
+        try:
+            _iw = float(canvas.width) or 0.0
+        except Exception:
+            _iw = 0.0
+        try:
+            _ih = float(canvas.height) or 0.0
+        except Exception:
+            _ih = 0.0
+        try:
+            _lw = float(_canvas_width) or _iw or 900.0
+        except Exception:
+            _lw = _iw or 900.0
+        try:
+            _lh = float(_canvas_height) or _ih or 560.0
+        except Exception:
+            _lh = _ih or 560.0
+        if not _iw:
+            _iw = _lw
+        if not _ih:
+            _ih = _lh
+        _sx = _iw / float(r.width)
+        _sy = _ih / float(r.height)
+        _x_internal = (float(ev.clientX) - float(r.left)) * _sx
+        _y_internal = (float(ev.clientY) - float(r.top)) * _sy
+        return (_x_internal * _lw / _iw if _iw else 0.0,
+                _y_internal * _lh / _ih if _ih else 0.0)
     except Exception:
         return (0, 0)
 
