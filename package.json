@@ -23,9 +23,10 @@
     "README.md"
   ],
   "scripts": {
+    "dev": "npx serve . -p 8080 -C -s",
     "start": "npx serve .",
     "build": "echo 'No build step - Python package, thin shell only. scs.js + *.py are the package.'",
-    "test": "python3 -m py_compile scs.py scs_entrypoint.py"
+    "test": "python3 -m py_compile scs.py scs_entrypoint.py scs_engine_webgl2.py scs_entrypoint.py"
   },
   "keywords": [
     "cmu-graphics",

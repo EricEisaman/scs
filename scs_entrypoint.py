@@ -629,7 +629,9 @@ _resize_wrapper_css_injected = False
 
 def _get_hud_offscreen(width, height):
     """Offscreen 2D canvas for HUD mode. The 2D app draws here, unchanged.
-    Returns the canvas. Created once per size, reused every frame."""
+    Returns the canvas. Created once per size, reused every frame.
+    
+    HUD fidelity: backing is 2x logical size to ensure sharp text and shapes."""
     global _hud_offscreen
     try:
         w, h = int(width), int(height)
@@ -638,22 +640,12 @@ def _get_hud_offscreen(width, height):
     # v58: HUD texture backing MUST equal the WebGL drawing-buffer
     # size, or the texture stretches to the viewport and the HUD renders
     # ~3x huge (spatial_audio: 18px labels at ~3x, black bar ~3x tall).
-    # v57 assumed backing == CSS on both sides, but if the visible canvas
-    # backing is CSS*DPR (browser / stale _size_canvas / fullscreen 9997)
-    # while the offscreen is CSS, the texture is smaller than the viewport
-    # and stretches. Fix: read the visible canvas backing (canvas.width /
-    # canvas.height attributes = drawing buffer) and make the offscreen
-    # backing match it exactly. Logical size stays w x h; Renderer2D
-    # (v58) scales logical -> backing in begin_frame, so HUD stays 1:1
-    # for ANY backing size. Recreate if logical OR backing changed.
-    try:
-        _vc = _find_canvas()
-        _bw = int(getattr(_vc, 'width', 0) or 0) if _vc is not None else 0
-        _bh = int(getattr(_vc, 'height', 0) or 0) if _vc is not None else 0
-    except Exception:
-        _bw = _bh = 0
-    if not _bw or not _bh:
-        _bw, _bh = w, h
+    # v59-FIX: Use 2x logical size for HUD backing to improve text fidelity.
+    # This gives 2x resolution for HUD elements without changing CSS size.
+    # Font rendering is much crisper at 2x backing.
+    _hud_backing_ratio = 2.0  # 2x for sharp HUD text
+    _bw = int(w * _hud_backing_ratio)
+    _bh = int(h * _hud_backing_ratio)
     if _hud_offscreen is not None:
         try:
             _ow = getattr(_hud_offscreen, '_scs_css_w', None)
@@ -666,8 +658,22 @@ def _get_hud_offscreen(width, height):
             pass
     try:
         c = document.createElement('canvas')
-        c.width = int(_bw)
-        c.height = int(_bh)
+        try:
+            c.width = int(_bw)
+        except Exception:
+            pass
+        try:
+            c.setAttribute('width', str(int(_bw)))
+        except Exception:
+            pass
+        try:
+            c.height = int(_bh)
+        except Exception:
+            pass
+        try:
+            c.setAttribute('height', str(int(_bh)))
+        except Exception:
+            pass
         try:
             c._scs_css_w = w
             c._scs_css_h = h
@@ -872,9 +878,27 @@ def _size_canvas(width, height):
         # Buffer: assign only if actually changed (avoids needless reset).
         _bw, _bh = int(width), int(height)  # v38: backing == CSS == runApp, no DPR multiply
         if int(canvas.width) != _bw:
-            canvas.width = _bw
+            try:
+                # Try direct assignment first
+                canvas.width = _bw
+            except Exception:
+                pass
+            # If direct assignment didn't work, try setAttribute
+            try:
+                canvas.setAttribute('width', str(int(_bw)))
+            except Exception:
+                pass
         if int(canvas.height) != _bh:
-            canvas.height = _bh
+            try:
+                # Try direct assignment first
+                canvas.height = _bh
+            except Exception:
+                pass
+            # If direct assignment didn't work, try setAttribute
+            try:
+                canvas.setAttribute('height', str(int(_bh)))
+            except Exception:
+                pass
     except Exception:
         pass
     try:
