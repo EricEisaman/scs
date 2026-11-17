@@ -434,5 +434,33 @@ class Renderer2D:
         finally:
             ctx.restore()
 
+    # 3D Shape drawing methods (2D fallback - draws placeholder rectangles)
+    def draw_cube3d(self, cx, cy, cz, width, height, depth, fill='gray', stroke=None, strokeWidth=1, opacity=100):
+        """2D fallback: draw a rectangle at screen position."""
+        # In 2D mode, just draw a rectangle (depth is ignored)
+        self.draw_rect(cx - width/2, cy - height/2, width, height, fill=fill,
+                      border=stroke, borderWidth=strokeWidth, opacity=opacity)
+
+    def draw_sphere3d(self, cx, cy, cz, radius, fill='blue', stroke=None, strokeWidth=1, opacity=100):
+        """2D fallback: draw a circle at screen position."""
+        self.draw_circle(cx, cy, radius, fill=fill, border=stroke,
+                        borderWidth=strokeWidth, opacity=opacity)
+
+    def draw_mesh3d(self, vertices, indices, centerX=0, centerY=0, centerZ=0, fill='gray', stroke=None, strokeWidth=1, opacity=100):
+        """2D fallback: draw mesh as a rectangle."""
+        pass
+
+    def set_camera(self, camera):
+        """No-op in 2D mode."""
+        pass
+
+    def clear_screen(self, fill='white'):
+        """Clear 2D canvas to a solid color."""
+        try:
+            self.ctx.fillStyle = fill
+            self.ctx.fillRect(0, 0, self.width, self.height)
+        except Exception:
+            pass
+
     def destroy(self):
         self.ctx = None

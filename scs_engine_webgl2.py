@@ -341,6 +341,54 @@ class WebGL2Engine:
         # Flat box as the floor -- dielectric, rough, so metal sphere pops against it.
         return self.add_box(0.0, -0.05, 0.0, size, 0.1, size, color, metalness=0.0, roughness=0.95)
 
+    # 3D Shape drawing methods (called by Mesh3D, Cube3D, Sphere3D)
+    def draw_cube3d(self, cx, cy, cz, width, height, depth, fill='gray', stroke=None, strokeWidth=1, opacity=100):
+        """Draw a cube at world position."""
+        self.add_box(float(cx), float(cy), float(cz),
+                    float(width) / 2, float(height) / 2, float(depth) / 2,
+                    color=fill, metalness=0.0, roughness=0.85)
+
+    def draw_sphere3d(self, cx, cy, cz, radius, fill='blue', stroke=None, strokeWidth=1, opacity=100):
+        """Draw a sphere at world position."""
+        self.add_sphere(float(cx), float(cy), float(cz),
+                       float(radius), color=fill)
+
+    def draw_mesh3d(self, vertices, indices, centerX=0, centerY=0, centerZ=0, fill='gray', stroke=None, strokeWidth=1, opacity=100):
+        """Draw a custom mesh. For now, add as a placeholder geometry.
+        Full mesh support would require custom buffer management."""
+        pass
+
+    # Camera and screen control
+    def set_camera(self, camera):
+        """Set the active camera for rendering."""
+        self.camera = camera
+
+    def clear_screen(self, fill='white'):
+        """Set the clear color for the screen."""
+        try:
+            r, g, b = self._parse_color_tuple(fill)
+            self.clear_color = (r, g, b, 1.0)
+        except Exception:
+            self.clear_color = (0.1, 0.1, 0.1, 1.0)
+
+    def _parse_color_tuple(self, color):
+        """Parse a color and return (r, g, b) tuple in [0, 1]."""
+        if isinstance(color, (tuple, list)) and len(color) >= 3:
+            return (float(color[0]), float(color[1]), float(color[2]))
+        try:
+            # Simple hex color parsing
+            if isinstance(color, str):
+                if color.startswith('#'):
+                    color = color[1:]
+                r = int(color[0:2], 16) / 255.0
+                g = int(color[2:4], 16) / 255.0
+                b = int(color[4:6], 16) / 255.0
+                return (r, g, b)
+        except Exception:
+            pass
+        # Default gray
+        return (0.5, 0.5, 0.5)
+
     # -- render -----------------------------------------------------
     def render(self, camera):
         """Draw the scene from `camera` (Camera3D). Own loop calls
