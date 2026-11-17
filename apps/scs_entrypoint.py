@@ -1,3 +1,4 @@
+# v54 DOM fullscreen button fixed 36px + logical stays runApp size + mouse 0..400 in fullscreen + HUD 1:1: engine import via import+getattr, DAMAGED kept, HUD pixel-perfect, single-run
 """
 scs_entrypoint.py - SCS entrypoint: API, App, events, loop, app loading.
 
@@ -8,7 +9,7 @@ index.html is now ~20 lines: load Brython, load this module, call boot().
     scs_entrypoint.boot()
 
 What lives here:
-  * Align logic (exact CMU semantics, creation-time only): BIG DAWG APPROVED
+  * Align logic (exact CMU semantics, creation-time only)
   * Shape classes (Rect, Oval, Circle, RegularPolygon, Star, Line,
     Polygon, Arc, Label, Image, Group) -- each with draw(renderer)
   * Immediate-mode draw* functions -- thin forwards to the renderer
@@ -35,6 +36,7 @@ _ctx is the 2D context when the 2D renderer is active, else None.
 
 import math
 import random as _random
+random = _random  # v46: __all__ contains 'random', must exist as a top-level name
 
 try:
     from browser import document, window, timer
@@ -60,25 +62,112 @@ __all__ = [
     # adapters around the renderer, never inside render().
     'getAssetCache', 'getPrefs', 'getAudioEngine', 'getMediaAdapter',
     'getSerialAdapter', 'getUSBAdapter',
-    # Spatial audio + 3D math + separate 3D engines.
-    'getSpatialAudioEngine', 'Camera3D',
-    'getWebGL2Engine', 'getWebGPUEngine',
-    'getSplatRenderer', 'createSplatSchema', 'loadSplatManifest',
-    'getPipelineManager', 'getMaterialLibrary', 'getPBRMaterial',
+    # v46: REMOVED 10 names that were in __all__ but NEVER defined:
+    # getSpatialAudioEngine, Camera3D, getWebGL2Engine, getWebGPUEngine,
+    # getSplatRenderer, createSplatSchema, loadSplatManifest,
+    # getPipelineManager, getMaterialLibrary, getPBRMaterial.
+    # Brython's `from X import *` tries missing __all__ names as submodules
+    # (scs_entrypoint.<name>) and fails with "'scs_entrypoint' is not a package".
 ]
 
-__version__ = '2026-11-14-runApp-*args-v5-no-shape-guess'
+__version__ = '2026-11-15-FIXED-v58-hud-backing-eq-viewport-fullscreen-measured-rect'
+
+# v32: ONE window property only: window.scs.
+# Corporate host pages do not want SCS scattering __SCS_* / SCS_CONFIG etc
+# across window. All SCS runtime state lives nested under window.scs.
+# We never create any other window.* property. We never overwrite an
+# existing window.scs - we reuse it and only add our own keys.
+def _scs_ns():
+    try:
+        _ns = getattr(window, 'scs', None)
+        if _ns is None:
+            _ns = {}
+            try:
+                window.scs = _ns
+            except Exception:
+                pass
+            return _ns
+        return _ns
+    except Exception:
+        return {}
+
+def _scs_get(_k, _default=None):
+    try:
+        _ns = _scs_ns()
+        try:
+            if isinstance(_ns, dict):
+                return _ns.get(_k, _default)
+        except Exception:
+            pass
+        return getattr(_ns, _k, _default)
+    except Exception:
+        return _default
+
+def _scs_set(_k, _v):
+    try:
+        _ns = _scs_ns()
+        try:
+            if isinstance(_ns, dict):
+                _ns[_k] = _v
+                return
+        except Exception:
+            pass
+        try:
+            setattr(_ns, _k, _v)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+def _scs_cleanup_legacy():
+    # v31 wrote window.__SCS_* - remove them on first v32 load so the host
+    # window is left clean. Migrate any values into window.scs first.
+    try:
+        for _old, _new in (('__SCS_VERSION_PRINTED__', 'versionPrinted'),
+                           ('__SCS_EVENTS_BOUND__', 'eventsBound'),
+                           ('__SCS_BOOTED__', 'booted'),
+                           ('__SCS_LAST_RUNAPP__', 'lastRunApp')):
+            try:
+                _v = getattr(window, _old, None)
+            except Exception:
+                _v = None
+            if _v is not None:
+                try:
+                    if _scs_get(_new, None) is None:
+                        _scs_set(_new, _v)
+                except Exception:
+                    pass
+                try:
+                    delattr(window, _old)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+try:
+    _scs_cleanup_legacy()
+except Exception:
+    pass
 
 # Console proof: log version the moment this file is imported by Brython.
 # If the live console does NOT show this line, the browser is NOT running this file.
+# v31 single-run: window-level guard. Two module instances (scs_entrypoint
+# vs scs.scs_entrypoint) have separate Python globals, so a Python-only
+# _booted flag does NOT stop the second instance. window is shared, so it
+# is the only place an "already ran" flag works across instances.
 try:
     _ver_msg = '[SCS entrypoint] version=' + __version__
-    print(_ver_msg)
+    _already_printed = False
     try:
         from browser import window as _w
-        _w.console.log(_ver_msg)
+        _already_printed = bool(_scs_get('versionPrinted', False))
     except Exception:
-        pass
+        _w = None
+    if not _already_printed:
+        try:
+            _scs_set('versionPrinted', True)
+        except Exception:
+            pass
+        _debug_log(_ver_msg)
 except Exception:
     pass
 
@@ -238,6 +327,20 @@ _renderer_kind = '2d'
 # composited every frame as a fullscreen HUD quad (depth off, ortho) in the
 # 3D scene. The 2D app never knows it is in 3D. No rewrite, one-line change.
 _hud_mode = False
+# --- Fullscreen button (enableFullscreen=True) ---
+# Minimal HUD button, bottom-right, 36x36, 16px margin. Same HUD system as
+# PLAY/STOP: centerZ is None -> drawn via HUD texture, hit-tested via
+# _hud_shape_at in the SAME logical space as _pos (v27). Position is derived
+# from _canvas_width/_canvas_height on every resize, so it stays bottom-right
+# in windowed AND fullscreen. Logical size tracks CSS size on fullscreenchange,
+# so picking stays correct without a second coordinate system.
+_fullscreen_enabled = False
+_fullscreen_btn = None
+_fullscreen_btn_label = None
+_fullscreen_orig_w = None
+_fullscreen_orig_h = None
+_fullscreen_orig_style_w = None
+_fullscreen_orig_style_h = None
 _hud_offscreen = None   # offscreen 2D canvas where the 2D app draws in HUD mode
 _hud_2d_renderer = None  # 2D renderer for the offscreen canvas
 _hud_3d_kind = None     # 'webgl2' or 'webgpu' when in HUD mode
@@ -294,15 +397,171 @@ _clear_all_shapes = _clear_shapes
 
 
 def _debug_log(msg):
+    # v33: log ONCE. Brython print() already goes to DevTools, so doing
+    # console.log AND print duplicated every line (looked like double-run).
+    # Prefer console.log in browser, print only as fallback (CPython tests).
     try:
-        if hasattr(window, 'console'):
+        if window is not None and hasattr(window, 'console'):
             window.console.log(msg)
+            return
     except Exception:
         pass
     try:
         print(msg)
     except Exception:
         pass
+
+_canvas_context_logged_frame = False
+
+def _log_canvas_context(where=''):
+    # v55: print the ACTUAL canvas context, not the intended size.
+    # HUD 5x debug: we kept guessing canvas=900x560, DPR=2, viewport=900.
+    # The real answer is in these numbers: canvas.width (backing) vs
+    # style.width (CSS) vs drawingBufferWidth vs gl.VIEWPORT vs u_res.
+    # If viewport > drawingBuffer, you see only the bottom-left corner,
+    # magnified - that IS the HUD-5x look. If drawingBuffer != canvas.width,
+    # the browser resized the buffer behind us.
+    # Logs ONE line starting [SCS canvas-context] so it is greppable.
+    # Never crashes: every attribute is try/except, falls back to '?' .
+    try:
+        _c = None
+        try:
+            _c = _find_canvas()
+        except Exception:
+            _c = None
+        # --- visible canvas ---
+        _cw, _ch = '?', '?'
+        _sw, _sh = '?', '?'
+        _client_w, _client_h = '?', '?'
+        _rect_w, _rect_h, _rect_l, _rect_t = '?', '?', '?', '?'
+        if _c is not None:
+            try: _cw = int(_c.width)
+            except Exception: pass
+            try: _ch = int(_c.height)
+            except Exception: pass
+            try: _sw = str(getattr(getattr(_c, 'style', None), 'width', '?'))
+            except Exception: pass
+            try: _sh = str(getattr(getattr(_c, 'style', None), 'height', '?'))
+            except Exception: pass
+            try: _client_w = int(_c.clientWidth)
+            except Exception: pass
+            try: _client_h = int(_c.clientHeight)
+            except Exception: pass
+            try:
+                _r = _c.getBoundingClientRect()
+                _rect_w = round(float(_r.width), 1); _rect_h = round(float(_r.height), 1)
+                _rect_l = round(float(_r.left), 1); _rect_t = round(float(_r.top), 1)
+            except Exception: pass
+        # --- window / DPR ---
+        _dpr, _iw, _ih, _vv = '?', '?', '?', '?'
+        try: _dpr = float(window.devicePixelRatio or 1.0)
+        except Exception: pass
+        try: _iw = int(window.innerWidth); _ih = int(window.innerHeight)
+        except Exception: pass
+        try:
+            _vv = window.visualViewport
+            if _vv is not None:
+                _vv = round(float(_vv.scale or 1.0), 3)
+        except Exception: pass
+        # --- entrypoint logical ---
+        _lw = _canvas_width; _lh = _canvas_height
+        _ow = _fullscreen_orig_w; _oh = _fullscreen_orig_h
+        # --- renderer ---
+        _r = _renderer
+        _rk = getattr(_r, 'kind', '?') if _r is not None else 'None'
+        _rw, _rh, _rdpr = '?', '?', '?'
+        _r_same = '?'
+        if _r is not None:
+            try: _rw = int(getattr(_r, 'width', '?'))
+            except Exception: pass
+            try: _rh = int(getattr(_r, 'height', '?'))
+            except Exception: pass
+            try: _rdpr = float(getattr(_r, 'dpr', '?'))
+            except Exception: pass
+            try: _r_same = (getattr(_r, 'canvas', None) is _c)
+            except Exception: pass
+        # --- GL context (actual) ---
+        _gl = getattr(_r, 'gl', None) if _r is not None else None
+        _dbw, _dbh, _vp, _gl_attrs, _gl_type = '?', '?', '?', '?', '?'
+        if _gl is not None:
+            _gl_type = 'webgl2 (renderer.gl)'
+            try: _dbw = int(getattr(_gl, 'drawingBufferWidth', '?'))
+            except Exception: pass
+            try: _dbh = int(getattr(_gl, 'drawingBufferHeight', '?'))
+            except Exception: pass
+            try:
+                _v = _gl.getParameter(_gl.VIEWPORT)
+                _vp = '[%s,%s,%s,%s]' % (int(_v[0]), int(_v[1]), int(_v[2]), int(_v[3]))
+            except Exception: pass
+            try:
+                _a = _gl.getContextAttributes()
+                if _a is not None:
+                    _gl_attrs = 'alpha=%s antialias=%s depth=%s stencil=%s premult=%s' % (
+                        getattr(_a, 'alpha', '?'), getattr(_a, 'antialias', '?'),
+                        getattr(_a, 'depth', '?'), getattr(_a, 'stencil', '?'),
+                        getattr(_a, 'premultipliedAlpha', '?'))
+            except Exception: pass
+        else:
+            # No renderer.gl - probe WITHOUT creating a new context type.
+            # getContext with a different type returns null, does not create.
+            try:
+                _g2 = _c.getContext('webgl2') if _c is not None else None
+                if _g2 is not None:
+                    _gl_type = 'webgl2 (probed)'
+                    try: _dbw = int(getattr(_g2, 'drawingBufferWidth', '?'))
+                    except Exception: pass
+                    try: _dbh = int(getattr(_g2, 'drawingBufferHeight', '?'))
+                    except Exception: pass
+                    try:
+                        _v = _g2.getParameter(_g2.VIEWPORT)
+                        _vp = '[%s,%s,%s,%s]' % (int(_v[0]), int(_v[1]), int(_v[2]), int(_v[3]))
+                    except Exception: pass
+            except Exception: pass
+            if _gl_type == '?':
+                try:
+                    _ctx2 = _c.getContext('2d') if _c is not None else None
+                    if _ctx2 is not None:
+                        _gl_type = '2d'
+                        try:
+                            _tm = _ctx2.getTransform()
+                            _gl_attrs = 'transform=[%s,%s,%s,%s,%s,%s]' % (
+                                round(float(_tm.a), 3), round(float(_tm.b), 3),
+                                round(float(_tm.c), 3), round(float(_tm.d), 3),
+                                round(float(_tm.e), 1), round(float(_tm.f), 1))
+                        except Exception: pass
+                except Exception: pass
+        # --- HUD offscreen ---
+        _hud_w, _hud_h, _hud_css, _hud_rdpr = '?', '?', '?', '?'
+        try:
+            if _hud_offscreen is not None:
+                _hud_w = int(_hud_offscreen.width); _hud_h = int(_hud_offscreen.height)
+                _hud_css = '%sx%s' % (getattr(_hud_offscreen, '_scs_css_w', '?'),
+                                      getattr(_hud_offscreen, '_scs_css_h', '?'))
+        except Exception: pass
+        try:
+            if _hud_2d_renderer is not None:
+                _hud_rdpr = getattr(_hud_2d_renderer, 'dpr', '?')
+        except Exception: pass
+        _msg = ('[SCS canvas-context] where=%s | canvas backing=%sx%s style=%sx%s client=%sx%s rect=%sx%s@%s,%s | '
+                'DPR=%s inner=%sx%s visualViewport.scale=%s | logical=%sx%s orig=%sx%s | '
+                'renderer kind=%s size=%sx%s dpr=%s canvas_is_visible=%s | '
+                'GL type=%s drawingBuffer=%sx%s VIEWPORT=%s attrs=%s | '
+                'HUD mode=%s kind=%s offscreen=%sx%s css=%s hud2d.dpr=%s' % (
+                    where, _cw, _ch, _sw, _sh, _client_w, _client_h, _rect_w, _rect_h, _rect_l, _rect_t,
+                    _dpr, _iw, _ih, _vv, _lw, _lh, _ow, _oh,
+                    _rk, _rw, _rh, _rdpr, _r_same,
+                    _gl_type, _dbw, _dbh, _vp, _gl_attrs,
+                    _hud_mode, _hud_kind, _hud_w, _hud_h, _hud_css, _hud_rdpr))
+        try:
+            _debug_log(_msg)
+        except Exception:
+            pass
+    except Exception as _e:
+        try:
+            _debug_log('[SCS canvas-context] FAILED: %s' % (_e,))
+        except Exception:
+            pass
+
 
 
 # ----------------------------------------------------------------------
@@ -342,24 +601,86 @@ def _dpr():
     except Exception:
         return 1.0
 
+def _budgeted_ratio():
+    # v51 PIXEL-PERFECT HUD: return ACTUAL devicePixelRatio, not 1.0.
+    # v38 returned 1.0, so HUD offscreen was 900x560 while WebGL drawing
+    # buffer is 900*DPR (4500 if DPR=5). HUD texture (900) drawn onto
+    # 4500 viewport = upscaled 5x, pixelated, huge. That was the screenshot.
+    # HUD offscreen MUST be CSS * DPR, and 2D renderer must scale by DPR,
+    # so HUD is 1:1 in device pixels = 18px CSS looks like 18px CSS.
+    try:
+        if window is not None and hasattr(window, 'devicePixelRatio'):
+            _d = float(window.devicePixelRatio or 1.0)
+            if _d > 0:
+                return _d
+    except Exception:
+        pass
+    return 1.0
+
+# --- Resize pipeline (v29): CSS drives layout, ResizeObserver drives buffer ---
+# CSS size (content box) is the source of truth. canvas.width/height (backing)
+# are derived, never the other way round, so a buffer change cannot feed back
+# into layout. Notifications coalesce into one pending update, applied before
+# the next frame draw, not once per burst event.
+_resize_pending = None  # (cssW, cssH, backingW, backingH)
+_resize_observer = None
+_resize_last_dpr = None
+_resize_wrapper_css_injected = False
+
 def _get_hud_offscreen(width, height):
     """Offscreen 2D canvas for HUD mode. The 2D app draws here, unchanged.
-    Returns the canvas. Created once per size, reused every frame."""
+    Returns the canvas. Created once per size, reused every frame.
+    
+    HUD fidelity: backing is 2x logical size to ensure sharp text and shapes."""
     global _hud_offscreen
     try:
         w, h = int(width), int(height)
     except Exception:
         w, h = 400, 400
+    # v58: HUD texture backing MUST equal the WebGL drawing-buffer
+    # size, or the texture stretches to the viewport and the HUD renders
+    # ~3x huge (spatial_audio: 18px labels at ~3x, black bar ~3x tall).
+    # v59-FIX: Use 2x logical size for HUD backing to improve text fidelity.
+    # This gives 2x resolution for HUD elements without changing CSS size.
+    # Font rendering is much crisper at 2x backing.
+    _hud_backing_ratio = 2.0  # 2x for sharp HUD text
+    _bw = int(w * _hud_backing_ratio)
+    _bh = int(h * _hud_backing_ratio)
     if _hud_offscreen is not None:
         try:
-            if int(_hud_offscreen.width) == int(w * _dpr()) and int(_hud_offscreen.height) == int(h * _dpr()):
+            _ow = getattr(_hud_offscreen, '_scs_css_w', None)
+            _oh = getattr(_hud_offscreen, '_scs_css_h', None)
+            _obw = getattr(_hud_offscreen, '_scs_backing_w', None)
+            _obh = getattr(_hud_offscreen, '_scs_backing_h', None)
+            if _ow == w and _oh == h and _obw == _bw and _obh == _bh:
                 return _hud_offscreen
         except Exception:
             pass
     try:
         c = document.createElement('canvas')
-        c.width = int(w * _dpr())
-        c.height = int(h * _dpr())
+        try:
+            c.width = int(_bw)
+        except Exception:
+            pass
+        try:
+            c.setAttribute('width', str(int(_bw)))
+        except Exception:
+            pass
+        try:
+            c.height = int(_bh)
+        except Exception:
+            pass
+        try:
+            c.setAttribute('height', str(int(_bh)))
+        except Exception:
+            pass
+        try:
+            c._scs_css_w = w
+            c._scs_css_h = h
+            c._scs_backing_w = int(_bw)
+            c._scs_backing_h = int(_bh)
+        except Exception:
+            pass
         try:
             c.style.width = '%dpx' % w
             c.style.height = '%dpx' % h
@@ -482,27 +803,340 @@ def setHtmlHudElement(el):
     return _hud_html_element
 
 
+def _replace_canvas_for_context(kind):
+    # v35: One canvas = one context type per page load (browser rule).
+    # WebGL -> 2D (spatial_audio -> fetch_demo) or 2D -> WebGL on the SAME
+    # canvas makes getContext() return null and run_app fails with no loop.
+    # Fix: if the requested kind differs from the canvas's existing context
+    # kind, replace the <canvas> element with a fresh one (same id, same
+    # attributes). Fresh element has no context, so getContext() succeeds.
+    try:
+        _prev = _scs_get('canvasContextKind', None)
+        if _prev is None or str(_prev).lower() == str(kind).lower():
+            return
+        _c = _find_canvas()
+        if _c is None:
+            return
+        _parent = getattr(_c, 'parentNode', None)
+        if _parent is None:
+            return
+        _new = document.createElement('canvas')
+        try:
+            _new.id = _c.id
+        except Exception:
+            pass
+        for _attr in ('data-app', 'tabindex'):  # v38: NEVER copy width/height attrs (1050x700 in index.html)
+            try:
+                _v = _c.getAttribute(_attr)
+                if _v is not None:
+                    _new.setAttribute(_attr, _v)
+            except Exception:
+                pass
+        try:
+            _new.style.cssText = _c.style.cssText
+        except Exception:
+            pass
+        # v38: new canvas gets runApp size, not index.html attrs.
+        try:
+            _new.width = int(_canvas_width); _new.height = int(_canvas_height)
+            _new.style.width = '%dpx' % int(_canvas_width); _new.style.height = '%dpx' % int(_canvas_height)
+        except Exception:
+            pass
+        _parent.replaceChild(_new, _c)
+        global _canvas
+        _canvas = _new
+        _scs_set('canvasContextKind', str(kind).lower())
+        _debug_log('SCS canvas: replaced canvas to switch context %s -> %s' % (_prev, kind))
+    except Exception:
+        pass
+
 def _size_canvas(width, height):
-    """Backing store = width*dpr, CSS size = width px. User coords stay
-    in CSS pixels on every renderer."""
-    global _canvas_width, _canvas_height
+    """v29: CSS controls displayed size, buffer is derived.
+    Initial CSS = width x height px (the layout). Backing = CSS * budgeted ratio.
+    After this, CSS is NOT rewritten from the buffer - ResizeObserver measures
+    the content box and queues a buffer update. No layout feedback loop."""
+    global _canvas_width, _canvas_height, _resize_last_dpr
     _canvas_width, _canvas_height = int(width), int(height)
     canvas = _find_canvas()
     if canvas is None:
         return
-    dpr = _dpr()
+    _br = _budgeted_ratio()
+    _resize_last_dpr = _br
     try:
-        canvas.width = int(width * dpr)
-        canvas.height = int(height * dpr)
-        canvas.style.width = '%dpx' % int(width)
-        canvas.style.height = '%dpx' % int(height)
+        # v36: APP SIZE WINS. runApp(900,560) means 900x560, period.
+        # v30 "host owns CSS" left the canvas at index.html's 1050x700 while
+        # the app drew at 900x560 - then ResizeObserver measured 1050x700
+        # (or DevTools 9990x7593) and overwrote the app size every frame.
+        # That is the tiny flashing HUD tile at the bottom. Always set CSS
+        # to the app size. Host pages that want responsive must opt in via
+        # fullscreen / responsive mode, not by having a different CSS size.
         try:
-            canvas.setAttribute('width', str(int(width * dpr)))
-            canvas.setAttribute('height', str(int(height * dpr)))
+            canvas.style.width = '%dpx' % int(width)
+            canvas.style.height = '%dpx' % int(height)
+        except Exception:
+            pass
+        # Buffer: assign only if actually changed (avoids needless reset).
+        _bw, _bh = int(width), int(height)  # v38: backing == CSS == runApp, no DPR multiply
+        if int(canvas.width) != _bw:
+            try:
+                # Try direct assignment first
+                canvas.width = _bw
+            except Exception:
+                pass
+            # If direct assignment didn't work, try setAttribute
+            try:
+                canvas.setAttribute('width', str(int(_bw)))
+            except Exception:
+                pass
+        if int(canvas.height) != _bh:
+            try:
+                # Try direct assignment first
+                canvas.height = _bh
+            except Exception:
+                pass
+            # If direct assignment didn't work, try setAttribute
+            try:
+                canvas.setAttribute('height', str(int(_bh)))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        _ensure_resize_observer()
+    except Exception:
+        pass
+
+def _measure_canvas_css():
+    # CSS content-box size in CSS px, rounded. Used as fallback when
+    # devicePixelContentBoxSize is unavailable.
+    try:
+        _c = _find_canvas()
+        if _c is None:
+            return (float(_canvas_width), float(_canvas_height))
+        _r = _c.getBoundingClientRect()
+        return (float(_r.width), float(_r.height))
+    except Exception:
+        return (float(_canvas_width), float(_canvas_height))
+
+def _queue_resize(cssW, cssH, backingW=None, backingH=None):
+    # v37: NO RESIZING EVER. Fixed-size app: runApp(900,560) is 900x560.
+    # There was never supposed to be a resize pipeline. RO / DPR / presentation
+    # resizing is what blew the canvas up to viewport size and made the
+    # poem text huge and clipped. This is a no-op by design.
+    return
+    global _resize_pending
+    try:
+        _cssW, _cssH = float(cssW), float(cssH)
+        if _cssW <= 0 or _cssH <= 0:
+            return
+        _br = _budgeted_ratio()
+        if backingW is None or backingH is None:
+            backingW, backingH = int(round(_cssW * _br)), int(round(_cssH * _br))
+        else:
+            backingW, backingH = int(backingW), int(backingH)
+        _resize_pending = (_cssW, _cssH, backingW, backingH)
+    except Exception:
+        pass
+
+def _apply_pending_resize():
+    # v37: NO RESIZING EVER. See _queue_resize.
+    return
+    # Called at the START of _frame, before any draw. Applies one coalesced
+    # update: buffer only if changed, HUD offscreen + renderer sizes in step,
+    # fullscreen button repositioned. Post-resize, the next draw restores
+    # 2D context config (begin_frame sets absolute transform) and redraws the
+    # scene from scratch - never stretches an old frame.
+    global _resize_pending, _canvas_width, _canvas_height, _hud_offscreen, _hud_2d_renderer
+    if _resize_pending is None:
+        return
+    _cssW, _cssH, _bw, _bh = _resize_pending
+    _resize_pending = None
+    # v36: FIXED-SIZE APPS IGNORE ResizeObserver. If the pending size does not
+    # match the app's current size, it is the PAGE / DevTools viewport size
+    # (1050x700, 9990x7593), not the app size. Applying it overwrites
+    # runApp(900,560) and makes the app draw as a tiny flashing tile.
+    # Only responsive/fullscreen apps opt into RO-driven size.
+    try:
+        _is_resp = bool(_responsive) if '_responsive' in globals() else False
+    except Exception:
+        _is_resp = False
+    if not _is_resp:
+        try:
+            if int(round(_cssW)) != int(_canvas_width) or int(round(_cssH)) != int(_canvas_height):
+                return
+        except Exception:
+            pass
+    # v36: no-op if backing already matches - assigning canvas.width clears
+    # the canvas and resets the 2D context, which is the per-frame flash.
+    try:
+        _c0 = _find_canvas()
+        if _c0 is not None and int(_c0.width) == int(_bw) and int(_c0.height) == int(_bh):
+            return
+    except Exception:
+        pass
+    try:
+        _c = _find_canvas()
+        if _c is not None:
+            # Buffer: only when changed.
+            if int(_c.width) != int(_bw):
+                _c.width = int(_bw)
+            if int(_c.height) != int(_bh):
+                _c.height = int(_bh)
+        _canvas_width, _canvas_height = int(round(_cssW)), int(round(_cssH))
+        # HUD offscreen (size-dependent target) resized consistently.
+        try:
+            _hud_offscreen = None
+            _hud_2d_renderer = None
+            if _hud_offscreen is None:
+                _get_hud_offscreen(_canvas_width, _canvas_height)
+            if _hud_offscreen is not None:
+                try:
+                    _hud_2d_renderer = create_renderer('2d', _hud_offscreen, _canvas_width, _canvas_height)
+                    # 2D renderer must use the same budgeted ratio for its absolute transform.
+                    try:
+                        _hud_2d_renderer.dpr = _budgeted_ratio()
+                    except Exception:
+                        pass
+                except Exception:
+                    _hud_2d_renderer = None
+        except Exception:
+            pass
+        # Main renderer: logical size for HUD/mouse + viewport for 3D.
+        try:
+            _r = _renderer
+            if _r is not None:
+                _r.width = int(_canvas_width)
+                _r.height = int(_canvas_height)
+                try:
+                    _r.dpr = _budgeted_ratio()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        _reposition_fullscreen_button()
+    except Exception:
+        pass
+
+def _check_pixel_ratio_change():
+    # v37: NO RESIZING EVER. DPR wobble must not resize the canvas.
+    return
+    # Zoom / display-density change with unchanged CSS size: device-pixel
+    # observation would catch it, but not all browsers support it. Check DPR
+    # every frame in the resize pipeline and queue a buffer-only update.
+    global _resize_last_dpr
+    try:
+        _br = _budgeted_ratio()
+        if _resize_last_dpr is None:
+            _resize_last_dpr = _br
+            return
+        if abs(_br - _resize_last_dpr) > 0.001:
+            _resize_last_dpr = _br
+            _cssW, _cssH = _measure_canvas_css()
+            _queue_resize(_cssW, _cssH)
+    except Exception:
+        pass
+
+def _on_resize_observer(entries, observer=None):
+    # v37: NO RESIZING EVER.
+    return
+    # ResizeObserver: prefer devicePixelContentBoxSize (exact backing size),
+    # fallback to contentBoxSize * budgeted ratio, then bounding rect * ratio.
+    try:
+        for _e in entries:
+            _bw = _bh = None
+            try:
+                _dpc = getattr(_e, 'devicePixelContentBoxSize', None)
+                if _dpc is not None and len(_dpc) > 0:
+                    _bw = int(_dpc[0].inlineSize)
+                    _bh = int(_dpc[0].blockSize)
+            except Exception:
+                pass
+            try:
+                _cb = getattr(_e, 'contentBoxSize', None)
+                if _cb is not None and len(_cb) > 0:
+                    _cssW = float(_cb[0].inlineSize)
+                    _cssH = float(_cb[0].blockSize)
+                else:
+                    _cssW, _cssH = _measure_canvas_css()
+            except Exception:
+                _cssW, _cssH = _measure_canvas_css()
+            if _bw is None or _bh is None:
+                _br = _budgeted_ratio()
+                _bw, _bh = int(round(_cssW * _br)), int(round(_cssH * _br))
+            # v36: fixed-size app - RO is advisory only. If CSS box != app
+            # size, it is the host page / DevTools, not the app. Ignore it.
+            try:
+                _is_resp2 = bool(_responsive) if '_responsive' in globals() else False
+            except Exception:
+                _is_resp2 = False
+            if not _is_resp2:
+                try:
+                    if int(round(_cssW)) != int(_canvas_width) or int(round(_cssH)) != int(_canvas_height):
+                        continue
+                except Exception:
+                    pass
+            _queue_resize(_cssW, _cssH, _bw, _bh)
+    except Exception:
+        pass
+
+def _ensure_resize_observer():
+    # v37: NO RESIZING EVER. Do not create a ResizeObserver at all.
+    # Creating it was enough: it fired on load and overwrote the app size.
+    return
+    global _resize_observer
+    if _resize_observer is not None:
+        return
+    try:
+        _c = _find_canvas()
+        if _c is None:
+            return
+        _RO = getattr(window, 'ResizeObserver', None)
+        if _RO is None:
+            # No RO: window.resize fallback + DPR check in _frame still works.
+            try:
+                window.addEventListener('resize', lambda *_a: _queue_resize(*_measure_canvas_css()))
+            except Exception:
+                pass
+            return
+        try:
+            # Prefer device-pixel box - exact backing size, catches zoom/DPR.
+            _resize_observer = _RO.new(_on_resize_observer, {'box': 'device-pixel-content-box'})
+        except Exception:
+            try:
+                _resize_observer = _RO.new(_on_resize_observer)
+            except Exception:
+                return
+        try:
+            _resize_observer.observe(_c)
         except Exception:
             pass
     except Exception:
         pass
+
+def _ensure_app_wrapper():
+    # v30: NON-INVASIVE for apps already in the wild in standard web pages.
+    # Do NOT create a div, do NOT move the canvas, do NOT inject CSS.
+    # Moving the canvas or injecting !important fullscreen CSS breaks the
+    # host page's own layout (flex/grid, responsive rules, other content).
+    # HUD controls are drawn INSIDE the canvas, so fullscreening the canvas
+    # itself keeps them visible. Use the existing parent ONLY if it holds
+    # just the canvas (a dedicated container); otherwise use the canvas.
+    try:
+        _c = _find_canvas()
+        if _c is None:
+            return None
+        _p = _c.parentElement
+        if _p is not None:
+            try:
+                # Dedicated container = only the canvas inside (ignore text nodes).
+                _kids = [ _n for _n in list(_p.childNodes) if getattr(_n, 'nodeType', 3) == 1 ]
+                if len(_kids) == 1 and _kids[0] is _c:
+                    return _p
+            except Exception:
+                pass
+        return _c
+    except Exception:
+        return None
 
 
 def _url_param(name):
@@ -518,9 +1152,13 @@ def _url_param(name):
 
 
 def _js_config():
-    """window.SCS_CONFIG set by the JS / CDN loader (see src/scs-loader.js).
-    Returns a dict-like or None."""
+    """v32: config lives under window.scs.config. Legacy window.SCS_CONFIG
+    (set by the JS / CDN loader) is still read for backwards compat with
+    pages already in the wild, but we never create it."""
     try:
+        cfg = _scs_get('config', None)
+        if cfg is not None:
+            return cfg
         cfg = getattr(window, 'SCS_CONFIG', None)
         if cfg is None:
             return None
@@ -649,6 +1287,27 @@ def create_renderer(kind, canvas, width, height):
     if kind in ('2d', 'canvas', 'canvas2d'):
         return _import_renderer_module('scs_2d')(canvas, width, height)
     if kind in ('webgl', 'webgl2', 'webgl-2'):
+        # FIX v25: 'webgl2' means the 3D engine (kind webgl2-3d), NOT the 2D
+        # tessellator in scs_webgl.py. The 3D path in _render_one_view only
+        # runs when kind == 'webgl2-3d'. Try the engine first; if its
+        # getContext(webgl2) fails (e.g. canvas already has 2d), fall back
+        # to the 2D tessellator so 2D apps still work.
+        try:
+            # v50 ROOT FIX: Brython's 'from scs_engine_webgl2 import WebGL2Engine'
+            # tries 'scs_engine_webgl2.WebGL2Engine' as a SUBMODULE first, and fails
+            # with "is not a package" even though the class IS in the file.
+            # Use 'import scs_engine_webgl2' + getattr - never 'from X import Y' for the engine.
+            import scs_engine_webgl2 as _eng_mod
+            WebGL2Engine = getattr(_eng_mod, 'WebGL2Engine', None)
+            if WebGL2Engine is None:
+                raise ImportError('WebGL2Engine not found in scs_engine_webgl2 module')
+            _eng = WebGL2Engine(canvas=canvas, width=width, height=height)
+            if getattr(_eng, 'error', None) is None and getattr(_eng, 'gl', None) is not None:
+                return _eng
+            # Engine failed - fall through to tessellator
+            _debug_log('SCS renderer webgl2 engine failed (%s) - using 2D tessellator' % (getattr(_eng, 'error', 'unknown'),))
+        except Exception as _e_eng:
+            _debug_log('SCS renderer webgl2 engine import failed (%r) - using 2D tessellator' % (_e_eng,))
         return _import_renderer_module('scs_webgl')(canvas, width, height)
     if kind in ('webgpu', 'gpu'):
         return _import_renderer_module('scs_webgpu')(canvas, width, height)
@@ -673,6 +1332,16 @@ def _activate_renderer(renderer, kind):
     global _renderer, _renderer_kind, _ctx
     _renderer = renderer
     _renderer_kind = kind
+    # FIX v25: log the real kind. Old code never logged here, so the only
+    # 'SCS renderer version=0.1 mode=...' line came from a cached old file.
+    try:
+        _debug_log('SCS renderer version=0.1 mode=%s' % (kind,))
+    except Exception:
+        pass
+    try:
+        _log_canvas_context('activate-renderer')
+    except Exception:
+        pass
     if kind == '2d' and renderer is not None:
         _ctx = getattr(renderer, 'ctx', None)
     else:
@@ -680,17 +1349,14 @@ def _activate_renderer(renderer, kind):
 
 
 def _ensure_canvas():
+    # FIX v25: do NOT create a 2d renderer here. getContext('2d') on the visible
+    # canvas permanently blocks getContext('webgl2') on the same canvas (browser
+    # rule: one canvas = one context type). The old code created 2d first, so
+    # every later webgl2 request got null and fell back to 2d. Just return canvas.
     global _canvas
     canvas = _find_canvas()
     if canvas is None:
         return None
-    if _renderer is None:
-        _size_canvas(_canvas_width, _canvas_height)
-        try:
-            r = create_renderer('2d', canvas, _canvas_width, _canvas_height)
-            _activate_renderer(r, '2d')
-        except Exception:
-            pass
     return canvas
 
 
@@ -1140,7 +1806,8 @@ class Line:
             return
         renderer.draw_line(self.x1, self.y1, self.x2, self.y2,
                            fill=self.fill, lineWidth=self.lineWidth,
-                           opacity=self.opacity, dashes=self.dashes)
+                           opacity=self.opacity, dashes=self.dashes,
+                           rotateAngle=self.rotateAngle)
 
 
 class Polygon:
@@ -1468,6 +2135,9 @@ class Group:
 # ----------------------------------------------------------------------
 
 def _renderer_or_2d():
+    # FIX v25: do NOT auto-create a 2d renderer here. _ensure_canvas used to
+    # create 2d and steal the canvas. Now it just returns the canvas, so
+    # returning _renderer (possibly None) is correct - run_app creates it.
     if _renderer is None:
         _ensure_canvas()
     return _renderer
@@ -1560,14 +2230,15 @@ def drawLabel(text, x, y, fill='black', size=12, font='arial', bold=False,
 
 
 def drawLine(x1, y1, x2, y2, fill='black', lineWidth=2, opacity=100,
-             dashes=False, visible=True, hud=False, centerZ=None):
+             dashes=False, rotateAngle=0, visible=True, hud=False, centerZ=None):
     if not visible:
         return
     r = _renderer_or_2d()
     if r is None:
         return
     r.draw_line(float(x1), float(y1), float(x2), float(y2), fill=fill,
-                lineWidth=lineWidth, opacity=opacity, dashes=dashes)
+                lineWidth=lineWidth, opacity=opacity, dashes=dashes,
+                rotateAngle=rotateAngle)
 
 
 def drawPolygon(*points, fill='black', border=None, borderWidth=2, opacity=100,
@@ -1831,8 +2502,19 @@ def _parse_run_args(args, kwargs):
     # If mode is 'html' but hud was not set, hud='html' (already handled above)
     if mode == 'html' and hud is None:
         hud = 'html'
-    # Extra kwargs are still dropped (never TypeError), but hud/mode are kept.
-    # Return them via globals so runApp() can forward them.
+    # v53: enableFullscreen MUST NOT be dropped. runApp(enableFullscreen=True) was
+    # silently dropped here - _parse_run_args never returned it, runApp never
+    # forwarded it, run_app got enableFullscreen=False, so no button was ever created.
+    # v54+: enableFullscreen defaults to True. Apps must explicitly set False to disable.
+    _ef = kwargs.pop('enableFullscreen', None)
+    if _ef is None:
+        _ef = kwargs.pop('enable_fullscreen', None)
+    if _ef is None:
+        for _k in ('fullscreenButton', 'fullscreen_button', 'fullscreen'):
+            if _k in kwargs:
+                _ef = kwargs.pop(_k)
+                break
+    # Extra kwargs are still dropped (never TypeError), but hud/mode/enableFullscreen are kept.
     if len(args) >= 1:
         width = args[0]
     if len(args) >= 2:
@@ -1843,8 +2525,11 @@ def _parse_run_args(args, kwargs):
         renderer = args[3]
     if len(args) >= 5:
         canvas = args[4]
-    # Attach hud/mode to the return via a tuple - callers unpack 7 values.
-    return width, height, steps, renderer, canvas, hud, mode, html_element
+    # Return 9 values - callers unpack 9.
+    # Default enableFullscreen to True if not specified (None)
+    if _ef is None:
+        _ef = True
+    return width, height, steps, renderer, canvas, hud, mode, html_element, bool(_ef)
 
 
 def runApp(*args, **kwargs):
@@ -1856,18 +2541,27 @@ def runApp(*args, **kwargs):
       runApp(1050, 700, stepsPerSecond=60, hud=True)  -> HUD
       runApp(1050, 700, stepsPerSecond=60, mode='hud')  -> HUD
     """
-    width, height, steps, renderer, canvas, hud, mode, html_element = _parse_run_args(args, kwargs)
+    width, height, steps, renderer, canvas, hud, mode, html_element, _ef = _parse_run_args(args, kwargs)
     return run_app(width=width, height=height,
                    stepsPerSecond=steps, renderer=renderer, canvas=canvas,
-                   hud=hud, mode=mode, html_element=html_element)
+                   hud=hud, mode=mode, html_element=html_element,
+                   enableFullscreen=_ef)
 
 
 def cmu_graphics_run(*args, **kwargs):
     """CMU alias. Same bulletproof parsing as runApp()."""
-    width, height, steps, renderer, canvas, hud, mode, html_element = _parse_run_args(args, kwargs)
+    width, height, steps, renderer, canvas, hud, mode, html_element, _ef = _parse_run_args(args, kwargs)
     return run_app(width=width, height=height,
                    stepsPerSecond=steps, renderer=renderer, canvas=canvas,
-                   hud=hud, mode=mode, html_element=html_element)
+                   hud=hud, mode=mode, html_element=html_element,
+                   enableFullscreen=_ef)
+
+# v46: __all__ contains 'run' and 'loop' - they MUST exist as top-level names.
+# Before this they only existed as methods on a class, so Brython's
+# `from scs_entrypoint import *` tried `scs_entrypoint.run` as a submodule
+# and failed with "'scs_entrypoint' is not a package". These are real aliases now.
+run = runApp
+loop = runApp
 
 
 # ----------------------------------------------------------------------
@@ -1880,33 +2574,353 @@ def _call(name, *args):
         return
     try:
         cb(*args)
+    except Exception as e:
+        # v42: NEVER swallow. ofdm did nothing because onAppStart/redrawAll
+        # raised here and was hidden. Log it so the console shows the real error.
+        try:
+            _debug_log('SCS _call %s failed: %s' % (name, e))
+        except Exception:
+            pass
+
+
+def _remove_fullscreen_button():
+    # v54: DOM button - remove it on stop / new runApp so we never stack duplicates.
+    global _fullscreen_btn, _fullscreen_btn_label
+    try:
+        _b = _fullscreen_btn
+        _fullscreen_btn = None
+        _fullscreen_btn_label = None
+        if _b is not None:
+            try:
+                # DOM element (v54) - remove from DOM. Old canvas Rect (pre-v54) - no-op.
+                if hasattr(_b, 'remove'):
+                    _b.remove()
+                elif hasattr(_b, 'parentNode') and _b.parentNode is not None:
+                    _b.parentNode.removeChild(_b)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+def _create_fullscreen_button(w=None, h=None):
+    # v54: REAL DOM BUTTON, fixed 36x36px, position:fixed bottom:16 right:16.
+    # Never scales with the canvas. Canvas Rect version scaled with the canvas
+    # (36 logical -> 36 * (9997/400) = huge, blurry, looked like shit).
+    # DOM button is always 36 CSS px, in windowed AND fullscreen, on any DPR.
+    global _fullscreen_btn, _fullscreen_btn_label
+    try:
+        _remove_fullscreen_button()
+        try:
+            _btn = document.createElement('button')
+        except Exception:
+            return None
+        _btn.id = 'scs-fullscreen-btn'
+        # v56: Brython DOM uses .text, NOT .textContent. The old line
+        # _btn.textContent = '...' threw here, outer try swallowed it,
+        # button was never appended -> 'no fullscreen DOM element'.
+        # Toolbar buttons in boot_sandbox already use .text and work.
+        try:
+            _btn.text = '\u26f6'
+        except Exception:
+            try:
+                _btn.innerHTML = '\u26f6'
+            except Exception:
+                pass
+        _btn.setAttribute('aria-label', 'Toggle fullscreen')
+        _btn.setAttribute('title', 'Fullscreen')
+        try:
+            _s = _btn.style
+            _s.position = 'fixed'
+            _s.width = '36px'
+            _s.height = '36px'
+            _s.bottom = '16px'
+            _s.right = '16px'
+            _s.left = 'auto'
+            _s.top = 'auto'
+            _s.background = '#1a1a2a'
+            _s.color = '#e6e6e6'
+            _s.border = '1px solid #555566'
+            _s.borderRadius = '8px'
+            _s.fontSize = '18px'
+            _s.lineHeight = '36px'
+            _s.textAlign = 'center'
+            _s.padding = '0'
+            _s.margin = '0'
+            _s.boxSizing = 'border-box'
+            _s.cursor = 'pointer'
+            _s.zIndex = '2147483647'
+            _s.display = 'flex'
+            _s.alignItems = 'center'
+            _s.justifyContent = 'center'
+            _s.flexShrink = '0'
+        except Exception:
+            pass
+        try:
+            _btn.addEventListener('click', lambda _e: _toggle_fullscreen())
+        except Exception:
+            try:
+                _btn.onclick = lambda _e: _toggle_fullscreen()
+            except Exception:
+                pass
+        try:
+            document.body.appendChild(_btn)
+        except Exception:
+            return None
+        _fullscreen_btn = _btn
+        _fullscreen_btn_label = None
+        # v56: place over canvas bottom-right, not viewport corner.
+        try:
+            _reposition_fullscreen_button()
+        except Exception:
+            pass
+        # Keep it over the canvas on scroll/resize (bind once).
+        try:
+            global _fullscreen_btn_listeners_bound
+            if not _fullscreen_btn_listeners_bound:
+                _fullscreen_btn_listeners_bound = True
+                try:
+                    window.addEventListener('resize', lambda _e: _reposition_fullscreen_button())
+                except Exception:
+                    pass
+                try:
+                    window.addEventListener('scroll', lambda _e: _reposition_fullscreen_button())
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return _btn
+    except Exception:
+        return None
+
+_fullscreen_btn_listeners_bound = False
+
+def _reposition_fullscreen_button():
+    # v56: button sits OVER bottom-right of the CANVAS, not viewport corner.
+    # Canvas is centered with a textarea below it in the sandbox - viewport
+    # bottom-right is far from the canvas. So: position:fixed + left/top
+    # computed from canvas.getBoundingClientRect() (viewport coords).
+    # 36px button, 16px inset: left = rect.left + rect.width - 52, same for top.
+    # Called on create, fullscreenchange, resize, scroll.
+    try:
+        _b = _fullscreen_btn
+        _c = _find_canvas()
+        if _b is None or _c is None:
+            return
+        try:
+            _r = _c.getBoundingClientRect()
+            _lx = float(_r.left) + float(_r.width) - 52.0
+            _ty = float(_r.top) + float(_r.height) - 52.0
+        except Exception:
+            return
+        try:
+            _s = _b.style
+            _s.position = 'fixed'
+            _s.left = '%dpx' % int(_lx)
+            _s.top = '%dpx' % int(_ty)
+            _s.right = 'auto'
+            _s.bottom = 'auto'
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+def _toggle_fullscreen():
+    # v29: request on the WRAPPER (canvas + controls stay visible), from a
+    # user gesture, handle rejected promise. Do NOT assume success - the
+    # fullscreenchange handler + ResizeObserver will measure the actual layout.
+    try:
+        try:
+            _fs = document.fullscreenElement
+        except Exception:
+            _fs = None
+        if _fs is not None:
+            try:
+                _p = document.exitFullscreen()
+                # exitFullscreen also returns a promise in modern browsers - swallow rejection.
+                try:
+                    if _p is not None and hasattr(_p, 'catch'):
+                        _p.catch(lambda _e: None)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            return
+        _w = _ensure_app_wrapper()
+        _target = _w if _w is not None else _find_canvas()
+        if _target is None:
+            return
+        try:
+            _p = _target.requestFullscreen()
+            try:
+                if _p is not None and hasattr(_p, 'catch'):
+                    _p.catch(lambda _e: None)
+            except Exception:
+                pass
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+def _on_fullscreen_change(ev=None):
+    # v54: LOGICAL STAYS runApp SIZE. Canvas scales via CSS only.
+    # User: "logical stays 400x400, canvas just scales up via CSS to fill screen (mouse still 0..400)"
+    # Old code did _c.width = innerWidth (9997) + globals()['__dict__']['_canvas_width'] = 9997
+    # (which didn't even update the real global). That made:
+    #  - HUD: 900 texture drawn onto 9997 viewport = 9997/1800 ~ 5x huge
+    #  - Mouse: _pos mapped to 9997 instead of 400, dots inset 25% on each side
+    #  - Backing: 400 logical drawn 1:1 on 9997 backing = tiny tile, not fullscreen
+    # v58: _canvas_width/_canvas_height NEVER change in fullscreen. canvas.width/height
+    # (backing) NEVER change. Only canvas.style.width/height change, to the
+    # MEASURED fullscreen-element rect (see below), NOT window.innerWidth.
+    # _pos then maps (clientX-left) * logical / rect.width -> 0..logical correctly.
+    # HUD offscreen backing = drawing-buffer size, drawn 1:1.
+    try:
+        try:
+            _is_fs = document.fullscreenElement is not None
+        except Exception:
+            _is_fs = False
+        _c = _find_canvas()
+        if _c is None:
+            return
+        _ow = int(_fullscreen_orig_w) if _fullscreen_orig_w else int(_canvas_width) if _canvas_width else 900
+        _oh = int(_fullscreen_orig_h) if _fullscreen_orig_h else int(_canvas_height) if _canvas_height else 560
+        if _is_fs:
+            try:
+                # v58: size from the MEASURED fullscreen-element rect, NOT
+                # window.innerWidth. innerWidth produced 9997x7354 (stale /
+                # zoom / display-move value) and stretched the canvas to
+                # 9997px wide, overflowing the viewport - clicks then mapped
+                # to an inset band (blue-rectangle screenshot) and the
+                # backing ballooned. getBoundingClientRect() of the element
+                # that is actually fullscreen IS the viewport. If the
+                # fullscreen element is the canvas itself, the browser's
+                # :fullscreen UA styles (width:100% !important) already size
+                # it; setting it to its own rect is a no-op. If it is the
+                # wrapper, the canvas fills the wrapper.
+                try:
+                    _fs_el = document.fullscreenElement
+                except Exception:
+                    _fs_el = None
+                _fw = _fh = 0
+                if _fs_el is not None:
+                    try:
+                        _fr = _fs_el.getBoundingClientRect()
+                        _fw, _fh = int(_fr.width), int(_fr.height)
+                    except Exception:
+                        _fw = _fh = 0
+                if not _fw or not _fh:
+                    _fw, _fh = int(window.innerWidth), int(window.innerHeight)
+                # CSS only - backing stays _ow x _oh.
+                _c.style.width = '%dpx' % _fw; _c.style.height = '%dpx' % _fh
+            except Exception:
+                pass
+        else:
+            try:
+                _c.style.width = '%dpx' % _ow; _c.style.height = '%dpx' % _oh
+            except Exception:
+                pass
+        # _canvas_width/_canvas_height intentionally NOT changed. Backing intentionally NOT changed.
+        try:
+            _reposition_fullscreen_button()
+        except Exception:
+            pass
+        try:
+            _log_canvas_context('fullscreenchange')
+        except Exception:
+            pass
     except Exception:
         pass
 
 
 def _pos(ev):
+    # FIX v27 HUD events: map CSS rect -> logical app size (_canvas_width x
+    # _canvas_height), NOT via backing-store canvas.width / DPR. Old code did
+    # (clientX-left)*canvas.width/r.width/dpr. canvas.width = _canvas_width*dpr
+    # at _size_canvas time, so if DPR changes after sizing (DevTools emulation,
+    # zoom, display move), the division is wrong and clicks drift off the HUD
+    # buttons. Logical size is the same space HUD Rects are drawn in (Rect(40,470,160,44)
+    # means app x=40..200, y=470..514), so this is the space onMousePress expects.
+    # Y is top-down in both: CSS y=0 is top, app y=0 is top, HUD texture V=0 is top
+    # (see engine draw_hud_canvas: top vertex has V=0). No Y flip.
     canvas = _find_canvas()
     try:
         r = canvas.getBoundingClientRect()
-        sx = canvas.width / r.width if r.width else 1
-        sy = canvas.height / r.height if r.height else 1
-        # Backing store is width*dpr; user coords are CSS pixels, so
-        # divide by dpr to map backing-store scale back to CSS pixels.
-        return ((ev.clientX - r.left) * sx / _dpr(),
-                (ev.clientY - r.top) * sy / _dpr())
+        if not r.width or not r.height:
+            return (0, 0)
+        # v54: logical = runApp size (_fullscreen_orig_w/h), NEVER viewport size.
+        # In fullscreen rect.width = innerWidth (9997), logical must still be 400/900.
+        # Old code used _canvas_width which _on_fullscreen_change had set to 9997,
+        # so _pos returned 0..9997 and dots landed inset 25% on each side.
+        if _fullscreen_orig_w:
+            _lw = float(_fullscreen_orig_w)
+        elif _canvas_width:
+            _lw = float(_canvas_width)
+        else:
+            _lw = 900.0
+        if _fullscreen_orig_h:
+            _lh = float(_fullscreen_orig_h)
+        elif _canvas_height:
+            _lh = float(_canvas_height)
+        else:
+            _lh = 560.0
+        return ((ev.clientX - r.left) * _lw / float(r.width),
+                (ev.clientY - r.top) * _lh / float(r.height))
     except Exception:
         return (0, 0)
+
+def _hud_shape_at(x, y):
+    # HUD hit-test in the SAME logical space as _pos and as HUD Rects are drawn.
+    # Returns the topmost HUD shape (centerZ is None) whose bbox contains (x,y),
+    # or None. Used to stop camera-drag from starting when a HUD button is clicked.
+    try:
+        for s in reversed(list(_shapes)):
+            if getattr(s, 'centerZ', None) is not None:
+                continue
+            if not getattr(s, 'visible', True):
+                continue
+            # Rect: _left/_top/_width/_height. Circle/Oval/Label: use _left/_top + size.
+            try:
+                _l = float(getattr(s, '_left', 0) or 0)
+                _t = float(getattr(s, '_top', 0) or 0)
+                _w = float(getattr(s, '_width', 0) or 0)
+                _h = float(getattr(s, '_height', 0) or 0)
+                # Label has no _width/_height in some builds - use a small hit box around center
+                if _w == 0 and _h == 0:
+                    _cx = float(getattr(s, 'centerX', _l) or _l)
+                    _cy = float(getattr(s, 'centerY', _t) or _t)
+                    _l, _t, _w, _h = _cx - 20, _cy - 10, 40, 20
+                if _l <= x <= _l + _w and _t <= y <= _t + _h:
+                    return s
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
 
 
 def _mp(ev):
     global _is_dragging
-    _is_dragging = True
+    # FIX v27 HUD events: HUD buttons are UI, not camera drag. If the press lands
+    # on a HUD shape (centerZ is None), do NOT start dragging - the app's
+    # onMousePress will handle the button (PLAY/STOP/CENTRE/MODE). Otherwise,
+    # dragging starts for camera look.
+    _x, _y = _pos(ev)
+    _hit = _hud_shape_at(_x, _y)
+    # v54: fullscreen button is a DOM button (fixed 36px), NOT in _shapes.
+    # Canvas clicks never hit it - DOM click handler toggles fullscreen.
+    # Old canvas-Rect hit-test removed.
+    # Only Rect buttons block drag - Labels are text, they should not block look.
+    # If the hit is a Rect (button background), it is a UI element.
+    if _hit is not None and type(_hit).__name__ in ('Rect',):
+        _is_dragging = False
+    else:
+        _is_dragging = True
     try:
         _find_canvas().focus()
     except Exception:
         pass
     if _app is not None:
-        _call('onMousePress', _app, *_pos(ev))
+        _call('onMousePress', _app, _x, _y)
 
 
 def _mr(ev):
@@ -2000,6 +3014,14 @@ def _bind_events():
     global _events_bound
     if _events_bound:
         return
+    # v32: window.scs.eventsBound - one window property, nested.
+    try:
+        if bool(_scs_get('eventsBound', False)):
+            _events_bound = True
+            return
+        _scs_set('eventsBound', True)
+    except Exception:
+        pass
     _events_bound = True
     canvas = _find_canvas()
     if canvas is None:
@@ -2024,6 +3046,10 @@ def _bind_events():
 
 def stop():
     global _app_timer
+    try:
+        _remove_fullscreen_button()
+    except Exception:
+        pass
     if _app_timer is not None:
         try:
             timer.clear_interval(_app_timer)
@@ -2057,6 +3083,126 @@ def _render_one_view(view, renderer=None):
     # is distinct from per-object / per-material data).
     r = renderer if renderer is not None else _renderer
     if r is None or _app is None:
+        return
+    # ENGINE PATH: 3D engine (webgl2-3d) - translate CMU shapes to engine scene.
+    # FIX: Oval has no radius - use width/2, NOT 1.0. Old code made all balls radius 1.0 -> red/green clipped.
+    if getattr(r, 'kind', '') == 'webgl2-3d':
+        try:
+            # FIX v26 HUD: engine path MUST call redrawAll first. Old code
+            # never did, so _update_world never ran, sphere positions never
+            # updated, and HUD labels never updated. Non-engine path calls
+            # redrawAll - engine path must too.
+            try:
+                _call('redrawAll', _app)
+            except Exception:
+                pass
+            r.clear_scene()
+            r.add_floor(40, '#22223a')
+            for s in list(_shapes):
+                try:
+                    if not getattr(s, 'visible', True):
+                        continue
+                    _cz = getattr(s, 'centerZ', None)
+                    if _cz is None:
+                        continue
+                    _cx = float(getattr(s, 'centerX', 0) or 0)
+                    _cy = float(getattr(s, 'centerY', 0) or 0)
+                    _fill = getattr(s, 'fill', 'blue') or 'blue'
+                    _cls = type(s).__name__
+                    if _cls in ('Rect',):
+                        r.add_box(_cx, _cy, float(_cz), float(getattr(s, 'width', 1) or 1), float(getattr(s, 'height', 1) or 1), 1.0, _fill, metalness=float(getattr(s, 'metalness', 1.0) or 1.0), roughness=float(getattr(s, 'roughness', 0.38) or 0.38), defectLevel=float(getattr(s, 'defectLevel', 0.5) or 0.5))
+                    else:
+                        # Circle: radius attr. Oval: width/2 (NOT 1.0). Ball highlights: radius attr.
+                        if _cls in ('Oval',):
+                            _rad = float(getattr(s, 'width', 1.0) or 1.0) / 2.0
+                        else:
+                            _rad = float(getattr(s, 'radius', getattr(s, '_radius', 1.0)) or 1.0)
+                        # DAMAGED METAL: per-sphere defect + corrosion, stored on shape by app (v5).
+                        # Default: metallic=1.0 (metal, not plastic), roughness from shape or 0.32, defect 0.45.
+                        _def = float(getattr(s, 'defectLevel', 0.45) or 0.45)
+                        _corr = float(getattr(s, 'corrosionEnabled', 0.0) or 0.0)
+                        _met = float(getattr(s, 'metalness', 1.0) if getattr(s, 'metalness', None) is not None else 1.0)
+                        _rou = float(getattr(s, 'roughness', 0.32) if getattr(s, 'roughness', None) is not None else 0.32)
+                        # Copper-patina green is corrosion, not base colour - engine handles it via corrosionColor.
+                        # For patina ball, base is copper, corrosion colour is patina green.
+                        _corrCol = '#3affa8' if _corr > 0.5 else '#3a1a08'
+                        try:
+                            r.add_sphere(_cx, _cy, float(_cz), _rad, _fill, metalness=_met, roughness=_rou, defectLevel=_def, corrosionEnabled=_corr, corrosionColor=_corrCol)
+                        except TypeError:
+                            r.add_sphere(_cx, _cy, float(_cz), _rad, _fill)
+                except Exception:
+                    pass
+            _cam = getattr(_app, 'camera', None)
+            if _cam is None:
+                # v33: correct camera primitive. Never pass None to engine -
+                # engine returns False on None and you get black screen.
+                # Default matches spatial_audio: pos (0,2,6), yaw 0, pitch -4, fov 60.
+                try:
+                    from scs_3d import Camera3D as _C3D
+                    _cam = _C3D(position=(0.0, 2.0, 6.0), yaw=0.0, pitch=-4.0, fov=60.0)
+                    _app.camera = _cam
+                except Exception:
+                    _cam = None
+            if _cam is not None:
+                r.render(_cam)
+            # FIX v26 HUD: ALWAYS draw HUD shapes (centerZ is None) in 3D mode,
+            # not only if _hud_mode is True. Old code required _hud_mode, but
+            # _hud_mode is only True when _is_3d_app is True, and _is_3d_app is
+            # only True when the app defines onRender3D etc. Spatial audio has
+            # NO such callback - it uses centerZ shapes + redrawAll - so
+            # _hud_mode stayed False and HUD was never drawn. Now: if there is
+            # ANY HUD shape, lazily create the offscreen + 2d renderer and draw it.
+            try:
+                _has_hud = False
+                for _hs in list(_shapes):
+                    if getattr(_hs, 'centerZ', None) is None and getattr(_hs, 'visible', True):
+                        _has_hud = True
+                        break
+                if _has_hud:
+                    global _hud_offscreen, _hud_2d_renderer
+                    # v34: HUD offscreen / renderer MUST stay in sync.
+                    # _get_hud_offscreen recreates the canvas when CSS size or
+                    # budgeted DPR changes. Old code kept the old 2D renderer,
+                    # which still drew to the OLD (detached) offscreen - HUD
+                    # briefly showed, then went into the off-canvas behind.
+                    # Fix: if the offscreen changed, recreate the renderer.
+                    _prev_off = _hud_offscreen
+                    try:
+                        _get_hud_offscreen(_canvas_width, _canvas_height)
+                    except Exception:
+                        pass
+                    if _hud_offscreen is not None and _hud_offscreen is not _prev_off:
+                        _hud_2d_renderer = None
+                    if _hud_2d_renderer is None and _hud_offscreen is not None:
+                        try:
+                            _hud_2d_renderer = create_renderer('2d', _hud_offscreen, _canvas_width, _canvas_height)
+                        except Exception:
+                            _hud_2d_renderer = None
+                    # Safety: renderer must draw to the CURRENT offscreen,
+                    # not a stale one. If it does not, recreate it.
+                    try:
+                        _rc = getattr(_hud_2d_renderer, 'canvas', None) if _hud_2d_renderer is not None else None
+                        if _rc is None:
+                            _rc = getattr(_hud_2d_renderer, '_canvas', None) if _hud_2d_renderer is not None else None
+                        if _rc is not None and _hud_offscreen is not None and _rc is not _hud_offscreen:
+                            _hud_2d_renderer = create_renderer('2d', _hud_offscreen, _canvas_width, _canvas_height)
+                    except Exception:
+                        pass
+                    if _hud_2d_renderer is not None:
+                        _hud_2d_renderer.begin_frame('rgba(0,0,0,0)')
+                        for s in list(_shapes):
+                            try:
+                                if getattr(s, 'centerZ', None) is None and getattr(s, 'visible', True):
+                                    getattr(s, 'draw', lambda _r: None)(_hud_2d_renderer)
+                            except Exception:
+                                pass
+                        _hud_2d_renderer.end_frame()
+                        if _hud_offscreen is not None and hasattr(r, 'draw_hud_canvas'):
+                            r.draw_hud_canvas(_hud_offscreen, 0, 0, _canvas_width, _canvas_height)
+            except Exception:
+                pass
+        except Exception:
+            pass
         return
     target = getattr(view, 'target', None) if view is not None else None
     viewport = getattr(view, 'viewport', None) if view is not None else None
@@ -2217,15 +3363,51 @@ def _frame():
             cur = _presentation_coordinator.current()
             if cur is not None and getattr(cur, 'is_zero_sized', False):
                 return
+        # v29 resize pipeline: apply coalesced resize + DPR change BEFORE draw.
+        try:
+            _check_pixel_ratio_change()
+        except Exception:
+            pass
+        try:
+            _apply_pending_resize()
+        except Exception:
+            pass
         _step()
         _render()
-    except Exception:
+        try:
+            global _canvas_context_logged_frame
+            if not _canvas_context_logged_frame:
+                _canvas_context_logged_frame = True
+                _log_canvas_context('first-frame')
+        except Exception:
+            pass
+    except Exception as e:
+        # v42: _frame used to stop() the loop on ANY error with no log -
+        # one redrawAll exception = black screen forever, no console error.
+        try:
+            _debug_log('SCS _frame failed: %s' % (e,))
+        except Exception:
+            pass
         stop()
 
 
 def _start_loop():
     global _app_timer
+    # v31: stop() clears THIS instance's timer, but not another instance's.
+    # The window flag + runApp 500ms guard above are the real dedup; here we
+    # just ensure we don't start a second interval from THIS instance.
     stop()
+    # v57: stop() above calls _remove_fullscreen_button(). run_app created the
+    # button BEFORE _start_loop, so stop() deleted it ~0ms after creation -
+    # that is why there was never a fullscreen DOM element, even after the
+    # v56 .text fix. Recreate it here, AFTER stop(), so it survives.
+    # Covers both paths: 2d/webgl2 (run_app -> _start_loop) and webgpu
+    # (_gpu_ready -> _start_loop -> stop()).
+    try:
+        if _fullscreen_enabled:
+            _create_fullscreen_button(_canvas_width, _canvas_height)
+    except Exception:
+        pass
     _frame()
     iv = int(1000 / _steps_per_second) if _steps_per_second > 0 else 33
     try:
@@ -2235,7 +3417,7 @@ def _start_loop():
 
 
 def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
-            canvas=None, hud=None, mode=None, html_element=None, **kwargs):
+            canvas=None, hud=None, mode=None, html_element=None, enableFullscreen=True, **kwargs):
     """The initialiser. renderer: '2d', 'webgl2', or 'webgpu'. NO FALLBACK.
     NO WebGPU -> WebGL2 -> 2D fallback chain. 'auto' = default (2D, or HUD texture if 3D renderer). If you ask for 'webgl2' and
     WebGL2 fails, it FAILS. If you ask for 'webgpu' and WebGPU fails, it FAILS.
@@ -2245,6 +3427,10 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
     setRenderer() > ?renderer= URL param > SCS_CONFIG.renderer.
     """
     global _app, _canvas, _steps_per_second, _pending_renderer
+    # v33: NO 500ms guard. It black-screened: second exec_code stops loop #1,
+    # then this guard rejected runApp #2, leaving NO loop running.
+    # Single-run is enforced by boot() via window.scs.booted, not here.
+    # runApp ALWAYS starts a loop after stop().
     if isinstance(width, App):
         _a = width
         try:
@@ -2271,6 +3457,21 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
     # forced into HUD; it runs natively. We detect 2D apps by: no 3D callbacks
     # defined (no onRender3D / onDraw3D / draw3D in _user_funcs).
     global _hud_mode, _hud_2d_renderer, _hud_3d_kind, _hud_kind, _hud_html_element
+    global _fullscreen_enabled, _fullscreen_btn, _fullscreen_btn_label, _fullscreen_orig_w, _fullscreen_orig_h, _fullscreen_orig_style_w, _fullscreen_orig_style_h
+    # enableFullscreen: explicit arg > kwargs (enableFullscreen / enable_fullscreen / fullscreenButton)
+    _ef = enableFullscreen
+    if not _ef:
+        for _k in ('enableFullscreen', 'enable_fullscreen', 'fullscreenButton', 'fullscreen_button'):
+            if _k in kwargs and kwargs.get(_k):
+                _ef = True
+                break
+    _fullscreen_enabled = bool(_ef)
+    _fullscreen_btn = None
+    _fullscreen_btn_label = None
+    _fullscreen_orig_w = int(width)
+    _fullscreen_orig_h = int(height)
+    _fullscreen_orig_style_w = None
+    _fullscreen_orig_style_h = None
     _hud_mode = False
     _hud_2d_renderer = None
     _hud_3d_kind = None
@@ -2319,18 +3520,15 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
     # 3D app (has onRender3D / onDraw3D / draw3D) + webgl2/webgpu => HUD is the 2D
     # overlay (labels, buttons) on top of the 3D scene. THAT is when HUD makes sense.
     _is_3d_app = any(k in _user_funcs for k in ('onRender3D', 'onDraw3D', 'draw3D', 'onRender', 'render3D'))
-    # NOTE: No shape-based 3D guess here. Flat CMU shapes can be 3D (centerZ set later, or flat in world).
-    # The DEMO must declare itself as 3D: runApp(..., renderer='webgl2'). EntryPoint does NOT guess.
     # _renderer_req must include setRenderer() / _pending_renderer / App.renderer,
     # not just the runApp() arg.
     _renderer_req = str(renderer or _pending_renderer or getattr(_app, 'renderer', None) or '').lower() or None  # FIX: _app, not app - app is defined at line 2394, using app here = UnboundLocalError
     if not _is_3d_app and _hud_requested:
-        # Explicit hud=True / mode='hud' / renderer='3d' IS a declaration: "I am 3D".
-        # Do NOT ignore it. The demo declares itself as 3D - that wins over
-        # callback guessing. Flat shapes can be 3D, so callback/shape guessing is wrong.
-        # If the app explicitly asked for HUD, it IS a 3D app.
-        _is_3d_app = True
-        _debug_log('SCS HUD: explicit HUD/3D requested - demo declares itself as 3D. Respecting it.')
+        # Explicit hud=True / mode='hud' on a 2D app - HUD makes no sense, ignore it.
+        # Don't force a 2D app into HUD. Just render 2D.
+        _debug_log('SCS HUD: hud requested on a 2D app (no 3D callbacks) - HUD only makes sense in 3D apps. Ignoring HUD, rendering 2D directly.')
+        _hud_requested = False
+        _hud_kind = 'texture'
     if _renderer_req in ('webgl2', 'webgl', 'webgpu', 'gpu', 'auto') and _is_3d_app:
         # Implicit HUD: 3D app + 3D renderer => HUD overlay automatically, no explicit mode needed.
         _hud_requested = True
@@ -2403,6 +3601,25 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
     _call('onAppStart', app)
     if 'appStarted' in _user_funcs and 'onAppStart' not in _user_funcs:
         _call('appStarted', app)
+    # Fullscreen button: created AFTER onAppStart so it is topmost in _shapes
+    # (drawn last, hit-tested first). Position derived from runApp width/height.
+    if _fullscreen_enabled:
+        try:
+            _c0 = _find_canvas()
+            if _c0 is not None:
+                try:
+                    _fullscreen_orig_style_w = _c0.style.width
+                    _fullscreen_orig_style_h = _c0.style.height
+                except Exception:
+                    pass
+            _create_fullscreen_button(width, height)
+            # Bind once: fullscreenchange -> _on_fullscreen_change (resizing + reposition)
+            try:
+                document.addEventListener('fullscreenchange', _on_fullscreen_change)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     kind = _resolve_renderer_kind(
         renderer or _pending_renderer or getattr(app, 'renderer', None))
@@ -2438,6 +3655,10 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
             return
 
         def _gpu_ready():
+            try:
+                _scs_set('canvasContextKind', 'webgpu')
+            except Exception:
+                pass
             _activate_renderer(r, 'webgpu')
             _start_loop()
 
@@ -2449,9 +3670,18 @@ def run_app(width=400, height=400, stepsPerSecond=30, renderer=None,
         r.on_error = _gpu_fail
         return  # loop starts from _gpu_ready
 
+    # v35: switch canvas if context kind changed (WebGL -> 2D for fetch_demo).
+    try:
+        _replace_canvas_for_context(kind)
+    except Exception:
+        pass
     # webgl2 / 2d: explicit, no fallback. If create fails, FAIL.
     try:
         r = create_renderer(kind, _find_canvas(), width, height)
+        try:
+            _scs_set('canvasContextKind', str(kind).lower())
+        except Exception:
+            pass
     except Exception as e:
         try:
             import traceback as _tb
@@ -2695,263 +3925,8 @@ def getFullscreenState():
 
 
 def _setup_presentation(canvas):
-    global _presentation, _presentation_coordinator
-    try:
-        from scs_presentation import PresentationController, ResizeCoordinator
-        container = canvas
-        try:
-            parent = getattr(canvas, 'parentElement', None)
-            if parent is not None:
-                container = parent
-        except Exception:
-            pass
-        _presentation = PresentationController(canvas=canvas, container=container)
-        def _apply(metrics):
-            r = _renderer
-            if r is not None and hasattr(r, 'apply_size'):
-                try:
-                    r.apply_size(metrics)
-                except Exception:
-                    pass
-        _presentation_coordinator = ResizeCoordinator(_apply)
-        try:
-            _presentation.observe_resize(_presentation_coordinator)
-        except Exception:
-            pass
-    except Exception:
-        _presentation = None
-        _presentation_coordinator = None
-
-
-def _teardown_presentation():
-    global _presentation, _presentation_coordinator
-    try:
-        if _presentation is not None:
-            _presentation.dispose()
-    except Exception:
-        pass
-    _presentation = None
-    _presentation_coordinator = None
-
-
-# [STRIPPED 70 bytes]
-# Controller / Gamepad (scs_controller.py)
-# [STRIPPED 70 bytes]
-
-def getControllerManager():
-    global _controller_manager
-    if _controller_manager is None:
-        try:
-            from scs_controller import ControllerManager
-            _controller_manager = ControllerManager()
-        except Exception:
-            _controller_manager = None
-    return _controller_manager
-
-
-def getGamepads():
-    try:
-        from browser import window
-        gps = window.navigator.getGamepads()
-        return list(gps) if gps is not None else []
-    except Exception:
-        mgr = getControllerManager()
-        if mgr is not None:
-            try:
-                mgr.mark_blocked()
-            except Exception:
-                pass
-        return []
-
-
-def controllerFeedback(player, kind, intensity=1.0, duration_ms=100):
-    try:
-        mgr = getControllerManager()
-        if mgr is None:
-            return False
-        ctrl = mgr.player_controller(player)
-        if ctrl is None:
-            return False
-        return ctrl.feedback(kind, intensity, duration_ms)
-    except Exception:
-        return False
-
-
-# [STRIPPED 70 bytes]
-# Loader (scs_loader.py) -- see below for getAssetLoader etc.
-# [STRIPPED 70 bytes]
-
-def getAssetLoader():
-    """Singleton AssetLoader (scs_loader). Stages are separate:
-    fetch -> decode -> create runtime resource -> prepare."""
-    global _asset_loader
-    if _asset_loader is None:
-        try:
-            from scs_loader import AssetLoader
-            _asset_loader = AssetLoader()
-        except Exception:
-            _asset_loader = None
-    return _asset_loader
-
-
-def getSpatialAudioEngine(context=None):
-    """SpatialAudioEngine: AudioEngine + PannerNode listener/sources.
-    The listener is the Camera3D -- call engine.update(camera) per
-    step. Returns None if scs_spatial_audio.py is not deployed."""
-    try:
-        from scs_spatial_audio import SpatialAudioEngine
-        return SpatialAudioEngine(context=context)
-    except Exception:
-        return None
-
-
-def Camera3D(*args, **kwargs):
-    """Camera3D from scs_3d.py (position, yaw, pitch, fov)."""
-    try:
-        from scs_3d import Camera3D as _C3D
-        return _C3D(*args, **kwargs)
-    except Exception:
-        return None
-
-
-def getWebGL2Engine(canvas=None, width=900, height=560):
-    """Separate WebGL2 3D engine. Owns its OWN WebGL2 context on its
-    OWN canvas. Does NOT share the 2D renderer's context, loop, or
-    buffers. If it fails, it fails -- no silent fallback to 2D."""
-    try:
-        from scs_engine_webgl2 import WebGL2Engine
-        return WebGL2Engine(canvas=canvas, width=width, height=height)
-    except Exception:
-        return None
-
-
-def getWebGPUEngine(canvas=None, width=900, height=560):
-    """Separate WebGPU 3D engine. Owns its OWN WebGPU context/device.
-    Does NOT share the WebGL2 engine's context or the 2D renderer's.
-    Async init: engine.ready is False until on_ready fires."""
-    try:
-        from scs_engine_webgpu import WebGPU3DEngine
-        return WebGPU3DEngine(canvas=canvas, width=width, height=height)
-    except Exception:
-        return None
-
-
-
-def loadAsset(source, kind='auto', options=None):
-    """Load one asset through the staged pipeline. Returns an
-    AssetHandle with a documented ownership contract, not a raw
-    scene/texture/buffer. Promise stage is PREPARED (see scs_loader)."""
-    loader = getAssetLoader()
-    if loader is None:
-        raise RuntimeError('Asset loader unavailable')
-    return loader.load(source, kind=kind, options=options)
-
-
-def loadGLB(source, options=None):
-    return loadAsset(source, kind='glb', options=options)
-
-
-def loadTexture(source, options=None):
-    return loadAsset(source, kind='texture', options=options)
-
-
-def loadAudio(source, options=None):
-    return loadAsset(source, kind='audio', options=options)
-
-
-# [STRIPPED 70 bytes]
-# Splats (scs_splats.py) -- first-class primitive
-# [STRIPPED 70 bytes]
-
-def getSplatRenderer(backend='webgl2'):
-    """Singleton splat renderer extension. WebGL raster + WebGPU
-    compute behind the same boundary. Custom passes, shared camera /
-    depth, explicit ordering."""
-    global _splat_renderer
-    if _splat_renderer is None:
-        try:
-            from scs_splats import WebGLSplatRenderer, WebGPUSplatRenderer
-            _splat_renderer = WebGPUSplatRenderer() if backend == 'webgpu' \
-                else WebGLSplatRenderer()
-        except Exception:
-            _splat_renderer = None
-    return _splat_renderer
-
-
-def createSplatSchema(sh_degree=0, relightable=False):
-    """Versioned logical schema. Backends pack it; the schema is
-    the contract, not any packed layout."""
-    from scs_splats import SplatSchema
-    s = SplatSchema(version=1, sh_degree=sh_degree)
-    if relightable:
-        s.add_relightable()
-    s.validate()
-    return s
-
-
-def createSplatAsset(schema=None, name='splats'):
-    """A splat asset: schema + chunks + hierarchy + appearance +
-    proxies. Scene membership here; residency in ResidencyManager."""
-    from scs_splats import SplatAsset
-    return SplatAsset(schema or createSplatSchema(), name=name)
-
-
-
-def getPipelineManager():
-    """Singleton PipelineManager (scs_pipeline). Pipelines are owned
-    state, not inline GL calls -- one per backend + material-kind."""
-    global _pipeline_manager
-    try:
-        _pipeline_manager
-    except NameError:
-        _pipeline_manager = None
-    if _pipeline_manager is None:
-        try:
-            from scs_pipeline import PipelineManager
-            _pipeline_manager = PipelineManager()
-        except Exception:
-            _pipeline_manager = None
-    return _pipeline_manager
-
-
-def getMaterialLibrary():
-    """Singleton MaterialLibrary (scs_materials). PBR materials are
-    data -- GLB loader fills it, pipelines bind it."""
-    global _material_library
-    try:
-        _material_library
-    except NameError:
-        _material_library = None
-    if _material_library is None:
-        try:
-            from scs_materials import MaterialLibrary
-            _material_library = MaterialLibrary()
-        except Exception:
-            _material_library = None
-    return _material_library
-
-
-def getPBRMaterial(name='', **kw):
-    """One-liner PBR material: getPBRMaterial('car-paint', base_color=(0.8,0.1,0.1), metallic=0.9, roughness=0.3, clearcoat=1.0)."""
-    try:
-        from scs_materials import PBRMaterial
-        return PBRMaterial(name=name, **kw)
-    except Exception:
-        return None
-
-
-def loadSplatManifest(asset_id, schema, chunk_ids, coarse_chunk_id=None):
-    """Chunked asset manifest + coarse representation before the
-    whole asset is available."""
-    from scs_splats import SplatAssetLoader
-    return SplatAssetLoader().manifest(asset_id, schema, chunk_ids,
-                                       coarse_chunk_id)
-
-
-# Aliases the user namespace expects.
-run = run_app
-loop = run_app
-
+    # v38: NO RESPONSIVE. No PresentationController, no ResizeCoordinator, no 100vw/100vh.
+    return
 
 # ----------------------------------------------------------------------
 # App loading (was in index.html)
@@ -3034,8 +4009,29 @@ def _app_url(name):
     return name
 
 
-def exec_code(code, fn):
+def exec_code(code, fn, force=False):
     global _user_ns, _user_funcs
+    # v52: single-run guard stops duplicate exec from two module instances.
+    # BUT sandbox Run MUST re-run: it passes force=True to reset the guard.
+    # Without force, second Run was ignored: "exec_code already ran for <sandbox>".
+    try:
+        if force:
+            # Sandbox Run: explicitly reset run-once so the app re-runs.
+            try:
+                _scs_set('execed_fn', None)
+            except Exception:
+                pass
+        else:
+            _prev = _scs_get('execed_fn', None)
+            if _prev == str(fn):
+                try:
+                    print('[SCS entrypoint] exec_code already ran for %s - ignoring duplicate exec' % (fn,))
+                except Exception:
+                    pass
+                return
+        _scs_set('execed_fn', str(fn))
+    except Exception:
+        pass
     stop()
     _clear_shapes()
     _user_ns = {'__builtins__': __builtins__}
@@ -3093,17 +4089,38 @@ def exec_code(code, fn):
         _scs_patch.run_app = run_app
     except Exception:
         pass
+    # v45: DO NOT set sys.modules['scs'] = entrypoint. That makes `import scs`
+    # resolve to a plain module (not a package) and Brython then fails
+    # `from scs import *` with "No module named 'scs.run'; 'scs' is not a package".
+    # Leave `import scs` to load scs.py (the alias above) normally.
     try:
-        import sys as _sys2
+        # v43: log WHAT code actually ran - callbacks=[] means the fetched file
+        # was not the pasted ofdm.py (no onAppStart in it, or wrong file).
         try:
-            _sys2.modules['scs'] = _sys2.modules['scs_entrypoint']
+            _debug_log('SCS exec code %s len=%s has_onAppStart=%s has_redrawAll=%s has_W=%s head=%s' % (fn, len(str(code)), ('def onAppStart' in str(code)), ('def redrawAll' in str(code)), ('W,H=1050' in str(code)), str(code)[:200].replace(chr(10), ' | ')))
         except Exception:
             pass
-    except Exception:
-        pass
-    try:
+        # v44: WRONG-FILE guard. Deployed apps/ofdm.py was 150552 bytes with head
+        # 'scs_entrypoint.py - SCS entrypoint' - i.e. a copy of the entrypoint,
+        # not the OFDM app. Exec'ing it defines boot/app_file/etc, not onAppStart,
+        # so it silently did nothing. Refuse loudly instead.
+        try:
+            _head = str(code)[:600]
+            if 'scs_entrypoint.py - SCS entrypoint' in _head:
+                _debug_log('SCS WRONG FILE: %s is a copy of scs_entrypoint.py, NOT an app. Replace it with the real OFDM app code. Not starting.' % (fn,))
+                return
+        except Exception:
+            pass
         exec(code, _user_ns)
         _refresh_user_funcs()
+        try:
+            _debug_log('SCS after exec %s W_in_ns=%s lerp_in_ns=%s onAppStart_in_ns=%s type=%s' % (fn, ('W' in _user_ns), ('lerp' in _user_ns), ('onAppStart' in _user_ns), str(type(_user_ns.get('onAppStart', None)))))
+        except Exception:
+            pass
+        try:
+            _debug_log('SCS exec ok %s callbacks=%s' % (fn, sorted(list(_user_funcs.keys()))))
+        except Exception:
+            pass
         if _user_funcs:
             # CMU-style app: callbacks defined, no explicit runApp() call
             # (or runApp() already started the loop -- starting again is
@@ -3117,7 +4134,16 @@ def exec_code(code, fn):
                 w, h = 1050, 700
             # Only auto-start if the loop is not already running.
             if _app_timer is None:
-                run_app(width=w, height=h)
+                try:
+                    _debug_log('SCS auto-start %s %sx%s' % (fn, w, h))
+                except Exception:
+                    pass
+                run_app(width=w, height=h, enableFullscreen=True)
+        else:
+            try:
+                _debug_log('SCS exec ok %s but NO callbacks found - not starting. ALL _user_ns keys=%s' % (fn, sorted([k for k in _user_ns.keys() if not k.startswith('_')])))
+            except Exception:
+                pass
     except Exception as e:
         _debug_log('SCS exec error in %s: %s' % (fn, e))
         # Prove WHICH runApp app.py actually called: _user_ns['runApp'] may have
@@ -3227,12 +4253,20 @@ def boot(app=None):
         except Exception:
             _sig = 'signature-unavailable'
         _boot_msg = '[SCS entrypoint] boot() version=' + __version__ + ' runApp' + _sig
-        print(_boot_msg)
-        try:
-            from browser import window as _w2
-            _w2.console.log(_boot_msg)
-        except Exception:
-            pass
+        _debug_log(_boot_msg)
+    except Exception:
+        pass
+    # v31 single-run: second boot() on the same page is a duplicate (e.g.
+    # index.html + loader both calling boot, or Brython executing the
+    # <script> twice). Ignore it - do NOT fetch/exec the app a second time.
+    try:
+        if bool(_scs_get('booted', False)):
+            try:
+                print('[SCS entrypoint] boot() already ran - ignoring duplicate boot()')
+            except Exception:
+                pass
+            return
+        _scs_set('booted', True)
     except Exception:
         pass
     _bind_events()
@@ -3318,8 +4352,30 @@ def boot_sandbox():
                 globals()['_debug_log'] = _sb_log
             except Exception:
                 pass
-            # Run / Stop buttons - created in the package if missing.
+            # v52: Sandbox toolbar - ONE flex row, BEFORE the textarea, not appended at end.
+            # Old code did document.body.appendChild(Run) + appendChild(Stop) after the log,
+            # so buttons ended up at the bottom, stacked vertically (body is flex column),
+            # far from the code. Now: toolbar div with flex row, gap, centred, inserted
+            # between canvas and textarea. Run = green, Stop = grey, Clear Log = outline.
             try:
+                _toolbar = None
+                try:
+                    _toolbar = document['sandbox-toolbar']
+                except Exception:
+                    pass
+                if _toolbar is None:
+                    _toolbar = document.createElement('div')
+                    _toolbar.id = 'sandbox-toolbar'
+                    try:
+                        _toolbar.style.cssText = 'display:flex;flex-direction:row;gap:10px;justify-content:center;align-items:center;margin:12px 0 10px 0;width:1050px;max-width:98vw;'
+                    except Exception:
+                        pass
+                    # Insert before textarea, not at end of body.
+                    try:
+                        _ta_el = document['code-input']
+                        document.body.insertBefore(_toolbar, _ta_el)
+                    except Exception:
+                        document.body.appendChild(_toolbar)
                 _run_btn = None
                 try:
                     _run_btn = document['run-btn']
@@ -3328,12 +4384,12 @@ def boot_sandbox():
                 if _run_btn is None:
                     _run_btn = document.createElement('button')
                     _run_btn.id = 'run-btn'
-                    _run_btn.text = 'Run'
+                    _run_btn.text = '▶ Run'
                     try:
-                        _run_btn.style.cssText = 'background:#4c6ef5;color:white;border:0;padding:10px 18px;border-radius:6px;cursor:pointer;font-weight:600;margin-right:8px;'
+                        _run_btn.style.cssText = 'background:#22c55e;color:white;border:0;padding:10px 22px;border-radius:6px;cursor:pointer;font-weight:600;font-size:14px;flex:0 0 auto;'
                     except Exception:
                         pass
-                    document.body.appendChild(_run_btn)
+                    _toolbar.appendChild(_run_btn)
                 _stop_btn = None
                 try:
                     _stop_btn = document['stop-btn']
@@ -3342,18 +4398,81 @@ def boot_sandbox():
                 if _stop_btn is None:
                     _stop_btn = document.createElement('button')
                     _stop_btn.id = 'stop-btn'
-                    _stop_btn.text = 'Stop'
+                    _stop_btn.text = '■ Stop'
                     try:
-                        _stop_btn.style.cssText = 'background:#4c6ef5;color:white;border:0;padding:10px 18px;border-radius:6px;cursor:pointer;font-weight:600;margin-right:8px;'
+                        _stop_btn.style.cssText = 'background:#64748b;color:white;border:0;padding:10px 22px;border-radius:6px;cursor:pointer;font-weight:600;font-size:14px;flex:0 0 auto;'
                     except Exception:
                         pass
-                    document.body.appendChild(_stop_btn)
+                    _toolbar.appendChild(_stop_btn)
+                # Clear Log button - same row, not stacked below.
+                _clear_btn = None
+                try:
+                    _clear_btn = document['clear-log-btn']
+                except Exception:
+                    pass
+                if _clear_btn is None:
+                    _clear_btn = document.createElement('button')
+                    _clear_btn.id = 'clear-log-btn'
+                    _clear_btn.text = 'Clear Log'
+                    try:
+                        _clear_btn.style.cssText = 'background:transparent;color:#94a3b8;border:1px solid #3a3f4b;padding:10px 18px;border-radius:6px;cursor:pointer;font-weight:600;font-size:14px;flex:0 0 auto;'
+                    except Exception:
+                        pass
+                    _toolbar.appendChild(_clear_btn)
+                # v56: handler MUST be bound whether the button came from HTML
+                # or was just created above. Old code defined + bound it INSIDE
+                # the `if _clear_btn is None:` block, so with the HTML toolbar
+                # (sandbox_v53 / deployed /sandbox) the button existed, the
+                # `if` was skipped, no handler was ever bound -> click = nothing.
+                def _clear_log(ev=None):
+                    try:
+                        if _log is not None:
+                            # Clear every way Brython/DOM can hold text.
+                            try:
+                                _log.text = ''
+                            except Exception:
+                                pass
+                            try:
+                                _log.textContent = ''
+                            except Exception:
+                                pass
+                            try:
+                                _log.innerHTML = ''
+                            except Exception:
+                                pass
+                            try:
+                                while getattr(_log, 'firstChild', None) is not None:
+                                    _log.removeChild(_log.firstChild)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    # Do NOT _log_msg('cleared') - that would refill the log
+                    # and look like Clear did nothing. Console only.
+                    try:
+                        window.console.log('[SCS sandbox] Log cleared.')
+                    except Exception:
+                        pass
+                    try:
+                        if ev is not None and hasattr(ev, 'preventDefault'):
+                            ev.preventDefault()
+                    except Exception:
+                        pass
+                try:
+                    _clear_btn.bind('click', _clear_log)
+                except Exception:
+                    pass
+                try:
+                    _clear_btn.onclick = _clear_log
+                except Exception:
+                    pass
             except Exception:
                 _run_btn = _stop_btn = None
             def _run(ev=None):
                 try:
                     _ta2 = document['code-input']
-                    exec_code(_ta2.value, '<sandbox>')
+                    # v52: Run MUST reset run-once - otherwise second Run is ignored.
+                    exec_code(_ta2.value, '<sandbox>', force=True)
                     _log_msg('Running; renderer=' + str(getRendererKind()))
                 except Exception:
                     import traceback
@@ -3413,5 +4532,12 @@ def boot_sandbox():
     except Exception:
         pass
 
+
+def reset_run_once():
+    """Clear the run-once guard so the next exec_code re-runs. Used by sandbox Run."""
+    try:
+        _scs_set('execed_fn', None)
+    except Exception:
+        pass
 
 main = boot
