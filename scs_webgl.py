@@ -689,8 +689,12 @@ class _GPURendererBase:
             self._emit_stroke(pts + [pts[0]], border, borderWidth, op, dashes, True)
 
     def draw_line(self, x1, y1, x2, y2, fill='black', lineWidth=2,
-                  opacity=100, dashes=False):
-        self._emit_stroke([(x1, y1), (x2, y2)], fill, lineWidth,
+                  opacity=100, dashes=False, rotateAngle=0):
+        cx = (x1 + x2) / 2
+        cy = (y1 + y2) / 2
+        pts = [(x1, y1), (x2, y2)]
+        pts = rotate_points(pts, cx, cy, rotateAngle)
+        self._emit_stroke(pts, fill, lineWidth,
                           opacity / 100.0, dashes, False)
 
     def draw_label(self, text, x, y, fill='black', size=12, font='arial',

@@ -439,9 +439,9 @@ class WGPUEngine:
         return self._overlay_item('oval', cx=float(cx), cy=float(cy), w=float(w), h=float(h),
                                   fill=fill, border=border, borderWidth=borderWidth,
                                   opacity=float(opacity))
-    def draw_line(self, x1, y1, x2, y2, fill='black', lineWidth=2, opacity=100, dashes=False):
+    def draw_line(self, x1, y1, x2, y2, fill='black', lineWidth=2, opacity=100, dashes=False, rotateAngle=0):
         return self._overlay_item('line', x1=float(x1), y1=float(y1), x2=float(x2), y2=float(y2),
-                                  fill=fill, lineWidth=float(lineWidth), opacity=float(opacity))
+                                  fill=fill, lineWidth=float(lineWidth), opacity=float(opacity), rotateAngle=float(rotateAngle))
     def draw_polygon(self, points, fill='black', border=None, borderWidth=2, opacity=100,
                      rotateAngle=0, dashes=False):
         return self._overlay_item('polygon', points=list(points), fill=fill, border=border,

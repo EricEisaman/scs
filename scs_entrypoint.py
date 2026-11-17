@@ -1806,7 +1806,8 @@ class Line:
             return
         renderer.draw_line(self.x1, self.y1, self.x2, self.y2,
                            fill=self.fill, lineWidth=self.lineWidth,
-                           opacity=self.opacity, dashes=self.dashes)
+                           opacity=self.opacity, dashes=self.dashes,
+                           rotateAngle=self.rotateAngle)
 
 
 class Polygon:
@@ -2229,14 +2230,15 @@ def drawLabel(text, x, y, fill='black', size=12, font='arial', bold=False,
 
 
 def drawLine(x1, y1, x2, y2, fill='black', lineWidth=2, opacity=100,
-             dashes=False, visible=True, hud=False, centerZ=None):
+             dashes=False, rotateAngle=0, visible=True, hud=False, centerZ=None):
     if not visible:
         return
     r = _renderer_or_2d()
     if r is None:
         return
     r.draw_line(float(x1), float(y1), float(x2), float(y2), fill=fill,
-                lineWidth=lineWidth, opacity=opacity, dashes=dashes)
+                lineWidth=lineWidth, opacity=opacity, dashes=dashes,
+                rotateAngle=rotateAngle)
 
 
 def drawPolygon(*points, fill='black', border=None, borderWidth=2, opacity=100,

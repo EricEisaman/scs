@@ -369,7 +369,7 @@ class Renderer2D:
             ctx.restore()
 
     def draw_line(self, x1, y1, x2, y2, fill='black', lineWidth=2,
-                  opacity=100, dashes=False):
+                  opacity=100, dashes=False, rotateAngle=0):
         ctx = self.ctx
         ctx.save()
         try:
@@ -380,6 +380,9 @@ class Renderer2D:
                 ctx.setLineDash([6, 3] if dashes else [])
             except Exception:
                 pass
+            cx = (x1 + x2) / 2
+            cy = (y1 + y2) / 2
+            self._rotated(cx, cy, rotateAngle)
             ctx.beginPath()
             ctx.moveTo(x1, y1)
             ctx.lineTo(x2, y2)
