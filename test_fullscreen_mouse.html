@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Fullscreen Mouse Mapping Test (400x400)</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px 0 0 0;
+            background: #0f1115;
+            text-align: center;
+        }
+        canvas {
+            display: block;
+            background: black;
+            outline: none;
+            margin: 0 auto;
+        }
+        #info {
+            color: white;
+            font-family: monospace;
+            margin-top: 20px;
+            padding: 10px;
+        }
+        button {
+            margin: 10px;
+            padding: 8px 16px;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div>
+        <button id="fsBtn">Enter Fullscreen (400x400 app)</button>
+        <button id="exitBtn">Exit Fullscreen</button>
+    </div>
+    <canvas id="canvas" width="400" height="400" tabindex="0"></canvas>
+    <div id="info">
+        <div>Mouse Position: <span id="mousePos">Move mouse over canvas</span></div>
+        <div>Canvas Rect: <span id="canvasRect">Waiting...</span></div>
+        <div>Viewport: <span id="viewport">Waiting...</span></div>
+        <div id="debug" style="text-align: left; max-width: 600px; margin: 20px auto;">
+            <p><strong>Test Instructions:</strong></p>
+            <ol>
+                <li>Click "Enter Fullscreen" button</li>
+                <li>Move mouse around - watch the mouse position numbers</li>
+                <li>If the mouse position is correct (0-400 range), clicks should map correctly</li>
+                <li>If you see numbers like 100-300 or 200-700, there's an offset/scaling issue</li>
+                <li>Compare left and right edges - if one has more inset than the other, that's the bug</li>
+            </ol>
+            <p id="result"></p>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const fsBtn = document.getElementById('fsBtn');
+        const exitBtn = document.getElementById('exitBtn');
+        const mousePosSpan = document.getElementById('mousePos');
+        const canvasRectSpan = document.getElementById('canvasRect');
+        const viewportSpan = document.getElementById('viewport');
+        const resultSpan = document.getElementById('result');
+
+        // Track if we're in fullscreen
+        let isFullscreen = false;
+
+        // Listen for fullscreen change
+        document.addEventListener('fullscreenchange', () => {
+            isFullscreen = !!document.fullscreenElement;
+            console.log('Fullscreen changed:', isFullscreen);
+        });
+
+        // Update viewport size display
+        function updateViewport() {
+            viewportSpan.textContent = `${window.innerWidth}x${window.innerHeight}`;
+        }
+
+        // Update canvas rect display
+        function updateCanvasRect() {
+            const rect = canvas.getBoundingClientRect();
+            canvasRectSpan.textContent = `${rect.width}x${rect.height} @ (${Math.round(rect.left)},${Math.round(rect.top)})`;
+        }
+
+        // Map mouse position (like _pos in scs_entrypoint.py)
+        function mapMousePosition(ev) {
+            const rect = canvas.getBoundingClientRect();
+            if (!rect.width || !rect.height) return { x: 0, y: 0 };
+
+            // The logical app size is ALWAYS 400x400
+            const logicalW = 400;
+            const logicalH = 400;
+
+            // Map from viewport coordinates to logical app coordinates
+            const logicalX = (ev.clientX - rect.left) * logicalW / rect.width;
+            const logicalY = (ev.clientY - rect.top) * logicalH / rect.height;
+
+            return { x: logicalX, y: logicalY };
+        }
+
+        // Mouse move handler
+        canvas.addEventListener('mousemove', (ev) => {
+            const rect = canvas.getBoundingClientRect();
+            const { x, y } = mapMousePosition(ev);
+            
+            updateCanvasRect();
+            mousePosSpan.textContent = `${x.toFixed(0)}, ${y.toFixed(0)}`;
+
+            // Check for inset issue
+            const tolerance = 5; // Allow some floating point error
+            if (isFullscreen) {
+                let warning = '';
+                
+                // In fullscreen, the canvas should fill the viewport
+                // Check if rect is NOT full viewport width
+                if (rect.width < window.innerWidth - 1) {
+                    warning += `❌ Canvas width ${rect.width} < viewport width ${window.innerWidth}. `;
+                }
+                
+                // Check if canvas is not at left edge
+                if (Math.abs(rect.left) > tolerance) {
+                    warning += `❌ Canvas left offset ${rect.left} (should be 0). `;
+                }
+                
+                // Check if logical coords are in valid range
+                if (x < -10 || x > 410 || y < -10 || y > 410) {
+                    warning += `⚠️ Logical coords (${x.toFixed(0)}, ${y.toFixed(0)}) outside expected range 0-400. `;
+                }
+                
+                if (warning) {
+                    resultSpan.textContent = warning;
+                } else {
+                    resultSpan.textContent = '✅ Mouse mapping appears correct!';
+                }
+            }
+        });
+
+        // Fullscreen button handlers
+        fsBtn.addEventListener('click', async () => {
+            try {
+                await canvas.requestFullscreen();
+                console.log('Fullscreen requested on canvas');
+            } catch (err) {
+                console.error('Fullscreen request failed:', err);
+                try {
+                    // Try the parent if canvas request fails
+                    await canvas.parentElement.requestFullscreen();
+                    console.log('Fullscreen requested on parent');
+                } catch (err2) {
+                    console.error('Fullscreen request on parent also failed:', err2);
+                }
+            }
+        });
+
+        exitBtn.addEventListener('click', async () => {
+            if (document.fullscreenElement) {
+                await document.exitFullscreen();
+            }
+        });
+
+        // Initial setup
+        updateViewport();
+        window.addEventListener('resize', updateViewport);
+    </script>
+</body>
+</html>
