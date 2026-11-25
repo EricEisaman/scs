@@ -870,6 +870,8 @@ def drawFruit(app):
         drawCircle(fx + 5, fy + 4, 7, fill='red')
         drawLine(fx - 5, fy - 2, fx + 2, fy - 10, fill='#D89055', lineWidth=2)
         drawLine(fx + 5, fy - 2, fx + 2, fy - 10, fill='#D89055', lineWidth=2)
+        drawRect(fx - 9, fy + 5, 4, 4, fill='white')
+        drawRect(fx + 1, fy + 5, 4, 4, fill='white')
     elif kind == 'strawberry':
         drawCircle(fx, fy + 2, 10, fill='red')
         drawRect(fx - 6, fy - 10, 12, 4, fill='green')
@@ -919,7 +921,7 @@ def drawPac(app):
     if app.state != 'play':
         openAmt = 0
     else:
-        openAmt = [30, 15, 0, 15][(app.mouth // 5) % 4]
+        openAmt = [0, 5, 10, 15, 20, 24, 20, 15, 10, 5][(app.mouth // 2) % 10]
     angMap = {(1, 0): 0, (-1, 0): 180, (0, 1): 90, (0, -1): 270, (0, 0): 0}
     ang = angMap[(p['dx'], p['dy'])]
     drawArc(p['x'] + T / 2, p['y'] + T / 2, T - 6, T - 6, ang + openAmt, 360 - 2 * openAmt, fill='yellow')
