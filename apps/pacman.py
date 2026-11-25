@@ -48,15 +48,13 @@ try:
 except Exception:
     _scores = None
 
+# Audio is lazy: created on first user gesture in _ensureAudio, not at import time.
 _audio = None
-try:
-    if HAS_PAC_AUDIO and _PacAudio is not None:
-        _audio = _PacAudio(quality="medium", seed=1)
-except Exception:
-    _audio = None
 
 def _play(name):
     try:
+        if _audio is None:
+            _ensureAudio()
         if _audio is not None:
             _audio.play(name)
     except Exception:
@@ -64,13 +62,14 @@ def _play(name):
 
 def _resumeAudio():
     try:
+        if _audio is None:
+            _ensureAudio()
         if _audio is not None:
             _audio.resume()
     except Exception:
         pass
 
 def _loadHigh():
-    # IndexedDB first, via sync localStorage mirror, fallback to legacy key.
     try:
         if _scores is not None:
             return int(_scores.best_score_sync(_APP_ID, player="local"))
@@ -86,7 +85,6 @@ def _loadHigh():
     return 0
 
 def _saveHigh(v):
-    # Add to IndexedDB top list, local only. Mirror keeps legacy key for compat.
     try:
         if _scores is not None:
             _scores.add_score_sync(_APP_ID, "local", int(v))
@@ -97,6 +95,68 @@ def _saveHigh(v):
             _window.localStorage.setItem("pacman_high", str(v))
     except Exception:
         pass
+
+def _ensureAudio():
+    # Lazy audio: create on first user gesture, not at import time.
+    # Import-time AudioContext is suspended and can fail silently.
+    global _audio
+    try:
+        if _audio is None and HAS_PAC_AUDIO and _PacAudio is not None:
+            _audio = _PacAudio(quality="medium", seed=1)
+    except Exception:
+        pass
+    try:
+        if _audio is not None:
+            _audio.resume()
+    except Exception:
+        pass
+    return _audio
+
+def _normKey(k):
+    # SCS / browser can deliver many variants: space, ' ', Spacebar, ArrowLeft, etc.
+    # Normalize all of them to CMU names: space, left, right, up, down, p, r, enter.
+    try:
+        s = str(k)
+    except Exception:
+        return ""
+    s = s.strip().lower()
+    if s in (" ", "space", "spacebar", "space_bar", "space bar"):
+        return "space"
+    if s in ("arrowleft", "left", "a"):
+        return "left"
+    if s in ("arrowright", "right", "d"):
+        return "right"
+    if s in ("arrowup", "up", "w"):
+        return "up"
+    if s in ("arrowdown", "down", "s"):
+        return "down"
+    if s in ("enter", "return", "returnkey"):
+        return "space"
+    if s in ("p", "r", "escape", "esc"):
+        return s
+    return s
+
+def _startGame(app):
+    # Shared start path for SPACE, Enter, arrows, WASD, and mouse click.
+    _ensureAudio()
+    try:
+        _resumeAudio()
+    except Exception:
+        pass
+    if app.state not in ("ready", "dead", "won"):
+        return
+    if app.state != "ready":
+        app.score = 0
+        app.lives = 3
+        app.level = 1
+        app.nextExtraLife = 10000
+        loadLevel(app)
+        app.timer = 0
+    else:
+        if app.timer == 0:
+            _play("intro")
+    app.state = "play"
+    app.paused = False
 
 # 1050 x 700 : T 30, COLS 35, ROWS 21, maze 1050 x 630, HUD 70
 T = 30
@@ -327,7 +387,6 @@ def addScore(app, pts):
     if app.score > app.high:
         app.high = app.score
         _saveHigh(app.high)
-        # Keep HUD top list in sync, local only
         try:
             if _scores is not None:
                 app.leaderboard = _scores.top_scores_sync(_APP_ID, limit=3)
@@ -557,21 +616,15 @@ def onAppStart(app):
     app.mouth = 0
     app.leaderboard = []
     app.leaderboardError = False
+    app.lastKey = ""
     loadLevel(app)
-    # Leaderboard: IndexedDB local only, never blocks game, never fetches
+    # Leaderboard: IndexedDB local only, sync mirror, never blocks, never fetches
     try:
         loadLeaderboard(app)
     except Exception:
         app.leaderboard = []
-    # Background IndexedDB sync, event driven, never blocks. If it fails, sync mirror already has data.
-    try:
-        if HAS_AIO and _aio is not None:
-            _aio.run(syncLeaderboard(app))
-    except Exception:
-        pass
 
 def loadLeaderboard(app):
-    # Sync read from IndexedDB mirror, local players only.
     try:
         if _scores is not None:
             app.leaderboard = _scores.top_scores_sync(_APP_ID, limit=3)
@@ -589,52 +642,58 @@ def saveLeaderboard(app):
     except Exception:
         pass
 
-async def syncLeaderboard(app):
-    # Async IndexedDB read, updates HUD when it resolves.
-    try:
-        if _scores is not None:
-            top = await _scores.top_scores(_APP_ID, limit=3)
-            if top:
-                app.leaderboard = top
-                if top[0].get('score', 0) > app.high:
-                    app.high = int(top[0].get('score', 0))
-    except Exception:
-        pass
-
 def onKeyPress(app, key):
-    if key in DIRS:
-        app.nextDir = DIRS[key]
-    if key == 'p' and app.state == 'play':
+    # Record raw key for HUD debug, then normalize.
+    try:
+        app.lastKey = str(key)
+    except Exception:
+        app.lastKey = ""
+    k = _normKey(key)
+    # Audio must resume on ANY key, not just SPACE, or AudioContext stays suspended.
+    _ensureAudio()
+    if k in DIRS:
+        app.nextDir = DIRS[k]
+        # Arrows / WASD also start the game, so pressing a direction just works.
+        if app.state in ("ready", "dead", "won"):
+            _startGame(app)
+        return
+    if k == "p" and app.state == "play":
         app.paused = not app.paused
         return
-    if key == 'r':
+    if k == "r":
         app.score = 0
         app.lives = 3
         app.level = 1
         app.nextExtraLife = 10000
         loadLevel(app)
-        app.state = 'ready'
+        app.state = "ready"
         app.timer = 0
         return
-    if key == 'space' and app.state in ('ready', 'dead', 'won'):
-        _resumeAudio()
-        if app.state != 'ready':
-            app.score = 0
-            app.lives = 3
-            app.level = 1
-            app.nextExtraLife = 10000
-            loadLevel(app)
-            app.timer = 0
-        else:
-            if app.timer == 0:
-                _play('intro')
-        app.state = 'play'
-        app.paused = False
+    if k == "space" and app.state in ("ready", "dead", "won"):
+        _startGame(app)
+        return
 
 def onKeyHold(app, keys):
-    for k in ['left', 'right', 'up', 'down']:
-        if k in keys:
-            app.nextDir = DIRS[k]
+    # keys can be a set/list of raw browser names: ArrowLeft, ' ', etc. Normalize each.
+    try:
+        if keys is None:
+            return
+        for raw in list(keys):
+            k = _normKey(raw)
+            if k in DIRS:
+                app.nextDir = DIRS[k]
+    except Exception:
+        pass
+
+def onMousePress(app, mouseX, mouseY):
+    # Click to start also resumes audio. Fixes focus: canvas click is a user gesture.
+    try:
+        app.lastKey = "click"
+    except Exception:
+        pass
+    _ensureAudio()
+    if app.state in ("ready", "dead", "won"):
+        _startGame(app)
 
 def onStep(app):
     if app.state != 'play':
@@ -762,6 +821,12 @@ def redrawAll(app):
     # Fruit indicator
     if app.fruit is not None:
         drawLabel('Fruit ' + app.fruit['kind'], 1020 - 80, ROWS * T + 48, fill='pink', size=14)
+    # Debug: show last key + state so a dead keyboard is visible.
+    try:
+        lk = getattr(app, "lastKey", "")
+        drawLabel("Key " + str(lk) + " State " + str(app.state), 525, 12, fill="lightGray", size=12)
+    except Exception:
+        pass
     # Leaderboard line, best effort
     if len(app.leaderboard) > 0:
         txt = 'Top: '
