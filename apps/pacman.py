@@ -83,6 +83,11 @@ def _saveLeaderboard(scores):
     except Exception:
         pass
 
+def _dist(x1, y1, x2, y2):
+    dx = x2 - x1
+    dy = y2 - y1
+    return (dx * dx + dy * dy) ** 0.5
+
 def _normKey(key):
     if key is None:
         return ''
@@ -328,7 +333,7 @@ def ghostTarget(app, i, g, scatter):
             ax, ay = pc + 2 * p['dx'], pr + 2 * p['dy']
         return (2 * ax - bc, 2 * ay - br)
     # Clyde
-    d = distance(g['x'], g['y'], p['x'], p['y'])
+    d = _dist(g['x'], g['y'], p['x'], p['y'])
     if d > 8 * T:
         return (pc, pr)
     return (1, 19)
@@ -554,7 +559,7 @@ def checkCollisions(app):
     for g in app.ghosts:
         if g['state'] == 'house' or g['state'] == 'leaving' or g['state'] == 'entering':
             continue
-        if distance(p['x'], p['y'], g['x'], g['y']) < T * 0.6:
+        if _dist(p['x'], p['y'], g['x'], g['y']) < T * 0.6:
             if g['fright'] and g['state'] == 'active':
                 app.ghostCombo = app.ghostCombo + 1
                 pts = 200 * (2 ** (app.ghostCombo - 1))
@@ -600,7 +605,28 @@ def onAppStart(app):
 def onKeyPress(app, key):
     k = _normKey(key)
     if k in DIRS:
-        app.nextDir = DIRS[k]
+        pressed = DIRS[k]
+        app.nextDir = pressed
+        if app.state in ('ready', 'dead', 'won'):
+            _resumeAudio()
+            if app.state != 'ready':
+                app.score = 0
+                app.lives = 3
+                app.level = 1
+                app.nextExtraLife = 10000
+                loadLevel(app)
+                app.timer = 0
+                app.lastDeathTimer = 0
+                app.modeTimer = 0
+            else:
+                resetPositions(app)
+                app.timer = 0
+                app.lastDeathTimer = 0
+                app.modeTimer = 0
+                _play('intro')
+            app.nextDir = pressed
+            app.state = 'play'
+            app.paused = False
         return
     if k == 'p' and app.state == 'play':
         app.paused = not app.paused
@@ -623,13 +649,40 @@ def onKeyPress(app, key):
             app.nextExtraLife = 10000
             loadLevel(app)
             app.timer = 0
+            app.lastDeathTimer = 0
+            app.modeTimer = 0
         else:
-            if app.timer == 0:
-                _play('intro')
+            resetPositions(app)
+            app.timer = 0
+            app.lastDeathTimer = 0
+            app.modeTimer = 0
+            _play('intro')
         app.state = 'play'
         app.paused = False
 
+def _tickHouse(app):
+    for g in app.ghosts:
+        if g['state'] != 'house':
+            continue
+        g['bob'] = g['bob'] + 1
+        if (g['bob'] // 20) % 2 == 0:
+            g['y'] = g['y'] - 0.4
+        else:
+            g['y'] = g['y'] + 0.4
+        if g['y'] < g['home'][1] * T - 4:
+            g['y'] = g['home'][1] * T - 4
+        if g['y'] > g['home'][1] * T + 4:
+            g['y'] = g['home'][1] * T + 4
+
 def onStep(app):
+    if app.state == 'ready':
+        app.timer = app.timer + 1
+        app.mouth = (app.mouth + 1) % 20
+        _tickHouse(app)
+        for i, g in enumerate(app.ghosts):
+            if g['state'] == 'active':
+                moveGhost(app, i, g)
+        return
     if app.state != 'play':
         return
     if app.paused:
