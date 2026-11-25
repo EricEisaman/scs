@@ -23,14 +23,30 @@ except Exception:
     _window = None
     HAS_WINDOW = False
 
+# High scores: app-agnostic IndexedDB extension, local players only, no network.
 try:
-    from extensions.fetch import fetch_json as _fetch_json
-    from browser import aio as _aio
-    HAS_FETCH = True
+    from extensions.indexed_db import LocalStore as _LocalStore
+    from extensions.indexed_db import get_store as _get_store
+    HAS_INDEXED_DB = True
 except Exception:
-    _fetch_json = None
+    _LocalStore = None
+    _get_store = None
+    HAS_INDEXED_DB = False
+
+try:
+    from browser import aio as _aio
+    HAS_AIO = True
+except Exception:
     _aio = None
-    HAS_FETCH = False
+    HAS_AIO = False
+
+_APP_ID = "pacman"
+_scores = None
+try:
+    if HAS_INDEXED_DB and _get_store is not None:
+        _scores = _get_store()
+except Exception:
+    _scores = None
 
 _audio = None
 try:
@@ -54,6 +70,12 @@ def _resumeAudio():
         pass
 
 def _loadHigh():
+    # IndexedDB first, via sync localStorage mirror, fallback to legacy key.
+    try:
+        if _scores is not None:
+            return int(_scores.best_score_sync(_APP_ID, player="local"))
+    except Exception:
+        pass
     try:
         if HAS_WINDOW and _window is not None:
             v = _window.localStorage.getItem("pacman_high")
@@ -64,6 +86,12 @@ def _loadHigh():
     return 0
 
 def _saveHigh(v):
+    # Add to IndexedDB top list, local only. Mirror keeps legacy key for compat.
+    try:
+        if _scores is not None:
+            _scores.add_score_sync(_APP_ID, "local", int(v))
+    except Exception:
+        pass
     try:
         if HAS_WINDOW and _window is not None:
             _window.localStorage.setItem("pacman_high", str(v))
@@ -299,6 +327,12 @@ def addScore(app, pts):
     if app.score > app.high:
         app.high = app.score
         _saveHigh(app.high)
+        # Keep HUD top list in sync, local only
+        try:
+            if _scores is not None:
+                app.leaderboard = _scores.top_scores_sync(_APP_ID, limit=3)
+        except Exception:
+            pass
     if app.score >= app.nextExtraLife:
         app.lives = app.lives + 1
         app.nextExtraLife = app.nextExtraLife + 10000
@@ -492,6 +526,10 @@ def checkCollisions(app):
                 _play('death')
                 if app.lives <= 0:
                     app.state = 'dead'
+                    try:
+                        saveLeaderboard(app)
+                    except Exception:
+                        pass
                 else:
                     app.state = 'ready'
                 resetPositions(app)
@@ -520,23 +558,48 @@ def onAppStart(app):
     app.leaderboard = []
     app.leaderboardError = False
     loadLevel(app)
-    # Leaderboard: best effort, never blocks game
+    # Leaderboard: IndexedDB local only, never blocks game, never fetches
     try:
-        if HAS_FETCH and _aio is not None:
-            _aio.run(loadLeaderboard(app))
+        loadLeaderboard(app)
+    except Exception:
+        app.leaderboard = []
+    # Background IndexedDB sync, event driven, never blocks. If it fails, sync mirror already has data.
+    try:
+        if HAS_AIO and _aio is not None:
+            _aio.run(syncLeaderboard(app))
     except Exception:
         pass
 
-async def loadLeaderboard(app):
+def loadLeaderboard(app):
+    # Sync read from IndexedDB mirror, local players only.
     try:
-        data = await _fetch_json('https://example.com/pacman-leaderboard.json')
-        if isinstance(data, list):
-            app.leaderboard = data[:3]
-        elif isinstance(data, dict) and 'scores' in data:
-            app.leaderboard = data['scores'][:3]
+        if _scores is not None:
+            app.leaderboard = _scores.top_scores_sync(_APP_ID, limit=3)
+            return
     except Exception:
-        app.leaderboardError = True
-        app.leaderboard = []
+        pass
+    app.leaderboard = []
+    app.leaderboardError = False
+
+def saveLeaderboard(app):
+    try:
+        if _scores is not None and app.score > 0:
+            _scores.add_score_sync(_APP_ID, "local", int(app.score), level=int(app.level))
+            app.leaderboard = _scores.top_scores_sync(_APP_ID, limit=3)
+    except Exception:
+        pass
+
+async def syncLeaderboard(app):
+    # Async IndexedDB read, updates HUD when it resolves.
+    try:
+        if _scores is not None:
+            top = await _scores.top_scores(_APP_ID, limit=3)
+            if top:
+                app.leaderboard = top
+                if top[0].get('score', 0) > app.high:
+                    app.high = int(top[0].get('score', 0))
+    except Exception:
+        pass
 
 def onKeyPress(app, key):
     if key in DIRS:
