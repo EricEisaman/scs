@@ -45,6 +45,13 @@ def _resumeAudio():
     except Exception:
         pass
 
+def _stopAudio():
+    try:
+        if _audio is not None and getattr(_audio, 'player', None) is not None:
+            _audio.player.stop_all()
+    except Exception:
+        pass
+
 def _loadHigh():
     try:
         if HAS_WINDOW and _window is not None:
@@ -156,6 +163,16 @@ DIR_LIST = [(-1, 0), (1, 0), (0, -1), (0, 1)]
 PHASES = [(7, 'scatter'), (20, 'chase'), (7, 'scatter'), (20, 'chase'), (5, 'scatter'), (20, 'chase'), (5, 'scatter'), (100000, 'chase')]
 FRUIT_POINTS = {'cherry': 100, 'strawberry': 300, 'orange': 500, 'apple': 700, 'melon': 1000}
 FRUIT_BY_LEVEL = ['cherry', 'strawberry', 'orange', 'apple', 'melon', 'melon', 'melon']
+
+# Arcade death, 60 steps/sec: freeze 60, anim 90, hold 60, total 210.
+# Sound starts at tick 60, not at collision. Ghosts visible in freeze, gone in anim.
+DEATH_FREEZE_TICKS = 60
+DEATH_ANIM_TICKS = 90
+DEATH_HOLD_TICKS = 60
+DEATH_TOTAL_TICKS = 210
+DEATH_READY_TICKS = 120
+# 11 frames, mouth half-angle, facing up. Sweep = 360 - 2 * openAmt.
+DEATH_OPEN = [20, 40, 60, 80, 100, 120, 140, 155, 165, 172, 178]
 
 # Model helpers
 def isWall(app, c, r, forGhost=False, allowDoor=False):
@@ -571,15 +588,16 @@ def checkCollisions(app):
                 _play('ghost_eaten')
             elif g['state'] == 'active' and not g['fright']:
                 app.lives = app.lives - 1
-                _play('death')
-                if app.lives <= 0:
-                    app.state = 'dead'
-                else:
-                    app.state = 'ready'
-                resetPositions(app)
-                app.timer = 0
-                app.lastDeathTimer = 0
-                app.modeTimer = 0
+                app.frightTimer = 0
+                app.fruit = None
+                for _g in app.ghosts:
+                    _g['fright'] = False
+                _stopAudio()
+                app.state = 'dying'
+                app.deathTimer = 0
+                app.pac['dx'] = 0
+                app.pac['dy'] = 0
+                app.nextDir = (0, 0)
                 return
 
 def onAppStart(app):
@@ -599,10 +617,13 @@ def onAppStart(app):
     app.frightTimer = 0
     app.ghostCombo = 0
     app.mouth = 0
+    app.deathTimer = 0
     app.leaderboard = _loadLeaderboard()
     loadLevel(app)
 
 def onKeyPress(app, key):
+    if app.state in ('dying', 'ready_wait'):
+        return
     k = _normKey(key)
     if k in DIRS:
         pressed = DIRS[k]
@@ -618,11 +639,13 @@ def onKeyPress(app, key):
                 app.timer = 0
                 app.lastDeathTimer = 0
                 app.modeTimer = 0
+                app.deathTimer = 0
             else:
                 resetPositions(app)
                 app.timer = 0
                 app.lastDeathTimer = 0
                 app.modeTimer = 0
+                app.deathTimer = 0
                 _play('intro')
             app.nextDir = pressed
             app.state = 'play'
@@ -639,6 +662,7 @@ def onKeyPress(app, key):
         loadLevel(app)
         app.state = 'ready'
         app.timer = 0
+        app.deathTimer = 0
         return
     if k == 'space' and app.state in ('ready', 'dead', 'won'):
         _resumeAudio()
@@ -651,11 +675,13 @@ def onKeyPress(app, key):
             app.timer = 0
             app.lastDeathTimer = 0
             app.modeTimer = 0
+            app.deathTimer = 0
         else:
             resetPositions(app)
             app.timer = 0
             app.lastDeathTimer = 0
             app.modeTimer = 0
+            app.deathTimer = 0
             _play('intro')
         app.state = 'play'
         app.paused = False
@@ -675,6 +701,33 @@ def _tickHouse(app):
             g['y'] = g['home'][1] * T + 4
 
 def onStep(app):
+    if app.state == 'dying':
+        app.deathTimer = app.deathTimer + 1
+        if app.deathTimer == DEATH_FREEZE_TICKS:
+            _play('death')
+        if app.deathTimer >= DEATH_TOTAL_TICKS:
+            app.deathTimer = 0
+            if app.lives <= 0:
+                app.state = 'dead'
+                app.timer = 0
+            else:
+                resetPositions(app)
+                app.timer = 0
+                app.lastDeathTimer = 0
+                app.modeTimer = 0
+                app.frightTimer = 0
+                app.fruit = None
+                app.state = 'ready_wait'
+        return
+    if app.state == 'ready_wait':
+        app.timer = app.timer + 1
+        _tickHouse(app)
+        if app.timer >= DEATH_READY_TICKS:
+            app.timer = 0
+            app.modeTimer = 0
+            app.state = 'play'
+            app.paused = False
+        return
     if app.state == 'ready':
         app.timer = app.timer + 1
         app.mouth = (app.mouth + 1) % 20
@@ -714,6 +767,8 @@ def onStep(app):
     for i, g in enumerate(app.ghosts):
         moveGhost(app, i, g)
     checkCollisions(app)
+    if app.state != 'play':
+        return
     if not app.pellets and not app.power:
         app.level = app.level + 1
         loadLevel(app)
@@ -766,6 +821,32 @@ def drawFruit(app):
 
 def drawPac(app):
     p = app.pac
+    if app.state == 'dead':
+        return
+    if app.state == 'dying':
+        if app.deathTimer < DEATH_FREEZE_TICKS:
+            openAmt = 20
+            angMap = {(1, 0): 0, (-1, 0): 180, (0, 1): 90, (0, -1): 270, (0, 0): 0}
+            ang = angMap[(p['dx'], p['dy'])]
+            drawArc(p['x'] + T / 2, p['y'] + T / 2, T - 6, T - 6, ang + openAmt, 360 - 2 * openAmt, fill='yellow')
+            return
+        anim = app.deathTimer - DEATH_FREEZE_TICKS
+        if anim >= DEATH_ANIM_TICKS:
+            return
+        frame = (anim * 11) // DEATH_ANIM_TICKS
+        if frame > 10:
+            frame = 10
+        openAmt = DEATH_OPEN[frame]
+        drawArc(p['x'] + T / 2, p['y'] + T / 2, T - 6, T - 6, 270 + openAmt, 360 - 2 * openAmt, fill='yellow')
+        if anim >= 80:
+            cx = p['x'] + T / 2
+            cy = p['y'] + T / 2
+            drawLine(cx - 9, cy, cx + 9, cy, fill='yellow', lineWidth=2)
+            drawLine(cx, cy - 9, cx, cy + 9, fill='yellow', lineWidth=2)
+            drawLine(cx - 6, cy - 6, cx + 6, cy + 6, fill='yellow', lineWidth=2)
+            drawLine(cx - 6, cy + 6, cx + 6, cy - 6, fill='yellow', lineWidth=2)
+            drawCircle(cx, cy, 2, fill='yellow')
+        return
     openAmt = 40 if app.mouth < 10 else 5
     if app.state != 'play':
         openAmt = 20
@@ -774,6 +855,10 @@ def drawPac(app):
     drawArc(p['x'] + T / 2, p['y'] + T / 2, T - 6, T - 6, ang + openAmt, 360 - 2 * openAmt, fill='yellow')
 
 def drawGhosts(app):
+    if app.state == 'dead':
+        return
+    if app.state == 'dying' and app.deathTimer >= DEATH_FREEZE_TICKS:
+        return
     for g in app.ghosts:
         cx = g['x'] + T / 2
         cy = g['y'] + T / 2

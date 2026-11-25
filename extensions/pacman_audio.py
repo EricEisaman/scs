@@ -2,13 +2,14 @@
 # Without modifying proc_audio.py at all.
 # EVENT-DRIVEN ONLY - No timeouts, no setTimeout, no polling counters.
 # All timing via AudioContext.currentTime, completion via oscillator.onended event.
-# WSG wavetable voice, like the original Namco hardware: each voice is
-# a 32-sample waveform, rendered as a PeriodicWave from its DFT spectrum,
-# plus a faithful two-voice MML intro in the style of extensions/8bit.py.
+# Square-wave arcade voice, like the original Namco hardware, plus a
+# faithful MML intro melody in the same style as extensions/8bit.py.
+# Death is NOT MML: arcade death is a single WSG voice, 90 ticks / 1.5 s,
+# two descending pitch sweeps with vibrato plus two low pops. It is
+# built in PacManPlayer.play_death with continuous frequency ramps.
 # Architecture mirrors extensions/8bit.py:
 # - Built on top of proc_audio.py: imports AudioEngine and Patch but does not modify them
-# - Uses Web Audio API PeriodicWave: DFT of 32-sample WSG waveform ->
-#   Fourier coeffs -> createPeriodicWave, per voice (lead / bass)
+# - Uses Web Audio API directly for square-wave: oscillator.type = square
 # - All oscillators scheduled via ctx.currentTime + offset, not setTimeout
 # - Completion via onended event chain: last oscillator onended -> _clear_nodes -> on_complete
 # - Siren loops by chaining onended -> schedule next loop chunk, never by timer
@@ -46,126 +47,38 @@ DEFAULT_TEMPO = 140
 DEFAULT_LENGTH = 4
 MODE_FACTORS = {'MN': 7 / 8, 'ML': 1.0, 'MS': 3 / 4}
 
-# ---- Namco WSG timbre: proper Fourier spectrum for both tracks ----
-# The arcade chip is not a square-wave chip. It is a 3-voice wavetable chip:
-# each voice steps through a 32-sample 4-bit waveform from PROM. The timbre
-# of a voice is the Fourier spectrum of that waveform, not a square wave
-# (square = odd harmonics only, 1, 0, 1/3, 0, 1/5 ...).
-# Here both intro voices get their own 32-sample WSG-style waveform, and
-# their Fourier spectra are computed from those waveforms by DFT, then
-# used as Web Audio PeriodicWave coefficients. No spectrum is asserted
-# by hand; it is derived from the waveform.
-# Lead: triangle + saw blend. Triangle alone gives odd harmonics only,
-# decaying as 1/n^2. Blending in a saw adds even harmonics, so the lead
-# is reedy and bright: fundamental 1.0, 2nd 0.30, 3rd 0.22, 4th 0.16,
-# then a slow tail. That is the lead cutting through, not a square.
-# Bass: pure triangle, 1 cycle over 32 samples. Triangle gives odd
-# harmonics only, decaying as 1/n^2: fundamental 1.0, 2nd 0.0,
-# 3rd 0.11, 5th 0.04, 7th 0.02. Fundamental-dominant, warm, no harsh
-# even harmonics, so it sits under the lead instead of masking it.
-def _wsg_lead_wave():
-    wave = []
-    for n in range(32):
-        if n < 16:
-            tri = float(n)
-        else:
-            tri = float(31 - n)
-        saw = n * 15.0 / 31.0
-        wave.append((tri + saw) / 2.0)
-    return wave
+# Arcade death sound, 90 ticks at 60 Hz = 1.5 s, WSG voice 2 only.
+# Sweep 1: 0.00-0.65 s, 1000 -> 100 Hz, vibrato ~9 Hz.
+# Sweep 2: 0.65-1.15 s, 700 -> 150 Hz, vibrato ~11 Hz.
+# Tail: 1.15-1.50 s, two low pops, 0.08 s each, 0.12 s gap.
+DEATH_TOTAL_S = 1.5
+DEATH_SWEEP1_START = 1000.0
+DEATH_SWEEP1_END = 100.0
+DEATH_SWEEP1_DUR = 0.65
+DEATH_SWEEP1_VIB_RATE = 9.0
+DEATH_SWEEP1_VIB_DEPTH = 45.0
+DEATH_SWEEP2_START = 700.0
+DEATH_SWEEP2_END = 150.0
+DEATH_SWEEP2_DUR = 0.50
+DEATH_SWEEP2_VIB_RATE = 11.0
+DEATH_SWEEP2_VIB_DEPTH = 35.0
+DEATH_POP1_START = 1.15
+DEATH_POP2_START = 1.35
+DEATH_POP_DUR = 0.08
+DEATH_POP_START_FREQ = 200.0
+DEATH_POP_END_FREQ = 80.0
 
-def _wsg_bass_wave():
-    wave = []
-    for n in range(32):
-        if n < 16:
-            wave.append(float(n))
-        else:
-            wave.append(float(31 - n))
-    return wave
-
-WSG_LEAD_WAVE = _wsg_lead_wave()
-WSG_BASS_WAVE = _wsg_bass_wave()
-
-def _wsg_fourier(wave32):
-    # DFT of a 32-sample waveform -> PeriodicWave (real, imag) coefficients.
-    # real[k] = cosine coeff a_k, imag[k] = sine coeff b_k, k = 0..16.
-    # a_k = (2/N) sum x_n cos(2 pi k n / N), b_k = (2/N) sum x_n sin(...)
-    # DC removed (real[0] = 0). Normalised so fundamental magnitude = 1.0,
-    # so gain, not spectrum, sets loudness.
-    n_count = len(wave32)
-    mean = sum(wave32) / float(n_count)
-    x = [v - mean for v in wave32]
-    real = [0.0] * 17
-    imag = [0.0] * 17
-    for k in range(1, 17):
-        a = 0.0
-        b = 0.0
-        for n in range(n_count):
-            ang = 2.0 * math.pi * k * n / n_count
-            a = a + x[n] * math.cos(ang)
-            b = b + x[n] * math.sin(ang)
-        real[k] = (2.0 / n_count) * a
-        imag[k] = (2.0 / n_count) * b
-    mag1 = math.sqrt(real[1] * real[1] + imag[1] * imag[1])
-    if mag1 > 0:
-        for k in range(1, 17):
-            real[k] = real[k] / mag1
-            imag[k] = imag[k] / mag1
-    real[0] = 0.0
-    imag[0] = 0.0
-    return real, imag
-
-WSG_LEAD_SPECTRUM = _wsg_fourier(WSG_LEAD_WAVE)
-WSG_BASS_SPECTRUM = _wsg_fourier(WSG_BASS_WAVE)
-
-def _assign_voice_offsets(events, voice, wave, gain):
-    # Give a single-voice event list explicit start offsets (seconds)
-    # and voice / wave / gain tags, so play_events can schedule it
-    # polyphonically. Returns a new list, does not mutate the input.
-    out = []
-    t = 0.0
-    for ev in events:
-        e = dict(ev)
-        e['start_offset_s'] = t
-        e['voice'] = voice
-        e['wave'] = wave
-        e['gain'] = gain
-        out.append(e)
-        t = t + ev['total_duration'] / 1000.0
-    return out
-
-def _merge_intro_events(melody_events, bass_events):
-    # Merge two voices with the same rhythm into one polyphonic list.
-    # Both start at 0. Bass is tagged wave='bass', gain 0.34; melody is
-    # wave='lead', gain 0.38, so bass is present but does not mask lead.
-    mel = _assign_voice_offsets(melody_events, 'melody', 'lead', 0.38)
-    bas = _assign_voice_offsets(bass_events, 'bass', 'bass', 0.34)
-    merged = mel + bas
-    merged.sort(key=lambda e: (e['start_offset_s'], 0 if e['voice'] == 'melody' else 1))
-    return merged
-
-
-# Pac-Man intro in MML, two WSG voices, same rhythm, 29 eighth notes each.
-# Melody (lead, O5): B B F# D# B F# D# C C G E C G E B B F# D# B F# D# D# E F F# G G# A B
-# Bass (O3, two octaves below melody): alternates root / fifth under each
-# chord, then doubles the final chromatic climb in octaves, so the two
-# voices converge on the final B. Phrase 1 B major: B F# B F# B F# B.
-# Phrase 2 C major: C G C G C G C. Phrase 3 B major again. Phrase 4:
-# D# E F F# G G# A B, exactly the melody an octave pair below.
+# Pac-Man intro melody in MML. Tempo and phrasing follow the arcade jingle.
+# B B F# D# B F# D# C C G E C G E B B F# D# B F# D# D# E F F# G G# A B
 PACMAN_MML = {
     "intro": "T150O5L8B B F# D# B F# D# C C G E C G E B B F# D# B F# D# D# E F F# G G# A B",
-    "intro_melody": "T150O5L8B B F# D# B F# D# C C G E C G E B B F# D# B F# D# D# E F F# G G# A B",
-    "intro_bass": "T150O3L8B F# B F# B F# B C G C G C G C B F# B F# B F# B D# E F F# G G# A B",
     "intro_short": "T150O5L8B B F# D# B F# D#",
-    "intro_short_bass": "T150O3L8B F# B F# B F# B",
     "level_clear": "T150O5L8C E G C E G C",
     "extra_life": "T180O6L16C E G C E G C E G",
     "fruit": "T180O6L16E G C E",
     "fruit_eaten": "T180O6L16G E C",
     "power": "T120O4L16C D E F G A B C",
     "ghost_eaten": "T200O5L32C D E F G A B C D E F G",
-    "death": "T120O4L8B A G F E D C B A G F E D C",
-    "death_tail": "T120O3L16B A B A B",
     "waka1": "T220O6L64C B",
     "waka2": "T220O6L64B C",
     "siren_loop": "T120O3L8C C C C",
@@ -175,15 +88,14 @@ PACMAN_MML = {
 }
 
 PACMAN_SOUNDS = {
-    "intro": [PACMAN_MML["intro_melody"], PACMAN_MML["intro_bass"]],
-    "intro_short": [PACMAN_MML["intro_short"], PACMAN_MML["intro_short_bass"]],
+    "intro": [PACMAN_MML["intro"]],
+    "intro_short": [PACMAN_MML["intro_short"]],
     "level_clear": [PACMAN_MML["level_clear"]],
     "extra_life": [PACMAN_MML["extra_life"]],
     "fruit": [PACMAN_MML["fruit"]],
     "fruit_eaten": [PACMAN_MML["fruit_eaten"]],
     "power": [PACMAN_MML["power"]],
     "ghost_eaten": [PACMAN_MML["ghost_eaten"]],
-    "death": [PACMAN_MML["death"], PACMAN_MML["death_tail"]],
     "waka": [PACMAN_MML["waka1"]],
     "waka_alt": [PACMAN_MML["waka2"]],
     "siren": [PACMAN_MML["siren_loop"]],
@@ -193,15 +105,15 @@ PACMAN_SOUNDS = {
 }
 
 PACMAN_DESCRIPTIONS = {
-    "intro": "Pac-Man arcade intro jingle, two WSG voices, lead + bass, PeriodicWave timbres",
-    "intro_short": "Intro first phrase only, lead + bass",
+    "intro": "Pac-Man arcade intro jingle, square wave",
+    "intro_short": "Intro first phrase only",
     "level_clear": "Level clear jingle",
     "extra_life": "Extra life jingle",
     "fruit": "Fruit spawn chime",
     "fruit_eaten": "Fruit eaten chime",
     "power": "Power pellet sweep",
     "ghost_eaten": "Ghost eaten ascending sweep",
-    "death": "Death descending wobble",
+    "death": "Death: two descending WSG sweeps with vibrato + two low pops, 1.5 s, 90 ticks",
     "waka": "Waka pellet chirp variant 1",
     "waka_alt": "Waka pellet chirp variant 2",
     "siren": "Background siren loop chunk",
@@ -417,10 +329,6 @@ class PacManPlayer:
         self.quality = quality
         self._active_nodes = []
         self._on_complete = None
-        self._wave_lead = None
-        self._wave_bass = None
-        self._wave_lead_coeffs = None
-        self._wave_bass_coeffs = None
         self._init_context()
     def _init_context(self):
         if HAS_BROWSER:
@@ -439,40 +347,6 @@ class PacManPlayer:
         if self.ctx is None:
             self._init_context()
         return self.ctx is not None
-    def _make_periodic_wave(self, wave32):
-        # DFT -> PeriodicWave. real/imag are Fourier coeffs, DC = 0.
-        real, imag = _wsg_fourier(wave32)
-        try:
-            if HAS_BROWSER and window is not None:
-                try:
-                    Float32Array = getattr(window, 'Float32Array', None)
-                    if Float32Array is not None:
-                        real_a = Float32Array.new(real)
-                        imag_a = Float32Array.new(imag)
-                    else:
-                        real_a = real
-                        imag_a = imag
-                except Exception:
-                    real_a = real
-                    imag_a = imag
-            else:
-                real_a = real
-                imag_a = imag
-            try:
-                return self.ctx.createPeriodicWave(real_a, imag_a, {'disableNormalization': True})
-            except Exception:
-                return self.ctx.createPeriodicWave(real_a, imag_a)
-        except Exception:
-            return None
-    def _ensure_waves(self):
-        if self.ctx is None:
-            return
-        if self._wave_lead is None:
-            self._wave_lead_coeffs = _wsg_fourier(WSG_LEAD_WAVE)
-            self._wave_lead = self._make_periodic_wave(WSG_LEAD_WAVE)
-        if self._wave_bass is None:
-            self._wave_bass_coeffs = _wsg_fourier(WSG_BASS_WAVE)
-            self._wave_bass = self._make_periodic_wave(WSG_BASS_WAVE)
     def resume(self):
         if self.ctx:
             try:
@@ -500,7 +374,6 @@ class PacManPlayer:
             return
         self.resume()
         ctx = self.ctx
-        self._ensure_waves()
         try:
             for osc, gain in self._active_nodes:
                 try:
@@ -515,52 +388,31 @@ class PacManPlayer:
             now = ctx.currentTime
         except Exception:
             now = 0
-        base = now + 0.02
-        t = base
+        t = now + 0.02
         last_osc = None
-        last_stop_time = base
+        last_stop_time = t
         played = 0
         for ev in events:
             total_s = ev['total_duration'] / 1000.0
             sound_s = ev['sound_duration'] / 1000.0
-            if 'start_offset_s' in ev and ev['start_offset_s'] is not None:
-                start = base + float(ev['start_offset_s'])
-            else:
-                start = t
-                t = t + total_s
             if ev['freq'] > 0 and sound_s > 0.002:
                 try:
                     osc = ctx.createOscillator()
                     gain = ctx.createGain()
-                    wave_name = ev.get('wave', 'lead')
-                    if wave_name == 'bass' and self._wave_bass is not None:
-                        try:
-                            osc.setPeriodicWave(self._wave_bass)
-                        except Exception:
-                            osc.type = "triangle"
-                    elif self._wave_lead is not None:
-                        try:
-                            osc.setPeriodicWave(self._wave_lead)
-                        except Exception:
-                            osc.type = "square"
-                    else:
-                        osc.type = "square"
+                    osc.type = "square"
                     osc.frequency.value = ev['freq']
-                    try:
-                        gain.gain.value = float(ev.get('gain', 0.38))
-                    except Exception:
-                        gain.gain.value = 0.38
+                    gain.gain.value = 0.38
                     osc.connect(gain)
                     gain.connect(self.master_gain or ctx.destination)
-                    osc.start(start)
-                    osc.stop(start + sound_s)
+                    osc.start(t)
+                    osc.stop(t + sound_s)
                     self._active_nodes.append((osc, gain))
-                    if start + sound_s >= last_stop_time:
-                        last_osc = osc
-                        last_stop_time = start + sound_s
+                    last_osc = osc
+                    last_stop_time = t + sound_s
                     played = played + 1
                 except Exception:
                     pass
+            t = t + total_s
         if last_osc is not None:
             try:
                 def on_ended(evt):
@@ -593,6 +445,142 @@ class PacManPlayer:
                 self._active_nodes.append((dummy, None))
             except Exception:
                 self._clear_nodes(None)
+    def _death_sweep(self, ctx, t0, dur, start_freq, end_freq, vib_rate, vib_depth):
+        osc = ctx.createOscillator()
+        gain = ctx.createGain()
+        osc.type = "square"
+        try:
+            osc.frequency.setValueAtTime(start_freq, t0)
+        except Exception:
+            try:
+                osc.frequency.value = start_freq
+            except Exception:
+                pass
+        try:
+            osc.frequency.exponentialRampToValueAtTime(end_freq, t0 + dur)
+        except Exception:
+            pass
+        try:
+            gain.gain.setValueAtTime(0.38, t0)
+            gain.gain.setValueAtTime(0.38, t0 + dur - 0.01)
+            gain.gain.linearRampToValueAtTime(0.0, t0 + dur)
+        except Exception:
+            try:
+                gain.gain.value = 0.38
+            except Exception:
+                pass
+        lfo = None
+        lfo_gain = None
+        try:
+            lfo = ctx.createOscillator()
+            lfo_gain = ctx.createGain()
+            lfo.type = "sine"
+            try:
+                lfo.frequency.value = vib_rate
+            except Exception:
+                pass
+            try:
+                lfo_gain.gain.value = vib_depth
+            except Exception:
+                pass
+            lfo.connect(lfo_gain)
+            lfo_gain.connect(osc.frequency)
+        except Exception:
+            lfo = None
+            lfo_gain = None
+        osc.connect(gain)
+        gain.connect(self.master_gain or ctx.destination)
+        osc.start(t0)
+        osc.stop(t0 + dur)
+        if lfo is not None:
+            try:
+                lfo.start(t0)
+                lfo.stop(t0 + dur)
+            except Exception:
+                pass
+        self._active_nodes.append((osc, gain))
+        if lfo is not None:
+            self._active_nodes.append((lfo, lfo_gain))
+        return osc
+    def _death_pop(self, ctx, t0, dur, start_freq, end_freq):
+        osc = ctx.createOscillator()
+        gain = ctx.createGain()
+        osc.type = "square"
+        try:
+            osc.frequency.setValueAtTime(start_freq, t0)
+        except Exception:
+            try:
+                osc.frequency.value = start_freq
+            except Exception:
+                pass
+        try:
+            osc.frequency.exponentialRampToValueAtTime(end_freq, t0 + dur)
+        except Exception:
+            pass
+        try:
+            gain.gain.setValueAtTime(0.0001, t0)
+            gain.gain.exponentialRampToValueAtTime(0.38, t0 + 0.01)
+            gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur)
+        except Exception:
+            try:
+                gain.gain.value = 0.38
+            except Exception:
+                pass
+        osc.connect(gain)
+        gain.connect(self.master_gain or ctx.destination)
+        osc.start(t0)
+        osc.stop(t0 + dur)
+        self._active_nodes.append((osc, gain))
+        return osc
+    def play_death(self, on_complete=None):
+        if not self._ensure():
+            if on_complete:
+                try:
+                    on_complete(None)
+                except Exception:
+                    pass
+            return
+        self.resume()
+        ctx = self.ctx
+        try:
+            for osc, gain in self._active_nodes:
+                try:
+                    osc.stop()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._active_nodes = []
+        self._on_complete = on_complete
+        try:
+            now = ctx.currentTime
+        except Exception:
+            now = 0
+        t0 = now + 0.02
+        last_osc = None
+        try:
+            self._death_sweep(ctx, t0, DEATH_SWEEP1_DUR, DEATH_SWEEP1_START, DEATH_SWEEP1_END, DEATH_SWEEP1_VIB_RATE, DEATH_SWEEP1_VIB_DEPTH)
+            self._death_sweep(ctx, t0 + DEATH_SWEEP1_DUR, DEATH_SWEEP2_DUR, DEATH_SWEEP2_START, DEATH_SWEEP2_END, DEATH_SWEEP2_VIB_RATE, DEATH_SWEEP2_VIB_DEPTH)
+            self._death_pop(ctx, t0 + DEATH_POP1_START, DEATH_POP_DUR, DEATH_POP_START_FREQ, DEATH_POP_END_FREQ)
+            last_osc = self._death_pop(ctx, t0 + DEATH_POP2_START, DEATH_POP_DUR, DEATH_POP_START_FREQ, DEATH_POP_END_FREQ)
+        except Exception:
+            last_osc = None
+        if last_osc is not None:
+            try:
+                def on_ended(evt):
+                    self._clear_nodes(evt)
+                try:
+                    last_osc.onended = on_ended
+                except Exception:
+                    pass
+                try:
+                    last_osc.addEventListener("ended", on_ended)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        else:
+            self._clear_nodes(None)
     def play_mml(self, mml_str, parser=None, on_complete=None):
         if parser is None:
             parser = PacManMMLParser()
@@ -636,15 +624,8 @@ class PacManAudioEngine:
         self._register()
     def _register(self):
         for name, mlist in PACMAN_SOUNDS.items():
-            if name in ('intro', 'intro_short') and len(mlist) == 2:
-                mel = self.parser.parse(mlist[0], carry_state=False)
-                bas = self.parser.parse(mlist[1], carry_state=False)
-                evs = _merge_intro_events(mel, bas)
-                self.presets[name] = {'mml': mlist, 'description': PACMAN_DESCRIPTIONS.get(name, ""), 'events': evs}
-            else:
-                raw = self.parser.parse_sequence(mlist)
-                evs = _assign_voice_offsets(raw, 'melody', 'lead', 0.38)
-                self.presets[name] = {'mml': mlist, 'description': PACMAN_DESCRIPTIONS.get(name, ""), 'events': evs}
+            self.presets[name] = {'mml': mlist, 'description': PACMAN_DESCRIPTIONS.get(name, ""), 'events': self.parser.parse_sequence(mlist)}
+        self.presets['death'] = {'mml': [], 'description': PACMAN_DESCRIPTIONS.get('death', ""), 'events': [], 'sweep': True}
     def resume(self):
         self.player.resume()
         if self.proc_engine:
@@ -654,6 +635,9 @@ class PacManAudioEngine:
                 pass
     def play(self, sound_name, seed=None, spatial=False, position=None, on_complete=None):
         self.resume()
+        if sound_name == 'death':
+            self.player.play_death(on_complete=on_complete)
+            return self.presets.get('death')
         # Waka alternates between two chirps, like the arcade
         if sound_name == 'waka':
             self._waka_flip = not self._waka_flip
@@ -733,4 +717,4 @@ def play_mml(mml_str, on_complete=None):
 def resume():
     return get_engine().resume()
 
-__all__ = ['PacManMMLParser', 'PacManPlayer', 'PacManAudioEngine', 'PACMAN_MML', 'PACMAN_SOUNDS', 'PACMAN_DESCRIPTIONS', 'WSG_LEAD_WAVE', 'WSG_BASS_WAVE', 'WSG_LEAD_SPECTRUM', 'WSG_BASS_SPECTRUM', 'get_engine', 'play', 'play_mml', 'resume', 'HAS_PROC_AUDIO']
+__all__ = ['PacManMMLParser', 'PacManPlayer', 'PacManAudioEngine', 'PACMAN_MML', 'PACMAN_SOUNDS', 'PACMAN_DESCRIPTIONS', 'get_engine', 'play', 'play_mml', 'resume', 'HAS_PROC_AUDIO']
