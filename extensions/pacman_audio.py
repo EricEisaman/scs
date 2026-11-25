@@ -7,6 +7,11 @@
 # Death is NOT MML: arcade death is a single WSG voice, 90 ticks / 1.5 s,
 # two descending pitch sweeps with vibrato plus two low pops. It is
 # built in PacManPlayer.play_death with continuous frequency ramps.
+# Credit is NOT a jingle either: on the official soundtrack Credit Sound
+# is a separate 0:01 track from Start Music (0:05, the opening jingle).
+# Credit is one short waka burst - the same two-square-wave alternating
+# chirp as eating a dot, a single articulation, ~0.09 s. It is built in
+# PacManPlayer.play_credit, not from MML.
 # Architecture mirrors extensions/8bit.py:
 # - Built on top of proc_audio.py: imports AudioEngine and Patch but does not modify them
 # - Uses Web Audio API directly for square-wave: oscillator.type = square
@@ -68,6 +73,13 @@ DEATH_POP_DUR = 0.08
 DEATH_POP_START_FREQ = 200.0
 DEATH_POP_END_FREQ = 80.0
 
+# Credit: one short waka, not a jingle. Single articulation, same
+# alternating two-square-wave chirp as a dot waka. 0.09 s total.
+CREDIT_WAKA_DUR = 0.09
+CREDIT_WAKA_HI = 580.0
+CREDIT_WAKA_LO = 340.0
+CREDIT_WAKA_STEP = 0.015
+
 # Pac-Man intro melody in MML. Tempo and phrasing follow the arcade jingle.
 # B B F# D# B F# D# C C G E C G E B B F# D# B F# D# D# E F F# G G# A B
 PACMAN_MML = {
@@ -114,6 +126,7 @@ PACMAN_DESCRIPTIONS = {
     "power": "Power pellet sweep",
     "ghost_eaten": "Ghost eaten ascending sweep",
     "death": "Death: two descending WSG sweeps with vibrato + two low pops, 1.5 s, 90 ticks",
+    "credit": "Credit: one short waka burst, 0.09 s, not a jingle",
     "waka": "Waka pellet chirp variant 1",
     "waka_alt": "Waka pellet chirp variant 2",
     "siren": "Background siren loop chunk",
@@ -581,6 +594,79 @@ class PacManPlayer:
                 pass
         else:
             self._clear_nodes(None)
+    def play_credit(self, on_complete=None):
+        if not self._ensure():
+            if on_complete:
+                try:
+                    on_complete(None)
+                except Exception:
+                    pass
+            return
+        self.resume()
+        ctx = self.ctx
+        try:
+            for osc, gain in self._active_nodes:
+                try:
+                    osc.stop()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._active_nodes = []
+        self._on_complete = on_complete
+        try:
+            now = ctx.currentTime
+        except Exception:
+            now = 0
+        t0 = now + 0.02
+        last_osc = None
+        try:
+            osc = ctx.createOscillator()
+            gain = ctx.createGain()
+            osc.type = "square"
+            steps = int(CREDIT_WAKA_DUR / CREDIT_WAKA_STEP)
+            for i in range(steps + 1):
+                f = CREDIT_WAKA_HI if i % 2 == 0 else CREDIT_WAKA_LO
+                try:
+                    osc.frequency.setValueAtTime(f, t0 + i * CREDIT_WAKA_STEP)
+                except Exception:
+                    pass
+            try:
+                osc.frequency.value = CREDIT_WAKA_HI
+            except Exception:
+                pass
+            try:
+                gain.gain.setValueAtTime(0.38, t0)
+                gain.gain.linearRampToValueAtTime(0.0, t0 + CREDIT_WAKA_DUR)
+            except Exception:
+                try:
+                    gain.gain.value = 0.38
+                except Exception:
+                    pass
+            osc.connect(gain)
+            gain.connect(self.master_gain or ctx.destination)
+            osc.start(t0)
+            osc.stop(t0 + CREDIT_WAKA_DUR)
+            self._active_nodes.append((osc, gain))
+            last_osc = osc
+        except Exception:
+            last_osc = None
+        if last_osc is not None:
+            try:
+                def on_ended(evt):
+                    self._clear_nodes(evt)
+                try:
+                    last_osc.onended = on_ended
+                except Exception:
+                    pass
+                try:
+                    last_osc.addEventListener("ended", on_ended)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        else:
+            self._clear_nodes(None)
     def play_mml(self, mml_str, parser=None, on_complete=None):
         if parser is None:
             parser = PacManMMLParser()
@@ -626,6 +712,7 @@ class PacManAudioEngine:
         for name, mlist in PACMAN_SOUNDS.items():
             self.presets[name] = {'mml': mlist, 'description': PACMAN_DESCRIPTIONS.get(name, ""), 'events': self.parser.parse_sequence(mlist)}
         self.presets['death'] = {'mml': [], 'description': PACMAN_DESCRIPTIONS.get('death', ""), 'events': [], 'sweep': True}
+        self.presets['credit'] = {'mml': [], 'description': PACMAN_DESCRIPTIONS.get('credit', ""), 'events': [], 'waka': True}
     def resume(self):
         self.player.resume()
         if self.proc_engine:
@@ -638,6 +725,9 @@ class PacManAudioEngine:
         if sound_name == 'death':
             self.player.play_death(on_complete=on_complete)
             return self.presets.get('death')
+        if sound_name == 'credit':
+            self.player.play_credit(on_complete=on_complete)
+            return self.presets.get('credit')
         # Waka alternates between two chirps, like the arcade
         if sound_name == 'waka':
             self._waka_flip = not self._waka_flip

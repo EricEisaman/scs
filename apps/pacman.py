@@ -1,8 +1,13 @@
 # pacman.py - Pac-Man clone for SCS, 1050x700
 # Place this file as apps/pacman.py in the SCS repo.
 # Run: python -m http.server 8000, then open ?app=pacman
-# Controls: Arrow keys to move, SPACE to start, P to pause, R to restart.
+# Controls: C / 5 = insert coin (credit, short waka), SPACE / ENTER / 1 = start
+#   when CREDIT > 0, Arrow keys to move, P to pause, R to attract screen.
+# Flow: attract (CHARACTER / NICKNAME, CREDIT 0) -> C -> pregame
+#   (PUSH START BUTTON, CREDIT 1) -> C again -> pregame CREDIT 2 ->
+#   SPACE -> intro (READY! + Start Music, no motion) -> play.
 # Audio: uses extensions/pacman_audio.py if present, else silent.
+# Credit is one short waka burst, not a jingle. Start Music is the jingle.
 # Model, Controller, View are kept separate. onStep and key handlers
 # change state, redrawAll only draws.
 from scs import *
@@ -171,6 +176,12 @@ DEATH_ANIM_TICKS = 90
 DEATH_HOLD_TICKS = 60
 DEATH_TOTAL_TICKS = 210
 DEATH_READY_TICKS = 120
+# Pregame / intro: Start Music is the opening jingle, Credit is one short waka.
+# INTRO_TICKS covers the Start Music + READY! hold before any motion.
+INTRO_TICKS = 240
+DEAD_HOLD_TICKS = 180
+WON_HOLD_TICKS = 120
+CREDIT_MAX = 2
 # 11 frames, mouth half-angle, facing up. Sweep = 360 - 2 * openAmt.
 DEATH_OPEN = [20, 40, 60, 80, 100, 120, 140, 155, 165, 172, 178]
 
@@ -600,6 +611,35 @@ def checkCollisions(app):
                 app.nextDir = (0, 0)
                 return
 
+def _addCredit(app):
+    if app.credits < CREDIT_MAX:
+        app.credits = app.credits + 1
+    _play('credit')
+    if app.state == 'attract':
+        app.state = 'pregame'
+        app.timer = 0
+    elif app.state == 'pregame':
+        app.timer = 0
+
+def _startFromPregame(app):
+    if app.credits <= 0:
+        return False
+    app.credits = app.credits - 1
+    app.score = 0
+    app.lives = 3
+    app.level = 1
+    app.nextExtraLife = 10000
+    loadLevel(app)
+    app.timer = 0
+    app.lastDeathTimer = 0
+    app.modeTimer = 0
+    app.deathTimer = 0
+    app.nextDir = (-1, 0)
+    app.state = 'intro'
+    app.paused = False
+    _play('intro')
+    return True
+
 def onAppStart(app):
     app.width = APP_W
     app.height = APP_H
@@ -610,7 +650,8 @@ def onAppStart(app):
     app.nextExtraLife = 10000
     app.lives = 3
     app.level = 1
-    app.state = 'ready'
+    app.credits = 0
+    app.state = 'attract'
     app.paused = False
     app.timer = 0
     app.lastDeathTimer = 0
@@ -622,34 +663,45 @@ def onAppStart(app):
     loadLevel(app)
 
 def onKeyPress(app, key):
+    k = _normKey(key)
+    # Coin: works in attract, pregame, and during play / intro / dying
+    # for the next game. One short waka, never a jingle.
+    if k in ('c', '5'):
+        _resumeAudio()
+        _addCredit(app)
+        return
     if app.state in ('dying', 'ready_wait'):
         return
-    k = _normKey(key)
+    if app.state == 'attract':
+        if k in ('space', 'enter', 'return', '1'):
+            if app.credits > 0:
+                _resumeAudio()
+                _startFromPregame(app)
+        return
+    if app.state == 'pregame':
+        if k in ('space', 'enter', 'return', '1'):
+            _resumeAudio()
+            _startFromPregame(app)
+        return
+    if app.state == 'intro':
+        if k in DIRS:
+            app.nextDir = DIRS[k]
+        return
+    if app.state in ('dead', 'won'):
+        if k == 'r':
+            app.score = 0
+            app.lives = 3
+            app.level = 1
+            app.nextExtraLife = 10000
+            app.credits = 0
+            loadLevel(app)
+            app.state = 'attract'
+            app.timer = 0
+            app.deathTimer = 0
+        return
     if k in DIRS:
         pressed = DIRS[k]
         app.nextDir = pressed
-        if app.state in ('ready', 'dead', 'won'):
-            _resumeAudio()
-            if app.state != 'ready':
-                app.score = 0
-                app.lives = 3
-                app.level = 1
-                app.nextExtraLife = 10000
-                loadLevel(app)
-                app.timer = 0
-                app.lastDeathTimer = 0
-                app.modeTimer = 0
-                app.deathTimer = 0
-            else:
-                resetPositions(app)
-                app.timer = 0
-                app.lastDeathTimer = 0
-                app.modeTimer = 0
-                app.deathTimer = 0
-                _play('intro')
-            app.nextDir = pressed
-            app.state = 'play'
-            app.paused = False
         return
     if k == 'p' and app.state == 'play':
         app.paused = not app.paused
@@ -659,33 +711,14 @@ def onKeyPress(app, key):
         app.lives = 3
         app.level = 1
         app.nextExtraLife = 10000
+        app.credits = 0
         loadLevel(app)
-        app.state = 'ready'
+        app.state = 'attract'
         app.timer = 0
         app.deathTimer = 0
         return
-    if k == 'space' and app.state in ('ready', 'dead', 'won'):
-        _resumeAudio()
-        if app.state != 'ready':
-            app.score = 0
-            app.lives = 3
-            app.level = 1
-            app.nextExtraLife = 10000
-            loadLevel(app)
-            app.timer = 0
-            app.lastDeathTimer = 0
-            app.modeTimer = 0
-            app.deathTimer = 0
-        else:
-            resetPositions(app)
-            app.timer = 0
-            app.lastDeathTimer = 0
-            app.modeTimer = 0
-            app.deathTimer = 0
-            _play('intro')
-        app.state = 'play'
-        app.paused = False
-
+    if k == 'space' and app.state == 'play':
+        return
 def _tickHouse(app):
     for g in app.ghosts:
         if g['state'] != 'house':
@@ -728,13 +761,44 @@ def onStep(app):
             app.state = 'play'
             app.paused = False
         return
-    if app.state == 'ready':
+    if app.state in ('attract', 'pregame'):
         app.timer = app.timer + 1
-        app.mouth = (app.mouth + 1) % 20
+        return
+    if app.state == 'intro':
+        app.timer = app.timer + 1
         _tickHouse(app)
-        for i, g in enumerate(app.ghosts):
-            if g['state'] == 'active':
-                moveGhost(app, i, g)
+        if app.timer >= INTRO_TICKS:
+            app.timer = 0
+            app.modeTimer = 0
+            app.state = 'play'
+            app.paused = False
+        return
+    if app.state == 'dead':
+        app.timer = app.timer + 1
+        if app.timer >= DEAD_HOLD_TICKS:
+            app.timer = 0
+            app.score = 0
+            app.lives = 3
+            app.level = 1
+            app.nextExtraLife = 10000
+            loadLevel(app)
+            if app.credits > 0:
+                app.state = 'pregame'
+            else:
+                app.state = 'attract'
+        return
+    if app.state == 'won':
+        app.timer = app.timer + 1
+        if app.timer >= WON_HOLD_TICKS:
+            app.timer = 0
+            app.lastDeathTimer = 0
+            app.modeTimer = 0
+            app.deathTimer = 0
+            loadLevel(app)
+            resetPositions(app)
+            app.state = 'intro'
+            app.paused = False
+            _play('intro')
         return
     if app.state != 'play':
         return
@@ -821,7 +885,12 @@ def drawFruit(app):
 
 def drawPac(app):
     p = app.pac
+    if app.state in ('attract', 'pregame'):
+        return
     if app.state == 'dead':
+        return
+    if app.state in ('intro', 'ready_wait'):
+        drawCircle(p['x'] + T / 2, p['y'] + T / 2, 12, fill='yellow')
         return
     if app.state == 'dying':
         if app.deathTimer < DEATH_FREEZE_TICKS:
@@ -855,6 +924,8 @@ def drawPac(app):
     drawArc(p['x'] + T / 2, p['y'] + T / 2, T - 6, T - 6, ang + openAmt, 360 - 2 * openAmt, fill='yellow')
 
 def drawGhosts(app):
+    if app.state in ('attract', 'pregame'):
+        return
     if app.state == 'dead':
         return
     if app.state == 'dying' and app.deathTimer >= DEATH_FREEZE_TICKS:
@@ -888,32 +959,109 @@ def drawGhosts(app):
                 drawCircle(cx - 5 + g['dx'] * 2, cy - 3 + g['dy'] * 2, 1.5, fill='black')
                 drawCircle(cx + 5 + g['dx'] * 2, cy - 3 + g['dy'] * 2, 1.5, fill='black')
 
+def _drawGhostIcon(cx, cy, col):
+    drawCircle(cx, cy - 2, 12, fill=col)
+    drawRect(cx - 12, cy - 2, 24, 14, fill=col)
+    for k in range(3):
+        drawCircle(cx - 8 + k * 8, cy + 12, 4, fill=col)
+    drawCircle(cx - 5, cy - 3, 3, fill='white')
+    drawCircle(cx + 5, cy - 3, 3, fill='white')
+    drawCircle(cx - 5, cy - 3, 1.5, fill='black')
+    drawCircle(cx + 5, cy - 3, 1.5, fill='black')
+
+def _drawScoreHeader(app):
+    drawLabel('1UP', 210, 22, fill='white', size=16)
+    drawLabel(str(app.score).zfill(2) if app.state in ('attract', 'pregame') else str(app.score), 210, 44, fill='white', size=16)
+    drawLabel('HIGH SCORE', 525, 22, fill='white', size=16)
+    drawLabel(str(app.high), 525, 44, fill='white', size=16)
+    drawLabel('2UP', 840, 22, fill='white', size=16)
+    if app.credits >= 2:
+        drawLabel('00', 840, 44, fill='white', size=16)
+
+def drawAttract(app):
+    _drawScoreHeader(app)
+    drawLabel('CHARACTER / NICKNAME', 525, 120, fill='white', size=18)
+    rows = [
+        ('red', 'OIKAKE - - - "AKABEI"', 'red', 185),
+        ('pink', 'MACHIBUSE - - "PINKY"', 'pink', 255),
+        ('cyan', 'KIMAGURE - - "AOSUKE"', 'cyan', 325),
+        ('orange', 'OTOBOKE - - - "GUZUTA"', 'orange', 395),
+    ]
+    for col, txt, fill, y in rows:
+        _drawGhostIcon(210, y, col)
+        drawLabel(txt, 560, y, fill=fill, size=16)
+    drawCircle(210, 485, 4, fill='white')
+    drawArc(500, 485, 26, 26, 30, 300, fill='yellow')
+    _drawGhostIcon(580, 485, 'red')
+    _drawGhostIcon(660, 485, 'pink')
+    _drawGhostIcon(740, 485, 'cyan')
+    _drawGhostIcon(820, 485, 'orange')
+    drawCircle(210, 545, 3, fill='white')
+    drawLabel('.  10  PTS', 420, 545, fill='white', size=16)
+    drawCircle(210, 590, 8, fill='white')
+    drawLabel('50  PTS', 420, 590, fill='white', size=16)
+    drawLabel('namco', 525, 640, fill='pink', size=16)
+    drawLabel('CREDIT  ' + str(app.credits), 525, 680, fill='white', size=16)
+    drawLabel('C = COIN   SPACE = START', 525, 662, fill='gray', size=11)
+
+def drawPregame(app):
+    _drawScoreHeader(app)
+    if (app.timer // 30) % 2 == 0:
+        drawLabel('PUSH START BUTTON', 525, 300, fill='orange', size=24)
+    drawLabel('1 PLAYER ONLY', 525, 400, fill='cyan', size=20)
+    drawLabel('BONUS PAC-MAN FOR 10000 PTS', 525, 480, fill='pink', size=18)
+    drawLabel('© 1980 MIDWAY MFG. CO.', 525, 560, fill='pink', size=16)
+    drawLabel('CREDIT  ' + str(app.credits), 525, 680, fill='white', size=16)
+    if app.credits >= 2:
+        drawLabel('2 CREDITS', 525, 620, fill='white', size=14)
+    else:
+        drawLabel('C = ANOTHER CREDIT', 525, 620, fill='gray', size=12)
+
 def drawHUD(app):
     y = ROWS * T + 22
-    drawLabel('Score ' + str(app.score), 80, y, fill='white', size=16)
-    drawLabel('High ' + str(app.high), 260, y, fill='yellow', size=16)
-    drawLabel('Level ' + str(app.level), 525, y, fill='white', size=16)
-    drawLabel('Lives ' + str(app.lives), 700, y, fill='white', size=16)
+    drawLabel('1UP  ' + str(app.score), 150, y, fill='white', size=16)
+    drawLabel('HIGH SCORE  ' + str(app.high), 525, y, fill='white', size=16)
+    drawLabel('CREDIT  ' + str(app.credits), 880, y, fill='white', size=16)
     for k in range(app.lives):
         lx = 60 + k * 30
         ly = ROWS * T + 48
         drawArc(lx, ly, 20, 20, 30, 300, fill='yellow')
-    if len(app.leaderboard) > 0:
-        txt = 'Top: '
-        for s in app.leaderboard:
-            if isinstance(s, dict) and 'score' in s:
-                txt = txt + str(s['score']) + ' '
-            else:
-                txt = txt + str(s) + ' '
-        drawLabel(txt, 525, ROWS * T + 48, fill='lightGray', size=13)
+    kind = FRUIT_BY_LEVEL[app.level - 1] if app.level - 1 < len(FRUIT_BY_LEVEL) else 'melon'
+    fx = 980
+    fy = ROWS * T + 48
+    if kind == 'cherry':
+        drawCircle(fx - 5, fy + 4, 7, fill='red')
+        drawCircle(fx + 5, fy + 4, 7, fill='red')
+    elif kind == 'strawberry':
+        drawCircle(fx, fy + 2, 10, fill='red')
+    elif kind == 'orange':
+        drawCircle(fx, fy, 11, fill='orange')
+    elif kind == 'apple':
+        drawCircle(fx, fy, 11, fill='red')
+    else:
+        drawCircle(fx, fy, 11, fill='darkGreen')
 
 def redrawAll(app):
+    if app.state == 'attract':
+        drawAttract(app)
+        return
+    if app.state == 'pregame':
+        drawPregame(app)
+        return
     drawMaze(app)
     drawPellets(app)
     drawFruit(app)
     drawPac(app)
     drawGhosts(app)
     drawHUD(app)
+    if app.state in ('intro', 'ready_wait'):
+        drawLabel('READY!', 525, 380, fill='yellow', size=24)
+    if app.state == 'dead':
+        drawLabel('GAME OVER', 525, 380, fill='red', size=24)
+    if app.state == 'won':
+        drawLabel('LEVEL CLEAR', 525, 380, fill='yellow', size=24)
+    if app.state == 'play' and app.paused:
+        drawLabel('PAUSED', 525, 380, fill='white', size=24)
 
 def main():
     runApp(1050, 700, stepsPerSecond=60)
