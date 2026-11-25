@@ -868,8 +868,8 @@ def drawFruit(app):
     if kind == 'cherry':
         drawCircle(fx - 5, fy + 4, 7, fill='red')
         drawCircle(fx + 5, fy + 4, 7, fill='red')
-        drawLine(fx - 5, fy - 2, fx + 2, fy - 10, fill='green', lineWidth=2)
-        drawLine(fx + 5, fy - 2, fx + 2, fy - 10, fill='green', lineWidth=2)
+        drawLine(fx - 5, fy - 2, fx + 2, fy - 10, fill='#D89055', lineWidth=2)
+        drawLine(fx + 5, fy - 2, fx + 2, fy - 10, fill='#D89055', lineWidth=2)
     elif kind == 'strawberry':
         drawCircle(fx, fy + 2, 10, fill='red')
         drawRect(fx - 6, fy - 10, 12, 4, fill='green')
@@ -890,7 +890,7 @@ def drawPac(app):
     if app.state == 'dead':
         return
     if app.state in ('intro', 'ready_wait'):
-        drawCircle(p['x'] + T / 2, p['y'] + T / 2, 12, fill='yellow')
+        drawArc(p['x'] + T / 2, p['y'] + T / 2, T - 6, T - 6, 0, 360, fill='yellow')
         return
     if app.state == 'dying':
         if app.deathTimer < DEATH_FREEZE_TICKS:
@@ -916,9 +916,10 @@ def drawPac(app):
             drawLine(cx - 6, cy + 6, cx + 6, cy - 6, fill='yellow', lineWidth=2)
             drawCircle(cx, cy, 2, fill='yellow')
         return
-    openAmt = 40 if app.mouth < 10 else 5
     if app.state != 'play':
-        openAmt = 20
+        openAmt = 0
+    else:
+        openAmt = [30, 15, 0, 15][(app.mouth // 5) % 4]
     angMap = {(1, 0): 0, (-1, 0): 180, (0, 1): 90, (0, -1): 270, (0, 0): 0}
     ang = angMap[(p['dx'], p['dy'])]
     drawArc(p['x'] + T / 2, p['y'] + T / 2, T - 6, T - 6, ang + openAmt, 360 - 2 * openAmt, fill='yellow')
