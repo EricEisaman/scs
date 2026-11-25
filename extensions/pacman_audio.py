@@ -9,9 +9,16 @@
 # built in PacManPlayer.play_death with continuous frequency ramps.
 # Credit is NOT a jingle either: on the official soundtrack Credit Sound
 # is a separate 0:01 track from Start Music (0:05, the opening jingle).
-# Credit is one short waka burst - the same two-square-wave alternating
-# chirp as eating a dot, a single articulation, ~0.09 s. It is built in
-# PacManPlayer.play_credit, not from MML.
+# Credit is one short waka burst - the same single-voice waka as eating
+# a dot, a single articulation. It is built in
+# PacManPlayer.play_credit -> play_waka, not from MML.
+# Waka model (see WAKA_* below): one WSG voice, harmonic-rich ROM-like
+# waveform, ~375 Hz fundamental. Wa/ka share the same base frequency
+# and differ in shape/envelope, not in fundamental. Forum D+A / C#+G#
+# pairs are UNVERIFIED, so they are NOT hardcoded. Clone 543/684 Hz
+# triangle is clone tuning, NOT an arcade measurement, so it is NOT
+# used as the fundamental. Looser 440 Hz / 500 Hz-1 kHz / 50-100 Hz
+# modulation is low-rigor, so it is NOT used.
 # Architecture mirrors extensions/8bit.py:
 # - Built on top of proc_audio.py: imports AudioEngine and Patch but does not modify them
 # - Uses Web Audio API directly for square-wave: oscillator.type = square
@@ -73,12 +80,25 @@ DEATH_POP_DUR = 0.08
 DEATH_POP_START_FREQ = 200.0
 DEATH_POP_END_FREQ = 80.0
 
-# Credit: one short waka, not a jingle. Single articulation, same
-# alternating two-square-wave chirp as a dot waka. 0.09 s total.
-CREDIT_WAKA_DUR = 0.09
-CREDIT_WAKA_HI = 580.0
-CREDIT_WAKA_LO = 340.0
-CREDIT_WAKA_STEP = 0.015
+# Waka: one WSG voice, harmonic-rich waveform, ~375 Hz fundamental.
+# Wa/ka share the same base frequency; they differ in envelope/shape,
+# not in fundamental. Durations wa 85 ms + ka 60 ms = 145 ms total
+# come from clone tuning (durations only, not its 543/684 Hz pitches).
+# Forum wa-rises / ka-falls is UNVERIFIED, so the sweep is kept small
+# (+12 / -12 Hz), NOT the forum D+A / C#+G# pairs. Clone 543/684 Hz
+# and looser 440 Hz / 500 Hz-1 kHz figures are NOT used.
+WAKA_FUNDAMENTAL = 375.0
+WAKA_WA_DUR = 0.085
+WAKA_KA_DUR = 0.060
+WAKA_TOTAL = WAKA_WA_DUR + WAKA_KA_DUR
+WAKA_ATTACK = 0.005
+WAKA_WA_RISE = 12.0
+WAKA_KA_FALL = -12.0
+# Credit is one waka. Old names kept as aliases only.
+CREDIT_WAKA_DUR = WAKA_TOTAL
+CREDIT_WAKA_HI = WAKA_FUNDAMENTAL
+CREDIT_WAKA_LO = WAKA_FUNDAMENTAL
+CREDIT_WAKA_STEP = WAKA_WA_DUR
 
 # Pac-Man intro melody in MML. Tempo and phrasing follow the arcade jingle.
 # B B F# D# B F# D# C C G E C G E B B F# D# B F# D# D# E F F# G G# A B
@@ -126,9 +146,9 @@ PACMAN_DESCRIPTIONS = {
     "power": "Power pellet sweep",
     "ghost_eaten": "Ghost eaten ascending sweep",
     "death": "Death: two descending WSG sweeps with vibrato + two low pops, 1.5 s, 90 ticks",
-    "credit": "Credit: one short waka burst, 0.09 s, not a jingle",
-    "waka": "Waka pellet chirp variant 1",
-    "waka_alt": "Waka pellet chirp variant 2",
+    "credit": "Credit: one single-voice waka burst, 0.145 s, not a jingle",
+    "waka": "Waka: one WSG voice, 375 Hz, wa 85 ms + ka 60 ms",
+    "waka_alt": "Waka: same single-voice waka (no alternate chirp)",
     "siren": "Background siren loop chunk",
     "fright": "Fright mode loop chunk",
     "eyes": "Eyes returning loop chunk",
@@ -594,7 +614,7 @@ class PacManPlayer:
                 pass
         else:
             self._clear_nodes(None)
-    def play_credit(self, on_complete=None):
+    def play_waka(self, on_complete=None):
         if not self._ensure():
             if on_complete:
                 try:
@@ -623,30 +643,49 @@ class PacManPlayer:
         try:
             osc = ctx.createOscillator()
             gain = ctx.createGain()
-            osc.type = "square"
-            steps = int(CREDIT_WAKA_DUR / CREDIT_WAKA_STEP)
-            for i in range(steps + 1):
-                f = CREDIT_WAKA_HI if i % 2 == 0 else CREDIT_WAKA_LO
+            # Single WSG voice. Sawtooth = harmonic-rich, all harmonics
+            # (odd + even), closer to the ROM wavetable than square
+            # (odd only). One oscillator for the whole wa+ka burst.
+            osc.type = "sawtooth"
+            try:
+                osc.frequency.setValueAtTime(WAKA_FUNDAMENTAL, t0)
+            except Exception:
                 try:
-                    osc.frequency.setValueAtTime(f, t0 + i * CREDIT_WAKA_STEP)
+                    osc.frequency.value = WAKA_FUNDAMENTAL
                 except Exception:
                     pass
             try:
-                osc.frequency.value = CREDIT_WAKA_HI
+                # Wa rises slightly, ka falls slightly. Small on purpose:
+                # forum pairs are unverified, so no D+A / C#+G# here.
+                osc.frequency.linearRampToValueAtTime(WAKA_FUNDAMENTAL + WAKA_WA_RISE, t0 + WAKA_WA_DUR)
             except Exception:
                 pass
             try:
-                gain.gain.setValueAtTime(0.38, t0)
-                gain.gain.linearRampToValueAtTime(0.0, t0 + CREDIT_WAKA_DUR)
+                osc.frequency.linearRampToValueAtTime(WAKA_FUNDAMENTAL + WAKA_WA_RISE + WAKA_KA_FALL, t0 + WAKA_TOTAL)
+            except Exception:
+                pass
+            try:
+                gain.gain.setValueAtTime(0.0001, t0)
+                gain.gain.exponentialRampToValueAtTime(0.38, t0 + WAKA_ATTACK)
             except Exception:
                 try:
                     gain.gain.value = 0.38
                 except Exception:
                     pass
+            try:
+                # Dip at the wa/ka boundary articulates ka. Wa/ka share
+                # the same base frequency; the boundary is envelope, not
+                # a second voice or a pitch jump.
+                gain.gain.setValueAtTime(0.38, t0 + WAKA_WA_DUR - 0.005)
+                gain.gain.linearRampToValueAtTime(0.22, t0 + WAKA_WA_DUR)
+                gain.gain.linearRampToValueAtTime(0.30, t0 + WAKA_WA_DUR + 0.01)
+                gain.gain.linearRampToValueAtTime(0.0, t0 + WAKA_TOTAL)
+            except Exception:
+                pass
             osc.connect(gain)
             gain.connect(self.master_gain or ctx.destination)
             osc.start(t0)
-            osc.stop(t0 + CREDIT_WAKA_DUR)
+            osc.stop(t0 + WAKA_TOTAL)
             self._active_nodes.append((osc, gain))
             last_osc = osc
         except Exception:
@@ -667,6 +706,9 @@ class PacManPlayer:
                 pass
         else:
             self._clear_nodes(None)
+    def play_credit(self, on_complete=None):
+        # Credit is one waka, same single-voice burst as a dot.
+        self.play_waka(on_complete=on_complete)
     def play_mml(self, mml_str, parser=None, on_complete=None):
         if parser is None:
             parser = PacManMMLParser()
@@ -713,6 +755,10 @@ class PacManAudioEngine:
             self.presets[name] = {'mml': mlist, 'description': PACMAN_DESCRIPTIONS.get(name, ""), 'events': self.parser.parse_sequence(mlist)}
         self.presets['death'] = {'mml': [], 'description': PACMAN_DESCRIPTIONS.get('death', ""), 'events': [], 'sweep': True}
         self.presets['credit'] = {'mml': [], 'description': PACMAN_DESCRIPTIONS.get('credit', ""), 'events': [], 'waka': True}
+        # Waka is a custom single-voice WSG burst, not MML. waka1/waka2
+        # MML entries above are legacy only and are not played.
+        self.presets['waka'] = {'mml': [], 'description': PACMAN_DESCRIPTIONS.get('waka', ""), 'events': [], 'waka': True}
+        self.presets['waka_alt'] = {'mml': [], 'description': PACMAN_DESCRIPTIONS.get('waka_alt', ""), 'events': [], 'waka': True}
     def resume(self):
         self.player.resume()
         if self.proc_engine:
@@ -728,11 +774,11 @@ class PacManAudioEngine:
         if sound_name == 'credit':
             self.player.play_credit(on_complete=on_complete)
             return self.presets.get('credit')
-        # Waka alternates between two chirps, like the arcade
-        if sound_name == 'waka':
-            self._waka_flip = not self._waka_flip
-            if self._waka_flip:
-                sound_name = 'waka_alt'
+        # Waka is one single-voice burst (wa+ka inside it). No flip,
+        # no alternate chirp, no two-voice alternation.
+        if sound_name in ('waka', 'waka_alt'):
+            self.player.play_waka(on_complete=on_complete)
+            return self.presets.get('waka')
         if sound_name in self.presets:
             preset = self.presets[sound_name]
             self.player.play_events(preset['events'], on_complete=on_complete)

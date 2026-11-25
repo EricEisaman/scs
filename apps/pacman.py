@@ -39,15 +39,7 @@ except Exception:
 def _play(name):
     try:
         if _audio is not None:
-            if name == 'waka':
-                # Spectrogram: each waka is a short ~0.09 s burst, two square
-                # waves alternating 580 / 340 Hz every 0.015 s, square-wave
-                # harmonics strongest low, decaying high. That is the
-                # credit chirp, not a single MML note. Route dot waka to it.
-                player = getattr(_audio, 'player', None)
-                if player is not None and hasattr(player, 'play_credit'):
-                    player.play_credit()
-                    return
+            # Waka is defined in pacman_audio.py as one WSG voice, not here.
             _audio.play(name)
     except Exception:
         pass
@@ -193,6 +185,11 @@ WON_HOLD_TICKS = 120
 CREDIT_MAX = 2
 # 11 frames, mouth half-angle, facing up. Sweep = 360 - 2 * openAmt.
 DEATH_OPEN = [20, 40, 60, 80, 100, 120, 140, 155, 165, 172, 178]
+# Eating mouth: time-driven, never 0 during play. Full circle (openAmt 0)
+# is only for intro / READY!. Driven by app.mouth, which onStep bumps
+# every tick in play, so it cycles even when Pac-Man is stopped against
+# a wall. Position-driven mouth stuck at 0 when snapped to a tile centre.
+PAC_MOUTH_CYCLE = [10, 22, 32, 22]
 
 # Model helpers
 def isWall(app, c, r, forGhost=False, allowDoor=False):
@@ -901,14 +898,14 @@ def drawPac(app):
     if app.state == 'dead':
         return
     if app.state in ('intro', 'ready_wait'):
-        drawArc(p['x'] + T / 2, p['y'] + T / 2, T - 6, T - 6, 0, 360, fill='yellow')
+        drawArc(p['x'] + T / 2, p['y'] + T / 2, T - 6, T - 6, 0, 360, fill='yellow', border=None)
         return
     if app.state == 'dying':
         if app.deathTimer < DEATH_FREEZE_TICKS:
             openAmt = 20
             angMap = {(1, 0): 0, (-1, 0): 180, (0, 1): 90, (0, -1): 270, (0, 0): 0}
             ang = angMap[(p['dx'], p['dy'])]
-            drawArc(p['x'] + T / 2, p['y'] + T / 2, T - 6, T - 6, ang + openAmt, 360 - 2 * openAmt, fill='yellow')
+            drawArc(p['x'] + T / 2, p['y'] + T / 2, T - 6, T - 6, ang + openAmt, 360 - 2 * openAmt, fill='yellow', border=None)
             return
         anim = app.deathTimer - DEATH_FREEZE_TICKS
         if anim >= DEATH_ANIM_TICKS:
@@ -917,7 +914,7 @@ def drawPac(app):
         if frame > 10:
             frame = 10
         openAmt = DEATH_OPEN[frame]
-        drawArc(p['x'] + T / 2, p['y'] + T / 2, T - 6, T - 6, 270 + openAmt, 360 - 2 * openAmt, fill='yellow')
+        drawArc(p['x'] + T / 2, p['y'] + T / 2, T - 6, T - 6, 270 + openAmt, 360 - 2 * openAmt, fill='yellow', border=None)
         if anim >= 80:
             cx = p['x'] + T / 2
             cy = p['y'] + T / 2
@@ -927,23 +924,16 @@ def drawPac(app):
             drawLine(cx - 6, cy + 6, cx + 6, cy - 6, fill='yellow', lineWidth=2)
             drawCircle(cx, cy, 2, fill='yellow')
         return
-    if app.state != 'play':
-        openAmt = 0
-    else:
-        if p['dx'] != 0:
-            off = p['x'] % T
-        elif p['dy'] != 0:
-            off = p['y'] % T
-        else:
-            off = 0
-        dist = off if off < T / 2 else T - off
-        frame = int(dist // 3)
-        if frame > 5:
-            frame = 5
-        openAmt = [0, 5, 10, 15, 20, 24][frame]
+    # drawArc(centerX, centerY, width, height, startAngle, sweepAngle,
+    #         fill, border). Angles: 0 = east, 90 = south, 180 = west,
+    # 270 = north (canvas clockwise). Mouth is the missing wedge:
+    # start = facing + openAmt, sweep = 360 - 2 * openAmt.
+    # Time-driven: app.mouth ticks every onStep in play, so this cycles
+    # even when Pac-Man is stopped. Never 0 during play.
+    openAmt = PAC_MOUTH_CYCLE[(app.mouth // 2) % len(PAC_MOUTH_CYCLE)]
     angMap = {(1, 0): 0, (-1, 0): 180, (0, 1): 90, (0, -1): 270, (0, 0): 0}
     ang = angMap[(p['dx'], p['dy'])]
-    drawArc(p['x'] + T / 2, p['y'] + T / 2, T - 6, T - 6, ang + openAmt, 360 - 2 * openAmt, fill='yellow')
+    drawArc(p['x'] + T / 2, p['y'] + T / 2, T - 6, T - 6, ang + openAmt, 360 - 2 * openAmt, fill='yellow', border=None)
 
 def drawGhosts(app):
     if app.state in ('attract', 'pregame'):
@@ -1013,7 +1003,7 @@ def drawAttract(app):
         _drawGhostIcon(210, y, col)
         drawLabel(txt, 560, y, fill=fill, size=16)
     drawCircle(210, 485, 4, fill='white')
-    drawArc(500, 485, 26, 26, 24, 312, fill='yellow')
+    drawArc(500, 485, 26, 26, 32, 296, fill='yellow', border=None)
     _drawGhostIcon(580, 485, 'red')
     _drawGhostIcon(660, 485, 'pink')
     _drawGhostIcon(740, 485, 'cyan')
@@ -1047,7 +1037,7 @@ def drawHUD(app):
     for k in range(app.lives):
         lx = 60 + k * 30
         ly = ROWS * T + 48
-        drawArc(lx, ly, 20, 20, 24, 312, fill='yellow')
+        drawArc(lx, ly, 20, 20, 32, 296, fill='yellow', border=None)
     kind = FRUIT_BY_LEVEL[app.level - 1] if app.level - 1 < len(FRUIT_BY_LEVEL) else 'melon'
     fx = 980
     fy = ROWS * T + 48
