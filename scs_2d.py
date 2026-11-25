@@ -319,23 +319,25 @@ class Renderer2D:
             ctx.restore()
 
     def draw_arc(self, cx, cy, w, h, startAngle, sweepAngle, fill=None,
-                 border=None, borderWidth=2, opacity=100, dashes=False):
-        ctx = self.ctx
-        ctx.save()
-        try:
-            ctx.globalAlpha = (opacity / 100.0) * self._alpha
-            ctx.beginPath()
-            start = math.radians(startAngle)
-            end = math.radians(startAngle + sweepAngle)
-            ctx.ellipse(cx, cy, w / 2, h / 2, 0, start, end)
-            if fill is not None:
-                self._apply_fill(fill, (cx - w / 2, cy - h / 2, w, h))
-                ctx.fill()
-            if border is not None:
-                self._apply_stroke(border, borderWidth, dashes)
-                ctx.stroke()
-        finally:
-            ctx.restore()
+             border=None, borderWidth=2, opacity=100, dashes=False):
+    ctx = self.ctx
+    ctx.save()
+    try:
+        ctx.globalAlpha = (opacity / 100.0) * self._alpha
+        ctx.beginPath()
+        ctx.moveTo(cx, cy)
+        start = math.radians(startAngle)
+        end = math.radians(startAngle + sweepAngle)
+        ctx.ellipse(cx, cy, w / 2, h / 2, 0, start, end)
+        ctx.closePath()
+        if fill is not None:
+            self._apply_fill(fill, (cx - w / 2, cy - h / 2, w, h))
+            ctx.fill()
+        if border is not None:
+            self._apply_stroke(border, borderWidth, dashes)
+            ctx.stroke()
+    finally:
+        ctx.restore()
 
     def draw_polygon(self, points, fill='black', border=None, borderWidth=2,
                      opacity=100, rotateAngle=0, dashes=False):
