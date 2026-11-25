@@ -5,16 +5,33 @@
 # Audio: uses extensions/pacman_audio.py if present, else silent.
 # Model, Controller, View are kept separate. onStep and key handlers
 # change state, redrawAll only draws.
+# Entry point is main() with runApp, like gorillas.py. Without main() SCS
+# only draws the first frame and never starts onStep or key handling.
 from scs import *
 import random
+import importlib
 
-# Audio: Pac-Man extension on top of proc_audio, guarded so game runs silent if missing.
+# ---- pacman audio integration - built ON TOP of proc_audio.py, like gorillas 8bit ----
 try:
-    from extensions.pacman_audio import PacManAudioEngine as _PacAudio
+    _pac_audio_mod = importlib.import_module('extensions.pacman_audio')
+    PacManAudioEngine = _pac_audio_mod.PacManAudioEngine
     HAS_PAC_AUDIO = True
-except Exception:
-    _PacAudio = None
+except Exception as e:
+    print(f"pacman audio load failed: {e}")
     HAS_PAC_AUDIO = False
+    PacManAudioEngine = None
+    _pac_audio_mod = None
+
+# ---- indexed_db integration - app-agnostic local high scores, local players only ----
+try:
+    _idb_mod = importlib.import_module('extensions.indexed_db')
+    _get_store = _idb_mod.get_store
+    HAS_INDEXED_DB = True
+except Exception as e:
+    print(f"indexed_db load failed: {e}")
+    HAS_INDEXED_DB = False
+    _get_store = None
+    _idb_mod = None
 
 try:
     from browser import window as _window
@@ -23,49 +40,81 @@ except Exception:
     _window = None
     HAS_WINDOW = False
 
-# High scores: app-agnostic IndexedDB extension, local players only, no network.
-try:
-    from extensions.indexed_db import LocalStore as _LocalStore
-    from extensions.indexed_db import get_store as _get_store
-    HAS_INDEXED_DB = True
-except Exception:
-    _LocalStore = None
-    _get_store = None
-    HAS_INDEXED_DB = False
-
-try:
-    from browser import aio as _aio
-    HAS_AIO = True
-except Exception:
-    _aio = None
-    HAS_AIO = False
-
 _APP_ID = "pacman"
 _scores = None
 try:
     if HAS_INDEXED_DB and _get_store is not None:
         _scores = _get_store()
-except Exception:
+except Exception as e:
+    print(f"indexed_db store failed: {e}")
     _scores = None
 
-# Audio is lazy: created on first user gesture in _ensureAudio, not at import time.
-_audio = None
-
-def _play(name):
+def play_sound(app, name, on_complete=None):
+    # Event-driven sound - currentTime scheduling + onended, no timeouts
+    # Same pattern as gorillas.py play_sound, engine lives on app.
+    if app is None:
+        return
+    if not hasattr(app, 'engine') or app.engine is None:
+        try:
+            if HAS_PAC_AUDIO and PacManAudioEngine is not None:
+                app.engine = PacManAudioEngine(quality="medium", seed=1)
+                app.player = app.engine.player
+                print("[pacman] audio engine ready")
+            else:
+                return
+        except Exception as e:
+            print(f"[pacman] audio init {e}")
+            return
     try:
-        if _audio is None:
-            _ensureAudio()
-        if _audio is not None:
-            _audio.play(name)
+        app.engine.resume()
     except Exception:
         pass
-
-def _resumeAudio():
     try:
-        if _audio is None:
-            _ensureAudio()
-        if _audio is not None:
-            _audio.resume()
+        if hasattr(app, 'player') and app.player:
+            try:
+                app.player.resume()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        app.engine.play(name, on_complete=on_complete)
+    except Exception as e:
+        print(f"play {name} failed {e}")
+
+def _ensureAudio(app):
+    if app is None:
+        return None
+    try:
+        if not hasattr(app, 'engine') or app.engine is None:
+            if HAS_PAC_AUDIO and PacManAudioEngine is not None:
+                app.engine = PacManAudioEngine(quality="medium", seed=1)
+                app.player = app.engine.player
+                print("[pacman] audio engine ready")
+    except Exception as e:
+        print(f"[pacman] audio init {e}")
+    try:
+        if hasattr(app, 'engine') and app.engine:
+            app.engine.resume()
+    except Exception:
+        pass
+    try:
+        if hasattr(app, 'engine') and app.engine:
+            return app.engine
+    except Exception:
+        pass
+    return None
+
+def _play(app, name=None):
+    # Compat wrapper: new code calls play_sound(app, name)
+    if name is None:
+        return
+    play_sound(app, name)
+
+def _resumeAudio(app=None):
+    try:
+        if app is not None and hasattr(app, 'engine') and app.engine:
+            app.engine.resume()
     except Exception:
         pass
 
@@ -96,25 +145,9 @@ def _saveHigh(v):
     except Exception:
         pass
 
-def _ensureAudio():
-    # Lazy audio: create on first user gesture, not at import time.
-    # Import-time AudioContext is suspended and can fail silently.
-    global _audio
-    try:
-        if _audio is None and HAS_PAC_AUDIO and _PacAudio is not None:
-            _audio = _PacAudio(quality="medium", seed=1)
-    except Exception:
-        pass
-    try:
-        if _audio is not None:
-            _audio.resume()
-    except Exception:
-        pass
-    return _audio
-
 def _normKey(k):
     # SCS / browser can deliver many variants: space, ' ', Spacebar, ArrowLeft, etc.
-    # Normalize all of them to CMU names: space, left, right, up, down, p, r, enter.
+    # Normalize all of them to CMU names: space, left, right, up, down, p, r.
     try:
         s = str(k)
     except Exception:
@@ -136,11 +169,17 @@ def _normKey(k):
         return s
     return s
 
+def isReturnKey(key):
+    if key is None:
+        return False
+    k = str(key).lower()
+    return k in ('enter', 'return') or key in (chr(13), chr(10))
+
 def _startGame(app):
     # Shared start path for SPACE, Enter, arrows, WASD, and mouse click.
-    _ensureAudio()
+    _ensureAudio(app)
     try:
-        _resumeAudio()
+        _resumeAudio(app)
     except Exception:
         pass
     if app.state not in ("ready", "dead", "won"):
@@ -154,7 +193,7 @@ def _startGame(app):
         app.timer = 0
     else:
         if app.timer == 0:
-            _play("intro")
+            play_sound(app, "intro")
     app.state = "play"
     app.paused = False
 
@@ -380,7 +419,7 @@ def ghostTarget(app, i, g, scatter):
 def spawnFruit(app):
     kind = FRUIT_BY_LEVEL[app.level - 1] if app.level - 1 < len(FRUIT_BY_LEVEL) else 'melon'
     app.fruit = {'pos': FRUIT_POS, 'kind': kind, 'timer': 540}
-    _play('fruit')
+    play_sound(app, 'fruit')
 
 def addScore(app, pts):
     app.score = app.score + pts
@@ -395,7 +434,7 @@ def addScore(app, pts):
     if app.score >= app.nextExtraLife:
         app.lives = app.lives + 1
         app.nextExtraLife = app.nextExtraLife + 10000
-        _play('extra_life')
+        play_sound(app, 'extra_life')
 
 # Controller
 def movePac(app):
@@ -412,7 +451,7 @@ def movePac(app):
             addScore(app, 10)
             app.pelletsEaten = app.pelletsEaten + 1
             app.dotsSinceDeath = app.dotsSinceDeath + 1
-            _play('waka')
+            play_sound(app, 'waka')
             if app.pelletsEaten == 70 and not app.fruitSpawned70:
                 app.fruitSpawned70 = True
                 spawnFruit(app)
@@ -436,13 +475,13 @@ def movePac(app):
                     g['fright'] = True
                     g['dx'] = -g['dx']
                     g['dy'] = -g['dy']
-            _play('power')
+            play_sound(app, 'power')
         if app.fruit is not None and (c, r) == app.fruit['pos']:
             pts = FRUIT_POINTS[app.fruit['kind']]
             addScore(app, pts)
             app.fruit = None
             app.fruitTimer = 0
-            _play('fruit_eaten')
+            play_sound(app, 'fruit_eaten')
         nx, ny = app.nextDir
         if (nx, ny) != (0, 0) and not isWall(app, c + nx, r + ny):
             p['dx'], p['dy'] = nx, ny
@@ -535,7 +574,7 @@ def moveGhost(app, i, g):
         g['fright'] = False
         g['bob'] = 0
         g['releaseDots'] = app.dotsSinceDeath + 2
-        _play('ghost_revive')
+        play_sound(app, 'ghost_revive')
         return
     # Active
     mode = currentMode(app)
@@ -579,10 +618,10 @@ def checkCollisions(app):
                 g['state'] = 'eyes'
                 g['dx'] = 0
                 g['dy'] = -1
-                _play('ghost_eaten')
+                play_sound(app, 'ghost_eaten')
             elif g['state'] == 'active' and not g['fright']:
                 app.lives = app.lives - 1
-                _play('death')
+                play_sound(app, 'death')
                 if app.lives <= 0:
                     app.state = 'dead'
                     try:
@@ -617,6 +656,16 @@ def onAppStart(app):
     app.leaderboard = []
     app.leaderboardError = False
     app.lastKey = ""
+    app.engine = None
+    app.player = None
+    # Audio engine init (does not touch graphics), like gorillas.py
+    if HAS_PAC_AUDIO and PacManAudioEngine:
+        try:
+            app.engine = PacManAudioEngine(quality="medium", seed=1)
+            app.player = app.engine.player
+            print("[pacman] audio engine ready")
+        except Exception as e:
+            print(f"[pacman] audio init {e}")
     loadLevel(app)
     # Leaderboard: IndexedDB local only, sync mirror, never blocks, never fetches
     try:
@@ -643,14 +692,19 @@ def saveLeaderboard(app):
         pass
 
 def onKeyPress(app, key):
-    # Record raw key for HUD debug, then normalize.
+    # Resume audio on any key (gesture), like gorillas.py
+    try:
+        if hasattr(app, 'engine') and app.engine:
+            app.engine.resume()
+    except Exception:
+        pass
+    if key is None:
+        return
     try:
         app.lastKey = str(key)
     except Exception:
         app.lastKey = ""
     k = _normKey(key)
-    # Audio must resume on ANY key, not just SPACE, or AudioContext stays suspended.
-    _ensureAudio()
     if k in DIRS:
         app.nextDir = DIRS[k]
         # Arrows / WASD also start the game, so pressing a direction just works.
@@ -685,13 +739,21 @@ def onKeyHold(app, keys):
     except Exception:
         pass
 
+def onKeyRelease(app, key):
+    return
+
 def onMousePress(app, mouseX, mouseY):
     # Click to start also resumes audio. Fixes focus: canvas click is a user gesture.
+    try:
+        if hasattr(app, 'engine') and app.engine:
+            app.engine.resume()
+    except Exception:
+        pass
     try:
         app.lastKey = "click"
     except Exception:
         pass
-    _ensureAudio()
+    _ensureAudio(app)
     if app.state in ("ready", "dead", "won"):
         _startGame(app)
 
@@ -729,7 +791,7 @@ def onStep(app):
         app.level = app.level + 1
         loadLevel(app)
         app.state = 'won'
-        _play('level_clear')
+        play_sound(app, 'level_clear')
 
 # View: redrawAll only draws
 def redrawAll(app):
@@ -848,3 +910,8 @@ def redrawAll(app):
         drawLabel(msg, app.width / 2, 7 * T + 16, fill='yellow', size=28, bold=True)
     if app.paused:
         drawLabel('PAUSED - P to resume', app.width / 2, 9 * T + 16, fill='white', size=20, bold=True)
+
+def main():
+    runApp(1050, 700)
+
+main()
