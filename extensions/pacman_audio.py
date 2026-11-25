@@ -61,17 +61,22 @@ DEFAULT_TEMPO = 140
 DEFAULT_LENGTH = 4
 MODE_FACTORS = {'MN': 7 / 8, 'ML': 1.0, 'MS': 3 / 4}
 
-# Pac-Man intro melody in MML. Tempo and phrasing follow the arcade jingle.
+# Arcade Chase (original), Dm, 4/4, Q=160, L=1/8, two tracks, 8 bars / 12 s.
+# Lead: ABC V:1, Bass: ABC V:2 clef=bass, from user's ABC ref.
+# Fixes to ABC (not perfect): K:Dm => B = Bb (B- in MML).
+# Bass register typos fixed: B,,, (Bb1) -> B,, (Bb2), bar 7 G,, -> G, (G3),
+# last bar A,, -> A, (A3). ABC 2 = MML 4 (quarter), ABC 4 = MML 2 (half).
+# Bass MML uses explicit O: O1 B = B1, O2 B = B2, O2 C = C2, O3 C = C3, O2 F# = F#2.
 # B B F# D# B F# D# C C G E C G E B B F# D# B F# D# D# E F F# G G# A B
 # Intro bass: 4 held roots (ML legato, L8). Phrase 1 B,
 # phrase 2 C, phrase 3 B, phrase 4 B. 29 notes, ML = held,
 # same total duration as melody, so both tracks end together.
-INTRO_BASS_MML = "T150O2MLL8B B B B B B B C C C C C C C B B B B B B B B B B B B B B B"
-INTRO_BASS_SHORT_MML = "T150O2MLL8B B B B B B B"
+INTRO_BASS_MML = "T160O3L8D4 A4 D4 A4 O2G4 O3D4 O2G4 O3D4 O3C4 G4 C4 G4 O2A4 O3E4 O2A4 O3E4 O2F4 O3C4 O2F4 O3C4 O2B-4 F4 B-4 F4 O3C4 G4 C4 G4 O3D4 A4 D2"
+INTRO_BASS_SHORT_MML = "T160O3L8D4 A4 D4 A4 O2G4 O3D4 O2G4 O3D4"
 PACMAN_MML = {
-    "intro": "T150O5L8B B F# D# B F# D# C C G E C G E B B F# D# B F# D# D# E F F# G G# A B",
+    "intro": "T160O4L8D F A O5D C O4A F D G B- O5D G F D O4B- G E G O5C E D C O4G E O4A4 O5C4 E4 A4 A4 G F E4 D C O5D4 C O4B- A4 G F O4E F G A B- O5C D E O5D2 O4A2",
     "intro_bass": INTRO_BASS_MML,
-    "intro_short": "T150O5L8B B F# D# B F# D#",
+    "intro_short": "T160O4L8D F A O5D C O4A F D G B- O5D G F D O4B- G",
     "intro_short_bass": INTRO_BASS_SHORT_MML,
     "level_clear": "T150O5L8C E G C E G C",
     "extra_life": "T180O6L16C E G C E G C E G",
@@ -90,7 +95,7 @@ PACMAN_MML = {
 PACMAN_SOUNDS = {
     "intro": [PACMAN_MML["intro"]],
     "intro_bass": [PACMAN_MML["intro_bass"]],
-    "intro_short": [PACMAN_MML["intro_short"]],
+    "intro_short": "T160O4L8D F A O5D C O4A F D G B- O5D G F D O4B- G",
     "intro_short_bass": [PACMAN_MML["intro_short_bass"]],
     "level_clear": [PACMAN_MML["level_clear"]],
     "extra_life": [PACMAN_MML["extra_life"]],
@@ -107,8 +112,8 @@ PACMAN_SOUNDS = {
 }
 
 PACMAN_DESCRIPTIONS = {
-    "intro": "Intro: higher synth melody + bass, two tracks at once",
-    "intro_bass": "Intro bass track, root notes, low octave",
+    "intro": "Arcade Chase (original), Dm, 8 bars, Lead + Bass, two tracks at once",
+    "intro_bass": "Arcade Chase bass, root-fifth quarters, low octave",
     "intro_short": "Intro first phrase only, melody + bass",
     "level_clear": "Level clear jingle",
     "extra_life": "Extra life jingle",
@@ -639,8 +644,8 @@ class PacManPlayer:
         return last_osc, last_stop
     def play_intro(self, on_complete=None, short=False):
         # Two tracks at once: higher synth melody + bass. Same t0, same
-        # tempo, same total duration. Melody is square, brighter and
-        # louder. Bass is triangle, lower octave, softer.
+        # tempo, same total duration (3.2 s). Melody square, bass triangle.
+        # Bass is octave bounce, not held roots: dotted 8th low + 16th high.
         if not self._ensure():
             if on_complete:
                 try:

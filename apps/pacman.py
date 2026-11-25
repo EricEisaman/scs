@@ -23,15 +23,6 @@ except Exception:
     _window = None
     HAS_WINDOW = False
 
-try:
-    from extensions.fetch import fetch_json as _fetch_json
-    from browser import aio as _aio
-    HAS_FETCH = True
-except Exception:
-    _fetch_json = None
-    _aio = None
-    HAS_FETCH = False
-
 _audio = None
 try:
     if HAS_PAC_AUDIO and _PacAudio is not None:
@@ -157,6 +148,30 @@ def wrap(app, e):
 
 def newEntity(c, r, color):
     return {'x': float(c * T), 'y': float(r * T), 'dx': 0, 'dy': 0, 'color': color, 'home': (c, r), 'fright': False, 'state': 'active', 'releaseDots': 0, 'bob': 0}
+
+# Pregame layout from screenshot, by actual ghost name.
+# Blinky (5,11), Pinky (4,12), Inky (1,12), Clyde (5,13), Pac-Man (1,15) facing right.
+PREGAME_PAC = (1, 15)
+PREGAME_GHOSTS = {'blinky': (5, 11), 'pinky': (4, 12), 'inky': (1, 12), 'clyde': (5, 13)}
+
+def resetPregamePositions(app):
+    # Pregame only: screenshot layout. No movement, mouth open, facing right.
+    app.pac = newEntity(PREGAME_PAC[0], PREGAME_PAC[1], 'yellow')
+    app.pac['dx'] = 1
+    app.pac['dy'] = 0
+    app.nextDir = (1, 0)
+    app.mouth = 20
+    app.mouthDir = 1
+    for g in app.ghosts:
+        c, r = PREGAME_GHOSTS[g['name']]
+        g['x'] = float(c * T)
+        g['y'] = float(r * T)
+        g['dx'] = 0
+        g['dy'] = 0
+        g['state'] = 'active'
+        g['fright'] = False
+    app.frightTimer = 0
+    app.ghostCombo = 0
 
 def resetPositions(app):
     app.pac = newEntity(PAC_START[0], PAC_START[1], 'yellow')
@@ -492,9 +507,12 @@ def checkCollisions(app):
                 app.lives = app.lives - 1
                 _play('death')
                 if app.lives <= 0:
-                    app.state = 'dead'
+                    app.state = 'gameover'
                 else:
-                    app.state = 'ready'
+                    app.state = 'pregame'
+                    app.pregameTimer = 720
+                    resetPregamePositions(app)
+                    _play('intro')
                 resetPositions(app)
                 app.timer = 0
                 app.lastDeathTimer = 0
@@ -511,7 +529,8 @@ def onAppStart(app):
     app.nextExtraLife = 10000
     app.lives = 3
     app.level = 1
-    app.state = 'ready'
+    app.state = 'attract'
+    app.pregameTimer = 0
     app.paused = False
     app.timer = 0
     app.lastDeathTimer = 0
@@ -520,26 +539,11 @@ def onAppStart(app):
     app.mouth = 0
     app.mouthDir = 1
     app.credits = 0
+    # Leaderboard is local only. No fetch, no CORS, no network.
     app.leaderboard = []
     app.leaderboardError = False
     loadLevel(app)
-    # Leaderboard: best effort, never blocks game
-    try:
-        if HAS_FETCH and _aio is not None:
-            _aio.run(loadLeaderboard(app))
-    except Exception:
-        pass
-
-async def loadLeaderboard(app):
-    try:
-        data = await _fetch_json('https://example.com/pacman-leaderboard.json')
-        if isinstance(data, list):
-            app.leaderboard = data[:3]
-        elif isinstance(data, dict) and 'scores' in data:
-            app.leaderboard = data['scores'][:3]
-    except Exception:
-        app.leaderboardError = True
-        app.leaderboard = []
+    resetPregamePositions(app)
 
 def onKeyPress(app, key):
     if key in ('c', '5'):
@@ -557,22 +561,42 @@ def onKeyPress(app, key):
         app.level = 1
         app.nextExtraLife = 10000
         loadLevel(app)
-        app.state = 'ready'
+        app.state = 'attract'
         app.timer = 0
         return
-    if key == 'space' and app.state in ('ready', 'dead', 'won'):
+    if key == 'space':
         _resumeAudio()
-        if app.state != 'ready':
+        if app.state == 'attract' and app.credits > 0:
+            app.credits = app.credits - 1
             app.score = 0
             app.lives = 3
             app.level = 1
             app.nextExtraLife = 10000
             loadLevel(app)
+            resetPregamePositions(app)
             app.timer = 0
-        else:
-            if app.timer == 0:
-                _play('intro')
-        app.state = 'play'
+            app.state = 'pregame'
+            app.pregameTimer = 720
+            _play('intro')
+        elif app.state == 'gameover' and app.credits > 0:
+            app.credits = app.credits - 1
+            app.score = 0
+            app.lives = 3
+            app.level = 1
+            app.nextExtraLife = 10000
+            loadLevel(app)
+            resetPregamePositions(app)
+            app.timer = 0
+            app.state = 'pregame'
+            app.pregameTimer = 720
+            _play('intro')
+        elif app.state == 'gameover':
+            app.state = 'attract'
+        elif app.state == 'won':
+            app.state = 'pregame'
+            app.pregameTimer = 720
+            resetPregamePositions(app)
+            _play('intro')
         app.paused = False
 
 def onKeyHold(app, keys):
@@ -581,6 +605,14 @@ def onKeyHold(app, keys):
             app.nextDir = DIRS[k]
 
 def onStep(app):
+    if app.state == 'attract':
+        app.timer = app.timer + 1
+        return
+    if app.state == 'pregame':
+        app.pregameTimer = app.pregameTimer - 1
+        if app.pregameTimer <= 0:
+            app.state = 'play'
+        return
     if app.state != 'play':
         return
     if app.paused:
@@ -700,23 +732,22 @@ def redrawAll(app):
                 drawCircle(cx + 5, cy - 3, 3, fill='white')
                 drawCircle(cx - 5 + g['dx'] * 2, cy - 3 + g['dy'] * 2, 1.5, fill='black')
                 drawCircle(cx + 5 + g['dx'] * 2, cy - 3 + g['dy'] * 2, 1.5, fill='black')
-    # HUD: 1050 x 70 at bottom
+    # HUD: screenshot layout, bottom only. 1UP, HIGH SCORE, CREDIT, lives, cherry.
     y = ROWS * T + 22
-    drawLabel('Score ' + str(app.score), 80, y, fill='white', size=16)
-    drawLabel('High ' + str(app.high), 260, y, fill='yellow', size=16)
-    drawLabel('Level ' + str(app.level), 525, y, fill='white', size=16)
-    drawLabel('Lives ' + str(app.lives), 700, y, fill='white', size=16)
-    drawLabel('Mode ' + currentMode(app), 870, y, fill='cyan', size=16)
-    drawLabel('CREDIT ' + str(app.credits), 870, ROWS * T + 48, fill='white', size=16)
-    # Lives icons
+    drawLabel('1UP  ' + str(app.score), 140, y, fill='white', size=18)
+    drawLabel('HIGH SCORE  ' + str(app.high), 525, y, fill='white', size=18)
+    drawLabel('CREDIT  ' + str(app.credits), 850, y, fill='white', size=18)
+    # Lives icons, bottom left, 3 Pac-Man
     for k in range(app.lives):
         lx = 60 + k * 30
         ly = ROWS * T + 48
         drawArc(lx, ly, 20, 20, 30, 300, fill='yellow', border=None)
-    # Fruit indicator
-    if app.fruit is not None:
-        drawLabel('Fruit ' + app.fruit['kind'], 1020 - 80, ROWS * T + 48, fill='pink', size=14)
-    # Leaderboard line, best effort
+    # Fruit indicator, cherry bottom right, like screenshot
+    drawCircle(990 - 5, ROWS * T + 52, 7, fill='red')
+    drawCircle(990 + 5, ROWS * T + 52, 7, fill='red')
+    drawLine(990 - 5, ROWS * T + 46, 990 + 2, ROWS * T + 38, fill='green', lineWidth=2)
+    drawLine(990 + 5, ROWS * T + 46, 990 + 2, ROWS * T + 38, fill='green', lineWidth=2)
+    # Leaderboard line, local only, no network
     if len(app.leaderboard) > 0:
         txt = 'Top: '
         for s in app.leaderboard:
@@ -725,15 +756,21 @@ def redrawAll(app):
             else:
                 txt = txt + str(s) + ' '
         drawLabel(txt, 525, ROWS * T + 48, fill='lightGray', size=13)
-    if app.state != 'play':
-        if app.state == 'ready':
-            msg = 'Press SPACE'
-        elif app.state == 'dead':
-            msg = 'GAME OVER - SPACE'
-        elif app.state == 'won':
-            msg = 'LEVEL CLEAR - SPACE'
-        else:
-            msg = 'Press SPACE'
-        drawLabel(msg, app.width / 2, 7 * T + 16, fill='yellow', size=28, bold=True)
+    # Pregame = screenshot. No PLAYER ONE / READY! text in screenshot.
+    # Pregame IS the positions: Blinky (5,11), Pinky (4,12), Inky (1,12), Clyde (5,13), Pac-Man (1,15) + HUD.
+    # attract: same pregame layout, plus INSERT COIN / PRESS SPACE.
+    # gameover: GAME OVER, SPACE + credit to restart
+    if app.state == 'attract':
+        if (app.timer // 30) % 2 == 0:
+            drawLabel('INSERT COIN', app.width / 2, 11 * T + 16, fill='white', size=24, bold=True)
+        drawLabel('PRESS SPACE TO START', app.width / 2, 13 * T + 16, fill='yellow', size=20, bold=True)
+        drawLabel('C FOR CREDIT', app.width / 2, 14 * T + 16, fill='cyan', size=16)
+    elif app.state == 'pregame':
+        pass
+    elif app.state == 'gameover':
+        drawLabel('GAME OVER', app.width / 2, 11 * T + 16, fill='red', size=28, bold=True)
+        drawLabel('SPACE + CREDIT TO RESTART', app.width / 2, 13 * T + 16, fill='yellow', size=18, bold=True)
+    elif app.state == 'won':
+        drawLabel('LEVEL CLEAR - SPACE', app.width / 2, 11 * T + 16, fill='yellow', size=28, bold=True)
     if app.paused:
         drawLabel('PAUSED - P to resume', app.width / 2, 9 * T + 16, fill='white', size=20, bold=True)
