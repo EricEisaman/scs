@@ -2,30 +2,12 @@
 # Without modifying proc_audio.py at all.
 # EVENT-DRIVEN ONLY - No timeouts, no setTimeout, no polling counters.
 # All timing via AudioContext.currentTime, completion via oscillator.onended event.
-# Square-wave arcade voice, like the original Namco hardware, plus a
-# faithful MML intro melody in the same style as extensions/8bit.py.
 # Death is NOT MML: arcade death is a single WSG voice, 90 ticks / 1.5 s,
-# two descending pitch sweeps with vibrato plus two low pops. It is
-# built in PacManPlayer.play_death with continuous frequency ramps.
-# Credit is NOT a jingle either: on the official soundtrack Credit Sound
-# is a separate 0:01 track from Start Music (0:05, the opening jingle).
-# Credit is one short waka burst - the same single-voice waka as eating
-# a dot, a single articulation. It is built in
-# PacManPlayer.play_credit -> play_waka, not from MML.
-# Waka model (see WAKA_* below): one WSG voice, harmonic-rich ROM-like
-# waveform, ~375 Hz fundamental. Wa/ka share the same base frequency
-# and differ in shape/envelope, not in fundamental. Forum D+A / C#+G#
-# pairs are UNVERIFIED, so they are NOT hardcoded. Clone 543/684 Hz
-# triangle is clone tuning, NOT an arcade measurement, so it is NOT
-# used as the fundamental. Looser 440 Hz / 500 Hz-1 kHz / 50-100 Hz
-# modulation is low-rigor, so it is NOT used.
-# Architecture mirrors extensions/8bit.py:
-# - Built on top of proc_audio.py: imports AudioEngine and Patch but does not modify them
-# - Uses Web Audio API directly for square-wave: oscillator.type = square
-# - All oscillators scheduled via ctx.currentTime + offset, not setTimeout
-# - Completion via onended event chain: last oscillator onended -> _clear_nodes -> on_complete
-# - Siren loops by chaining onended -> schedule next loop chunk, never by timer
-# - Waka, power, ghost eaten, death, fruit, extra life, level clear are events
+# two descending pitch sweeps with vibrato plus two low pops.
+# Credit is NOT waka. Waka is NOT a chirp. Intro is NOT single-track.
+# Credit: one WSG voice, fixed pitch, no sweep, short.
+# Waka: one WSG voice, same wave, pitch sweeps up then down.
+# Intro: two voices at once, melody + bass, same start, same duration.
 
 # Build on top of proc_audio - do NOT modify it
 try:
@@ -51,6 +33,26 @@ except ImportError:
 
 import math
 
+# Core WSG voice: one PeriodicWave, harmonic-rich, imag = 1, 1/2, 1/3, ...
+# Built once per context, cached in _wsg_wave. Not square, not sawtooth.
+WSG_WAVE_IMAG = [0.0, 1.0, 0.5, 0.33, 0.25, 0.2, 0.16, 0.14]
+# Waka: centre 375, sweep +/-75, symmetric. 300 -> 450 -> 300, 0.11 s.
+# One smooth up-then-down sweep. Not two pitches, not a chirp.
+WAKA_CENTRE = 375.0
+WAKA_SWEEP = 75.0
+WAKA_START = WAKA_CENTRE - WAKA_SWEEP
+WAKA_PEAK = WAKA_CENTRE + WAKA_SWEEP
+WAKA_END = WAKA_CENTRE - WAKA_SWEEP
+WAKA_TOTAL = 0.11
+WAKA_HALF = WAKA_TOTAL / 2.0
+WAKA_ATTACK = 0.003
+WAKA_GAIN = 0.35
+# Credit: same WSG voice, fixed pitch, no sweep. Short, distinct.
+# Fixed vs swept is what separates credit from waka.
+CREDIT_FREQ = 1000.0
+CREDIT_DUR = 0.08
+CREDIT_GAIN = 0.30
+
 BASE_SEMITONE = {'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11}
 A4_N = 58
 A4_FREQ = 440.0
@@ -59,52 +61,18 @@ DEFAULT_TEMPO = 140
 DEFAULT_LENGTH = 4
 MODE_FACTORS = {'MN': 7 / 8, 'ML': 1.0, 'MS': 3 / 4}
 
-# Arcade death sound, 90 ticks at 60 Hz = 1.5 s, WSG voice 2 only.
-# Sweep 1: 0.00-0.65 s, 1000 -> 100 Hz, vibrato ~9 Hz.
-# Sweep 2: 0.65-1.15 s, 700 -> 150 Hz, vibrato ~11 Hz.
-# Tail: 1.15-1.50 s, two low pops, 0.08 s each, 0.12 s gap.
-DEATH_TOTAL_S = 1.5
-DEATH_SWEEP1_START = 1000.0
-DEATH_SWEEP1_END = 100.0
-DEATH_SWEEP1_DUR = 0.65
-DEATH_SWEEP1_VIB_RATE = 9.0
-DEATH_SWEEP1_VIB_DEPTH = 45.0
-DEATH_SWEEP2_START = 700.0
-DEATH_SWEEP2_END = 150.0
-DEATH_SWEEP2_DUR = 0.50
-DEATH_SWEEP2_VIB_RATE = 11.0
-DEATH_SWEEP2_VIB_DEPTH = 35.0
-DEATH_POP1_START = 1.15
-DEATH_POP2_START = 1.35
-DEATH_POP_DUR = 0.08
-DEATH_POP_START_FREQ = 200.0
-DEATH_POP_END_FREQ = 80.0
-
-# Waka: one WSG voice, harmonic-rich waveform, ~375 Hz fundamental.
-# Wa/ka share the same base frequency; they differ in envelope/shape,
-# not in fundamental. Durations wa 85 ms + ka 60 ms = 145 ms total
-# come from clone tuning (durations only, not its 543/684 Hz pitches).
-# Forum wa-rises / ka-falls is UNVERIFIED, so the sweep is kept small
-# (+12 / -12 Hz), NOT the forum D+A / C#+G# pairs. Clone 543/684 Hz
-# and looser 440 Hz / 500 Hz-1 kHz figures are NOT used.
-WAKA_FUNDAMENTAL = 375.0
-WAKA_WA_DUR = 0.085
-WAKA_KA_DUR = 0.060
-WAKA_TOTAL = WAKA_WA_DUR + WAKA_KA_DUR
-WAKA_ATTACK = 0.005
-WAKA_WA_RISE = 12.0
-WAKA_KA_FALL = -12.0
-# Credit is one waka. Old names kept as aliases only.
-CREDIT_WAKA_DUR = WAKA_TOTAL
-CREDIT_WAKA_HI = WAKA_FUNDAMENTAL
-CREDIT_WAKA_LO = WAKA_FUNDAMENTAL
-CREDIT_WAKA_STEP = WAKA_WA_DUR
-
 # Pac-Man intro melody in MML. Tempo and phrasing follow the arcade jingle.
 # B B F# D# B F# D# C C G E C G E B B F# D# B F# D# D# E F F# G G# A B
+# Intro bass: 4 held roots (ML legato, L8). Phrase 1 B,
+# phrase 2 C, phrase 3 B, phrase 4 B. 29 notes, ML = held,
+# same total duration as melody, so both tracks end together.
+INTRO_BASS_MML = "T150O2MLL8B B B B B B B C C C C C C C B B B B B B B B B B B B B B B"
+INTRO_BASS_SHORT_MML = "T150O2MLL8B B B B B B B"
 PACMAN_MML = {
     "intro": "T150O5L8B B F# D# B F# D# C C G E C G E B B F# D# B F# D# D# E F F# G G# A B",
+    "intro_bass": INTRO_BASS_MML,
     "intro_short": "T150O5L8B B F# D# B F# D#",
+    "intro_short_bass": INTRO_BASS_SHORT_MML,
     "level_clear": "T150O5L8C E G C E G C",
     "extra_life": "T180O6L16C E G C E G C E G",
     "fruit": "T180O6L16E G C E",
@@ -121,7 +89,9 @@ PACMAN_MML = {
 
 PACMAN_SOUNDS = {
     "intro": [PACMAN_MML["intro"]],
+    "intro_bass": [PACMAN_MML["intro_bass"]],
     "intro_short": [PACMAN_MML["intro_short"]],
+    "intro_short_bass": [PACMAN_MML["intro_short_bass"]],
     "level_clear": [PACMAN_MML["level_clear"]],
     "extra_life": [PACMAN_MML["extra_life"]],
     "fruit": [PACMAN_MML["fruit"]],
@@ -137,8 +107,9 @@ PACMAN_SOUNDS = {
 }
 
 PACMAN_DESCRIPTIONS = {
-    "intro": "Pac-Man arcade intro jingle, square wave",
-    "intro_short": "Intro first phrase only",
+    "intro": "Intro: higher synth melody + bass, two tracks at once",
+    "intro_bass": "Intro bass track, root notes, low octave",
+    "intro_short": "Intro first phrase only, melody + bass",
     "level_clear": "Level clear jingle",
     "extra_life": "Extra life jingle",
     "fruit": "Fruit spawn chime",
@@ -146,8 +117,8 @@ PACMAN_DESCRIPTIONS = {
     "power": "Power pellet sweep",
     "ghost_eaten": "Ghost eaten ascending sweep",
     "death": "Death: two descending WSG sweeps with vibrato + two low pops, 1.5 s, 90 ticks",
-    "credit": "Credit: one single-voice waka burst, 0.145 s, not a jingle",
-    "waka": "Waka: one WSG voice, 375 Hz, wa 85 ms + ka 60 ms",
+    "credit": "Credit: one WSG voice, fixed pitch, no sweep",
+    "waka": "Waka: one WSG voice, 300->450->300 Hz sweep, 0.11 s",
     "waka_alt": "Waka: same single-voice waka (no alternate chirp)",
     "siren": "Background siren loop chunk",
     "fright": "Fright mode loop chunk",
@@ -362,6 +333,7 @@ class PacManPlayer:
         self.quality = quality
         self._active_nodes = []
         self._on_complete = None
+        self._wsg_wave_cached = None
         self._init_context()
     def _init_context(self):
         if HAS_BROWSER:
@@ -614,7 +586,61 @@ class PacManPlayer:
                 pass
         else:
             self._clear_nodes(None)
-    def play_waka(self, on_complete=None):
+    def _wsg_wave(self, ctx):
+        # Core WSG voice, built once, cached. Not square, not sawtooth.
+        if getattr(self, '_wsg_wave_cached', None) is not None:
+            return self._wsg_wave_cached
+        try:
+            create = getattr(ctx, 'createPeriodicWave', None)
+            if create is None:
+                return None
+            real = [0.0] * len(WSG_WAVE_IMAG)
+            wave = create(real, list(WSG_WAVE_IMAG))
+            self._wsg_wave_cached = wave
+            return wave
+        except Exception:
+            return None
+    def _schedule_track(self, ctx, events, waveform, gain_val, t0):
+        # Schedule one track at t0. Returns last oscillator + last stop time.
+        # Does NOT stop other tracks. Used by intro (melody + bass together).
+        last_osc = None
+        last_stop = t0
+        tt = t0
+        for ev in events:
+            total_s = ev['total_duration'] / 1000.0
+            sound_s = ev['sound_duration'] / 1000.0
+            if ev['freq'] > 0 and sound_s > 0.002:
+                try:
+                    osc = ctx.createOscillator()
+                    gain = ctx.createGain()
+                    if waveform == 'periodic':
+                        wave = self._wsg_wave(ctx)
+                        if wave is not None:
+                            try:
+                                osc.setPeriodicWave(wave)
+                            except Exception:
+                                osc.type = "square"
+                        else:
+                            osc.type = "square"
+                    else:
+                        osc.type = waveform
+                    osc.frequency.value = ev['freq']
+                    gain.gain.value = gain_val
+                    osc.connect(gain)
+                    gain.connect(self.master_gain or ctx.destination)
+                    osc.start(tt)
+                    osc.stop(tt + sound_s)
+                    self._active_nodes.append((osc, gain))
+                    last_osc = osc
+                    last_stop = tt + sound_s
+                except Exception:
+                    pass
+            tt = tt + total_s
+        return last_osc, last_stop
+    def play_intro(self, on_complete=None, short=False):
+        # Two tracks at once: higher synth melody + bass. Same t0, same
+        # tempo, same total duration. Melody is square, brighter and
+        # louder. Bass is triangle, lower octave, softer.
         if not self._ensure():
             if on_complete:
                 try:
@@ -639,57 +665,16 @@ class PacManPlayer:
         except Exception:
             now = 0
         t0 = now + 0.02
-        last_osc = None
-        try:
-            osc = ctx.createOscillator()
-            gain = ctx.createGain()
-            # Single WSG voice. Sawtooth = harmonic-rich, all harmonics
-            # (odd + even), closer to the ROM wavetable than square
-            # (odd only). One oscillator for the whole wa+ka burst.
-            osc.type = "sawtooth"
-            try:
-                osc.frequency.setValueAtTime(WAKA_FUNDAMENTAL, t0)
-            except Exception:
-                try:
-                    osc.frequency.value = WAKA_FUNDAMENTAL
-                except Exception:
-                    pass
-            try:
-                # Wa rises slightly, ka falls slightly. Small on purpose:
-                # forum pairs are unverified, so no D+A / C#+G# here.
-                osc.frequency.linearRampToValueAtTime(WAKA_FUNDAMENTAL + WAKA_WA_RISE, t0 + WAKA_WA_DUR)
-            except Exception:
-                pass
-            try:
-                osc.frequency.linearRampToValueAtTime(WAKA_FUNDAMENTAL + WAKA_WA_RISE + WAKA_KA_FALL, t0 + WAKA_TOTAL)
-            except Exception:
-                pass
-            try:
-                gain.gain.setValueAtTime(0.0001, t0)
-                gain.gain.exponentialRampToValueAtTime(0.38, t0 + WAKA_ATTACK)
-            except Exception:
-                try:
-                    gain.gain.value = 0.38
-                except Exception:
-                    pass
-            try:
-                # Dip at the wa/ka boundary articulates ka. Wa/ka share
-                # the same base frequency; the boundary is envelope, not
-                # a second voice or a pitch jump.
-                gain.gain.setValueAtTime(0.38, t0 + WAKA_WA_DUR - 0.005)
-                gain.gain.linearRampToValueAtTime(0.22, t0 + WAKA_WA_DUR)
-                gain.gain.linearRampToValueAtTime(0.30, t0 + WAKA_WA_DUR + 0.01)
-                gain.gain.linearRampToValueAtTime(0.0, t0 + WAKA_TOTAL)
-            except Exception:
-                pass
-            osc.connect(gain)
-            gain.connect(self.master_gain or ctx.destination)
-            osc.start(t0)
-            osc.stop(t0 + WAKA_TOTAL)
-            self._active_nodes.append((osc, gain))
-            last_osc = osc
-        except Exception:
-            last_osc = None
+        _parser = PacManMMLParser()
+        if short:
+            mel = _parser.parse(PACMAN_MML["intro_short"], carry_state=False)
+            bass = _parser.parse(PACMAN_MML["intro_short_bass"], carry_state=False)
+        else:
+            mel = _parser.parse(PACMAN_MML["intro"], carry_state=False)
+            bass = _parser.parse(PACMAN_MML["intro_bass"], carry_state=False)
+        last_mel, _ = self._schedule_track(ctx, mel, "square", 0.30, t0)
+        last_bass, _ = self._schedule_track(ctx, bass, "triangle", 0.26, t0)
+        last_osc = last_mel if last_mel is not None else last_bass
         if last_osc is not None:
             try:
                 def on_ended(evt):
@@ -706,9 +691,155 @@ class PacManPlayer:
                 pass
         else:
             self._clear_nodes(None)
+    def play_waka(self, on_complete=None):
+        # One WSG voice, wave 3, one smooth up-then-down sweep.
+        # Not a chirp: no two discrete pitches, no alternation.
+        # Does NOT stop other tracks: waka overlaps siren / intro.
+        if not self._ensure():
+            if on_complete:
+                try:
+                    on_complete(None)
+                except Exception:
+                    pass
+            return
+        self.resume()
+        ctx = self.ctx
+        try:
+            now = ctx.currentTime
+        except Exception:
+            now = 0
+        t0 = now + 0.02
+        try:
+            osc = ctx.createOscillator()
+            gain = ctx.createGain()
+            wave = self._wsg_wave(ctx)
+            if wave is not None:
+                try:
+                    osc.setPeriodicWave(wave)
+                except Exception:
+                    osc.type = "square"
+            else:
+                osc.type = "square"
+            try:
+                osc.frequency.setValueAtTime(WAKA_START, t0)
+                osc.frequency.linearRampToValueAtTime(WAKA_PEAK, t0 + WAKA_HALF)
+                osc.frequency.linearRampToValueAtTime(WAKA_END, t0 + WAKA_TOTAL)
+            except Exception:
+                try:
+                    osc.frequency.value = WAKA_CENTRE
+                except Exception:
+                    pass
+            try:
+                gain.gain.setValueAtTime(0.0001, t0)
+                gain.gain.exponentialRampToValueAtTime(WAKA_GAIN, t0 + WAKA_ATTACK)
+                gain.gain.exponentialRampToValueAtTime(0.0001, t0 + WAKA_TOTAL)
+            except Exception:
+                try:
+                    gain.gain.value = WAKA_GAIN
+                except Exception:
+                    pass
+            osc.connect(gain)
+            gain.connect(self.master_gain or ctx.destination)
+            osc.start(t0)
+            osc.stop(t0 + WAKA_TOTAL)
+            self._active_nodes.append((osc, gain))
+            last_osc = osc
+        except Exception:
+            last_osc = None
+        if last_osc is not None:
+            try:
+                def on_ended(evt, _o=last_osc):
+                    try:
+                        self._active_nodes = [n for n in self._active_nodes if n[0] is not _o]
+                    except Exception:
+                        pass
+                    if on_complete:
+                        try:
+                            on_complete(evt)
+                        except Exception:
+                            pass
+                try:
+                    last_osc.onended = on_ended
+                except Exception:
+                    pass
+                try:
+                    last_osc.addEventListener("ended", on_ended)
+                except Exception:
+                    pass
+            except Exception:
+                pass
     def play_credit(self, on_complete=None):
-        # Credit is one waka, same single-voice burst as a dot.
-        self.play_waka(on_complete=on_complete)
+        # Core: same WSG voice as waka, fixed pitch, no sweep.
+        # One oscillator, one envelope. Distinct from waka by fixed vs swept.
+        if not self._ensure():
+            if on_complete:
+                try:
+                    on_complete(None)
+                except Exception:
+                    pass
+            return
+        self.resume()
+        ctx = self.ctx
+        try:
+            now = ctx.currentTime
+        except Exception:
+            now = 0
+        t0 = now + 0.02
+        last_osc = None
+        try:
+            osc = ctx.createOscillator()
+            gain = ctx.createGain()
+            wave = self._wsg_wave(ctx)
+            if wave is not None:
+                try:
+                    osc.setPeriodicWave(wave)
+                except Exception:
+                    osc.type = "square"
+            else:
+                osc.type = "square"
+            try:
+                osc.frequency.value = CREDIT_FREQ
+            except Exception:
+                pass
+            try:
+                gain.gain.setValueAtTime(0.0001, t0)
+                gain.gain.exponentialRampToValueAtTime(CREDIT_GAIN, t0 + 0.005)
+                gain.gain.exponentialRampToValueAtTime(0.0001, t0 + CREDIT_DUR)
+            except Exception:
+                try:
+                    gain.gain.value = CREDIT_GAIN
+                except Exception:
+                    pass
+            osc.connect(gain)
+            gain.connect(self.master_gain or ctx.destination)
+            osc.start(t0)
+            osc.stop(t0 + CREDIT_DUR)
+            self._active_nodes.append((osc, gain))
+            last_osc = osc
+        except Exception:
+            last_osc = None
+        if last_osc is not None:
+            try:
+                def on_ended(evt, _o=last_osc):
+                    try:
+                        self._active_nodes = [n for n in self._active_nodes if n[0] is not _o]
+                    except Exception:
+                        pass
+                    if on_complete:
+                        try:
+                            on_complete(evt)
+                        except Exception:
+                            pass
+                try:
+                    last_osc.onended = on_ended
+                except Exception:
+                    pass
+                try:
+                    last_osc.addEventListener("ended", on_ended)
+                except Exception:
+                    pass
+            except Exception:
+                pass
     def play_mml(self, mml_str, parser=None, on_complete=None):
         if parser is None:
             parser = PacManMMLParser()
@@ -774,8 +905,14 @@ class PacManAudioEngine:
         if sound_name == 'credit':
             self.player.play_credit(on_complete=on_complete)
             return self.presets.get('credit')
-        # Waka is one single-voice burst (wa+ka inside it). No flip,
-        # no alternate chirp, no two-voice alternation.
+        if sound_name == 'intro':
+            self.player.play_intro(on_complete=on_complete, short=False)
+            return self.presets.get('intro')
+        if sound_name == 'intro_short':
+            self.player.play_intro(on_complete=on_complete, short=True)
+            return self.presets.get('intro_short')
+        # Waka is one single-voice WSG sweep (wa=up, ka=down inside it).
+        # No flip, no alternate chirp, no two-voice alternation.
         if sound_name in ('waka', 'waka_alt'):
             self.player.play_waka(on_complete=on_complete)
             return self.presets.get('waka')
