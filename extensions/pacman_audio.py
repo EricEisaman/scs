@@ -2,11 +2,13 @@
 # Without modifying proc_audio.py at all.
 # EVENT-DRIVEN ONLY - No timeouts, no setTimeout, no polling counters.
 # All timing via AudioContext.currentTime, completion via oscillator.onended event.
-# Square-wave arcade voice, like the original Namco hardware, plus a
-# faithful MML intro melody in the same style as extensions/8bit.py.
+# WSG wavetable voice, like the original Namco hardware: each voice is
+# a 32-sample waveform, rendered as a PeriodicWave from its DFT spectrum,
+# plus a faithful two-voice MML intro in the style of extensions/8bit.py.
 # Architecture mirrors extensions/8bit.py:
 # - Built on top of proc_audio.py: imports AudioEngine and Patch but does not modify them
-# - Uses Web Audio API directly for square-wave: oscillator.type = square
+# - Uses Web Audio API PeriodicWave: DFT of 32-sample WSG waveform ->
+#   Fourier coeffs -> createPeriodicWave, per voice (lead / bass)
 # - All oscillators scheduled via ctx.currentTime + offset, not setTimeout
 # - Completion via onended event chain: last oscillator onended -> _clear_nodes -> on_complete
 # - Siren loops by chaining onended -> schedule next loop chunk, never by timer
@@ -44,11 +46,118 @@ DEFAULT_TEMPO = 140
 DEFAULT_LENGTH = 4
 MODE_FACTORS = {'MN': 7 / 8, 'ML': 1.0, 'MS': 3 / 4}
 
-# Pac-Man intro melody in MML. Tempo and phrasing follow the arcade jingle.
-# B B F# D# B F# D# C C G E C G E B B F# D# B F# D# D# E F F# G G# A B
+# ---- Namco WSG timbre: proper Fourier spectrum for both tracks ----
+# The arcade chip is not a square-wave chip. It is a 3-voice wavetable chip:
+# each voice steps through a 32-sample 4-bit waveform from PROM. The timbre
+# of a voice is the Fourier spectrum of that waveform, not a square wave
+# (square = odd harmonics only, 1, 0, 1/3, 0, 1/5 ...).
+# Here both intro voices get their own 32-sample WSG-style waveform, and
+# their Fourier spectra are computed from those waveforms by DFT, then
+# used as Web Audio PeriodicWave coefficients. No spectrum is asserted
+# by hand; it is derived from the waveform.
+# Lead: triangle + saw blend. Triangle alone gives odd harmonics only,
+# decaying as 1/n^2. Blending in a saw adds even harmonics, so the lead
+# is reedy and bright: fundamental 1.0, 2nd 0.30, 3rd 0.22, 4th 0.16,
+# then a slow tail. That is the lead cutting through, not a square.
+# Bass: pure triangle, 1 cycle over 32 samples. Triangle gives odd
+# harmonics only, decaying as 1/n^2: fundamental 1.0, 2nd 0.0,
+# 3rd 0.11, 5th 0.04, 7th 0.02. Fundamental-dominant, warm, no harsh
+# even harmonics, so it sits under the lead instead of masking it.
+def _wsg_lead_wave():
+    wave = []
+    for n in range(32):
+        if n < 16:
+            tri = float(n)
+        else:
+            tri = float(31 - n)
+        saw = n * 15.0 / 31.0
+        wave.append((tri + saw) / 2.0)
+    return wave
+
+def _wsg_bass_wave():
+    wave = []
+    for n in range(32):
+        if n < 16:
+            wave.append(float(n))
+        else:
+            wave.append(float(31 - n))
+    return wave
+
+WSG_LEAD_WAVE = _wsg_lead_wave()
+WSG_BASS_WAVE = _wsg_bass_wave()
+
+def _wsg_fourier(wave32):
+    # DFT of a 32-sample waveform -> PeriodicWave (real, imag) coefficients.
+    # real[k] = cosine coeff a_k, imag[k] = sine coeff b_k, k = 0..16.
+    # a_k = (2/N) sum x_n cos(2 pi k n / N), b_k = (2/N) sum x_n sin(...)
+    # DC removed (real[0] = 0). Normalised so fundamental magnitude = 1.0,
+    # so gain, not spectrum, sets loudness.
+    n_count = len(wave32)
+    mean = sum(wave32) / float(n_count)
+    x = [v - mean for v in wave32]
+    real = [0.0] * 17
+    imag = [0.0] * 17
+    for k in range(1, 17):
+        a = 0.0
+        b = 0.0
+        for n in range(n_count):
+            ang = 2.0 * math.pi * k * n / n_count
+            a = a + x[n] * math.cos(ang)
+            b = b + x[n] * math.sin(ang)
+        real[k] = (2.0 / n_count) * a
+        imag[k] = (2.0 / n_count) * b
+    mag1 = math.sqrt(real[1] * real[1] + imag[1] * imag[1])
+    if mag1 > 0:
+        for k in range(1, 17):
+            real[k] = real[k] / mag1
+            imag[k] = imag[k] / mag1
+    real[0] = 0.0
+    imag[0] = 0.0
+    return real, imag
+
+WSG_LEAD_SPECTRUM = _wsg_fourier(WSG_LEAD_WAVE)
+WSG_BASS_SPECTRUM = _wsg_fourier(WSG_BASS_WAVE)
+
+def _assign_voice_offsets(events, voice, wave, gain):
+    # Give a single-voice event list explicit start offsets (seconds)
+    # and voice / wave / gain tags, so play_events can schedule it
+    # polyphonically. Returns a new list, does not mutate the input.
+    out = []
+    t = 0.0
+    for ev in events:
+        e = dict(ev)
+        e['start_offset_s'] = t
+        e['voice'] = voice
+        e['wave'] = wave
+        e['gain'] = gain
+        out.append(e)
+        t = t + ev['total_duration'] / 1000.0
+    return out
+
+def _merge_intro_events(melody_events, bass_events):
+    # Merge two voices with the same rhythm into one polyphonic list.
+    # Both start at 0. Bass is tagged wave='bass', gain 0.34; melody is
+    # wave='lead', gain 0.38, so bass is present but does not mask lead.
+    mel = _assign_voice_offsets(melody_events, 'melody', 'lead', 0.38)
+    bas = _assign_voice_offsets(bass_events, 'bass', 'bass', 0.34)
+    merged = mel + bas
+    merged.sort(key=lambda e: (e['start_offset_s'], 0 if e['voice'] == 'melody' else 1))
+    return merged
+
+
+# Pac-Man intro in MML, two WSG voices, same rhythm, 29 eighth notes each.
+# Melody (lead, O5): B B F# D# B F# D# C C G E C G E B B F# D# B F# D# D# E F F# G G# A B
+# Bass (O3, two octaves below melody): alternates root / fifth under each
+# chord, then doubles the final chromatic climb in octaves, so the two
+# voices converge on the final B. Phrase 1 B major: B F# B F# B F# B.
+# Phrase 2 C major: C G C G C G C. Phrase 3 B major again. Phrase 4:
+# D# E F F# G G# A B, exactly the melody an octave pair below.
 PACMAN_MML = {
     "intro": "T150O5L8B B F# D# B F# D# C C G E C G E B B F# D# B F# D# D# E F F# G G# A B",
+    "intro_melody": "T150O5L8B B F# D# B F# D# C C G E C G E B B F# D# B F# D# D# E F F# G G# A B",
+    "intro_bass": "T150O3L8B F# B F# B F# B C G C G C G C B F# B F# B F# B D# E F F# G G# A B",
     "intro_short": "T150O5L8B B F# D# B F# D#",
+    "intro_short_bass": "T150O3L8B F# B F# B F# B",
     "level_clear": "T150O5L8C E G C E G C",
     "extra_life": "T180O6L16C E G C E G C E G",
     "fruit": "T180O6L16E G C E",
@@ -66,8 +175,8 @@ PACMAN_MML = {
 }
 
 PACMAN_SOUNDS = {
-    "intro": [PACMAN_MML["intro"]],
-    "intro_short": [PACMAN_MML["intro_short"]],
+    "intro": [PACMAN_MML["intro_melody"], PACMAN_MML["intro_bass"]],
+    "intro_short": [PACMAN_MML["intro_short"], PACMAN_MML["intro_short_bass"]],
     "level_clear": [PACMAN_MML["level_clear"]],
     "extra_life": [PACMAN_MML["extra_life"]],
     "fruit": [PACMAN_MML["fruit"]],
@@ -84,8 +193,8 @@ PACMAN_SOUNDS = {
 }
 
 PACMAN_DESCRIPTIONS = {
-    "intro": "Pac-Man arcade intro jingle, square wave",
-    "intro_short": "Intro first phrase only",
+    "intro": "Pac-Man arcade intro jingle, two WSG voices, lead + bass, PeriodicWave timbres",
+    "intro_short": "Intro first phrase only, lead + bass",
     "level_clear": "Level clear jingle",
     "extra_life": "Extra life jingle",
     "fruit": "Fruit spawn chime",
@@ -308,6 +417,10 @@ class PacManPlayer:
         self.quality = quality
         self._active_nodes = []
         self._on_complete = None
+        self._wave_lead = None
+        self._wave_bass = None
+        self._wave_lead_coeffs = None
+        self._wave_bass_coeffs = None
         self._init_context()
     def _init_context(self):
         if HAS_BROWSER:
@@ -320,13 +433,46 @@ class PacManPlayer:
                     self.master_gain = self.ctx.createGain()
                     self.master_gain.gain.value = 0.28
                     self.master_gain.connect(self.ctx.destination)
-            except Exception as e:
-                print("[pacman_audio] init failed")
+            except Exception:
                 self.ctx = None
     def _ensure(self):
         if self.ctx is None:
             self._init_context()
         return self.ctx is not None
+    def _make_periodic_wave(self, wave32):
+        # DFT -> PeriodicWave. real/imag are Fourier coeffs, DC = 0.
+        real, imag = _wsg_fourier(wave32)
+        try:
+            if HAS_BROWSER and window is not None:
+                try:
+                    Float32Array = getattr(window, 'Float32Array', None)
+                    if Float32Array is not None:
+                        real_a = Float32Array.new(real)
+                        imag_a = Float32Array.new(imag)
+                    else:
+                        real_a = real
+                        imag_a = imag
+                except Exception:
+                    real_a = real
+                    imag_a = imag
+            else:
+                real_a = real
+                imag_a = imag
+            try:
+                return self.ctx.createPeriodicWave(real_a, imag_a, {'disableNormalization': True})
+            except Exception:
+                return self.ctx.createPeriodicWave(real_a, imag_a)
+        except Exception:
+            return None
+    def _ensure_waves(self):
+        if self.ctx is None:
+            return
+        if self._wave_lead is None:
+            self._wave_lead_coeffs = _wsg_fourier(WSG_LEAD_WAVE)
+            self._wave_lead = self._make_periodic_wave(WSG_LEAD_WAVE)
+        if self._wave_bass is None:
+            self._wave_bass_coeffs = _wsg_fourier(WSG_BASS_WAVE)
+            self._wave_bass = self._make_periodic_wave(WSG_BASS_WAVE)
     def resume(self):
         if self.ctx:
             try:
@@ -354,6 +500,7 @@ class PacManPlayer:
             return
         self.resume()
         ctx = self.ctx
+        self._ensure_waves()
         try:
             for osc, gain in self._active_nodes:
                 try:
@@ -368,31 +515,52 @@ class PacManPlayer:
             now = ctx.currentTime
         except Exception:
             now = 0
-        t = now + 0.02
+        base = now + 0.02
+        t = base
         last_osc = None
-        last_stop_time = t
+        last_stop_time = base
         played = 0
         for ev in events:
             total_s = ev['total_duration'] / 1000.0
             sound_s = ev['sound_duration'] / 1000.0
+            if 'start_offset_s' in ev and ev['start_offset_s'] is not None:
+                start = base + float(ev['start_offset_s'])
+            else:
+                start = t
+                t = t + total_s
             if ev['freq'] > 0 and sound_s > 0.002:
                 try:
                     osc = ctx.createOscillator()
                     gain = ctx.createGain()
-                    osc.type = "square"
+                    wave_name = ev.get('wave', 'lead')
+                    if wave_name == 'bass' and self._wave_bass is not None:
+                        try:
+                            osc.setPeriodicWave(self._wave_bass)
+                        except Exception:
+                            osc.type = "triangle"
+                    elif self._wave_lead is not None:
+                        try:
+                            osc.setPeriodicWave(self._wave_lead)
+                        except Exception:
+                            osc.type = "square"
+                    else:
+                        osc.type = "square"
                     osc.frequency.value = ev['freq']
-                    gain.gain.value = 0.38
+                    try:
+                        gain.gain.value = float(ev.get('gain', 0.38))
+                    except Exception:
+                        gain.gain.value = 0.38
                     osc.connect(gain)
                     gain.connect(self.master_gain or ctx.destination)
-                    osc.start(t)
-                    osc.stop(t + sound_s)
+                    osc.start(start)
+                    osc.stop(start + sound_s)
                     self._active_nodes.append((osc, gain))
-                    last_osc = osc
-                    last_stop_time = t + sound_s
+                    if start + sound_s >= last_stop_time:
+                        last_osc = osc
+                        last_stop_time = start + sound_s
                     played = played + 1
                 except Exception:
                     pass
-            t = t + total_s
         if last_osc is not None:
             try:
                 def on_ended(evt):
@@ -468,7 +636,15 @@ class PacManAudioEngine:
         self._register()
     def _register(self):
         for name, mlist in PACMAN_SOUNDS.items():
-            self.presets[name] = {'mml': mlist, 'description': PACMAN_DESCRIPTIONS.get(name, ""), 'events': self.parser.parse_sequence(mlist)}
+            if name in ('intro', 'intro_short') and len(mlist) == 2:
+                mel = self.parser.parse(mlist[0], carry_state=False)
+                bas = self.parser.parse(mlist[1], carry_state=False)
+                evs = _merge_intro_events(mel, bas)
+                self.presets[name] = {'mml': mlist, 'description': PACMAN_DESCRIPTIONS.get(name, ""), 'events': evs}
+            else:
+                raw = self.parser.parse_sequence(mlist)
+                evs = _assign_voice_offsets(raw, 'melody', 'lead', 0.38)
+                self.presets[name] = {'mml': mlist, 'description': PACMAN_DESCRIPTIONS.get(name, ""), 'events': evs}
     def resume(self):
         self.player.resume()
         if self.proc_engine:
@@ -557,4 +733,4 @@ def play_mml(mml_str, on_complete=None):
 def resume():
     return get_engine().resume()
 
-__all__ = ['PacManMMLParser', 'PacManPlayer', 'PacManAudioEngine', 'PACMAN_MML', 'PACMAN_SOUNDS', 'PACMAN_DESCRIPTIONS', 'get_engine', 'play', 'play_mml', 'resume', 'HAS_PROC_AUDIO']
+__all__ = ['PacManMMLParser', 'PacManPlayer', 'PacManAudioEngine', 'PACMAN_MML', 'PACMAN_SOUNDS', 'PACMAN_DESCRIPTIONS', 'WSG_LEAD_WAVE', 'WSG_BASS_WAVE', 'WSG_LEAD_SPECTRUM', 'WSG_BASS_SPECTRUM', 'get_engine', 'play', 'play_mml', 'resume', 'HAS_PROC_AUDIO']
