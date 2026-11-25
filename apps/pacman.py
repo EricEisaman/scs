@@ -39,6 +39,15 @@ except Exception:
 def _play(name):
     try:
         if _audio is not None:
+            if name == 'waka':
+                # Spectrogram: each waka is a short ~0.09 s burst, two square
+                # waves alternating 580 / 340 Hz every 0.015 s, square-wave
+                # harmonics strongest low, decaying high. That is the
+                # credit chirp, not a single MML note. Route dot waka to it.
+                player = getattr(_audio, 'player', None)
+                if player is not None and hasattr(player, 'play_credit'):
+                    player.play_credit()
+                    return
             _audio.play(name)
     except Exception:
         pass
@@ -921,7 +930,17 @@ def drawPac(app):
     if app.state != 'play':
         openAmt = 0
     else:
-        openAmt = [0, 5, 10, 15, 20, 24, 20, 15, 10, 5][(app.mouth // 2) % 10]
+        if p['dx'] != 0:
+            off = p['x'] % T
+        elif p['dy'] != 0:
+            off = p['y'] % T
+        else:
+            off = 0
+        dist = off if off < T / 2 else T - off
+        frame = int(dist // 3)
+        if frame > 5:
+            frame = 5
+        openAmt = [0, 5, 10, 15, 20, 24][frame]
     angMap = {(1, 0): 0, (-1, 0): 180, (0, 1): 90, (0, -1): 270, (0, 0): 0}
     ang = angMap[(p['dx'], p['dy'])]
     drawArc(p['x'] + T / 2, p['y'] + T / 2, T - 6, T - 6, ang + openAmt, 360 - 2 * openAmt, fill='yellow')
@@ -994,7 +1013,7 @@ def drawAttract(app):
         _drawGhostIcon(210, y, col)
         drawLabel(txt, 560, y, fill=fill, size=16)
     drawCircle(210, 485, 4, fill='white')
-    drawArc(500, 485, 26, 26, 30, 300, fill='yellow')
+    drawArc(500, 485, 26, 26, 24, 312, fill='yellow')
     _drawGhostIcon(580, 485, 'red')
     _drawGhostIcon(660, 485, 'pink')
     _drawGhostIcon(740, 485, 'cyan')
@@ -1028,13 +1047,17 @@ def drawHUD(app):
     for k in range(app.lives):
         lx = 60 + k * 30
         ly = ROWS * T + 48
-        drawArc(lx, ly, 20, 20, 30, 300, fill='yellow')
+        drawArc(lx, ly, 20, 20, 24, 312, fill='yellow')
     kind = FRUIT_BY_LEVEL[app.level - 1] if app.level - 1 < len(FRUIT_BY_LEVEL) else 'melon'
     fx = 980
     fy = ROWS * T + 48
     if kind == 'cherry':
         drawCircle(fx - 5, fy + 4, 7, fill='red')
         drawCircle(fx + 5, fy + 4, 7, fill='red')
+        drawLine(fx - 5, fy - 2, fx + 2, fy - 10, fill='#D89055', lineWidth=2)
+        drawLine(fx + 5, fy - 2, fx + 2, fy - 10, fill='#D89055', lineWidth=2)
+        drawRect(fx - 9, fy + 5, 4, 4, fill='white')
+        drawRect(fx + 1, fy + 5, 4, 4, fill='white')
     elif kind == 'strawberry':
         drawCircle(fx, fy + 2, 10, fill='red')
     elif kind == 'orange':
