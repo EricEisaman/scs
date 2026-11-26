@@ -1357,7 +1357,7 @@ def redrawAll(app):
     drawRect(0, 0, WIDTH, HEIGHT, fill=BG)
     # Top bar
     drawRect(0, 0, WIDTH, 68, fill=rgb(18, 20, 32))
-    drawLabel('OpenArm 2.0  —  MLP-RL Stacking Trainer', 20, 16, size=20, fill=TXT, bold=True, align='left-top')
+    drawLabel('OpenArm 2.0  🤖  MLP-RL Stacking Trainer', 20, 16, size=20, fill=TXT, bold=True, align='left-top')
     drawLabel('No IK  •  No grasp table  •  No shape library  •  No Computer Vision', 20, 42, size=11, fill=DIM, align='left-top')
     env = app.env
     drawLabel(('EVAL  |  ' if app.eval_mode else '') + 'Ep %d  |  Step %d  |  Reward %.1f  |  Tower %d/%d' % (env.episode, env.step_count, app.episode_reward, env.tower_count, len(env.objects)),
