@@ -1393,7 +1393,7 @@ def redrawAll(app):
     drawLabel('Keys: SPACE train • W/S A/D Q/E + G/O manual teleop • R rotate • DEL delete', PANEL_X + 14, hy + 88, size=8, fill=DIM, align='left-top')
     # Footer
     drawRect(0, HEIGHT - 22, WIDTH, 22, fill=rgb(18, 20, 32))
-    drawLabel('SCS robot_training.py — OpenArm 2.0 sim • MLP-RL from scratch • 1050x700 • main() → runApp()', 12, HEIGHT - 11, size=9, fill=DIM, align='left-center')
+    drawLabel('SCS robot_training.py — OpenArm 2.0 sim • MLP-RL', 12, HEIGHT - 11, size=9, fill=DIM, align='left-center')
 
 def main():
     runApp(width=1050, height=700)
