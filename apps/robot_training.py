@@ -1,4 +1,4 @@
-# robot_training_61.py — OpenArm 2.0 + MLP-RL Stacking Trainer (SCS, 1050x700)
+# robot_training_63.py — OpenArm 2.0 + MLP-RL Stacking Trainer (SCS, 1050x700)
 # ---------------------------------------------------------------------------
 # Maps the Anvil OpenArm 2.0 Quest Teleop Kit to a 2D SCS lab:
 #   Real kit: 7-DOF per arm, 633 mm reach, parallel gripper 88 mm opening,
@@ -36,6 +36,33 @@
 #     _update_held, _try_release, _finish_step) with bodies moved verbatim;
 #     step is now an orchestrator. Added FILE MAP + TUNABLES index below
 #     and section banners. Verified by step-by-step equivalence vs v52.
+    #   - v63: FIX stuck 233 steps at 271px (critique of v62). Arm was
+    #     parked, not exploring: shaping is 0 when it does not move, stuck
+    #     penalty was flat -0.08, and novelty was never rewarded. Three
+    #     sensor-only fixes, no script to target, no COM in obs:
+    #     (1) Novelty: +0.03 per NEW world-model cell (capped +0.15) when
+    #     rays/ultrasonic discover a cell never seen before. Rewards sweeping
+    #     sensors to build memory, which requires moving. Uses only sensor
+    #     hits, same data that already fills the grid.
+    #     (2) Stuck penalty escalates: -0.08 -0.002*(still-60), capped
+    #     -0.30. Staying stuck gets worse, so critic learns moving beats
+    #     parking. At 233 steps, -0.30 not -0.08.
+    #     (3) Stuck recovery: still>100 boosts OU noise 2.5x on joints.
+    #     Still random, just larger variance — a kick, not a script.
+    #   - v62: FIX zero-positive trap (critique of v61). Three principled
+    #     changes, no script, no privileged obs, no reward hacking:
+    #     (1) Actor gate 0.02 -> 0.005. Old gate blocked the actor on every
+    #     shaping-only batch: shaping rewards are 0.01-0.30, so TD-std
+    #     0.01-0.02 IS the shaping signal, not noise. Std floor 0.08
+    #     already prevents noise blow-up; the gate was redundant and
+    #     kept the policy at random init for 1200+ steps.
+    #     (2) Curriculum over first 10k env steps, driven by
+    #     app.total_env_steps: grasp stability 0.20->0.30, close halo
+    #     50px->30px, gripper boost 2.5x->1.8x. Easy first, full difficulty
+    #     by 10k. Uses only step count, never COM/privileged info.
+    #     (3) Adaptive actor frequency: actor every 2nd batch when Pos%>0,
+    #     every 5th when Pos%==0. More actor steps when there is positive
+    #     signal to learn from, fewer when there is not.
     #   - v61: FIX _try_release NameError (critique of v60). gc was used
     #     in EVT_PLACED / PLACED_TIPPED / RELEASE / TOWER_COMPLETE events
     #     but never defined or passed into _try_release — NameError on
@@ -1093,6 +1120,7 @@ class Env:
         # v52 minimum-time: per-episode steps-to-goal, reset in reset_scene.
         self.steps_to_grasp = None; self.steps_to_stack = None; self.steps_to_success = None; self.on_goal_steps = 0
         self.last_grasp_msg = ''  # v60: set only by Controller event handler, never by Model
+        self._curr_prog = 1.0; self._curr_stab_thresh = 0.30; self._curr_halo = 30.0  # v62: full difficulty until first step sets curriculum
         self.bus = EventBus()
         self._prev_contact = 0.0
         self._stuck_emitted = False
@@ -1357,22 +1385,39 @@ class Env:
         # pure time cost, dwarfing approach shaping and making Reward -9.8
         # look like failure even when the arm was approaching. -0.004 still
         # punishes dawdling (episode_len steps = -2.4) without dominating signal.
+        # v62: curriculum progress 0->1 over first 10k env steps. Stored on
+        # self so _shape_reward/_try_grasp can read it without new args.
+        # Baseline Dummy has no total_env_steps -> getattr default 10000
+        # = full difficulty, so baseline is never given easy curriculum.
+        self._curr_prog = min(1.0, getattr(app_ctx, 'total_env_steps', 10000) / 10000.0)
+        self._curr_stab_thresh = 0.20 + 0.10 * self._curr_prog  # 0.20 early -> 0.30 late
+        self._curr_halo = 50.0 - 20.0 * self._curr_prog  # 50px early -> 30px late
         reward = -0.004; info = {'slip':0.0,'contact':0.0,'grasped':False,'placed':False,'dropped':False,'collision':0.0,'stuck':0.0}
         reward, info, gc, prev_target, prev_dist, new_dist, prev_angles, _a3 = self._move_arm(action, reward, info)
         reward, info = self._shape_reward(action, reward, info, gc, prev_target, prev_dist, new_dist, prev_angles, _a3)
         reward, info = self._try_grasp(action, reward, info, gc, _a3, app_ctx)
         reward, info = self._update_held(reward, info, gc)
         reward, info = self._try_release(reward, info, gc)
+        # v63: WM before _finish_step so novelty can join reward before
+        # clipping/accounting. Gripper pose is already settled after
+        # _move_arm; free physics in _finish_step only moves non-held
+        # objects a few px, so WM tells are still sensor-accurate.
+        _new_cells = self._update_world_model()
+        if _new_cells > 0:
+            _nov = min(0.15, 0.03 * _new_cells)
+            reward += _nov; info['novelty'] = _nov; info['new_cells'] = _new_cells
         reward, done, timeout, info = self._finish_step(reward, info, gc, app_ctx)
-        self._update_world_model()  # v54: tell only, never touches reward/physics
         return reward, done, timeout, info
 
     def _update_world_model(self):
-        # v54: tell the WM what the sensors just saw, from the settled
-        # pose (after _finish_step physics). Pure observer: writes only
-        # to self.wm. Never reads object poses, never touches reward,
-        # physics, or info. Decay first, then tells, so fresh evidence
-        # lands at full confidence.
+        # v54: tell the WM what the sensors just saw. v63: returns count
+        # of NEW cells (cells never in grid before this step). Decay first,
+        # then tells, so fresh evidence lands at full confidence. Caller
+        # turns new-cell count into novelty reward. Still pure observer
+        # except for the returned count: never reads object poses, never
+        # touches physics. Before = all cells in grid (any confidence),
+        # so a decayed-then-readded cell is NOT counted as new.
+        _before = set(self.wm.grid.keys())
         gc = self.arm.gripper_center()
         _, _, _, _, a3 = self.arm.fk()
         self.wm.decay()
@@ -1382,6 +1427,7 @@ class Env:
         _c, _f, _s = self.contact_sensors()
         if _c > 0.5 and self.arm.held is None:
             self.wm.tell_contact(gc)
+        return len(set(self.wm.grid.keys()) - _before)
 
     def _move_arm(self, action, reward, info):
         # Phase 1 — apply joint deltas + gripper, reject floor collisions,
@@ -1440,12 +1486,16 @@ class Env:
             if moved >= 1.5:
                 self._stuck_emitted = False
             if self.still_steps > 60 and new_dist > 40:
-                reward -= 0.08; info['stuck']=1.0
+                # v63: escalating, not flat. -0.08 -0.002*(still-60), capped
+                # -0.30. At 233 steps, -0.30. Parking must get worse than
+                # moving, otherwise critic learns parking is fine.
+                _stuck_pen = min(0.30, 0.08 + 0.002 * (self.still_steps - 60))
+                reward -= _stuck_pen; info['stuck']=1.0
                 # v60: STUCK emits once on crossing 60, not every step. Reward
                 # still applies per step, the event is the semantic signal.
                 if not self._stuck_emitted:
                     self._stuck_emitted = True
-                    self.bus.emit(RobotEvent(EVT_STUCK, self.step_count, gripper=gc, dist=new_dist, reward_delta=-0.08, reason='still_60_steps'))
+                    self.bus.emit(RobotEvent(EVT_STUCK, self.step_count, gripper=gc, dist=new_dist, reward_delta=-_stuck_pen, reason='still_60_steps'))
         self.last_gripper_pos = gc
         return reward, info, gc, prev_target, prev_dist, new_dist, prev_angles, _a3
 
@@ -1521,7 +1571,7 @@ class Env:
                     self._close_given = True
                     self.bus.emit(RobotEvent(EVT_CLOSE_ON_OBJECT, self.step_count, gripper=gc, object_index=self.objects.index(_inside_any) if _inside_any in self.objects else -1, centred=_centred, reward_delta=_sh4, reason='close_inside_polygon'))
             else:
-                # Close-attempt zone: within 30px of an object's COM, a
+                # Close-attempt zone: within halo (v62 curriculum) of COM, a
                 # close action earns +0.10 even though the gripper is not
                 # yet inside the polygon. Old code paid +0 only inside, so
                 # the gripper had to randomly land inside (~0.5% of arena)
@@ -1539,18 +1589,20 @@ class Env:
                     if _d < _near_d:
                         _near_d = _d
                         _near = _o
-                if _near is not None and _near_d < 30.0 and action[3] > 0.30 and not self._close_given:
+                # v62: halo is curriculum: 50px early -> 30px late. Same one-time
+                # rule, same +0.10, just a larger learnable zone at the start.
+                if _near is not None and _near_d < self._curr_halo and action[3] > 0.30 and not self._close_given:
                     reward += 0.10
                     info['shaping'] = info.get('shaping', 0.0) + 0.10
                     self._close_given = True
-                    self.bus.emit(RobotEvent(EVT_CLOSE_ATTEMPT, self.step_count, gripper=gc, object_index=self.objects.index(_near) if _near in self.objects else -1, dist=_near_d, reward_delta=0.10, reason='close_halo_30px'))
-                elif _near is None or _near_d >= 30.0:
+                    self.bus.emit(RobotEvent(EVT_CLOSE_ATTEMPT, self.step_count, gripper=gc, object_index=self.objects.index(_near) if _near in self.objects else -1, dist=_near_d, reward_delta=0.10, reason='close_halo_%.0fpx' % self._curr_halo))
+                elif _near is None or _near_d >= self._curr_halo:
                     self._close_given = False
         return reward, info
 
     def _try_grasp(self, action, reward, info, gc, _a3, app_ctx):
         # Phase 3 — grasp attempt: gripper closed + centred inside an object
-        # polygon + stability > 0.30. Records steps-to-grasp (v52).
+        # polygon + stability > threshold (v62 curriculum 0.20->0.30).
         arm = self.arm
         if arm.held is None and arm.gripper < 0.38:
             for o in self.objects:
@@ -1570,7 +1622,7 @@ class Env:
                         if _w > 65.0: stability = 0.0; _fail_reason = 'too_wide_%.0fpx_gt_65_adaptive' % _w
                     else:
                         if _w > arm.GAP_MAX + 8.0: stability = 0.0; _fail_reason = 'too_wide_%.0fpx_gt_%.0f_parallel' % (_w, arm.GAP_MAX)
-                    if stability > 0.30:
+                    if stability > self._curr_stab_thresh:
                         arm.held = o; o.held=True; o.grasp_offset=(gc[0]-o.x, gc[1]-o.y); o.grasp_stability=max(0.15, stability); o.slip=0.0
                         _gr = 0.5 + 1.5 * stability
                         reward += _gr; info['grasped']=True; app_ctx.grasp_attempts+=1; app_ctx.grasp_success+=1; self._lift_given = False; self._close_given = False; self.steps_to_grasp = self.step_count + 1 if self.steps_to_grasp is None else self.steps_to_grasp
@@ -1578,7 +1630,7 @@ class Env:
                         self._slip_emitted = False
                     else:
                         o.slip=1.0; o.vrot+=(random.random()-0.5)*0.08; reward-=0.6; info['slip']=1.0; app_ctx.grasp_attempts+=1
-                        self.bus.emit(RobotEvent(EVT_GRASP_FAIL, self.step_count, gripper=gc, object_index=self.objects.index(o), centred=max(0.0, 1.0 - off/(o.radius+12.0)), stability=stability, reward_delta=-0.6, reason=_fail_reason if _fail_reason else 'stability_%.2f_below_0.30' % stability))
+                        self.bus.emit(RobotEvent(EVT_GRASP_FAIL, self.step_count, gripper=gc, object_index=self.objects.index(o), centred=max(0.0, 1.0 - off/(o.radius+12.0)), stability=stability, reward_delta=-0.6, reason=_fail_reason if _fail_reason else 'stability_%.2f_below_%.2f' % (stability, self._curr_stab_thresh)))
                     break
         return reward, info
 
@@ -1697,6 +1749,7 @@ def onAppStart(app):
     app.stepsPerSecond = 30
     app.scs = {}  # single nested bundle for any future window/extension use
     app.env = Env()
+    app.total_env_steps = 0  # v62: global step count drives curriculum, never resets per episode
     _subscribe_robot_events(app)  # v60: events, not polling
     # Input 69 = 61 sensors (37 + 24 memory rays) + 8 context. Actor 4 = joint deltas + gripper.
     # v50: actions stay joint deltas. They are already incremental (relative
@@ -1924,16 +1977,19 @@ def _train_batch(app):
     # NORMALISED advantages adv_n in [-1,1] actually used for the actor
     # update. TD-std = std of raw TD errors. They must differ.
     pos_frac = sum(1 for (_s, _a, _n, _r, _s2, _d, _t) in batch if _r >= 0.4) / len(batch)
-    # Gate: no positives AND no TD surprise -> critic still learns (it is
-    # fitting the failure distribution), but the actor does NOT update.
-    # Exploration (OU noise) keeps running, so the actor still explores;
-    # it just does not collapse toward its own noise.
-    actor_gated = (pos_frac == 0.0 and td_std < 0.02)
-    # v48 asymmetric: critic every batch, actor every 5th batch. Paper M=20
-    # counts batch gradient steps. Here one _train_batch = 1 batch step
-    # (v56, was 32 per-sample steps) and _train_batch runs every 2 env
-    # steps, so M=5 here = 5 critic batch steps per actor step. M=20 here
-    # update per 80 env steps and would starve the actor at this UTD.
+    # Gate: no positives AND essentially zero TD surprise -> critic still
+    # learns, actor does NOT update. v62: threshold 0.02 -> 0.005. Old 0.02
+    # gated every shaping-only batch: shaping rewards are 0.01-0.30, so
+    # TD-std 0.01-0.02 IS the shaping gradient, not noise. Std floor 0.08
+    # already prevents noise blow-up (the original reason for the gate),
+    # so the gate only needs to catch truly flat batches (<0.005).
+    actor_gated = (pos_frac == 0.0 and td_std < 0.005)
+    # v48 asymmetric: critic every batch, actor every 5th batch. v62
+    # adaptive: when Pos%>0 there is positive signal to learn from, so
+    # actor every 2nd batch; when Pos%==0, keep 5th to avoid chasing
+    # failures. app.actor_update_every is set here per batch, not in
+    # onAppStart, so it adapts as Pos% changes.
+    app.actor_update_every = 2 if pos_frac > 0.0 else 5
     actor_due = (app.critic_updates % app.actor_update_every == 0)
     actor_skip = actor_gated or not actor_due
     _adv_ns = []
@@ -2125,9 +2181,20 @@ def onStep(app):
             _ultra_d2, _ = app.env.ultrasonic()
             _rays2 = app.env.cast_rays()
             _near_sensor = (_ultra_d2 < 50.0) or (min(_rays2) * 240.0 < 50.0)
+            # v62: gripper boost is curriculum: 2.5x early -> 1.8x late.
+            # Same sensor trigger (contact or 50px halo), just stronger
+            # while the first grasp is still undiscovered.
+            _prog = min(1.0, getattr(app, 'total_env_steps', 10000) / 10000.0)
+            _boost = 2.5 - 0.7 * _prog
             if (_c > 0.5 or _near_sensor) and app.env.arm.gripper > 0.38:
-                noise[3] = noise[3] * 1.8
+                noise[3] = noise[3] * _boost
+            # v63: stuck recovery. Still random, just larger variance.
+            # If arm has not moved >1.5px for 100+ steps, OU noise on
+            # joints is 2.5x. No direction scripted, no target used.
+            if getattr(app.env, 'still_steps', 0) > 100:
+                noise[0] = noise[0] * 2.5; noise[1] = noise[1] * 2.5; noise[2] = noise[2] * 2.5
             executed = [max(-1.0, min(1.0, clean[i] + noise[i])) for i in range(4)]
+        app.total_env_steps = getattr(app, 'total_env_steps', 0) + 1  # v62: drives curriculum
         reward, done, timeout, info = app.env.step(executed, app)
         # Per-step epsilon decay: old code decayed epsilon only at episode
         # END (0.985/episode), so after 515 steps eps was still 0.35 and
@@ -2170,6 +2237,7 @@ def onStep(app):
         # effect and bad teleop moves were cloned as strongly as good ones.
         _clean = app.actor.forward(s)
         _teleop_noise = [a[i] - _clean[i] for i in range(4)]
+        app.total_env_steps = getattr(app, 'total_env_steps', 0) + 1  # v62: teleop also advances curriculum
         reward, done, timeout, info = app.env.step(a, app)
         s2, _ = _sensor_vector(app)
         if any(v != 0.0 for v in a):
