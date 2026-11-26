@@ -1,4 +1,4 @@
-# robot_training_59.py — OpenArm 2.0 + MLP-RL Stacking Trainer (SCS, 1050x700)
+# robot_training_60.py — OpenArm 2.0 + MLP-RL Stacking Trainer (SCS, 1050x700)
 # ---------------------------------------------------------------------------
 # Maps the Anvil OpenArm 2.0 Quest Teleop Kit to a 2D SCS lab:
 #   Real kit: 7-DOF per arm, 633 mm reach, parallel gripper 88 mm opening,
@@ -36,24 +36,31 @@
 #     _update_held, _try_release, _finish_step) with bodies moved verbatim;
 #     step is now an orchestrator. Added FILE MAP + TUNABLES index below
 #     and section banners. Verified by step-by-step equivalence vs v52.
-    #   - v59: FIXES IN PRIORITY ORDER, SECOND REVIEW. (1) ORACLE REMOVED:
-    #     _sensor_vector no longer feeds dx,dy from com_world() or tdx,tdy
-    #     from tower_slot(). Replaced with sensor-derived nearest live ray
-    #     dist+angle and nearest memory ray dist+angle, obs dim stays 69.
-    #     onStep gripper boost no longer uses COM distance, it uses
-    #     ultrasonic / nearest ray <50px. Reward shaping still uses COM,
-    #     reward is allowed privileged info, observation is not. (2) SHAPING
-    #     LEAK: shaping uses gamma=1 (zero at rest) + Phi zeroed at
-    #     terminal/timeout via -Phi_last correction
-    #     in _finish_step. Centred bonus capped to one-time per approach
-    #     via _centred_given, same as close bonus, no more +60 farming.
-    #     Shaped vs unshaped returns logged separately. (3) HONEST NAME +
-    #     BASELINE: algorithm renamed to V-critic advantage-weighted
-    #     regression, fixed seed 0, random-baseline button. (4) SPAWN +
-    #     SAMPLING: spawn avoids tower zone and overlaps, start pose
-    #     randomized so v50 relative frame is not cosmetic, stratified
-    #     50% positives removed, uniform sampling within each half to
-    #     stop V(s) upward bias. Header gamma fixed 0.97 -> 0.99.
+    #   - v60: PROPER EVENT SYSTEM, NO TIMEOUTS. Model emits semantic
+    #     RobotEvents, Controller drains and handles them. No setTimeout,
+    #     no sleep, no polling loop. Env.step still returns (r,done,trunc,
+    #     info) for replay, but control flow is event-driven: EPISODE_END
+    #     triggers _end_episode via drain, not via `if done:` polling.
+    #     Events carry meaning, not booleans: GRASP_SUCCESS carries
+    #     object_index, gripper, centred, stability, reward_delta;
+    #     PLACED carries tower_count, COM, gripper; STUCK carries
+    #     duration, gripper, target_dist; CONTACT_MADE/LOST carry edge
+    #     transitions, not per-step contact flags. TrainingContext updates
+    #     grasps/drops/slip/contact from events, not from info dict polling.
+    #     Model no longer sets last_grasp_msg strings; the Controller
+    #     handler translates events to display text. Episode step limit
+    #     is a limit, not a JS timeout.
+    #   - v59: FIXES IN PRIORITY ORDER. (1) ORACLE REMOVED: _sensor_vector
+    #     no longer feeds COM dx,dy or tower tdx,tdy. Replaced with sensor
+    #     nearest live ray + nearest memory ray, obs stays 69. onStep grip
+    #     boost uses ultrasonic/ray, not COM. Reward shaping still uses COM,
+    #     reward may be privileged, observation may not. (2) SHAPING: gamma
+    #     unified to 0.999 for BOTH critic and shaping (see gamma note),
+    #     Phi zeroed at terminal/timeout via -0.999*Phi_last, centred capped
+    #     to one-time per approach, shaped vs unshaped logged. (3) HONEST
+    #     NAME + BASELINE: V-critic AWR, fixed seed 0, random-baseline.
+    #     (4) SPAWN + SAMPLING: spawn avoids tower + overlaps, start pose
+    #     randomised, stratified 50% positives removed -> uniform.
     #   - v58: RESTORE LIVE DATA. v56 deleted the EMA but left the loss
     #     chart reading _lh, which was defined from the EMA hist. redrawAll
     #     raised NameError at the loss chart rect, so the reward chart,
@@ -510,19 +517,26 @@ class TrainingContext:
                 min(1.0, self.drops / 10.0),
                 self.prev_action[0], self.prev_action[1]]
     def update(self, reward, slip, contact, action, grasped):
-        # Scale: final reward is in [-25,25] (terminal +20). /25 keeps
-        # ordering: step ~0.00, grasp ~0.08, stack ~0.40, terminal ~1.0.
-        # Previously raw reward was clipped to [-1,1] in vector(), so
-        # grasp (+2) and stack (+10) both became 1.0 — signal lost.
+        # v60: per-step part only. Grasp/drop/slip/contact counts now come
+        # from events via handle_event, not from polling info dict.
         self.prev_reward = max(-1.0, min(1.0, reward / 25.0))
-        self.prev_slip = slip
-        self.prev_contact = contact
         self.prev_action = list(action)
-        if grasped:
+        # grasped arg kept for compat, ignored: events are source of truth.
+        # steps_since_grasp is advanced here, reset by GRASP_SUCCESS event.
+        self.steps_since_grasp += 1
+    def handle_event(self, event):
+        # v60: semantic event handler. Called from Controller drain.
+        if event.type == EVT_GRASP_SUCCESS:
             self.grasps += 1
             self.steps_since_grasp = 0
-        else:
-            self.steps_since_grasp += 1
+        elif event.type == EVT_DROPPED:
+            self.drops += 1
+        elif event.type == EVT_CONTACT_MADE:
+            self.prev_contact = 1.0
+        elif event.type == EVT_CONTACT_LOST:
+            self.prev_contact = 0.0
+        elif event.type == EVT_SLIP:
+            self.prev_slip = event.slip
 
 class ObsNormalizer:
     """Welford running mean/var. Normalise obs to ~N(0,1), clip to [-5,5].
@@ -593,8 +607,7 @@ class ReplayBuffer:
         if len(self.buf) > self.capacity:
             self.buf.pop(0)
     def sample(self, k):
-        # v59: uniform. Was sample_stratified, which forced 50% positives
-        # and biased V(s) upward with no importance weighting.
+        # v59: uniform. Was stratified 50% positives, biased V(s) up.
         n = min(k, len(self.buf))
         if n <= 0:
             return []
@@ -996,6 +1009,68 @@ class WorldModel:
         return out
 
 
+
+# --- v60 EVENT SYSTEM: Model emits, Controller handles, no timeouts ---
+EVT_EPISODE_START = "episode_start"
+EVT_EPISODE_END = "episode_end"
+EVT_GRASP_ATTEMPT = "grasp_attempt"
+EVT_GRASP_SUCCESS = "grasp_success"
+EVT_GRASP_FAIL = "grasp_fail"
+EVT_RELEASE = "release"
+EVT_PLACED = "placed"
+EVT_PLACED_TIPPED = "placed_tipped"
+EVT_DROPPED = "dropped"
+EVT_LIFT = "lift"
+EVT_CLOSE_ON_OBJECT = "close_on_object"
+EVT_CLOSE_ATTEMPT = "close_attempt"
+EVT_CONTACT_MADE = "contact_made"
+EVT_CONTACT_LOST = "contact_lost"
+EVT_SLIP = "slip"
+EVT_STUCK = "stuck"
+EVT_FLOOR_CONTACT = "floor_contact"
+EVT_TOWER_COMPLETE = "tower_complete"
+
+class RobotEvent:
+    # Semantic event, not a boolean flag. Carries what happened, where,
+    # on which object, how centred/stable, and what reward it earned,
+    # so handlers do not have to re-derive it from sensors.
+    def __init__(self, type, step, gripper=(0.0, 0.0), object_index=-1, dist=0.0, centred=0.0, stability=0.0, slip=0.0, reward_delta=0.0, reason="", tower_count=0):
+        self.type = type
+        self.step = step
+        self.gripper = gripper
+        self.object_index = object_index
+        self.dist = dist
+        self.centred = centred
+        self.stability = stability
+        self.slip = slip
+        self.reward_delta = reward_delta
+        self.reason = reason
+        self.tower_count = tower_count
+
+class EventBus:
+    # Queued, synchronous, no timeouts, no threads. Model calls emit()
+    # during Env.step, Controller calls drain(app) after the transition
+    # is stored, so handlers run in step order and never mid-step reset
+    # the scene while onStep still needs s2. If no handler is subscribed
+    # for a type, emit is a no-op so baseline Envs with no subscribers
+    # do not grow an unbounded queue.
+    def __init__(self):
+        self.handlers = {}
+        self.queue = []
+    def subscribe(self, event_type, handler):
+        if event_type not in self.handlers:
+            self.handlers[event_type] = []
+        if handler not in self.handlers[event_type]:
+            self.handlers[event_type].append(handler)
+    def emit(self, event):
+        if event.type in self.handlers and len(self.handlers[event.type]) > 0:
+            self.queue.append(event)
+    def drain(self, app):
+        while len(self.queue) > 0:
+            _ev = self.queue.pop(0)
+            for _h in list(self.handlers.get(_ev.type, [])):
+                _h(_ev, app)
+
 class Env:
     def __init__(self):
         self.objects = []
@@ -1009,7 +1084,11 @@ class Env:
         self.tower_count = 0
         # v52 minimum-time: per-episode steps-to-goal, reset in reset_scene.
         self.steps_to_grasp = None; self.steps_to_stack = None; self.steps_to_success = None; self.on_goal_steps = 0
-        self.last_grasp_msg = ''
+        self.last_grasp_msg = ''  # v60: set only by Controller event handler, never by Model
+        self.bus = EventBus()
+        self._prev_contact = 0.0
+        self._stuck_emitted = False
+        self._slip_emitted = False
         self._custom_verts = None
         self.last_gripper_pos = None; self.still_steps = 0; self._lift_given = False; self._close_given = False; self._centred_given = False; self._last_phi = 0.0; self.episode_shaped = 0.0; self.episode_unshaped = 0.0
         self.prev_gripper_vel = (0.0, 0.0); self.joint_vel = [0.0,0.0,0.0]
@@ -1174,11 +1253,15 @@ class Env:
         # within ~150px makes the first inside/proximity bonuses reachable
         # by exploration, then later episodes can spawn farther. Still no
         # script: position is randomised, the MLP still has to find them.
-        # v59: spawn avoids tower zone 320-420 and overlaps. Fixed slots
-        # left of tower, 60px apart, small jitter. No resample loop: slots
-        # already guarantee separation and tower avoidance.
-        base_xs = [175, 235, 295, 205, 265, 320]
-        xs = [float(base_xs[i % 3] + random.uniform(-8, 8)) for i in range(len(self.objects))]
+        # v59: spawn avoids tower + overlaps via per-row slots.
+        # Slots 170/230/290 are 60 apart, jitter +-5 keeps >=50.
+        xs = []
+        _rows = {}
+        for i in range(len(self.objects)):
+            _r = i // 3
+            if _r not in _rows:
+                _s = [170, 230, 290]; random.shuffle(_s); _rows[_r] = _s
+            xs.append(float(_rows[_r][i % 3] + random.uniform(-5, 5)))
         for i, o in enumerate(self.objects):
             o.x = float(xs[i % len(xs)])
             o.y = 430.0 + (i // 3) * 60.0 + random.uniform(-20, 20)
@@ -1191,6 +1274,8 @@ class Env:
             o.resting = False
             o.slip = 0.0
             o.tipping = 0
+        self._prev_contact = 0.0; self._stuck_emitted = False; self._slip_emitted = False
+        self.bus.emit(RobotEvent(EVT_EPISODE_START, 0, gripper=self.arm.gripper_center(), reason='reset_scene', tower_count=0))
     def physics_only(self):
         for o in self.objects:
             if o.held or o.placed:
@@ -1327,7 +1412,8 @@ class Env:
             # floor — where every object sits. Now -0.5, and only -0.1 when
             # the gripper is over an object (it is trying to grasp, not crash).
             _over_obj = any(_point_in_poly(gc0[0], gc0[1], o.world_verts()) for o in self.objects if not o.placed)
-            reward -= 0.1 if _over_obj else 0.5; info['collision']=1.0; self.last_grasp_msg='FLOOR CONTACT — gripper hit floor, move rejected'
+            reward -= 0.1 if _over_obj else 0.5; info['collision']=1.0
+            self.bus.emit(RobotEvent(EVT_FLOOR_CONTACT, self.step_count, gripper=gc0, reward_delta=-(0.1 if _over_obj else 0.5), reason='over_object' if _over_obj else 'free_floor'))
         gc = arm.gripper_center(); new_dist = math.hypot(prev_target[0]-gc[0], prev_target[1]-gc[1])
         self.joint_vel = [arm.angles[i]-prev_angles[i] for i in range(3)]
         _new_vel = (gc[0]-gc0[0], gc[1]-gc0[1])
@@ -1343,7 +1429,15 @@ class Env:
         if self.last_gripper_pos is not None:
             moved = math.hypot(gc[0]-self.last_gripper_pos[0], gc[1]-self.last_gripper_pos[1])
             self.still_steps = self.still_steps+1 if moved < 1.5 else 0
-            if self.still_steps > 60 and new_dist > 40: reward -= 0.08; info['stuck']=1.0
+            if moved >= 1.5:
+                self._stuck_emitted = False
+            if self.still_steps > 60 and new_dist > 40:
+                reward -= 0.08; info['stuck']=1.0
+                # v60: STUCK emits once on crossing 60, not every step. Reward
+                # still applies per step, the event is the semantic signal.
+                if not self._stuck_emitted:
+                    self._stuck_emitted = True
+                    self.bus.emit(RobotEvent(EVT_STUCK, self.step_count, gripper=gc, dist=new_dist, reward_delta=-0.08, reason='still_60_steps'))
         self.last_gripper_pos = gc
         return reward, info, gc, prev_target, prev_dist, new_dist, prev_angles, _a3
 
@@ -1363,10 +1457,7 @@ class Env:
         _new_down = math.sin(_a3)
         _phi_prev = -prev_dist / 50.0 + 0.5 * _prev_down
         _phi_new = -new_dist / 50.0 + 0.5 * _new_down
-        # v59: shaping uses gamma=1, not 0.99. With gamma=0.99, a motionless
-        # arm earns (1-gamma)*-Phi = +0.06/step leak, +20 over 321 steps.
-        # With gamma=1, shaping at rest is 0, total is -Phi_0, policy-invariant.
-        _shaping = _phi_new - _phi_prev
+        _shaping = 0.999 * _phi_new - _phi_prev
         reward += _shaping
         self._last_phi = _phi_new
         info['shaping'] = info.get('shaping', 0.0) + _shaping
@@ -1403,10 +1494,11 @@ class Env:
                     _inside_any = _o
                     _inside_off = math.hypot(gc[0] - _cx, gc[1] - _cy)
                     break
+            if _inside_any is None:
+                self._centred_given = False
             if _inside_any is not None:
                 _centred = max(0.0, 1.0 - _inside_off / (_inside_any.radius + 12.0))
-                # v59: one-time per approach, not per-step. Was +0.10*centred
-                # every step, up to +60 per episode vs +10 for a stack.
+                # v59: one-time per approach, was per-step up to +60/ep.
                 if not self._centred_given:
                     _sh3 = 0.10 * _centred
                     reward += _sh3
@@ -1419,9 +1511,8 @@ class Env:
                     reward += _sh4
                     info['shaping'] = info.get('shaping', 0.0) + _sh4
                     self._close_given = True
-                    self.last_grasp_msg = 'CLOSE ON OBJECT — centred %.2f' % _centred
+                    self.bus.emit(RobotEvent(EVT_CLOSE_ON_OBJECT, self.step_count, gripper=gc, object_index=self.objects.index(_inside_any) if _inside_any in self.objects else -1, centred=_centred, reward_delta=_sh4, reason='close_inside_polygon'))
             else:
-                self._centred_given = False
                 # Close-attempt zone: within 30px of an object's COM, a
                 # close action earns +0.10 even though the gripper is not
                 # yet inside the polygon. Old code paid +0 only inside, so
@@ -1444,7 +1535,7 @@ class Env:
                     reward += 0.10
                     info['shaping'] = info.get('shaping', 0.0) + 0.10
                     self._close_given = True
-                    self.last_grasp_msg = 'CLOSE ATTEMPT — %.0fpx from COM' % _near_d
+                    self.bus.emit(RobotEvent(EVT_CLOSE_ATTEMPT, self.step_count, gripper=gc, object_index=self.objects.index(_near) if _near in self.objects else -1, dist=_near_d, reward_delta=0.10, reason='close_halo_30px'))
                 elif _near is None or _near_d >= 30.0:
                     self._close_given = False
         return reward, info
@@ -1457,25 +1548,29 @@ class Env:
             for o in self.objects:
                 if o.placed: continue
                 if _point_in_poly(gc[0], gc[1], o.world_verts()):
+                    # v60: attempt is a semantic event, not just a boolean.
+                    self.bus.emit(RobotEvent(EVT_GRASP_ATTEMPT, self.step_count, gripper=gc, object_index=self.objects.index(o), dist=math.hypot(gc[0]-o.com_world()[0], gc[1]-o.com_world()[1]), reason='gripper_closed_inside_polygon'))
                     cx, cy = o.com_world(); off = math.hypot(gc[0]-cx, gc[1]-cy)
                     edge_d = _min_edge_distance(gc[0], gc[1], o.world_verts()); edge_factor = min(1.0, edge_d/12.0)
                     stability = (1.0 - off/(o.radius+12.0))*edge_factor
                     _px2 = -math.sin(_a3); _py2 = math.cos(_a3)
                     _proj = [v[0]*_px2 + v[1]*_py2 for v in o.world_verts()]; _w = max(_proj)-min(_proj)
+                    _fail_reason = ''
                     if arm.gripper_type == 'adaptive':
                         stability = (1.0 - off/(o.radius+18.0))*(0.55+0.45*edge_factor)+0.10
                         if stability > 1.0: stability = 1.0
-                        if _w > 65.0: stability = 0.0; self.last_grasp_msg='GRASP FAIL — %.0f px wide > 65 px adaptive caging' % _w
+                        if _w > 65.0: stability = 0.0; _fail_reason = 'too_wide_%.0fpx_gt_65_adaptive' % _w
                     else:
-                        if _w > arm.GAP_MAX + 8.0: stability = 0.0; self.last_grasp_msg='GRASP FAIL — %.0f px wide > %.0f px max opening, orient to narrow side' % (_w, arm.GAP_MAX)
+                        if _w > arm.GAP_MAX + 8.0: stability = 0.0; _fail_reason = 'too_wide_%.0fpx_gt_%.0f_parallel' % (_w, arm.GAP_MAX)
                     if stability > 0.30:
                         arm.held = o; o.held=True; o.grasp_offset=(gc[0]-o.x, gc[1]-o.y); o.grasp_stability=max(0.15, stability); o.slip=0.0
-                        # Was flat +2.0: stability 0.31 paid same as 0.99, so the
-                        # MLP had no gradient to learn COM-centring. Now
-                        # 0.5 + 1.5*stability: 0.31 -> 0.97, 0.99 -> 1.99.
-                        reward += 0.5 + 1.5 * stability; info['grasped']=True; self.last_grasp_msg='GRASP %.2f stab' % stability; app_ctx.grasp_attempts+=1; app_ctx.grasp_success+=1; self._lift_given = False; self._close_given = False; self.steps_to_grasp = self.step_count + 1 if self.steps_to_grasp is None else self.steps_to_grasp  # v52
+                        _gr = 0.5 + 1.5 * stability
+                        reward += _gr; info['grasped']=True; app_ctx.grasp_attempts+=1; app_ctx.grasp_success+=1; self._lift_given = False; self._close_given = False; self.steps_to_grasp = self.step_count + 1 if self.steps_to_grasp is None else self.steps_to_grasp
+                        self.bus.emit(RobotEvent(EVT_GRASP_SUCCESS, self.step_count, gripper=gc, object_index=self.objects.index(o), centred=max(0.0, 1.0 - off/(o.radius+12.0)), stability=stability, reward_delta=_gr, reason='centred_stable_grasp'))
+                        self._slip_emitted = False
                     else:
                         o.slip=1.0; o.vrot+=(random.random()-0.5)*0.08; reward-=0.6; info['slip']=1.0; app_ctx.grasp_attempts+=1
+                        self.bus.emit(RobotEvent(EVT_GRASP_FAIL, self.step_count, gripper=gc, object_index=self.objects.index(o), centred=max(0.0, 1.0 - off/(o.radius+12.0)), stability=stability, reward_delta=-0.6, reason=_fail_reason if _fail_reason else 'stability_%.2f_below_0.30' % stability))
                     break
         return reward, info
 
@@ -1488,13 +1583,18 @@ class Env:
             wobble=(1.0-o.grasp_stability)*0.018; o.rot+=(random.random()-0.5)*wobble*2.0
             _slip_rate=0.008 if arm.gripper_type=='adaptive' else 0.012
             o.slip=min(1.0, o.slip+(1.0-o.grasp_stability)*_slip_rate); info['slip']=o.slip; info['contact']=1.0
+            if o.slip > 0.5 and not self._slip_emitted:
+                self._slip_emitted = True
+                self.bus.emit(RobotEvent(EVT_SLIP, self.step_count, gripper=gc, object_index=self.objects.index(o), slip=o.slip, stability=o.grasp_stability, reason='slip_crossed_0.5'))
             if o.slip>0.95 and o.grasp_stability<0.45:
-                arm.held=None; o.held=False; o.vy=1.5; reward-=3.0; info['dropped']=True; self.last_grasp_msg='DROPPED — off-COM slip'; self._lift_given = False; self._close_given = False
+                arm.held=None; o.held=False; o.vy=1.5; reward-=3.0; info['dropped']=True; self._lift_given = False; self._close_given = False
+                self.bus.emit(RobotEvent(EVT_DROPPED, self.step_count, gripper=gc, object_index=self.objects.index(o), slip=o.slip, stability=o.grasp_stability, reward_delta=-3.0, reason='off_com_slip'))
             # Was +0.04 EVERY step while held high: hold+hover for episode_len steps
             # = +24, more than a stack (+10). Pure reward hacking. Now
             # one-time +0.5 on first lift per grasp.
             if o.y < FLOOR_Y-55 and not self._lift_given:
                 reward += 0.5; self._lift_given = True
+                self.bus.emit(RobotEvent(EVT_LIFT, self.step_count, gripper=gc, object_index=self.objects.index(o), reward_delta=0.5, reason='first_lift_per_grasp'))
         return reward, info
 
     def _try_release(self, reward, info):
@@ -1502,12 +1602,18 @@ class Env:
         # Records steps-to-stack (v52).
         arm = self.arm
         if arm.held is not None and arm.gripper > 0.62:
-            o=arm.held; arm.held=None; o.held=False; o.vy=0.0; _clamp_to_floor(o); cx,_=o.com_world()  # v57: released object clamped before stability check
+            o=arm.held; arm.held=None; o.held=False; o.vy=0.0; _clamp_to_floor(o); cx,_=o.com_world()
             if TOWER_X0 <= cx <= TOWER_X1 and o.is_stable(self):
-                o.placed=True; o.resting=True; self.tower_count+=1; reward+=10.0; info['placed']=True; self.last_grasp_msg='STACKED! tower=%d' % self.tower_count; self.steps_to_stack = self.step_count + 1 if self.steps_to_stack is None else self.steps_to_stack  # v52
+                o.placed=True; o.resting=True; self.tower_count+=1; reward+=10.0; info['placed']=True; self.steps_to_stack = self.step_count + 1 if self.steps_to_stack is None else self.steps_to_stack
+                self.bus.emit(RobotEvent(EVT_PLACED, self.step_count, gripper=gc, object_index=self.objects.index(o), reward_delta=10.0, reason='stable_in_tower', tower_count=self.tower_count))
+                if self.tower_count >= len(self.objects) and len(self.objects) > 0:
+                    self.bus.emit(RobotEvent(EVT_TOWER_COMPLETE, self.step_count, gripper=gc, reward_delta=20.0, reason='all_objects_placed', tower_count=self.tower_count))
             elif TOWER_X0 <= cx <= TOWER_X1 and not o.is_stable(self):
-                reward-=2.5; self.last_grasp_msg='PLACED BUT TIPPED — COM off support'
-            else: reward-=0.2
+                reward-=2.5
+                self.bus.emit(RobotEvent(EVT_PLACED_TIPPED, self.step_count, gripper=gc, object_index=self.objects.index(o), reward_delta=-2.5, reason='com_off_support', tower_count=self.tower_count))
+            else:
+                reward-=0.2
+                self.bus.emit(RobotEvent(EVT_RELEASE, self.step_count, gripper=gc, object_index=self.objects.index(o), reward_delta=-0.2, reason='released_outside_tower'))
         return reward, info
 
     def _finish_step(self, reward, info, gc, app_ctx):
@@ -1534,14 +1640,22 @@ class Env:
             self.on_goal_steps += 1
         done=False; timeout=False
         _step_r = max(-5.0, min(5.0, reward))
+        _ep_reason = ''
         if self.tower_count>=len(self.objects) and len(self.objects)>0:
             done=True; _step_r += 20.0
-            self.steps_to_success = self.step_count + 1  # v52: steps-to-goal, full task
-        if self.step_count+1 > app_ctx.episode_len: done=True; timeout=True  # v52: timeout is a tunable parameter, not a magic 600
-        # v59: zero Phi at terminal/timeout. Shaping added Phi_new,
-        # correct is 0 at terminal, so correction is -Phi_last.
+            self.steps_to_success = self.step_count + 1
+            _ep_reason = 'tower_complete'
+        if self.step_count+1 > app_ctx.episode_len:
+            done=True; timeout=True  # v60: step limit, not a JS timeout. See EPISODE_END event.
+            if _ep_reason == '':
+                _ep_reason = 'step_limit'
+        # v60: EPISODE_END is a semantic event. Controller drains it and
+        # calls _end_episode. Model does not reset the scene here.
         if done:
-            _corr = -1.0 * self._last_phi
+            self.bus.emit(RobotEvent(EVT_EPISODE_END, self.step_count, gripper=gc, reward_delta=_step_r, reason=_ep_reason, tower_count=self.tower_count))
+        # v59: zero Phi at terminal/timeout: correction -0.999*Phi_last.
+        if done:
+            _corr = -0.999 * self._last_phi
             _step_r = max(-5.0, min(5.0, _step_r + _corr))
             info['shaping'] = info.get('shaping', 0.0) + _corr
         _sh = info.get('shaping', 0.0)
@@ -1565,13 +1679,14 @@ def _make_button(x, y, w, h, label, action):
     return {'x': x, 'y': y, 'w': w, 'h': h, 'label': label, 'action': action, 'enabled': True}
 
 def onAppStart(app):
-    random.seed(0)  # v59: fixed seed for reproducibility
+    random.seed(0)  # v59: fixed seed
     app.seed = 0
     app.width = WIDTH
     app.height = HEIGHT
     app.stepsPerSecond = 30
     app.scs = {}  # single nested bundle for any future window/extension use
     app.env = Env()
+    _subscribe_robot_events(app)  # v60: events, not polling
     # Input 69 = 61 sensors (37 + 24 memory rays) + 8 context. Actor 4 = joint deltas + gripper.
     # v50: actions stay joint deltas. They are already incremental (relative
     # to the current pose), not absolute joint targets, so there is no
@@ -1596,7 +1711,7 @@ def onAppStart(app):
     # supervised MSE, not a Q-gradient step, so 1e-5 would stall it.
     app.actor_lr = 0.0001
     app.critic_lr = 0.001
-    app.gamma = 0.99
+    app.gamma = 0.999  # v59: 0.99 -> 0.999, horizon 100 -> 1000, matches shaping
     app.tau = 0.005
     app.eval_mode = False
     app.ou = OUNoise(4)
@@ -1610,7 +1725,7 @@ def onAppStart(app):
     app.actor_gated_count = 0
     app.shaped_hist = [0.0]  # v59: shaped return per episode
     app.unshaped_hist = [0.0]  # v59: unshaped return per episode
-    app.random_baseline = None  # v59: random-policy mean reward, computed on demand
+    app.random_baseline = None  # v59: random-policy mean, on demand
     app.critic_updates = 0  # v48: counts _train_batch calls (critic updates)
     app.actor_updates = 0  # v48: counts actor updates actually run
     app.actor_update_every = 5  # v48: critic:actor = 5:1 in _train_batch units, see _train_batch
@@ -1695,8 +1810,7 @@ def _sensor_vector(app):
     _ultra_d, _ultra_close = env.ultrasonic()
     _ultra_norm = max(0.0, min(1.0, _ultra_d / ULTRA_MAX))
     contact, force, slip = env.contact_sensors()
-    # v59: NO ORACLE. target/tower COM removed. Reward shaping still uses
-    # COM (privileged reward is allowed), observation does not.
+    # v59: NO ORACLE. Reward shaping uses COM, observation does not.
     # v50 relative frame: rotate every vector by -frame_a3 (episode-start
     # EE orientation) and translate by the episode-start gripper position.
     # At episode start the gripper obs is (0,0) and the joint obs is
@@ -1708,8 +1822,7 @@ def _sensor_vector(app):
     def _rot(_dx, _dy):
         return (_dx * _ca - _dy * _sa, _dx * _sa + _dy * _ca)
     _gdx, _gdy = _rot(gc[0] - env.frame_ox, gc[1] - env.frame_oy)
-    # v59: sensor-derived target cue, not COM. Nearest live ray + nearest
-    # memory ray. Both are sensor readings.
+    # v59: sensor-derived cue: nearest live ray + nearest memory ray.
     _mem_rays = env.wm.ask_polar(gc, _a3)
     _ray_k = min(range(len(rays)), key=lambda _k: rays[_k])
     _ray_min = rays[_ray_k]
@@ -1743,7 +1856,7 @@ def _sensor_vector(app):
                          env.joint_vel[0]/0.07, env.joint_vel[1]/0.07, env.joint_vel[2]/0.07,
                          _gvx/10.0, _gvy/10.0]  # v50: gripper vel in start-EE frame
     sensors = sensors + [_ultra_norm, _ultra_close]
-    sensors = sensors + _mem_rays  # v54: 24 memory rays, reused, no second cast
+    sensors = sensors + _mem_rays  # v54: reused, no second cast
     # sensors = 61 (37 + 24 memory rays), context = 8 → 69, then Welford-normalised.
     raw = sensors + app.ctx.vector()
     # Normalise with PRIOR stats, then update — never normalise a sample
@@ -1757,9 +1870,8 @@ def _train_batch(app):
     if len(app.replay) + len(app.demo_replay) < 16:
         return
     app.critic_updates = app.critic_updates + 1
-    # v59: 50/50 demo/online kept (RLPD-style demo ratio), but stratified
-    # 50% positives REMOVED. Forcing positives biased V(s) upward with no
-    # importance weighting. Now uniform within each half.
+    # v59: 50/50 demo/online kept, stratified 50% positives REMOVED.
+    # Forcing positives biased V(s) up with no importance weighting.
     _n_demo = min(16, len(app.demo_replay))
     batch = app.demo_replay.sample(_n_demo) + app.replay.sample(32 - _n_demo)
     random.shuffle(batch)
@@ -1866,10 +1978,53 @@ def _train_batch(app):
     for _h in (app.loss_hist, app.grad_norm_hist, app.critic_loss_hist, app.actor_loss_hist):
         if len(_h) > 120: _h.pop(0)
 
+
+def _on_robot_event(event, app):
+    # v60: Controller translates semantic events to display + context.
+    # Model never sets last_grasp_msg. One handler per event type,
+    # no polling of info dict for grasp/contact/slip.
+    if event.type == EVT_EPISODE_START:
+        app.env.last_grasp_msg = ''
+    elif event.type == EVT_GRASP_SUCCESS:
+        app.env.last_grasp_msg = 'GRASP %.2f stab' % event.stability
+    elif event.type == EVT_GRASP_FAIL:
+        app.env.last_grasp_msg = 'GRASP FAIL — %s' % (event.reason if event.reason.startswith('too_wide') else 'stability %.2f' % event.stability)
+    elif event.type == EVT_GRASP_ATTEMPT:
+        pass  # attempt is counted in Env, no display spam
+    elif event.type == EVT_CLOSE_ON_OBJECT:
+        app.env.last_grasp_msg = 'CLOSE ON OBJECT — centred %.2f' % event.centred
+    elif event.type == EVT_CLOSE_ATTEMPT:
+        app.env.last_grasp_msg = 'CLOSE ATTEMPT — %.0fpx from COM' % event.dist
+    elif event.type == EVT_PLACED:
+        app.env.last_grasp_msg = 'STACKED! tower=%d' % event.tower_count
+    elif event.type == EVT_PLACED_TIPPED:
+        app.env.last_grasp_msg = 'PLACED BUT TIPPED — COM off support'
+    elif event.type == EVT_DROPPED:
+        app.env.last_grasp_msg = 'DROPPED — off-COM slip'
+    elif event.type == EVT_FLOOR_CONTACT:
+        app.env.last_grasp_msg = 'FLOOR CONTACT — gripper hit floor, move rejected'
+    elif event.type == EVT_STUCK:
+        app.env.last_grasp_msg = 'STUCK — %d steps at %.0fpx from target' % (event.step, event.dist)
+    elif event.type == EVT_TOWER_COMPLETE:
+        app.env.last_grasp_msg = 'TOWER COMPLETE'
+    # Context always updates from events, not from info polling.
+    app.ctx.handle_event(event)
+
+def _on_episode_end_event(event, app):
+    # v60: EPISODE_END event triggers _end_episode. Called from drain,
+    # after onStep has stored the transition, so s2 is still terminal state.
+    _end_episode(app)
+
+def _subscribe_robot_events(app):
+    # v60: subscribe once per Env. Called in onAppStart and after any
+    # Env replacement (none today, but explicit for future).
+    _bus = app.env.bus
+    for _t in (EVT_EPISODE_START, EVT_GRASP_SUCCESS, EVT_GRASP_FAIL, EVT_GRASP_ATTEMPT, EVT_CLOSE_ON_OBJECT, EVT_CLOSE_ATTEMPT, EVT_PLACED, EVT_PLACED_TIPPED, EVT_DROPPED, EVT_FLOOR_CONTACT, EVT_STUCK, EVT_TOWER_COMPLETE, EVT_CONTACT_MADE, EVT_CONTACT_LOST, EVT_SLIP, EVT_LIFT, EVT_RELEASE):
+        _bus.subscribe(_t, _on_robot_event)
+    _bus.subscribe(EVT_EPISODE_END, _on_episode_end_event)
+
 def _random_baseline(app, n_episodes=3):
-    # v59: random-policy baseline. Runs n episodes with uniform random
-    # actions in a fresh Env, no learning, returns mean shaped reward.
-    # Lets you tell learning from reward leakage: MLP must beat this.
+    # v59: random-policy baseline, MLP must beat this.
     _tot = 0.0
     for _ in range(n_episodes):
         _e = Env()
@@ -1885,6 +2040,7 @@ def _random_baseline(app, n_episodes=3):
     return app.random_baseline
 
 def _end_episode(app):
+    # v60: called only from _on_episode_end_event via bus.drain, never from `if done:` polling.
     app.reward_hist.append(app.env.episode_reward)
     if len(app.reward_hist) > 120:
         app.reward_hist.pop(0)
@@ -1952,9 +2108,7 @@ def onStep(app):
             # the 50px approach halo too: trying to close near an object
             # is the behaviour to explore, not just closing after contact.
             _c, _f, _sl = app.env.contact_sensors()
-            # v59: sensor-based boost, not COM. Was _d_tgt from
-            # current_target_pos() (COM). Now ultrasonic <50 or nearest
-            # ray <50px. Same 50px halo, no oracle.
+            # v59: sensor boost, not COM. Was COM distance <50.
             _ultra_d2, _ = app.env.ultrasonic()
             _rays2 = app.env.cast_rays()
             _near_sensor = (_ultra_d2 < 50.0) or (min(_rays2) * 240.0 < 50.0)
@@ -1979,15 +2133,19 @@ def onStep(app):
         s2, _ = _sensor_vector(app)
         if not app.eval_mode:
             app.replay.add((s, executed, noise, reward, s2, done, timeout))
-            app.ctx.update(reward, info['slip'], info['contact'], executed, info['grasped'])
+            # v60: ctx per-step part only, semantic counts come from events.
+            app.ctx.update(reward, info['slip'], info['contact'], executed, False)
+            # v60: drain events after transition stored. EPISODE_END handler
+            # calls _end_episode here, not via `if done:` polling.
             # v51 UTD: every 2 steps, not 4. Paired with critic LayerNorm
             # (RLPD): without LN, more critic updates diverge; with LN they
             # stay bounded. Every step (UTD 1.0) would be 4x compute and
             # risks frame drops in Brython, so 2x is the step.
             if app.env.step_count % app.train_every == 0:
                 _train_batch(app)
-        if done:
-            _end_episode(app)
+        # v60: drain, not `if done:` polling. If EPISODE_END was queued,
+        # its handler calls _end_episode now, after s2 is captured.
+        app.env.bus.drain(app)
         return
     if app.teleop:
         a = list(app.teleop_action)
@@ -2009,8 +2167,8 @@ def onStep(app):
         # 50% online. All teleop transitions go in, failures included:
         # the critic needs good AND bad experience to rank actions.
         app.demo_replay.add((s, a, _teleop_noise, reward, s2, done, timeout))
-        if done:
-            _end_episode(app)
+        # v60: same drain as training branch.
+        app.env.bus.drain(app)
         return
     # Paused: let physics settle, no learning.
     app.env.physics_only()
@@ -2100,9 +2258,6 @@ def _handle_button(app, action):
         app.adv_std_hist = [0.0]
         app.pos_frac_hist = [0.0]
         app.actor_gated_count = 0
-        app.shaped_hist = [0.0]
-        app.unshaped_hist = [0.0]
-        app.random_baseline = None
         app.critic_updates = 0  # v48
         app.actor_updates = 0  # v48
         app.t_grasp_hist = []  # v52
@@ -2489,7 +2644,7 @@ def redrawAll(app):
     # MLP viz — HOW TO moved to INSTRUCTION MANUAL overlay. Freed space
     # goes to bigger loss/reward curves + a live sensor readout.
     py = 445  # v59: shifted down for random-baseline button
-    drawLabel('Actor 69 → 48 → 32 → 4 tanh | V-critic AWR, seed 0', PANEL_X + 14, py, size=9, fill=DIM, align='left-top')
+    drawLabel('Actor 69 → 48 → 32 → 4 tanh | V-critic AWR, seed 0, gamma 0.999', PANEL_X + 14, py, size=9, fill=DIM, align='left-top')
     drawLabel('Critic 69 → 48 → 32 → 1', PANEL_X + 14, py + 13, size=9, fill=DIM, align='left-top')
     drawLabel('Input: 61 sensors + 8 ctx  (incl 24 memory rays + ultra)', PANEL_X + 14, py + 26, size=8, fill=DIM, align='left-top')
     # Was: 'Actor RMS / Critic RMS' (weight RMS). Both nets init with the
