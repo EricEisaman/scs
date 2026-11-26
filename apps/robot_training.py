@@ -30,6 +30,10 @@
 # ML ENGINEERING STANDARD (senior / Sigma):
 #   - Actor-Critic with SEPARATE target critic, soft updates (tau=0.005),
 #     TD3-style bootstrapping: timeout != terminal (timeout bootstraps).
+#   - Premature-loss fixes: stratified replay (>=50% positives when any
+#     exist), TD-std floor 0.08 + actor gating when Pos==0 and TD-std<0.02,
+#     close-on-object shaping, gripper-noise boost on contact, TD-std /
+#     Adv-std / Pos% diagnostics. Loss alone is never trusted.
 #   - Adam from scratch per-weight (Kingma & Ba 2014), bias-corrected,
 #     gradient clipping, Huber loss for critic TD (robust to outliers).
 #   - Observation normalisation (Welford running mean/var, clipped +-5),
@@ -261,14 +265,18 @@ class TrainingContext:
         self.drops = 0
         self.successes = 0
     def vector(self):
-        return [max(-1, min(1, self.prev_reward)),
+        return [self.prev_reward,
                 self.prev_slip, self.prev_contact,
                 min(1.0, self.steps_since_grasp / 200.0),
                 min(1.0, self.grasps / 10.0),
                 min(1.0, self.drops / 10.0),
                 self.prev_action[0], self.prev_action[1]]
     def update(self, reward, slip, contact, action, grasped):
-        self.prev_reward = reward
+        # Scale: final reward is in [-25,25] (terminal +20). /25 keeps
+        # ordering: step ~0.00, grasp ~0.08, stack ~0.40, terminal ~1.0.
+        # Previously raw reward was clipped to [-1,1] in vector(), so
+        # grasp (+2) and stack (+10) both became 1.0 — signal lost.
+        self.prev_reward = max(-1.0, min(1.0, reward / 25.0))
         self.prev_slip = slip
         self.prev_contact = contact
         self.prev_action = list(action)
@@ -325,7 +333,14 @@ class OUNoise:
         return out
 
 class ReplayBuffer:
-    """Uniform replay, capacity 2000. Stores (s, a, noise, r, s2, done, timeout)."""
+    """Stratified replay, capacity 2000. Stores (s, a, noise, r, s2, done, timeout).
+    Uniform sampling is the premature-loss bug: with 0 grasps the buffer
+    is 100% failures, every batch has ~0 TD surprise, and loss collapses
+    while nothing is learned. Stratified sampling guarantees the batch
+    contains positives (r >= 0.4: grasp / lift / stack / terminal) whenever
+    any exist, so the critic always has signal to fit and the actor always
+    has a good action to clone. This is prioritised sampling, not a script:
+    no transition is invented, only the sampling mix changes."""
     def __init__(self, capacity):
         self.capacity = capacity
         self.buf = []
@@ -334,7 +349,27 @@ class ReplayBuffer:
         if len(self.buf) > self.capacity:
             self.buf.pop(0)
     def sample(self, k):
-        return random.sample(self.buf, min(k, len(self.buf)))
+        return self.sample_stratified(k)
+    def sample_stratified(self, k, pos_thresh=0.4, min_pos_frac=0.5):
+        n = min(k, len(self.buf))
+        if n <= 0:
+            return []
+        pos = [t for t in self.buf if t[3] >= pos_thresh]
+        neg = [t for t in self.buf if t[3] < pos_thresh]
+        if len(pos) == 0 or len(neg) == 0:
+            return random.sample(self.buf, n)
+        n_pos = min(len(pos), max(1, int(round(n * min_pos_frac))))
+        n_neg = n - n_pos
+        if n_neg > len(neg):
+            n_neg = len(neg)
+            n_pos = n - n_neg
+        batch = random.sample(pos, n_pos) + random.sample(neg, n_neg)
+        random.shuffle(batch)
+        return batch
+    def pos_frac(self, pos_thresh=0.4):
+        if len(self.buf) == 0:
+            return 0.0
+        return sum(1 for t in self.buf if t[3] >= pos_thresh) / len(self.buf)
     def __len__(self):
         return len(self.buf)
 
@@ -589,7 +624,7 @@ class Env:
         self.tower_count = 0
         self.last_grasp_msg = ''
         self._custom_verts = None
-        self.last_gripper_pos = None; self.still_steps = 0
+        self.last_gripper_pos = None; self.still_steps = 0; self._lift_given = False; self._close_given = False
         self.prev_gripper_vel = (0.0, 0.0); self.joint_vel = [0.0,0.0,0.0]
         self.gripper_vel = (0.0, 0.0); self.gripper_acc = (0.0, 0.0)
         self.accel_forward = 0.0; self.accel_perp = 0.0; self.down_alignment = 0.0
@@ -679,7 +714,7 @@ class Env:
     def reset_scene(self, keep_brain=True):
         _gt = self.arm.gripper_type if hasattr(self.arm, 'gripper_type') else 'parallel'
         self.arm = RobotArm(); self.arm.gripper_type = _gt
-        self.tower_count = 0; self.still_steps = 0; self.last_gripper_pos = None
+        self.tower_count = 0; self.still_steps = 0; self.last_gripper_pos = None; self._lift_given = False; self._close_given = False
         self.prev_gripper_vel = (0.0, 0.0); self.joint_vel = [0.0,0.0,0.0]
         self.gripper_vel = (0.0, 0.0); self.gripper_acc = (0.0, 0.0)
         self.step_count = 0; self.episode_reward = 0.0
@@ -774,7 +809,12 @@ class Env:
         if _ft_try[1] > FLOOR_Y-5 and _ft_try[1] >= _ft_prev_y:
             arm.angles = prev_angles; collision = True
         reward = -0.012; info = {'slip':0.0,'contact':0.0,'grasped':False,'placed':False,'dropped':False,'collision':0.0,'stuck':0.0}
-        if collision: reward -= 2.0; info['collision']=1.0; self.last_grasp_msg='FLOOR CONTACT — gripper hit floor, move rejected'
+        if collision:
+            # Was -2.0: dwarfed grasp (+2) and taught the robot to fear the
+            # floor — where every object sits. Now -0.5, and only -0.1 when
+            # the gripper is over an object (it is trying to grasp, not crash).
+            _over_obj = any(_point_in_poly(gc0[0], gc0[1], o.world_verts()) for o in self.objects if not o.placed)
+            reward -= 0.1 if _over_obj else 0.5; info['collision']=1.0; self.last_grasp_msg='FLOOR CONTACT — gripper hit floor, move rejected'
         gc = arm.gripper_center(); new_dist = math.hypot(prev_target[0]-gc[0], prev_target[1]-gc[1])
         self.joint_vel = [arm.angles[i]-prev_angles[i] for i in range(3)]
         _new_vel = (gc[0]-gc0[0], gc[1]-gc0[1])
@@ -792,6 +832,40 @@ class Env:
             self.still_steps = self.still_steps+1 if moved < 1.5 else 0
             if self.still_steps > 60 and new_dist > 40: reward -= 0.08; info['stuck']=1.0
         self.last_gripper_pos = gc; reward += (prev_dist - new_dist)*0.015
+        # --- Close-on-object shaping (fixes 0 grasp attempts) ---
+        # The old reward gave +0 for being centred inside an object with the
+        # gripper open, and +0 for closing on it unless a grasp succeeded.
+        # So the MLP had NO gradient toward grasping before its first grasp
+        # ever happened, and the buffer stayed 100% failures. Now:
+        #  (a) small per-step reward for being centred inside an object
+        #      (teaches approach + COM-centring, not bbox-centring);
+        #  (b) one-time +0.30 the first time it CLOSES while inside an object
+        #      (teaches the close action itself, without farming: _close_given
+        #      resets only when the gripper leaves every object / drops).
+        # Both are environmental shaping, not a script: the MLP still has to
+        # discover the close, and the bonus is capped / one-time.
+        if arm.held is None:
+            _inside_any = None
+            _inside_off = 0.0
+            for _o in self.objects:
+                if _o.placed:
+                    continue
+                if _point_in_poly(gc[0], gc[1], _o.world_verts()):
+                    _cx, _cy = _o.com_world()
+                    _inside_any = _o
+                    _inside_off = math.hypot(gc[0] - _cx, gc[1] - _cy)
+                    break
+            if _inside_any is not None:
+                _centred = max(0.0, 1.0 - _inside_off / (_inside_any.radius + 12.0))
+                reward += 0.10 * _centred
+                # Closing = gripper value decreasing (action[3] > 0 drives
+                # arm.gripper down in step()). Detect a close this step.
+                if action[3] > 0.30 and not self._close_given:
+                    reward += 0.30 * _centred
+                    self._close_given = True
+                    self.last_grasp_msg = 'CLOSE ON OBJECT — centred %.2f' % _centred
+            else:
+                self._close_given = False
         if arm.held is None and arm.gripper < 0.38:
             for o in self.objects:
                 if o.placed: continue
@@ -809,7 +883,10 @@ class Env:
                         if _w > arm.GAP_MAX + 8.0: stability = 0.0; self.last_grasp_msg='GRASP FAIL — %.0f px wide > %.0f px max opening, orient to narrow side' % (_w, arm.GAP_MAX)
                     if stability > 0.30:
                         arm.held = o; o.held=True; o.grasp_offset=(gc[0]-o.x, gc[1]-o.y); o.grasp_stability=max(0.15, stability); o.slip=0.0
-                        reward+=2.0; info['grasped']=True; self.last_grasp_msg='GRASP %.2f stab' % stability; app_ctx.grasp_attempts+=1; app_ctx.grasp_success+=1
+                        # Was flat +2.0: stability 0.31 paid same as 0.99, so the
+                        # MLP had no gradient to learn COM-centring. Now
+                        # 0.5 + 1.5*stability: 0.31 -> 0.97, 0.99 -> 1.99.
+                        reward += 0.5 + 1.5 * stability; info['grasped']=True; self.last_grasp_msg='GRASP %.2f stab' % stability; app_ctx.grasp_attempts+=1; app_ctx.grasp_success+=1; self._lift_given = False; self._close_given = False
                     else:
                         o.slip=1.0; o.vrot+=(random.random()-0.5)*0.08; reward-=0.6; info['slip']=1.0; app_ctx.grasp_attempts+=1
                     break
@@ -819,8 +896,12 @@ class Env:
             _slip_rate=0.008 if arm.gripper_type=='adaptive' else 0.012
             o.slip=min(1.0, o.slip+(1.0-o.grasp_stability)*_slip_rate); info['slip']=o.slip; info['contact']=1.0
             if o.slip>0.95 and o.grasp_stability<0.45:
-                arm.held=None; o.held=False; o.vy=1.5; reward-=3.0; info['dropped']=True; self.last_grasp_msg='DROPPED — off-COM slip'
-            if o.y < FLOOR_Y-55: reward+=0.04
+                arm.held=None; o.held=False; o.vy=1.5; reward-=3.0; info['dropped']=True; self.last_grasp_msg='DROPPED — off-COM slip'; self._lift_given = False; self._close_given = False
+            # Was +0.04 EVERY step while held high: hold+hover for 600 steps
+            # = +24, more than a stack (+10). Pure reward hacking. Now
+            # one-time +0.5 on first lift per grasp.
+            if o.y < FLOOR_Y-55 and not self._lift_given:
+                reward += 0.5; self._lift_given = True
         if arm.held is not None and arm.gripper > 0.62:
             o=arm.held; arm.held=None; o.held=False; o.vy=0.0; cx,_=o.com_world()
             if TOWER_X0 <= cx <= TOWER_X1 and o.is_stable(self):
@@ -832,10 +913,20 @@ class Env:
             if not o.held and not o.placed: self._free_update(o)
         c,f,s=self.contact_sensors(); info['contact']=c
         if arm.held is not None: info['slip']=arm.held.slip
-        self.step_count+=1; self.episode_reward+=reward; done=False; timeout=False
-        if self.tower_count>=len(self.objects) and len(self.objects)>0: done=True; reward+=20.0
-        if self.step_count>600: done=True; timeout=True
-        reward=max(-10.0,min(10.0,reward)); return reward, done, timeout, info
+        # --- Terminal + accounting (was buggy) ---
+        # Old code: episode_reward += reward BEFORE terminal bonus and BEFORE
+        # clipping, so logged reward missed +20 and included unclipped values,
+        # while the returned (learned) reward was clipped to [-10,10] — so the
+        # +20 terminal bonus was clipped to +10, identical to a single stack.
+        # New: clip the STEP reward to [-5,5], add terminal AFTER clipping,
+        # then clip final to [-25,25]. Logged == learned, terminal survives.
+        done=False; timeout=False
+        _step_r = max(-5.0, min(5.0, reward))
+        if self.tower_count>=len(self.objects) and len(self.objects)>0:
+            done=True; _step_r += 20.0
+        if self.step_count+1>600: done=True; timeout=True
+        reward = max(-25.0, min(25.0, _step_r))
+        self.step_count+=1; self.episode_reward+=reward; return reward, done, timeout, info
 
 # CONTROLLER — app state
 # ---------------------------------------------------------------------------
@@ -864,6 +955,12 @@ def onAppStart(app):
     app.ou = OUNoise(4)
     app.manual_open = False
     app.grad_norm_hist = [0.0]
+    app.critic_loss_hist = [0.0]
+    app.actor_loss_hist = [0.0]
+    app.td_std_hist = [0.0]
+    app.adv_std_hist = [0.0]
+    app.pos_frac_hist = [0.0]
+    app.actor_gated_count = 0
     app.eval_reward_hist = [0.0]
     app.training = False
     app.teleop = False
@@ -950,44 +1047,94 @@ def _train_batch(app):
     if len(app.replay) < 16:
         return
     batch = app.replay.sample(32)
-    # First pass: TD targets + advantages (for normalisation).
-    advs = []
-    targets = []
+    # --- Pass 1: TD targets + advantages (NO weight updates yet) ---
+    # Old code interleaved critic/actor updates with advantage computation,
+    # so later samples in the batch used stale advantages (V had already moved).
+    # Now: compute all targets first, then update.
+    advs = []; targets = []
     for (s, a, noise, r, s2, done, timeout) in batch:
-        r_c = max(-10.0, min(10.0, r))
+        # Reward scaling: final reward is in [-25,25] (terminal +20). /10 ->
+        # stack 10 -> 1.0, grasp ~1-2 -> 0.1-0.2, step ~0.00.
+        # Was: raw r in [-10,10] with gamma 0.99 -> value scale ~1000,
+        # critic (linear out, Huber grad capped at 1) could never catch up.
+        # Scaled: value scale ~2-3, critic learns in tens of updates.
+        r_c = max(-25.0, min(25.0, r)) / 10.0
         if done and not timeout:
             target_v = r_c
         else:
             v_next = app.target_critic.forward(s2)[0]
             target_v = r_c + app.gamma * v_next
+        # Clip TD target: prevents one diverged V(s') from poisoning the batch.
+        target_v = max(-5.0, min(5.0, target_v))
         v = app.critic.forward(s)[0]
         advs.append(target_v - v)
         targets.append(target_v)
-    # Advantage normalisation: mean 0, std 1 — stabilises policy gradient.
     mean_adv = sum(advs) / len(advs)
     var_adv = sum((x - mean_adv) * (x - mean_adv) for x in advs) / len(advs)
-    std_adv = math.sqrt(var_adv + 1e-8)
-    tot = 0.0
-    grad_tot = 0.0
+    # TD-error std IS the learning signal. If it is ~0, the batch has no
+    # surprise (all failures, critic already predicts failure) and any actor
+    # update is fitting noise. Old code used +1e-8 floor: when advs were all
+    # -0.01, std ~1e-4, so (adv-mean)/std blew tiny noise up to +/-1 and the
+    # actor chased it. New: hard floor 0.08 + explicit gate below.
+    raw_std_adv = math.sqrt(var_adv)
+    std_adv = max(raw_std_adv, 0.08)
+    td_std = raw_std_adv
+    pos_frac = sum(1 for (_s, _a, _n, _r, _s2, _d, _t) in batch if _r >= 0.4) / len(batch)
+    # Gate: no positives AND no TD surprise -> critic still learns (it is
+    # fitting the failure distribution), but the actor does NOT update.
+    # Exploration (OU noise) keeps running, so the actor still explores;
+    # it just does not collapse toward its own noise.
+    actor_gated = (pos_frac == 0.0 and td_std < 0.02)
+    app.td_std_hist.append(td_std)
+    app.adv_std_hist.append(raw_std_adv)
+    app.pos_frac_hist.append(pos_frac)
+    if len(app.td_std_hist) > 120: app.td_std_hist.pop(0)
+    if len(app.adv_std_hist) > 120: app.adv_std_hist.pop(0)
+    if len(app.pos_frac_hist) > 120: app.pos_frac_hist.pop(0)
+    app.actor_gated_count = app.actor_gated_count + (1 if actor_gated else 0)
+    # --- Pass 2: critic (all samples) ---
+    tot_c = 0.0
     for idx, (s, a, noise, r, s2, done, timeout) in enumerate(batch):
-        target_v = targets[idx]
+        tot_c += app.critic.train_example(s, [targets[idx]], app.critic_lr, loss_type='huber')
+    # --- Pass 3: actor (all samples), advantage-weighted BC done correctly ---
+    # Old: desired = a + adv_n * noise * 0.9, adv_n in [-2,2].
+    # If adv=+2, desired = executed + 1.8*noise = clean + 2.8*noise — overshoots
+    # past the good action. If adv=-2, desired = executed - 1.8*noise, which
+    # is not the clean action either. Not a policy gradient, not BC.
+    # New: clean = a - noise (executed = clean + noise). Desired interpolates:
+    #   adv=+1 -> desired = executed (clone the good noisy action)
+    #   adv=-1 -> desired = clean (retreat to the clean action)
+    #   adv=0  -> halfway. adv_n in [-1,1], no overshoot by construction.
+    tot_a = 0.0; grad_tot = 0.0
+    if actor_gated:
+        # Actor skipped by design (see above). Record 0 loss so the curve
+        # does NOT fake a low actor loss while the actor learned nothing.
+        app.critic_loss_hist.append(tot_c / len(batch))
+        app.actor_loss_hist.append(0.0)
+        app.loss_hist.append(tot_c / len(batch))
+        app.grad_norm_hist.append(0.0)
+        app.target_critic.soft_update_from(app.critic, app.tau)
+        for _h in (app.loss_hist, app.grad_norm_hist, app.critic_loss_hist, app.actor_loss_hist):
+            if len(_h) > 120: _h.pop(0)
+        return
+    for idx, (s, a, noise, r, s2, done, timeout) in enumerate(batch):
         adv_n = (advs[idx] - mean_adv) / std_adv
-        if adv_n > 2.0:
-            adv_n = 2.0
-        if adv_n < -2.0:
-            adv_n = -2.0
-        closs = app.critic.train_example(s, [target_v], app.critic_lr, loss_type='huber')
-        desired = [max(-1.0, min(1.0, a[i] + adv_n * noise[i] * 0.9)) for i in range(4)]
-        aloss = app.actor.train_example(s, desired, app.actor_lr, loss_type='mse')
-        tot += closs + aloss
+        adv_n = max(-1.0, min(1.0, adv_n))
+        w = 0.5 + 0.5 * adv_n  # 0 = clean, 1 = executed
+        desired = []
+        for i in range(4):
+            clean_est = a[i] - noise[i]
+            desired.append(max(-1.0, min(1.0, clean_est + w * noise[i])))
+        tot_a += app.actor.train_example(s, desired, app.actor_lr, loss_type='mse')
         grad_tot += abs(adv_n)
     app.target_critic.soft_update_from(app.critic, app.tau)
-    app.loss_hist.append(tot / len(batch))
+    # Track critic / actor separately — summing them hid which one diverged.
+    app.critic_loss_hist.append(tot_c / len(batch))
+    app.actor_loss_hist.append(tot_a / len(batch))
+    app.loss_hist.append((tot_c + tot_a) / len(batch))
     app.grad_norm_hist.append(grad_tot / len(batch))
-    if len(app.loss_hist) > 120:
-        app.loss_hist.pop(0)
-    if len(app.grad_norm_hist) > 120:
-        app.grad_norm_hist.pop(0)
+    for _h in (app.loss_hist, app.grad_norm_hist, app.critic_loss_hist, app.actor_loss_hist):
+        if len(_h) > 120: _h.pop(0)
 
 def _end_episode(app):
     app.reward_hist.append(app.env.episode_reward)
@@ -997,11 +1144,13 @@ def _end_episode(app):
         app.eval_reward_hist.append(app.env.episode_reward)
         if len(app.eval_reward_hist) > 60:
             app.eval_reward_hist.pop(0)
-    # LR decay: gentle, per-episode. Adam already adapts per-weight.
-    app.actor_lr = max(0.00008, app.actor_lr * 0.995)
-    app.critic_lr = max(0.00025, app.critic_lr * 0.995)
-    app.epsilon = max(0.05, app.epsilon * 0.985)
-    app.ou.reset()
+    # LR / epsilon decay: only in TRAINING. Eval episodes must not consume
+    # exploration budget or anneal the LR.
+    if not app.eval_mode:
+        app.actor_lr = max(0.00008, app.actor_lr * 0.995)
+        app.critic_lr = max(0.00025, app.critic_lr * 0.995)
+        app.epsilon = max(0.05, app.epsilon * 0.985)
+        app.ou.reset()
     app.env.episode += 1
     # Reset scene but KEEP weights — learning persists across episodes.
     objs = list(app.env.objects)
@@ -1009,6 +1158,7 @@ def _end_episode(app):
     app.ctx = TrainingContext()
     app.status = 'Episode %d done. Reward %.1f — brain kept, scene reset.' % (app.env.episode - 1, app.env.episode_reward)
     app.env.episode_reward = 0.0
+    app.episode_reward = 0.0  # keep the (now unused) display var in sync
 
 def onStep(app):
     if app.training:
@@ -1020,9 +1170,21 @@ def onStep(app):
         else:
             ou = app.ou.sample()
             noise = [ou[i] * app.epsilon * 1.4 for i in range(4)]
+            # Grasp exploration boost: when the wrist sensor reports contact
+            # (touch) and the gripper is still open, the robot is IN a grasp
+            # opportunity but has never closed there. Boost ONLY the
+            # magnitude of the gripper noise (variance, not direction) so it
+            # tries closing more often there. No direction is scripted: the
+            # sign still comes from OU noise, the MLP still has to learn that
+            # closing pays. Uses contact_sensors() — a sensor, not ground truth.
+            _c, _f, _sl = app.env.contact_sensors()
+            if _c > 0.5 and app.env.arm.gripper > 0.38:
+                noise[3] = noise[3] * 1.8
             executed = [max(-1.0, min(1.0, clean[i] + noise[i])) for i in range(4)]
         reward, done, timeout, info = app.env.step(executed, app)
-        app.episode_reward += reward
+        # Do NOT also do app.episode_reward += reward: Env.step already adds
+        # to env.episode_reward. Double-counting + _end_episode only reset
+        # env.episode_reward, so the displayed Reward grew across episodes.
         s2, _ = _sensor_vector(app)
         if not app.eval_mode:
             app.replay.add((s, executed, noise, reward, s2, done, timeout))
@@ -1122,6 +1284,12 @@ def _handle_button(app, action):
         app.loss_hist = [0.0]
         app.reward_hist = [0.0]
         app.grad_norm_hist = [0.0]
+        app.critic_loss_hist = [0.0]
+        app.actor_loss_hist = [0.0]
+        app.td_std_hist = [0.0]
+        app.adv_std_hist = [0.0]
+        app.pos_frac_hist = [0.0]
+        app.actor_gated_count = 0
         app.eval_reward_hist = [0.0]
         app.ctx = TrainingContext()
         app.epsilon = 0.35
@@ -1399,7 +1567,12 @@ def _draw_manual(app):
     drawLabel('Teleop: W/S A/D Q/E move, G/O grip. Reset Brain = re-learn.', RX, y, size=14, fill=TXT, align='left-top'); y += 20
     drawLabel('SPACE=train  •  R=rotate  •  DEL=delete  •  M/ESC=manual', RX, y, size=14, fill=TXT, align='left-top'); y += 20
     drawLabel('Floor contact rejects the move. Stuck >60 steps = penalty.', RX, y, size=14, fill=TXT, align='left-top'); y += 20
-    drawLabel('NO fakes, NO fallbacks: MLP only.', RX, y, size=14, fill=WARN, bold=True, align='left-top')
+    drawLabel('NO fakes, NO fallbacks: MLP only.', RX, y, size=14, fill=WARN, bold=True, align='left-top'); y += 28
+    drawLabel('8 — LOSS LIES (READ THIS)', RX, y, size=16, fill=BAD, bold=True, align='left-top'); y += 22
+    drawLabel('Low loss + 0 grasps = collapse, not learning.', RX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('Watch TD-std + Pos% in the top bar, not Loss.', RX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('TD-std ~0 + Pos 0% = actor gated, buffer all failures.', RX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('Close-on-object shaping + stratified replay fix it.', RX, y, size=14, fill=TXT, align='left-top')
 
 def redrawAll(app):
     drawRect(0, 0, WIDTH, HEIGHT, fill=BG)
@@ -1408,10 +1581,15 @@ def redrawAll(app):
     drawLabel('OpenArm 2.0  🤖  MLP-RL Stacking Trainer', 20, 16, size=20, fill=TXT, bold=True, align='left-top')
     drawLabel('No IK  •  No grasp table  •  No shape library  •  No Computer Vision', 20, 42, size=11, fill=DIM, align='left-top')
     env = app.env
-    drawLabel(('EVAL  |  ' if app.eval_mode else '') + 'Ep %d  |  Step %d  |  Reward %.1f  |  Tower %d/%d' % (env.episode, env.step_count, app.episode_reward, env.tower_count, len(env.objects)),
+    drawLabel(('EVAL  |  ' if app.eval_mode else '') + 'Ep %d  |  Step %d  |  Reward %.1f  |  Tower %d/%d' % (env.episode, env.step_count, env.episode_reward, env.tower_count, len(env.objects)),
               1020, 16, size=11, fill=TXT, bold=True, align='right-top')
     grasp_rate = (app.grasp_success / max(1, app.grasp_attempts) * 100)
-    drawLabel('Eps %.2f  |  Grasp %.0f%% (%d/%d)  |  Loss %.3f' % (app.epsilon, grasp_rate, app.grasp_success, app.grasp_attempts, app.loss_hist[-1] if app.loss_hist else 0.0),
+    # Loss alone lies (see manual §8): low loss + 0 grasps = collapse.
+    # TD-std = surprise in the batch, Pos% = share of batch with r>=0.4.
+    # If TD-std ~0 and Pos% = 0, the actor is gated — it is NOT learning.
+    _td = app.td_std_hist[-1] if app.td_std_hist else 0.0
+    _pos = app.pos_frac_hist[-1] if app.pos_frac_hist else 0.0
+    drawLabel('Eps %.2f  |  Grasp %.0f%% (%d/%d)  |  Loss %.3f  |  TD-std %.3f  Pos %.0f%%' % (app.epsilon, grasp_rate, app.grasp_success, app.grasp_attempts, app.loss_hist[-1] if app.loss_hist else 0.0, _td, _pos * 100.0),
               1020, 38, size=10, fill=ACC2 if app.training else DIM, align='right-top')
     # Arena
     drawRect(ARENA_X0, ARENA_Y0, ARENA_X1 - ARENA_X0, ARENA_Y1 - ARENA_Y0, fill=rgb(16, 18, 32), border=BORDER, roundness=12)
@@ -1488,11 +1666,12 @@ def redrawAll(app):
         drawLine(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], fill=ACC2, lineWidth=1.6)
     drawLabel('episode reward', gx + 8, ry + 6, size=8, fill=DIM, align='left-top')
     sy = ry + 42 + 8
-    drawRect(gx, sy, gw, 60, fill=PANEL2, border=BORDER, roundness=8)
+    drawRect(gx, sy, gw, 73, fill=PANEL2, border=BORDER, roundness=8)
     drawLabel('LIVE: ACC %.2f,%.2f  DOWN %.2f' % (env.accel_forward, env.accel_perp, env.down_alignment), gx + 8, sy + 6, size=8, fill=rgb(45, 212, 191), align='left-top')
     drawLabel('JOINT VEL %.2f %.2f %.2f  |  GRIP VEL %.1f,%.1f' % (env.joint_vel[0], env.joint_vel[1], env.joint_vel[2], env.gripper_vel[0], env.gripper_vel[1]), gx + 8, sy + 20, size=8, fill=DIM, align='left-top')
     drawLabel('GRIPPER %s  GAP %.0fpx  |  See INSTRUCTION MANUAL' % (env.arm.gripper_type.upper(), env.arm.gap()), gx + 8, sy + 34, size=8, fill=WARN, bold=True, align='left-top')
-    drawLabel('lr a=%.5f c=%.5f | Grad %.2f | Eval %.1f | g %.2f' % (app.actor_lr, app.critic_lr, app.grad_norm_hist[-1] if app.grad_norm_hist else 0.0, app.eval_reward_hist[-1] if app.eval_reward_hist else 0.0, app.gamma), PANEL_X + 14, sy + 48, size=8, fill=DIM, align='left-top')
+    drawLabel('TD-std %.3f  Adv-std %.3f  Pos %.0f%%  Actor gated %d' % (app.td_std_hist[-1] if app.td_std_hist else 0.0, app.adv_std_hist[-1] if app.adv_std_hist else 0.0, (app.pos_frac_hist[-1] if app.pos_frac_hist else 0.0) * 100.0, app.actor_gated_count), gx + 8, sy + 48, size=8, fill=(BAD if (app.pos_frac_hist[-1] if app.pos_frac_hist else 0.0) == 0.0 and app.training else DIM), align='left-top')
+    drawLabel('lr a=%.5f c=%.5f | Grad %.2f | Eval %.1f | g %.2f' % (app.actor_lr, app.critic_lr, app.grad_norm_hist[-1] if app.grad_norm_hist else 0.0, app.eval_reward_hist[-1] if app.eval_reward_hist else 0.0, app.gamma), PANEL_X + 23, sy + 60, size=8, fill=DIM, align='left-top')
     # Manual overlay — completely overlays everything, drawn last.
     if getattr(app, 'manual_open', False):
         _draw_manual(app)
