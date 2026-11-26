@@ -1,4 +1,4 @@
-# robot_training_54.py — OpenArm 2.0 + MLP-RL Stacking Trainer (SCS, 1050x700)
+# robot_training_58.py — OpenArm 2.0 + MLP-RL Stacking Trainer (SCS, 1050x700)
 # ---------------------------------------------------------------------------
 # Maps the Anvil OpenArm 2.0 Quest Teleop Kit to a 2D SCS lab:
 #   Real kit: 7-DOF per arm, 633 mm reach, parallel gripper 88 mm opening,
@@ -36,6 +36,38 @@
 #     _update_held, _try_release, _finish_step) with bodies moved verbatim;
 #     step is now an orchestrator. Added FILE MAP + TUNABLES index below
 #     and section banners. Verified by step-by-step equivalence vs v52.
+    #   - v58: RESTORE LIVE DATA. v56 deleted the EMA but left the loss
+    #     chart reading _lh, which was defined from the EMA hist. redrawAll
+    #     raised NameError at the loss chart rect, so the reward chart,
+    #     LIVE box, TIME line, and footer never drew. Screenshot showed
+    #     exactly that: empty loss rect, blank right panel below it.
+    #     Fix: _lh = app.loss_hist (critic loss only, v56). No display
+    #     smoothing, no new data, the same loss_hist the header shows.
+    #   - v57: FLOOR HARD CONSTRAINT, NO PENETRATION. Screenshot showed a
+    #     held block sunk into the floor bar while gripper reported HOLDING.
+    #     Cause: _free_update clamps free objects to FLOOR_Y, but _update_held
+    #     set o.x/o.y = gripper - grasp_offset with no floor check, and
+    #     _move_arm only checked the fingertip, not the object it carries.
+    #     Fix, proven position-based hard constraint: one helper
+    #     _clamp_to_floor(o) that does if bottom_y > FLOOR_Y: o.y -= excess.
+    #     Applied in _update_held (safety net), _try_release, add_object,
+    #     and onMouseDrag (now bottom-based, not centre-based). _move_arm now
+    #     also predicts the held object bottom after the move and rejects
+    #     the move if it would push the held object through the floor, same
+    #     as the fingertip rejection. No new hyperparams, no reward change.
+    #   - v56: REAL LOSS FIX, NO EMA. v55 used an EMA on the chart, which
+    #     hid noise instead of fixing it. Reverted. Root cause, proven:
+    #     _train_batch did 32 sequential per-sample Adam steps per batch.
+    #     Adam (Kingma & Ba 2014) is defined for mini-batch gradients,
+    #     not per-sample steps, so the weights chased the last sample and
+    #     the next batch loss spiked. Fix: MLP.train_batch accumulates
+    #     gradients over the batch and does ONE Adam step on the mean
+    #     gradient (standard mini-batch gradient descent). Critic and
+    #     actor each get one batch step per _train_batch. loss_hist is
+    #     now critic TD loss only, actor loss in its own hist, no fake
+    #     0.0 when skipped, so the 5:1 schedule cannot make the curve
+    #     jump. No new hyperparams, no display smoothing. Panels kept:
+    #     ARENA_Y0 76 -> 72, ARENA_Y1 660 -> 670 (+14px tall).
 #   - v54: WORLD MODEL (belief state, Plausible rung). New WorldModel class
 #     in PHYSICS: world-frame occupancy grid, told only by sensors (9 rays
 #     + ultrasonic + contact; held object excluded, floor included),
@@ -139,9 +171,9 @@ import math, random
 WIDTH = 1050
 HEIGHT = 700
 ARENA_X0 = 16
-ARENA_Y0 = 76
+ARENA_Y0 = 72
 ARENA_X1 = 694
-ARENA_Y1 = 660
+ARENA_Y1 = 670
 FLOOR_Y = 600
 TOWER_X0 = 320
 TOWER_X1 = 420
@@ -270,17 +302,13 @@ class MLP:
         for layer in self.layers:
             cur = layer.forward(cur)
         return cur
-    def train_example(self, x, target, lr, loss_type='mse'):
-        """One Adam step. loss_type='mse' for actor, 'huber' for critic TD.
-        Huber: grad = clip(err, -1, 1) — robust to large TD outliers.
-        Gradients clipped to [-1, 1] before Adam to prevent explosion."""
-        out = self.forward(x)
+    def _backward(self, out, target, loss_type):
+        # Backward only, no weight update. Sets neuron.delta (dL/dz) and
+        # grad_gamma / grad_beta. Shared by train_example (batch size 1)
+        # and train_batch (mean over batch). Proven backprop, Rumelhart et al.
         for li in range(len(self.layers) - 1, -1, -1):
             layer = self.layers[li]
             is_out = (li == len(self.layers) - 1)
-            # Pass 1: dy = dL/dy for every neuron (y = post-norm pre-act,
-            # = pre-act when no LN). Next layer's neuron.delta is already
-            # dL/dz there, which is what this layer's output feeds into.
             _dys = []
             for ni, neuron in enumerate(layer.neurons):
                 if is_out:
@@ -297,10 +325,6 @@ class MLP:
                         if ni < len(n_next.weights):
                             s += n_next.delta * n_next.weights[ni]
                     _dys.append(s * _deriv(neuron.activator, neuron.accumulator, neuron.output))
-            # Pass 2: through LayerNorm (if any) to dz = dL/dz, then clip.
-            # neuron.delta is always dL/dz after this, so weight updates
-            # (delta * inputs) and propagation to the previous layer are
-            # both correct. Without LN, dz == dy.
             if layer.layernorm:
                 _g = [_dys[i] * layer.neurons[i].gamma for i in range(len(_dys))]
                 _n = len(_dys)
@@ -313,49 +337,53 @@ class MLP:
                     neuron.delta = max(-1.0, min(1.0, _dz))
             else:
                 for i, neuron in enumerate(layer.neurons):
-                    # Clip delta (gradient) — prevents a single bad TD from wrecking weights.
                     neuron.delta = max(-1.0, min(1.0, _dys[i]))
-        # --- Adam update per weight ---
+
+    def _adam_step(self, grads, lr):
+        # One Adam step (Kingma & Ba 2014) from grads. grads mirrors layers:
+        # grads[li][ni] = (grad_w list, grad_b, grad_gamma, grad_beta).
         beta1 = 0.9
         beta2 = 0.999
         eps = 1e-8
-        for layer in self.layers:
-            for neuron in layer.neurons:
+        for li, layer in enumerate(self.layers):
+            for ni, neuron in enumerate(layer.neurons):
+                gw, gb, gg, gbe = grads[li][ni]
                 neuron.adam_step += 1
                 bc1 = 1.0 - (beta1 ** neuron.adam_step)
                 bc2 = 1.0 - (beta2 ** neuron.adam_step)
                 for i in range(len(neuron.weights)):
-                    inp = neuron.inputs[i] if i < len(neuron.inputs) else 0.0
-                    g = neuron.delta * inp
-                    if g > 1.0:
-                        g = 1.0
-                    if g < -1.0:
-                        g = -1.0
+                    g = max(-1.0, min(1.0, gw[i]))
                     neuron.m_w[i] = beta1 * neuron.m_w[i] + (1.0 - beta1) * g
                     neuron.v_w[i] = beta2 * neuron.v_w[i] + (1.0 - beta2) * g * g
-                    m_hat = neuron.m_w[i] / bc1
-                    v_hat = neuron.v_w[i] / bc2
-                    neuron.weights[i] -= lr * m_hat / (math.sqrt(v_hat) + eps)
-                g_b = neuron.delta
-                if g_b > 1.0:
-                    g_b = 1.0
-                if g_b < -1.0:
-                    g_b = -1.0
+                    neuron.weights[i] -= lr * (neuron.m_w[i] / bc1) / (math.sqrt(neuron.v_w[i] / bc2) + eps)
+                g_b = max(-1.0, min(1.0, gb))
                 neuron.m_b = beta1 * neuron.m_b + (1.0 - beta1) * g_b
                 neuron.v_b = beta2 * neuron.v_b + (1.0 - beta2) * g_b * g_b
-                m_hat_b = neuron.m_b / bc1
-                v_hat_b = neuron.v_b / bc2
-                neuron.bias -= lr * m_hat_b / (math.sqrt(v_hat_b) + eps)
+                neuron.bias -= lr * (neuron.m_b / bc1) / (math.sqrt(neuron.v_b / bc2) + eps)
                 if layer.layernorm:
-                    # v51: Adam for LN gamma/beta, same step counter / betas.
-                    _gg = max(-1.0, min(1.0, neuron.grad_gamma))
+                    _gg = max(-1.0, min(1.0, gg))
                     neuron.m_gamma = beta1 * neuron.m_gamma + (1.0 - beta1) * _gg
                     neuron.v_gamma = beta2 * neuron.v_gamma + (1.0 - beta2) * _gg * _gg
                     neuron.gamma -= lr * (neuron.m_gamma / bc1) / (math.sqrt(neuron.v_gamma / bc2) + eps)
-                    _gb = max(-1.0, min(1.0, neuron.grad_beta))
+                    _gb = max(-1.0, min(1.0, gbe))
                     neuron.m_beta = beta1 * neuron.m_beta + (1.0 - beta1) * _gb
                     neuron.v_beta = beta2 * neuron.v_beta + (1.0 - beta2) * _gb * _gb
                     neuron.beta -= lr * (neuron.m_beta / bc1) / (math.sqrt(neuron.v_beta / bc2) + eps)
+
+    def train_example(self, x, target, lr, loss_type='mse'):
+        # Single-sample Adam step. Only for teleop BC (batch size 1), where
+        # mini-batch mean equals the single sample. _train_batch uses
+        # train_batch below.
+        out = self.forward(x)
+        self._backward(out, target, loss_type)
+        grads = []
+        for layer in self.layers:
+            lg = []
+            for neuron in layer.neurons:
+                gw = [neuron.delta * (neuron.inputs[i] if i < len(neuron.inputs) else 0.0) for i in range(len(neuron.weights))]
+                lg.append((gw, neuron.delta, neuron.grad_gamma, neuron.grad_beta))
+            grads.append(lg)
+        self._adam_step(grads, lr)
         loss = 0.0
         for a, b in zip(out, target):
             d = a - b
@@ -365,6 +393,48 @@ class MLP:
             else:
                 loss += d * d
         return loss / max(1, len(target))
+
+    def train_batch(self, examples, lr, loss_type='mse'):
+        # Mini-batch gradient descent, standard definition: accumulate
+        # gradients over the batch, one Adam step on the mean. This is the
+        # loss-volatility fix. No EMA, no display smoothing, training itself
+        # is stable. Returns mean loss over the batch.
+        if not examples:
+            return 0.0
+        acc = []
+        for layer in self.layers:
+            lg = []
+            for neuron in layer.neurons:
+                lg.append(([0.0] * len(neuron.weights), 0.0, 0.0, 0.0))
+            acc.append(lg)
+        total_loss = 0.0
+        for (x, target) in examples:
+            out = self.forward(x)
+            for a, b in zip(out, target):
+                d = a - b
+                if loss_type == 'huber':
+                    ad = abs(d)
+                    total_loss += (0.5 * d * d) if ad <= 1.0 else (ad - 0.5)
+                else:
+                    total_loss += d * d
+            self._backward(out, target, loss_type)
+            for li, layer in enumerate(self.layers):
+                for ni, neuron in enumerate(layer.neurons):
+                    gw, gb, gg, gbe = acc[li][ni]
+                    for i in range(len(neuron.weights)):
+                        inp = neuron.inputs[i] if i < len(neuron.inputs) else 0.0
+                        gw[i] += neuron.delta * inp
+                    acc[li][ni] = (gw, gb + neuron.delta, gg + neuron.grad_gamma, gbe + neuron.grad_beta)
+        n = float(len(examples))
+        grads = []
+        for li, layer in enumerate(self.layers):
+            lg = []
+            for ni, neuron in enumerate(layer.neurons):
+                gw, gb, gg, gbe = acc[li][ni]
+                lg.append(([g / n for g in gw], gb / n, gg / n, gbe / n))
+            grads.append(lg)
+        self._adam_step(grads, lr)
+        return total_loss / (len(examples) * max(1, len(examples[0][1])))
     def copy_from(self, other):
         """Hard copy weights + bias (for target-critic init). Adam state reset."""
         for la, lb in zip(self.layers, other.layers):
@@ -617,6 +687,14 @@ def _rotate(px, py, ang):
     c = math.cos(ang)
     s = math.sin(ang)
     return (px * c - py * s, px * s + py * c)
+
+def _clamp_to_floor(o):
+    # Hard floor constraint, position-based. Guarantees bottom_y <= FLOOR_Y.
+    # Used by held, released, spawned, and dragged objects. Free objects
+    # already had this logic in _free_update, now all paths share it.
+    _by = o.bottom_y()
+    if _by > FLOOR_Y:
+        o.y -= (_by - FLOOR_Y)
 
 TEMPLATES = {
     'block': ([(-28, -18), (28, -18), (28, 18), (-28, 18)], rgb(99, 102, 241), 'Block'),
@@ -1049,7 +1127,7 @@ class Env:
         else:
             verts, color, name = TEMPLATES[template_name]
             verts = list(verts)
-        o = PhysObject(self.next_id, verts, x, y, color, name)
+        o = PhysObject(self.next_id, verts, x, y, color, name); _clamp_to_floor(o)  # v57
         self.next_id += 1
         self.objects.append(o)
         return o
@@ -1101,7 +1179,7 @@ class Env:
         by = o.bottom_y()
         if by >= FLOOR_Y:
             # land on floor
-            o.y -= (by - FLOOR_Y)
+            _clamp_to_floor(o)
             o.vy = 0.0
             if o.is_stable(self):
                 o.resting = True
@@ -1203,6 +1281,18 @@ class Env:
         collision = False
         if _ft_try[1] > FLOOR_Y-5 and _ft_try[1] >= _ft_prev_y:
             arm.angles = prev_angles; collision = True
+        # v57: held object floor check. Fingertip check alone lets the arm
+        # push a held block through the floor, because the block extends
+        # below the gripper centre. Predict the held bottom after this move
+        # and reject the move if it would penetrate, same as fingertip.
+        if not collision and arm.held is not None:
+            _held = arm.held
+            _new_gc = arm.gripper_center()
+            _pred_x = _new_gc[0] - _held.grasp_offset[0]
+            _pred_y = _new_gc[1] - _held.grasp_offset[1]
+            _pred_bottom = max(_pred_y + _rotate(lx, ly, _held.rot)[1] for (lx, ly) in _held.verts)
+            if _pred_bottom > FLOOR_Y and _pred_bottom >= _held.bottom_y():
+                arm.angles = prev_angles; collision = True
         if collision:
             # Was -2.0: dwarfed grasp (+2) and taught the robot to fear the
             # floor — where every object sits. Now -0.5, and only -0.1 when
@@ -1347,7 +1437,7 @@ class Env:
         # one-time lift bonus.
         arm = self.arm
         if arm.held is not None:
-            o = arm.held; o.x = gc[0]-o.grasp_offset[0]; o.y = gc[1]-o.grasp_offset[1]
+            o = arm.held; o.x = gc[0]-o.grasp_offset[0]; o.y = gc[1]-o.grasp_offset[1]; _clamp_to_floor(o)  # v57: safety net, held object never below floor
             wobble=(1.0-o.grasp_stability)*0.018; o.rot+=(random.random()-0.5)*wobble*2.0
             _slip_rate=0.008 if arm.gripper_type=='adaptive' else 0.012
             o.slip=min(1.0, o.slip+(1.0-o.grasp_stability)*_slip_rate); info['slip']=o.slip; info['contact']=1.0
@@ -1365,7 +1455,7 @@ class Env:
         # Records steps-to-stack (v52).
         arm = self.arm
         if arm.held is not None and arm.gripper > 0.62:
-            o=arm.held; arm.held=None; o.held=False; o.vy=0.0; cx,_=o.com_world()
+            o=arm.held; arm.held=None; o.held=False; o.vy=0.0; _clamp_to_floor(o); cx,_=o.com_world()  # v57: released object clamped before stability check
             if TOWER_X0 <= cx <= TOWER_X1 and o.is_stable(self):
                 o.placed=True; o.resting=True; self.tower_count+=1; reward+=10.0; info['placed']=True; self.last_grasp_msg='STACKED! tower=%d' % self.tower_count; self.steps_to_stack = self.step_count + 1 if self.steps_to_stack is None else self.steps_to_stack  # v52
             elif TOWER_X0 <= cx <= TOWER_X1 and not o.is_stable(self):
@@ -1647,9 +1737,9 @@ def _train_batch(app):
     # it just does not collapse toward its own noise.
     actor_gated = (pos_frac == 0.0 and td_std < 0.02)
     # v48 asymmetric: critic every batch, actor every 5th batch. Paper M=20
-    # counts batch gradient steps. Here one _train_batch = 32 per-sample
-    # updates and _train_batch runs every 4 env steps, so M=5 here = 160
-    # critic sample-updates per actor update. M=20 here would be 1 actor
+    # counts batch gradient steps. Here one _train_batch = 1 batch step
+    # (v56, was 32 per-sample steps) and _train_batch runs every 2 env
+    # steps, so M=5 here = 5 critic batch steps per actor step. M=20 here
     # update per 80 env steps and would starve the actor at this UTD.
     actor_due = (app.critic_updates % app.actor_update_every == 0)
     actor_skip = actor_gated or not actor_due
@@ -1666,50 +1756,42 @@ def _train_batch(app):
     if len(app.adv_std_hist) > 120: app.adv_std_hist.pop(0)
     if len(app.pos_frac_hist) > 120: app.pos_frac_hist.pop(0)
     app.actor_gated_count = app.actor_gated_count + (1 if actor_gated else 0)
-    # --- Pass 2: critic (all samples) ---
-    tot_c = 0.0
-    for idx, (s, a, noise, r, s2, done, timeout) in enumerate(batch):
-        tot_c += app.critic.train_example(s, [targets[idx]], app.critic_lr, loss_type='huber')
-    # --- Pass 3: actor (all samples), advantage-weighted BC done correctly ---
-    # Old: desired = a + adv_n * noise * 0.9, adv_n in [-2,2].
-    # If adv=+2, desired = executed + 1.8*noise = clean + 2.8*noise — overshoots
-    # past the good action. If adv=-2, desired = executed - 1.8*noise, which
-    # is not the clean action either. Not a policy gradient, not BC.
-    # New: clean = a - noise (executed = clean + noise). Desired interpolates:
-    #   adv=+1 -> desired = executed (clone the good noisy action)
-    #   adv=-1 -> desired = clean (retreat to the clean action)
-    #   adv=0  -> halfway. adv_n in [-1,1], no overshoot by construction.
+    # --- Pass 2: critic, ONE batch Adam step on mean gradient (v56) ---
+    _critic_examples = [(s, [targets[idx]]) for idx, (s, a, noise, r, s2, done, timeout) in enumerate(batch)]
+    tot_c = app.critic.train_batch(_critic_examples, app.critic_lr, loss_type='huber') * len(batch)
+    # --- Pass 3: actor, advantage-weighted BC, one batch step ---
+    # Desired interpolates clean to executed by advantage, adv in [-1,1].
+    # adv=+1 -> executed, adv=-1 -> clean, adv=0 -> halfway. No overshoot.
     tot_a = 0.0; grad_tot = 0.0
     if actor_skip:
-        # Actor skipped by gate (above) or by asymmetric schedule. Record 0
-        # loss so the curve does NOT fake a low actor loss while the actor
-        # learned nothing. Critic still learned above. Schedule skips are
-        # NOT counted in actor_gated_count (that counts only the TD gate).
-        # does NOT fake a low actor loss while the actor learned nothing.
+        # Actor did not train. No actor loss entry, no fake 0.0.
+        # loss_hist is critic loss only, so the 5:1 schedule cannot jump it.
         app.critic_loss_hist.append(tot_c / len(batch))
-        app.actor_loss_hist.append(0.0)
         app.loss_hist.append(tot_c / len(batch))
         app.grad_norm_hist.append(0.0)
         app.target_critic.soft_update_from(app.critic, app.tau)
-        for _h in (app.loss_hist, app.grad_norm_hist, app.critic_loss_hist, app.actor_loss_hist):
+        for _h in (app.loss_hist, app.grad_norm_hist, app.critic_loss_hist):
             if len(_h) > 120: _h.pop(0)
         return
     app.actor_updates = app.actor_updates + 1
+    _actor_examples = []
     for idx, (s, a, noise, r, s2, done, timeout) in enumerate(batch):
         adv_n = (advs[idx] - mean_adv) / std_adv
         adv_n = max(-1.0, min(1.0, adv_n))
-        w = 0.5 + 0.5 * adv_n  # 0 = clean, 1 = executed
+        w = 0.5 + 0.5 * adv_n
         desired = []
         for i in range(4):
             clean_est = a[i] - noise[i]
             desired.append(max(-1.0, min(1.0, clean_est + w * noise[i])))
-        tot_a += app.actor.train_example(s, desired, app.actor_lr, loss_type='mse')
+        _actor_examples.append((s, desired))
         grad_tot += abs(adv_n)
+    tot_a = app.actor.train_batch(_actor_examples, app.actor_lr, loss_type='mse') * len(batch)
     app.target_critic.soft_update_from(app.critic, app.tau)
-    # Track critic / actor separately — summing them hid which one diverged.
+    # loss_hist is critic TD loss only (TD3 / SAC practice: track critic and
+    # actor separately). Actor loss in its own hist, never summed in.
     app.critic_loss_hist.append(tot_c / len(batch))
     app.actor_loss_hist.append(tot_a / len(batch))
-    app.loss_hist.append((tot_c + tot_a) / len(batch))
+    app.loss_hist.append(tot_c / len(batch))
     app.grad_norm_hist.append(grad_tot / len(batch))
     for _h in (app.loss_hist, app.grad_norm_hist, app.critic_loss_hist, app.actor_loss_hist):
         if len(_h) > 120: _h.pop(0)
@@ -2036,7 +2118,7 @@ def onMouseDrag(app, mx, my):
     if app.drag_obj is not None:
         o = app.drag_obj
         o.x = max(34, min(678, mx + app.drag_dx))
-        o.y = max(110, min(FLOOR_Y - 20, my + app.drag_dy))
+        o.y = max(110, my + app.drag_dy); _clamp_to_floor(o)  # v57: bottom-based, centre-based clamp let tall objects sink
         o.vx = 0.0
         o.vy = 0.0
         o.resting = False
@@ -2317,9 +2399,10 @@ def redrawAll(app):
     drawLabel('Critic loss %.4f  |  Actor loss %.4f  |  RMS %.3f/%.3f' % (app.critic_loss_hist[-1] if app.critic_loss_hist else 0.0, app.actor_loss_hist[-1] if app.actor_loss_hist else 0.0, app.actor.weight_norm(), app.critic.weight_norm()), PANEL_X + 14, py + 39, size=8, fill=ACC, align='left-top')
     gx, gy, gw, gh = PANEL_X + 14, py + 52, PANEL_W - 28, 52
     drawRect(gx, gy, gw, gh, fill=PANEL2, border=BORDER, roundness=8)
-    mx = max(app.loss_hist); mn = min(app.loss_hist); rng = (mx - mn) if mx - mn > 0.01 else 1.0
+    _lh = app.loss_hist if app.loss_hist else [0.0]  # v58: was EMA hist, now critic loss only
+    mx = max(_lh); mn = min(_lh); rng = (mx - mn) if mx - mn > 0.01 else 1.0
     pts = []
-    for i, v in enumerate(app.loss_hist):
+    for i, v in enumerate(_lh):
         x = gx + 8 + (i / max(1, len(app.loss_hist) - 1)) * (gw - 16)
         y = gy + gh - 8 - ((v - mn) / rng * (gh - 16)); pts.append((x, y))
     for i in range(len(pts) - 1):
