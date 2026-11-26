@@ -1,4 +1,4 @@
-# robot_training_66.py — OpenArm 2.0 + MLP-RL Stacking Trainer (SCS, 1050x700)
+# robot_training_67.py — OpenArm 2.0 + MLP-RL Stacking Trainer (SCS, 1050x700)
 # ---------------------------------------------------------------------------
 # Maps the Anvil OpenArm 2.0 Quest Teleop Kit to a 2D SCS lab:
 #   Real kit: 7-DOF per arm, 633 mm reach, parallel gripper 88 mm opening,
@@ -36,6 +36,13 @@
 #     _update_held, _try_release, _finish_step) with bodies moved verbatim;
 #     step is now an orchestrator. Added FILE MAP + TUNABLES index below
 #     and section banners. Verified by step-by-step equivalence vs v52.
+    #   - v67: FIX right-panel bottom overflow (screenshot: ~6px over).
+    #     Stack was py 410 -> gy 462 (loss 52) -> ry 522 (reward 42)
+    #     -> sy 572 (LIVE 100) -> bottom 672, 2px past panel bottom 670
+    #     (plus 1px borders each side reads as ~6px in screenshot).
+    #     Tightened the two 8px chart gaps to 4px: ry = gy+gh+4,
+    #     sy = ry+42+4. Now sy 564, LIVE bottom 664, 6px padding inside
+    #     panel. Buttons / CONTROLS / py unchanged, so outer gaps stay.
     #   - v66: FIX grab-in-action but no grab recorded (screenshot).
     #     Two bugs: (1) DistObj included the HELD object, so while
     #     holding it read 5px (grasp offset) for every row. Now excludes
@@ -2897,7 +2904,7 @@ def redrawAll(app):
     for i in range(len(pts) - 1):
         drawLine(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], fill=ACC, lineWidth=1.6)
     drawLabel('loss ↓ as it learns', gx + gw - 8, gy + 8, size=8, fill=DIM, align='right-top')
-    ry = gy + gh + 8
+    ry = gy + gh + 4  # v67: was +8, saves 4px to fix bottom overflow
     drawRect(gx, ry, gw, 42, fill=PANEL2, border=BORDER, roundness=8)
     # Live curve: use live_reward_hist (running episode reward, updated
     # every 20 steps) when the episode has not ended yet; reward_hist
@@ -2915,7 +2922,7 @@ def redrawAll(app):
     for i in range(len(pts) - 1):
         drawLine(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], fill=ACC2, lineWidth=1.6)
     drawLabel('episode reward (live, current ep %.1f)' % app.env.episode_reward, gx + 8, ry + 6, size=8, fill=DIM, align='left-top')
-    sy = ry + 42 + 8
+    sy = ry + 42 + 4  # v67: was +8, saves 4px — LIVE bottom 672->664, 6px padding inside panel
     drawRect(gx, sy, gw, 100, fill=PANEL2, border=BORDER, roundness=8)  # v59: 87 -> 100 for shaped line
     drawLabel('LIVE: ACC %.2f,%.2f  DOWN %.2f  |  ULTRA %.0fpx %s' % (env.accel_forward, env.accel_perp, env.down_alignment, env.ultrasonic_dist, 'IN RANGE' if env.ultrasonic_close > 0.5 else 'FAR'), gx + 8, sy + 6, size=8, fill=rgb(45, 212, 191), align='left-top')
     drawLabel('JOINT VEL %.2f %.2f %.2f  |  GRIP VEL %.1f,%.1f' % (env.joint_vel[0], env.joint_vel[1], env.joint_vel[2], env.gripper_vel[0], env.gripper_vel[1]), gx + 8, sy + 20, size=8, fill=DIM, align='left-top')
