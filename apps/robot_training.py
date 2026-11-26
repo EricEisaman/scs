@@ -35,7 +35,7 @@
 #   - Observation normalisation (Welford running mean/var, clipped +-5),
 #     advantage normalisation per batch, reward clipping, LR decay.
 #   - He init for ReLU, Xavier for tanh/sigmoid/linear, zero bias init.
-#   - Uniform replay buffer (capacity 2000), batch 32, gamma=0.99.
+#   - Uniform replay buffer (capacity 2000), batch 32, gamma=0.97.
 #   - Deterministic eval mode (noise=0, no training) to measure true policy.
 #   - No try/except, no getattr/hasattr, no .get() defaults, no scripted
 #     controller, no IK, no grasp table. Every line is explicit.
@@ -55,8 +55,8 @@ ARENA_Y0 = 76
 ARENA_X1 = 694
 ARENA_Y1 = 660
 FLOOR_Y = 600
-TOWER_X0 = 520
-TOWER_X1 = 664
+TOWER_X0 = 320
+TOWER_X1 = 420
 PANEL_X = 710
 PANEL_W = 324
 
@@ -542,17 +542,71 @@ class RobotArm:
         tx = wx + math.cos(a3) * self.L3
         ty = wy + math.sin(a3) * self.L3
         return (sx, sy), (ex, ey), (wx, wy), (tx, ty), a3
+    # Parallel-jaw topology (photo: FIPA GR04-style). Two straight fingers
+    # slide parallel on a base — they do NOT converge to a point like a
+    # V-pincer. Fingers point along a3, gap is perpendicular to a3.
+    BASE_LEN = 18.0
+    FINGER_LEN = 32.0
+    FINGER_THICK = 8.0
+    GAP_MAX = 44.0  # 88 mm at 0.5 px/mm
+    GAP_MIN = 4.0
+    def gap(self):
+        # gripper 1 = open (44 px), 0 = closed (4 px)
+        return self.GAP_MIN + self.gripper * (self.GAP_MAX - self.GAP_MIN)
     def gripper_center(self):
+        # Centre of the grasp: between the fingers, mid-finger length.
         _, _, _, tip, a3 = self.fk()
-        return (tip[0] + math.cos(a3) * 10, tip[1] + math.sin(a3) * 10)
+        d = self.BASE_LEN + self.FINGER_LEN / 2.0  # 34 px ahead of wrist tip
+        return (tip[0] + math.cos(a3) * d, tip[1] + math.sin(a3) * d)
+    def finger_tip(self):
+        _, _, _, tip, a3 = self.fk()
+        d = self.BASE_LEN + self.FINGER_LEN  # 50 px ahead of wrist tip
+        return (tip[0] + math.cos(a3) * d, tip[1] + math.sin(a3) * d)
     def jaw_positions(self):
+        # Inner faces of the two fingers — where contact happens.
         _, _, _, tip, a3 = self.fk()
         px = -math.sin(a3)
         py = math.cos(a3)
-        half = 6 + self.gripper * 22.0
+        half = self.gap() / 2.0
         c = self.gripper_center()
         return ((c[0] + px * half, c[1] + py * half),
                 (c[0] - px * half, c[1] - py * half))
+    def finger_rects(self):
+        # Two parallel finger rectangles as 4-corner quads. Returns
+        # [left_quad, right_quad], each [(x,y) x4]. Base is drawn separately.
+        _, _, _, tip, a3 = self.fk()
+        ax = math.cos(a3)
+        ay = math.sin(a3)
+        px = -math.sin(a3)
+        py = math.cos(a3)
+        bx = tip[0] + ax * self.BASE_LEN
+        by = tip[1] + ay * self.BASE_LEN
+        ex = tip[0] + ax * (self.BASE_LEN + self.FINGER_LEN)
+        ey = tip[1] + ay * (self.BASE_LEN + self.FINGER_LEN)
+        rects = []
+        for s in (1.0, -1.0):
+            inner = self.gap() / 2.0
+            outer = inner + self.FINGER_THICK
+            c1 = (bx + px * inner * s, by + py * inner * s)
+            c2 = (bx + px * outer * s, by + py * outer * s)
+            c3 = (ex + px * outer * s, ey + py * outer * s)
+            c4 = (ex + px * inner * s, ey + py * inner * s)
+            rects.append([c1, c2, c3, c4])
+        return rects
+    def base_rect(self):
+        _, _, _, tip, a3 = self.fk()
+        ax = math.cos(a3)
+        ay = math.sin(a3)
+        px = -math.sin(a3)
+        py = math.cos(a3)
+        cx = tip[0] + ax * (self.BASE_LEN / 2.0)
+        cy = tip[1] + ay * (self.BASE_LEN / 2.0)
+        hl = self.BASE_LEN / 2.0
+        hw = 18.0
+        return [(cx + ax * hl + px * hw, cy + ay * hl + py * hw),
+                (cx + ax * hl - px * hw, cy + ay * hl - py * hw),
+                (cx - ax * hl - px * hw, cy - ay * hl - py * hw),
+                (cx - ax * hl + px * hw, cy - ay * hl + py * hw)]
 
 class Env:
     def __init__(self):
@@ -569,7 +623,7 @@ class Env:
         self.still_steps = 0
     def tower_slot(self):
         # Next stable slot in tower zone. Stack height grows with placed count.
-        return (592.0, FLOOR_Y - self.tower_count * 38.0 - 20.0)
+        return ((TOWER_X0 + TOWER_X1) / 2.0, FLOOR_Y - self.tower_count * 38.0 - 20.0)
     def current_target_pos(self):
         if self.arm.held is not None:
             return self.tower_slot()
@@ -661,7 +715,7 @@ class Env:
         self.last_gripper_pos = None
         self.step_count = 0
         self.episode_reward = 0.0
-        base_xs = [180, 300, 420, 240, 360, 470]
+        base_xs = [130, 190, 250, 160, 220, 280]
         random.shuffle(base_xs)
         for i, o in enumerate(self.objects):
             o.x = float(base_xs[i % len(base_xs)] + random.uniform(-40, 40))
@@ -749,12 +803,15 @@ class Env:
         arm.angles[0] = max(-2.4, min(0.45, arm.angles[0] + action[0] * 0.055))
         arm.angles[1] = max(-0.15, min(2.6, arm.angles[1] + action[1] * 0.065))
         arm.angles[2] = max(-1.8, min(1.8, arm.angles[2] + action[2] * 0.065))
-        # Floor contact: reject only moves pushing FURTHER into floor. Moves
-        # lifting back toward floor are allowed even while still below it,
-        # otherwise a below-floor pose is permanently trapped. No teleport.
-        _gc_try = arm.gripper_center()
+        # Floor contact: FINGER TIPS hit floor first (16 px ahead of centre).
+        # Reject only moves pushing tips FURTHER into floor. Moves lifting
+        # back are allowed even while still below it, else a below-floor
+        # pose is permanently trapped. No teleport.
+        _ft_try = arm.finger_tip()
+        _a3_old = prev_angles[0] + prev_angles[1] + prev_angles[2]
+        _ft_prev_y = gc0[1] + math.sin(_a3_old) * (arm.FINGER_LEN / 2.0)
         collision = False
-        if _gc_try[1] > FLOOR_Y - 5 and _gc_try[1] >= gc0[1]:
+        if _ft_try[1] > FLOOR_Y - 5 and _ft_try[1] >= _ft_prev_y:
             arm.angles = prev_angles
             collision = True
         # gripper: +1 = close, -1 = open
@@ -794,6 +851,19 @@ class Env:
                     if edge_factor > 1.0:
                         edge_factor = 1.0
                     stability = (1.0 - off / (o.radius + 12.0)) * edge_factor
+                    # Parallel-jaw fit: object width ACROSS the fingers
+                    # (perpendicular to a3) must fit in the 88 mm opening.
+                    # A 56 px block fits only when grasped across its 36 px
+                    # narrow side — the robot must learn to orient a3 along
+                    # the long axis. Grasping across the wide side collides.
+                    _a3 = arm.angles[0] + arm.angles[1] + arm.angles[2]
+                    _px = -math.sin(_a3)
+                    _py = math.cos(_a3)
+                    _proj = [v[0] * _px + v[1] * _py for v in o.world_verts()]
+                    _w = max(_proj) - min(_proj)
+                    if _w > arm.gap() + 8.0:
+                        stability = 0.0
+                        self.last_grasp_msg = 'GRASP FAIL — %.0f px wide > %.0f px opening, orient to narrow side' % (_w, arm.gap())
                     if stability > 0.30:
                         arm.held = o
                         o.held = True
@@ -928,9 +998,9 @@ def onAppStart(app):
     app.status = 'PAUSED — press TRAIN to let the MLP learn. DRAW a custom shape to break scripts.'
     app.teleop_action = [0.0, 0.0, 0.0, 0.0]
     # Seed scene: 3 objects that already punish bbox-centre grasping.
-    app.env.add_object('L', 200, 220)
-    app.env.add_object('block', 330, 220)
-    app.env.add_object('wedge', 440, 230)
+    app.env.add_object('L', 150, 220)
+    app.env.add_object('block', 220, 220)
+    app.env.add_object('wedge', 290, 230)
     app.buttons = {}
     # Mode row
     app.buttons['mode_move'] = _make_button(710, 108, 100, 28, 'Move', 'mode_move')
@@ -1102,7 +1172,7 @@ def _handle_button(app, action):
         app.status = 'Template: %s — click Place, then click arena.' % key
     elif action == 'add_here':
         # Spawn at a free spot near centre-left.
-        x = 220 + (len(env.objects) % 4) * 90
+        x = 150 + (len(env.objects) % 4) * 50
         y = 200 + (len(env.objects) // 4) * 80
         if app.selected_template == 'custom' and app.custom_verts is None:
             app.status = 'No custom shape yet — draw one first, then Close Shape.'
@@ -1175,9 +1245,9 @@ def _handle_button(app, action):
         env.objects = []
         env.arm.held = None
         env.tower_count = 0
-        env.add_object('block', 190, 220)
-        env.add_object('L', 320, 220)
-        env.add_object('U', 440, 220)
+        env.add_object('block', 150, 220)
+        env.add_object('L', 220, 220)
+        env.add_object('U', 290, 220)
         env.reset_scene()
         app.status = 'Demo stack: Block + L + U. Train and watch it learn COM vs bbox.'
     elif action == 'close_shape':
@@ -1327,13 +1397,20 @@ def _draw_arm(app):
     (sx, sy), (ex, ey), (wx, wy), (tx, ty), a3 = arm.fk()
     # Pedestal / base
     drawRect(78, FLOOR_Y - 125, 64, 125, fill=rgb(38, 42, 66), border=BORDER, roundness=8)
-    drawLabel('OPENARM', 110, FLOOR_Y - 118, size=8, fill=DIM, bold=True, align='center-center')
-    # Rays (sensor viz)
+    drawLabel('OPENARM', 110, FLOOR_Y - 12, size=8, fill=DIM, bold=True, align='center-center')
+    # Rays (sensor viz) — MUST match cast_rays: hand-relative a3, not world-down.
+    # Length = true hit distance (rv * 240), clipped at floor so rays never
+    # draw below FLOOR_Y. Before this fix the viz pointed straight down
+    # while the sensors pointed along the hand, so the L-shape to the left
+    # of the gripper was invisible in the viz even though the rays sensed it.
     gc = arm.gripper_center()
     rays = env.cast_rays()
     for k, rv in enumerate(rays):
-        ang = math.pi / 2 + (k - 4) * 0.22
-        L = 18 + rv * 200
+        ang = a3 + (k - 4) * 0.22
+        L = max(4.0, min(240.0, rv * 240.0))
+        sa = math.sin(ang)
+        if sa > 0.05 and gc[1] + sa * L > FLOOR_Y:
+            L = (FLOOR_Y - gc[1]) / sa
         drawLine(gc[0], gc[1], gc[0] + math.cos(ang) * L, gc[1] + math.sin(ang) * L,
                  fill=rgb(45, 212, 191) if rv < 0.95 else GRID, lineWidth=0.8)
     # Links
@@ -1343,12 +1420,20 @@ def _draw_arm(app):
     drawCircle(sx, sy, 10, fill=ACC, border=rgb(255, 255, 255), borderWidth=1)
     drawCircle(ex, ey, 9, fill=ACC, border=rgb(255, 255, 255), borderWidth=1)
     drawCircle(wx, wy, 8, fill=ACC2, border=rgb(255, 255, 255), borderWidth=1)
-    # Gripper jaws
-    j1, j2 = arm.jaw_positions()
-    drawLine(tx, ty, j1[0], j1[1], fill=rgb(255, 255, 255), lineWidth=3)
-    drawLine(tx, ty, j2[0], j2[1], fill=rgb(255, 255, 255), lineWidth=3)
-    drawCircle(j1[0], j1[1], 4, fill=WARN, border=rgb(255, 255, 255), borderWidth=0.8)
-    drawCircle(j2[0], j2[1], 4, fill=WARN, border=rgb(255, 255, 255), borderWidth=0.8)
+    # Gripper: parallel-jaw base + two straight fingers (photo topology).
+    # Fingers stay parallel — they slide, they do not converge to a point.
+    _bq = arm.base_rect()
+    _flat_b = []
+    for (qx, qy) in _bq:
+        _flat_b.append(qx)
+        _flat_b.append(qy)
+    drawPolygon(*_flat_b, fill=rgb(58, 62, 88), border=rgb(255, 255, 255), borderWidth=0.8)
+    for quad in arm.finger_rects():
+        _flat = []
+        for (qx, qy) in quad:
+            _flat.append(qx)
+            _flat.append(qy)
+        drawPolygon(*_flat, fill=rgb(180, 188, 210), border=rgb(255, 255, 255), borderWidth=0.8)
     # Held object follows gripper (drawn in object pass, but highlight)
     if arm.held is not None:
         drawLabel('HOLDING', gc[0], gc[1] - 22, size=9, fill=WARN, bold=True, align='center-center')
@@ -1375,13 +1460,13 @@ def redrawAll(app):
     drawRect(ARENA_X0, FLOOR_Y, ARENA_X1 - ARENA_X0, ARENA_Y1 - FLOOR_Y, fill=FLOOR_C, roundness=8)
     drawRect(TOWER_X0, FLOOR_Y - 52, TOWER_X1 - TOWER_X0, 52, fill=rgb(16, 185, 129), border=ACC2, borderWidth=1.2, roundness=6, opacity=22)
     drawLabel('TOWER ZONE — stack here', (TOWER_X0 + TOWER_X1) / 2, FLOOR_Y - 58, size=10, fill=ACC2, bold=True, align='center-center')
-    # Target marker
-    tx, ty = env.current_target_pos()
-    drawCircle(tx, ty, 12, fill=None, border=WARN, borderWidth=1.2, dashes=True)
-    drawLabel('TARGET', tx, ty - 18, size=8, fill=WARN, bold=True, align='center-center')
     # Objects
     for o in env.objects:
         _draw_object(app, o)
+    # Target marker — AFTER objects so it stays visible when it overlaps one.
+    tx, ty = env.current_target_pos()
+    drawCircle(tx, ty, 12, fill=None, border=WARN, borderWidth=1.2, dashes=True)
+    drawLabel('TARGET', tx, ty - 18, size=8, fill=WARN, bold=True, align='center-center')
     # Draft shape
     if len(app.draft_verts) >= 1:
         for i in range(len(app.draft_verts)):
@@ -1394,7 +1479,7 @@ def redrawAll(app):
     _draw_arm(app)
     # Status
     drawRect(ARENA_X0, ARENA_Y1 - 26, ARENA_X1 - ARENA_X0, 26, fill=rgb(18, 20, 32), border=BORDER, roundness=8)
-    drawLabel((env.last_grasp_msg + '  |  ' + app.status)[:92], ARENA_X0 + 10, ARENA_Y1 - 13, size=9, fill=DIM, align='left-center')
+    drawLabel(((env.last_grasp_msg + '  |  ' + app.status) if env.last_grasp_msg else app.status)[:92], ARENA_X0 + 10, ARENA_Y1 - 13, size=9, fill=DIM, align='left-center')
     # Right panel
     drawRect(PANEL_X, ARENA_Y0, PANEL_W, ARENA_Y1 - ARENA_Y0, fill=PANEL, border=BORDER, roundness=12)
     drawLabel('CONTROLS', PANEL_X + 14, ARENA_Y0 + 14, size=12, fill=TXT, bold=True, align='left-top')
@@ -1432,7 +1517,7 @@ def redrawAll(app):
         pts.append((x, y))
     for i in range(len(pts) - 1):
         drawLine(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], fill=ACC, lineWidth=1.6)
-    drawLabel('loss ↓ as it learns', gx + 8, gy + 8, size=8, fill=DIM, align='left-top')
+    drawLabel('loss ↓ as it learns', gx + gw - 8, gy + 8, size=8, fill=DIM, align='right-top')
     # Reward curve
     ry = gy + gh + 10
     drawRect(gx, ry, gw, 52, fill=PANEL2, border=BORDER, roundness=8)
