@@ -179,17 +179,17 @@ DEATH_TOTAL_TICKS = 210
 DEATH_READY_TICKS = 120
 # Pregame / intro: Start Music is the opening jingle, Credit is one short waka.
 # INTRO_TICKS covers the Start Music + READY! hold before any motion.
-INTRO_TICKS = 240
+# FIX: 110 BPM, user's two-part text in music.txt. Treble as written = 41 16ths = 5.59 s = 335 ticks, bass = 32 16ths = 262 ticks. Use longer so intro does not cut off.
+INTRO_TICKS = 335
 DEAD_HOLD_TICKS = 180
 WON_HOLD_TICKS = 120
 CREDIT_MAX = 2
 # 11 frames, mouth half-angle, facing up. Sweep = 360 - 2 * openAmt.
 DEATH_OPEN = [20, 40, 60, 80, 100, 120, 140, 155, 165, 172, 178]
-# Eating mouth: time-driven, never 0 during play. Full circle (openAmt 0)
-# is only for intro / READY!. Driven by app.mouth, which onStep bumps
-# every tick in play, so it cycles even when Pac-Man is stopped against
-# a wall. Position-driven mouth stuck at 0 when snapped to a tile centre.
-PAC_MOUTH_CYCLE = [10, 22, 32, 22]
+# Eating mouth: FIX - includes 0 so mouth fully closes.
+# FIX - mouth only advances when Pac-Man actually moves, frozen when stopped.
+# Full circle (openAmt 0) is only for intro / READY! plus the 0 frame in cycle.
+PAC_MOUTH_CYCLE = [0, 10, 22, 32, 22, 10]
 
 # Model helpers
 def isWall(app, c, r, forGhost=False, allowDoor=False):
@@ -812,7 +812,9 @@ def onStep(app):
         return
     app.timer = app.timer + 1
     app.modeTimer = app.modeTimer + 1
-    app.mouth = (app.mouth + 1) % 20
+    # FIX: mouth only advances when Pac-Man actually moves, frozen when stopped against a wall.
+    if (app.pac['dx'], app.pac['dy']) != (0, 0):
+        app.mouth = (app.mouth + 1) % 20
     # Mode change: reverse ghosts on scatter to chase flip
     m = currentMode(app)
     if m != app.lastMode:
@@ -928,8 +930,7 @@ def drawPac(app):
     #         fill, border). Angles: 0 = east, 90 = south, 180 = west,
     # 270 = north (canvas clockwise). Mouth is the missing wedge:
     # start = facing + openAmt, sweep = 360 - 2 * openAmt.
-    # Time-driven: app.mouth ticks every onStep in play, so this cycles
-    # even when Pac-Man is stopped. Never 0 during play.
+    # FIX: cycle now includes 0, so mouth fully closes. Frozen when stopped (see onStep).
     openAmt = PAC_MOUTH_CYCLE[(app.mouth // 2) % len(PAC_MOUTH_CYCLE)]
     angMap = {(1, 0): 0, (-1, 0): 180, (0, 1): 90, (0, -1): 270, (0, 0): 0}
     ang = angMap[(p['dx'], p['dy'])]

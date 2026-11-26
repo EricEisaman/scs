@@ -48,10 +48,27 @@ WAKA_HALF = WAKA_TOTAL / 2.0
 WAKA_ATTACK = 0.003
 WAKA_GAIN = 0.35
 # Credit: same WSG voice, fixed pitch, no sweep. Short, distinct.
-# Fixed vs swept is what separates credit from waka.
-CREDIT_FREQ = 1000.0
-CREDIT_DUR = 0.08
+# FIX: arcade coin is a high ding, 2000 Hz, 0.10 s. Fixed vs swept is what separates credit from waka.
+CREDIT_FREQ = 2000.0
+CREDIT_DUR = 0.10
 CREDIT_GAIN = 0.30
+# Death: FIX - constants were missing, play_death referenced them but they were never defined.
+# Arcade death, 1.5 s total: sweep1 0.70 s, sweep2 0.50 s, pops at 1.20 s and 1.35 s.
+DEATH_SWEEP1_DUR = 0.70
+DEATH_SWEEP1_START = 800.0
+DEATH_SWEEP1_END = 200.0
+DEATH_SWEEP1_VIB_RATE = 30.0
+DEATH_SWEEP1_VIB_DEPTH = 50.0
+DEATH_SWEEP2_DUR = 0.50
+DEATH_SWEEP2_START = 600.0
+DEATH_SWEEP2_END = 100.0
+DEATH_SWEEP2_VIB_RATE = 30.0
+DEATH_SWEEP2_VIB_DEPTH = 40.0
+DEATH_POP1_START = 1.20
+DEATH_POP2_START = 1.35
+DEATH_POP_DUR = 0.12
+DEATH_POP_START_FREQ = 200.0
+DEATH_POP_END_FREQ = 50.0
 
 BASE_SEMITONE = {'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11}
 A4_N = 58
@@ -61,22 +78,20 @@ DEFAULT_TEMPO = 140
 DEFAULT_LENGTH = 4
 MODE_FACTORS = {'MN': 7 / 8, 'ML': 1.0, 'MS': 3 / 4}
 
-# Arcade Chase (original), Dm, 4/4, Q=160, L=1/8, two tracks, 8 bars / 12 s.
-# Lead: ABC V:1, Bass: ABC V:2 clef=bass, from user's ABC ref.
-# Fixes to ABC (not perfect): K:Dm => B = Bb (B- in MML).
-# Bass register typos fixed: B,,, (Bb1) -> B,, (Bb2), bar 7 G,, -> G, (G3),
-# last bar A,, -> A, (A3). ABC 2 = MML 4 (quarter), ABC 4 = MML 2 (half).
-# Bass MML uses explicit O: O1 B = B1, O2 B = B2, O2 C = C2, O3 C = C3, O2 F# = F#2.
-# B B F# D# B F# D# C C G E C G E B B F# D# B F# D# D# E F F# G G# A B
-# Intro bass: 4 held roots (ML legato, L8). Phrase 1 B,
-# phrase 2 C, phrase 3 B, phrase 4 B. 29 notes, ML = held,
-# same total duration as melody, so both tracks end together.
-INTRO_BASS_MML = "T160O3L8D4 A4 D4 A4 O2G4 O3D4 O2G4 O3D4 O3C4 G4 C4 G4 O2A4 O3E4 O2A4 O3E4 O2F4 O3C4 O2F4 O3C4 O2B-4 F4 B-4 F4 O3C4 G4 C4 G4 O3D4 A4 D2"
-INTRO_BASS_SHORT_MML = "T160O3L8D4 A4 D4 A4 O2G4 O3D4 O2G4 O3D4"
+# Intro: FIX - from music.txt, user's verbatim two-part text, not the old Dm ABC.
+# No key signature, accidentals as written. 4/4, 2 bars, repeat, one pass.
+# Melody (treble) + Bass (bass) played together, same T110. See music.txt for verbatim text.
+# Melody (Part A): o4 b o5 b f+ d+  b f+8.  o5 d8 c o6 c  o5 g e o6 c o5 g8. e8
+#                   o4 b o5 b f+ d+  b f+8.  d8  d e f f  f+ f g g  g g+ a b
+# Bass (Part B):   o2 c8. o3 c  o2 c8. o3 c  o2 d8. o3 d  o2 d8. o3 d
+#                   o2 c8. o3 c  o2 c8. o3 c  o2 f+8 a-8  b-8 b8
+# See music.txt for the full text format.
+INTRO_BASS_MML = "T110L16O2C8. O3C O2C8. O3C O2D8. O3D O2D8. O3D O2C8. O3C O2C8. O3C O2F+8 A-8 B-8 B8"
+INTRO_BASS_SHORT_MML = "T110O2L8E. B16 E. B16"
 PACMAN_MML = {
-    "intro": "T160O4L8D F A O5D C O4A F D G B- O5D G F D O4B- G E G O5C E D C O4G E O4A4 O5C4 E4 A4 A4 G F E4 D C O5D4 C O4B- A4 G F O4E F G A B- O5C D E O5D2 O4A2",
+    "intro": "T110L16O4B O5B F+ D+ B F+8. O5D8 C O6C O5G E O6C O5G8. E8 O4B O5B F+ D+ B F+8. D8 D E F F F+ F G G G G+ A B",
     "intro_bass": INTRO_BASS_MML,
-    "intro_short": "T160O4L8D F A O5D C O4A F D G B- O5D G F D O4B- G",
+    "intro_short": "T110L16O4B O5B F+ D+ B F+8. O5D8 C O6C O5G E O6C O5G8. E8",
     "intro_short_bass": INTRO_BASS_SHORT_MML,
     "level_clear": "T150O5L8C E G C E G C",
     "extra_life": "T180O6L16C E G C E G C E G",
@@ -95,7 +110,7 @@ PACMAN_MML = {
 PACMAN_SOUNDS = {
     "intro": [PACMAN_MML["intro"]],
     "intro_bass": [PACMAN_MML["intro_bass"]],
-    "intro_short": "T160O4L8D F A O5D C O4A F D G B- O5D G F D O4B- G",
+    "intro_short": "T110L16O4B O5B F+ D+ B F+8. O5D8 C O6C O5G E O6C O5G8. E8",
     "intro_short_bass": [PACMAN_MML["intro_short_bass"]],
     "level_clear": [PACMAN_MML["level_clear"]],
     "extra_life": [PACMAN_MML["extra_life"]],
@@ -112,8 +127,8 @@ PACMAN_SOUNDS = {
 }
 
 PACMAN_DESCRIPTIONS = {
-    "intro": "Arcade Chase (original), Dm, 8 bars, Lead + Bass, two tracks at once",
-    "intro_bass": "Arcade Chase bass, root-fifth quarters, low octave",
+    "intro": "Intro from 110 BPM grand staff, B major, 2 bars, Lead + Bass, two tracks at once",
+    "intro_bass": "Intro bass, E pedal + chromatic F# Bb B, low octave",
     "intro_short": "Intro first phrase only, melody + bass",
     "level_clear": "Level clear jingle",
     "extra_life": "Extra life jingle",
@@ -644,8 +659,7 @@ class PacManPlayer:
         return last_osc, last_stop
     def play_intro(self, on_complete=None, short=False):
         # Two tracks at once: higher synth melody + bass. Same t0, same
-        # tempo, same total duration (3.2 s). Melody square, bass triangle.
-        # Bass is octave bounce, not held roots: dotted 8th low + 16th high.
+        # tempo, same total duration. Melody square, bass triangle.
         if not self._ensure():
             if on_complete:
                 try:
