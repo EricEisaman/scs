@@ -313,27 +313,15 @@ class ObsNormalizer:
         return out
 
 class OUNoise:
-    """OU correlated noise + common-mode. Independent Gaussian noise explores
-    one joint at a time and can never discover a coordinated multi-joint
-    escape from a wedge. OU keeps pushing one direction for a while and has
-    a shared component across shoulder+elbow so coordinated escapes are sampled."""
     def __init__(self, dim, theta=0.15, sigma=0.25):
-        self.dim = dim
-        self.theta = theta
-        self.sigma = sigma
-        self.state = [0.0] * dim
-    def reset(self):
-        self.state = [0.0] * self.dim
+        self.dim = dim; self.theta = theta; self.sigma = sigma; self.state = [0.0]*dim
+    def reset(self): self.state = [0.0]*self.dim
     def sample(self):
-        common = random.gauss(0, self.sigma * 0.5)
-        out = []
+        common = random.gauss(0, self.sigma*0.5); out=[]
         for i in range(self.dim):
-            dx = self.theta * (0.0 - self.state[i]) + random.gauss(0, self.sigma)
-            self.state[i] += dx
-            v = self.state[i] * 0.7 + common * 0.3
-            if v > 1.0: v = 1.0
-            if v < -1.0: v = -1.0
-            out.append(v)
+            dx = self.theta*(0.0-self.state[i]) + random.gauss(0, self.sigma)
+            self.state[i]+=dx; v=self.state[i]*0.7+common*0.3
+            out.append(max(-1.0,min(1.0,v)))
         return out
 
 class ReplayBuffer:
@@ -522,91 +510,73 @@ class PhysObject:
 
 class RobotArm:
     def __init__(self):
-        self.shoulder_x = 110.0
-        self.shoulder_y = 475.0
-        self.L1 = 135.0
-        self.L2 = 115.0
-        self.L3 = 48.0
-        self.angles = [-0.85, 1.15, 0.35]
-        self.gripper = 1.0  # 1 = open (88mm), 0 = closed
-        self.held = None
+        self.shoulder_x = 110.0; self.shoulder_y = 475.0
+        self.L1 = 135.0; self.L2 = 115.0; self.L3 = 48.0
+        self.angles = [-0.85, 1.15, 0.35]; self.gripper = 1.0; self.held = None; self.gripper_type = 'parallel'
     def fk(self):
-        a1 = self.angles[0]
-        a2 = a1 + self.angles[1]
-        a3 = a2 + self.angles[2]
+        a1 = self.angles[0]; a2 = a1 + self.angles[1]; a3 = a2 + self.angles[2]
         sx, sy = self.shoulder_x, self.shoulder_y
-        ex = sx + math.cos(a1) * self.L1
-        ey = sy + math.sin(a1) * self.L1
-        wx = ex + math.cos(a2) * self.L2
-        wy = ey + math.sin(a2) * self.L2
-        tx = wx + math.cos(a3) * self.L3
-        ty = wy + math.sin(a3) * self.L3
+        ex = sx + math.cos(a1)*self.L1; ey = sy + math.sin(a1)*self.L1
+        wx = ex + math.cos(a2)*self.L2; wy = ey + math.sin(a2)*self.L2
+        tx = wx + math.cos(a3)*self.L3; ty = wy + math.sin(a3)*self.L3
         return (sx, sy), (ex, ey), (wx, wy), (tx, ty), a3
-    # Parallel-jaw topology (photo: FIPA GR04-style). Two straight fingers
-    # slide parallel on a base — they do NOT converge to a point like a
-    # V-pincer. Fingers point along a3, gap is perpendicular to a3.
-    BASE_LEN = 18.0
-    FINGER_LEN = 32.0
-    FINGER_THICK = 8.0
-    GAP_MAX = 44.0  # 88 mm at 0.5 px/mm
-    GAP_MIN = 4.0
+    BASE_LEN = 18.0; FINGER_LEN = 32.0; FINGER_THICK = 8.0; GAP_MAX = 44.0; GAP_MIN = 4.0
+    ADAPT_PROX = 16.0; ADAPT_DIST = 20.0; ADAPT_PIVOT = 12.0
+    ADAPT_SPLAY_BASE = 0.10; ADAPT_SPLAY_RANGE = 0.80; ADAPT_CURL = 0.70
     def gap(self):
-        # gripper 1 = open (44 px), 0 = closed (4 px)
-        return self.GAP_MIN + self.gripper * (self.GAP_MAX - self.GAP_MIN)
+        if self.gripper_type == 'adaptive': return 4.6 + self.gripper*52.4
+        return self.GAP_MIN + self.gripper*(self.GAP_MAX-self.GAP_MIN)
+    def adaptive_segments(self):
+        _, _, _, tip, a3 = self.fk()
+        ax = math.cos(a3); ay = math.sin(a3); px = -math.sin(a3); py = math.cos(a3)
+        bx = tip[0]+ax*self.BASE_LEN; by = tip[1]+ay*self.BASE_LEN
+        splay = self.ADAPT_SPLAY_BASE + self.gripper*self.ADAPT_SPLAY_RANGE
+        out=[]
+        for s in (1.0,-1.0):
+            piv=(bx+px*self.ADAPT_PIVOT*s, by+py*self.ADAPT_PIVOT*s)
+            d_prox=(math.cos(a3+s*splay), math.sin(a3+s*splay))
+            prox_end=(piv[0]+d_prox[0]*self.ADAPT_PROX, piv[1]+d_prox[1]*self.ADAPT_PROX)
+            d_dist=(math.cos(a3+s*(splay-self.ADAPT_CURL)), math.sin(a3+s*(splay-self.ADAPT_CURL)))
+            tip_pt=(prox_end[0]+d_dist[0]*self.ADAPT_DIST, prox_end[1]+d_dist[1]*self.ADAPT_DIST)
+            mid=(prox_end[0]+d_dist[0]*self.ADAPT_DIST/2.0, prox_end[1]+d_dist[1]*self.ADAPT_DIST/2.0)
+            out.append((piv, prox_end, tip_pt, mid, s))
+        return out
     def gripper_center(self):
-        # Centre of the grasp: between the fingers, mid-finger length.
-        _, _, _, tip, a3 = self.fk()
-        d = self.BASE_LEN + self.FINGER_LEN / 2.0  # 34 px ahead of wrist tip
-        return (tip[0] + math.cos(a3) * d, tip[1] + math.sin(a3) * d)
+        if self.gripper_type == 'adaptive':
+            segs=self.adaptive_segments(); return ((segs[0][3][0]+segs[1][3][0])/2.0, (segs[0][3][1]+segs[1][3][1])/2.0)
+        _, _, _, tip, a3 = self.fk(); d=self.BASE_LEN+self.FINGER_LEN/2.0
+        return (tip[0]+math.cos(a3)*d, tip[1]+math.sin(a3)*d)
     def finger_tip(self):
-        _, _, _, tip, a3 = self.fk()
-        d = self.BASE_LEN + self.FINGER_LEN  # 50 px ahead of wrist tip
-        return (tip[0] + math.cos(a3) * d, tip[1] + math.sin(a3) * d)
+        if self.gripper_type == 'adaptive':
+            segs=self.adaptive_segments(); return segs[0][2] if segs[0][2][1]>=segs[1][2][1] else segs[1][2]
+        _, _, _, tip, a3 = self.fk(); d=self.BASE_LEN+self.FINGER_LEN
+        return (tip[0]+math.cos(a3)*d, tip[1]+math.sin(a3)*d)
     def jaw_positions(self):
-        # Inner faces of the two fingers — where contact happens.
-        _, _, _, tip, a3 = self.fk()
-        px = -math.sin(a3)
-        py = math.cos(a3)
-        half = self.gap() / 2.0
-        c = self.gripper_center()
-        return ((c[0] + px * half, c[1] + py * half),
-                (c[0] - px * half, c[1] - py * half))
+        if self.gripper_type == 'adaptive':
+            segs=self.adaptive_segments(); return (segs[0][2], segs[1][2])
+        _, _, _, tip, a3 = self.fk(); px=-math.sin(a3); py=math.cos(a3); half=self.gap()/2.0; c=self.gripper_center()
+        return ((c[0]+px*half, c[1]+py*half),(c[0]-px*half, c[1]-py*half))
     def finger_rects(self):
-        # Two parallel finger rectangles as 4-corner quads. Returns
-        # [left_quad, right_quad], each [(x,y) x4]. Base is drawn separately.
-        _, _, _, tip, a3 = self.fk()
-        ax = math.cos(a3)
-        ay = math.sin(a3)
-        px = -math.sin(a3)
-        py = math.cos(a3)
-        bx = tip[0] + ax * self.BASE_LEN
-        by = tip[1] + ay * self.BASE_LEN
-        ex = tip[0] + ax * (self.BASE_LEN + self.FINGER_LEN)
-        ey = tip[1] + ay * (self.BASE_LEN + self.FINGER_LEN)
-        rects = []
-        for s in (1.0, -1.0):
-            inner = self.gap() / 2.0
-            outer = inner + self.FINGER_THICK
-            c1 = (bx + px * inner * s, by + py * inner * s)
-            c2 = (bx + px * outer * s, by + py * outer * s)
-            c3 = (ex + px * outer * s, ey + py * outer * s)
-            c4 = (ex + px * inner * s, ey + py * inner * s)
-            rects.append([c1, c2, c3, c4])
+        if self.gripper_type == 'adaptive':
+            quads=[]
+            for (piv, prox_end, tip_pt, mid, s) in self.adaptive_segments():
+                for (p0,p1,thick) in ((piv,prox_end,9.0),(prox_end,tip_pt,8.0)):
+                    dx=p1[0]-p0[0]; dy=p1[1]-p0[1]; L=math.hypot(dx,dy) or 1.0
+                    nx=-dy/L*(thick/2.0); ny=dx/L*(thick/2.0)
+                    quads.append([(p0[0]+nx,p0[1]+ny),(p0[0]-nx,p0[1]-ny),(p1[0]-nx,p1[1]-ny),(p1[0]+nx,p1[1]+ny)])
+            return quads
+        _, _, _, tip, a3 = self.fk(); ax=math.cos(a3); ay=math.sin(a3); px=-math.sin(a3); py=math.cos(a3)
+        bx=tip[0]+ax*self.BASE_LEN; by=tip[1]+ay*self.BASE_LEN
+        ex=tip[0]+ax*(self.BASE_LEN+self.FINGER_LEN); ey=tip[1]+ay*(self.BASE_LEN+self.FINGER_LEN)
+        rects=[]
+        for s in (1.0,-1.0):
+            inner=self.gap()/2.0; outer=inner+self.FINGER_THICK
+            rects.append([(bx+px*inner*s, by+py*inner*s),(bx+px*outer*s, by+py*outer*s),(ex+px*outer*s, ey+py*outer*s),(ex+px*inner*s, ey+py*inner*s)])
         return rects
     def base_rect(self):
-        _, _, _, tip, a3 = self.fk()
-        ax = math.cos(a3)
-        ay = math.sin(a3)
-        px = -math.sin(a3)
-        py = math.cos(a3)
-        cx = tip[0] + ax * (self.BASE_LEN / 2.0)
-        cy = tip[1] + ay * (self.BASE_LEN / 2.0)
-        hl = self.BASE_LEN / 2.0
-        hw = 18.0
-        return [(cx + ax * hl + px * hw, cy + ay * hl + py * hw),
-                (cx + ax * hl - px * hw, cy + ay * hl - py * hw),
-                (cx - ax * hl - px * hw, cy - ay * hl - py * hw),
-                (cx - ax * hl + px * hw, cy - ay * hl + py * hw)]
+        _, _, _, tip, a3 = self.fk(); ax=math.cos(a3); ay=math.sin(a3); px=-math.sin(a3); py=math.cos(a3)
+        cx=tip[0]+ax*(self.BASE_LEN/2.0); cy=tip[1]+ay*(self.BASE_LEN/2.0); hl=self.BASE_LEN/2.0; hw=18.0
+        return [(cx+ax*hl+px*hw, cy+ay*hl+py*hw),(cx+ax*hl-px*hw, cy+ay*hl-py*hw),(cx-ax*hl-px*hw, cy-ay*hl-py*hw),(cx-ax*hl+px*hw, cy-ay*hl+py*hw)]
 
 class Env:
     def __init__(self):
@@ -619,8 +589,10 @@ class Env:
         self.tower_count = 0
         self.last_grasp_msg = ''
         self._custom_verts = None
-        self.last_gripper_pos = None
-        self.still_steps = 0
+        self.last_gripper_pos = None; self.still_steps = 0
+        self.prev_gripper_vel = (0.0, 0.0); self.joint_vel = [0.0,0.0,0.0]
+        self.gripper_vel = (0.0, 0.0); self.gripper_acc = (0.0, 0.0)
+        self.accel_forward = 0.0; self.accel_perp = 0.0; self.down_alignment = 0.0
     def tower_slot(self):
         # Next stable slot in tower zone. Stack height grows with placed count.
         return ((TOWER_X0 + TOWER_X1) / 2.0, FLOOR_Y - self.tower_count * 38.0 - 20.0)
@@ -642,8 +614,7 @@ class Env:
             return self.tower_slot()
         return best
     def cast_rays(self):
-        # 9 rays from wrist camera, HAND-RELATIVE. Centre is a3 = cumulative
-        # wrist angle = direction open hand points. World-down gave free vision.
+        # 9 depth rays fanning downward from wrist camera. Returns 0..1 (1 = far).
         gc = self.arm.gripper_center()
         _, _, _, _, a3 = self.arm.fk()
         out = []
@@ -706,19 +677,17 @@ class Env:
         self.objects.append(o)
         return o
     def reset_scene(self, keep_brain=True):
-        # Episode reset: KEEP brain, re-drop SAME objects at RANDOM positions.
-        # Fixed drop let the MLP memorise one layout. Random drop forces
-        # generalisation: every episode is a new layout it must sense.
-        self.arm = RobotArm()
-        self.tower_count = 0
-        self.still_steps = 0
-        self.last_gripper_pos = None
-        self.step_count = 0
-        self.episode_reward = 0.0
+        _gt = self.arm.gripper_type if hasattr(self.arm, 'gripper_type') else 'parallel'
+        self.arm = RobotArm(); self.arm.gripper_type = _gt
+        self.tower_count = 0; self.still_steps = 0; self.last_gripper_pos = None
+        self.prev_gripper_vel = (0.0, 0.0); self.joint_vel = [0.0,0.0,0.0]
+        self.gripper_vel = (0.0, 0.0); self.gripper_acc = (0.0, 0.0)
+        self.step_count = 0; self.episode_reward = 0.0
         base_xs = [130, 190, 250, 160, 220, 280]
         random.shuffle(base_xs)
+        xs = [float(base_xs[i % len(base_xs)] + random.uniform(-40, 40)) for i in range(len(self.objects))]
         for i, o in enumerate(self.objects):
-            o.x = float(base_xs[i % len(base_xs)] + random.uniform(-40, 40))
+            o.x = float(xs[i % len(xs)])
             o.y = 170.0 + (i // 3) * 70.0 + random.uniform(-20, 20)
             o.rot = random.uniform(-0.25, 0.25)
             o.vx = 0.0
@@ -793,164 +762,81 @@ class Env:
             o.x = 678
             o.vx = 0
     def step(self, action, app_ctx):
-        # action: [d_shoulder, d_elbow, d_wrist, grip] in [-1,1]
-        arm = self.arm
-        prev_target = self.current_target_pos()
-        gc0 = arm.gripper_center()
-        prev_dist = math.hypot(prev_target[0] - gc0[0], prev_target[1] - gc0[1])
-        # --- apply joint deltas (NO IK — MLP drives joints directly) ---
-        prev_angles = list(arm.angles)
-        arm.angles[0] = max(-2.4, min(0.45, arm.angles[0] + action[0] * 0.055))
-        arm.angles[1] = max(-0.15, min(2.6, arm.angles[1] + action[1] * 0.065))
-        arm.angles[2] = max(-1.8, min(1.8, arm.angles[2] + action[2] * 0.065))
-        # Floor contact: FINGER TIPS hit floor first (16 px ahead of centre).
-        # Reject only moves pushing tips FURTHER into floor. Moves lifting
-        # back are allowed even while still below it, else a below-floor
-        # pose is permanently trapped. No teleport.
-        _ft_try = arm.finger_tip()
-        _a3_old = prev_angles[0] + prev_angles[1] + prev_angles[2]
-        _ft_prev_y = gc0[1] + math.sin(_a3_old) * (arm.FINGER_LEN / 2.0)
+        arm = self.arm; prev_target = self.current_target_pos(); gc0 = arm.gripper_center()
+        prev_dist = math.hypot(prev_target[0]-gc0[0], prev_target[1]-gc0[1]); prev_angles = list(arm.angles)
+        arm.angles[0] = max(-2.4, min(0.45, arm.angles[0] + action[0]*0.055))
+        arm.angles[1] = max(-0.15, min(2.6, arm.angles[1] + action[1]*0.065))
+        arm.angles[2] = max(-1.8, min(1.8, arm.angles[2] + action[2]*0.065))
+        arm.gripper = max(0.0, min(1.0, arm.gripper - action[3]*0.085))
+        _ft_try = arm.finger_tip(); _a3_old = prev_angles[0]+prev_angles[1]+prev_angles[2]
+        _ft_prev_y = gc0[1] + math.sin(_a3_old)*(arm.FINGER_LEN/2.0) if arm.gripper_type=='parallel' else gc0[1]
         collision = False
-        if _ft_try[1] > FLOOR_Y - 5 and _ft_try[1] >= _ft_prev_y:
-            arm.angles = prev_angles
-            collision = True
-        # gripper: +1 = close, -1 = open
-        arm.gripper = max(0.0, min(1.0, arm.gripper - action[3] * 0.085))
-        reward = -0.012
-        info = {'slip': 0.0, 'contact': 0.0, 'grasped': False, 'placed': False, 'dropped': False, 'collision': 0.0, 'stuck': 0.0}
-        if collision:
-            reward -= 2.0
-            info['collision'] = 1.0
-            self.last_grasp_msg = 'FLOOR CONTACT — gripper hit floor, move rejected'
-        gc = arm.gripper_center()
-        new_dist = math.hypot(prev_target[0] - gc[0], prev_target[1] - gc[1])
+        if _ft_try[1] > FLOOR_Y-5 and _ft_try[1] >= _ft_prev_y:
+            arm.angles = prev_angles; collision = True
+        reward = -0.012; info = {'slip':0.0,'contact':0.0,'grasped':False,'placed':False,'dropped':False,'collision':0.0,'stuck':0.0}
+        if collision: reward -= 2.0; info['collision']=1.0; self.last_grasp_msg='FLOOR CONTACT — gripper hit floor, move rejected'
+        gc = arm.gripper_center(); new_dist = math.hypot(prev_target[0]-gc[0], prev_target[1]-gc[1])
+        self.joint_vel = [arm.angles[i]-prev_angles[i] for i in range(3)]
+        _new_vel = (gc[0]-gc0[0], gc[1]-gc0[1])
+        self.gripper_acc = (_new_vel[0]-self.prev_gripper_vel[0], _new_vel[1]-self.prev_gripper_vel[1])
+        self.gripper_vel = _new_vel; self.prev_gripper_vel = _new_vel
+        _a3 = arm.angles[0]+arm.angles[1]+arm.angles[2]
+        _ax = self.gripper_acc[0]/10.0; _ay = self.gripper_acc[1]/10.0
+        _proper_x = _ax - 0.0; _proper_y = _ay - 1.0
+        _fx = math.cos(_a3); _fy = math.sin(_a3); _px = -math.sin(_a3); _py = math.cos(_a3)
+        self.accel_forward = max(-2.0, min(2.0, _proper_x*_fx + _proper_y*_fy))/2.0
+        self.accel_perp = max(-2.0, min(2.0, _proper_x*_px + _proper_y*_py))/2.0
+        self.down_alignment = math.sin(_a3)
         if self.last_gripper_pos is not None:
-            moved = math.hypot(gc[0] - self.last_gripper_pos[0], gc[1] - self.last_gripper_pos[1])
-            if moved < 1.5:
-                self.still_steps += 1
-            else:
-                self.still_steps = 0
-            if self.still_steps > 60 and new_dist > 40:
-                reward -= 0.08
-                info['stuck'] = 1.0
-        self.last_gripper_pos = gc
-        reward += (prev_dist - new_dist) * 0.015
-        # --- grasp attempt ---
+            moved = math.hypot(gc[0]-self.last_gripper_pos[0], gc[1]-self.last_gripper_pos[1])
+            self.still_steps = self.still_steps+1 if moved < 1.5 else 0
+            if self.still_steps > 60 and new_dist > 40: reward -= 0.08; info['stuck']=1.0
+        self.last_gripper_pos = gc; reward += (prev_dist - new_dist)*0.015
         if arm.held is None and arm.gripper < 0.38:
             for o in self.objects:
-                if o.placed:
-                    continue
+                if o.placed: continue
                 if _point_in_poly(gc[0], gc[1], o.world_verts()):
-                    cx, cy = o.com_world()
-                    off = math.hypot(gc[0] - cx, gc[1] - cy)
-                    # True stability: COM offset AND edge distance.
-                    # Robot cannot see either — it must infer them from
-                    # rays (width) + touch + torque/slip.
-                    edge_d = _min_edge_distance(gc[0], gc[1], o.world_verts())
-                    edge_factor = edge_d / 12.0
-                    if edge_factor > 1.0:
-                        edge_factor = 1.0
-                    stability = (1.0 - off / (o.radius + 12.0)) * edge_factor
-                    # Parallel-jaw fit: object width ACROSS the fingers
-                    # (perpendicular to a3) must fit in the 88 mm opening.
-                    # A 56 px block fits only when grasped across its 36 px
-                    # narrow side — the robot must learn to orient a3 along
-                    # the long axis. Grasping across the wide side collides.
-                    _a3 = arm.angles[0] + arm.angles[1] + arm.angles[2]
-                    _px = -math.sin(_a3)
-                    _py = math.cos(_a3)
-                    _proj = [v[0] * _px + v[1] * _py for v in o.world_verts()]
-                    _w = max(_proj) - min(_proj)
-                    if _w > arm.gap() + 8.0:
-                        stability = 0.0
-                        self.last_grasp_msg = 'GRASP FAIL — %.0f px wide > %.0f px opening, orient to narrow side' % (_w, arm.gap())
-                    if stability > 0.30:
-                        arm.held = o
-                        o.held = True
-                        o.grasp_offset = (gc[0] - o.x, gc[1] - o.y)
-                        o.grasp_stability = max(0.15, stability)
-                        o.slip = 0.0
-                        reward += 2.0
-                        info['grasped'] = True
-                        self.last_grasp_msg = 'GRASP %.2f stab' % stability
-                        app_ctx.grasp_attempts += 1
-                        app_ctx.grasp_success += 1
+                    cx, cy = o.com_world(); off = math.hypot(gc[0]-cx, gc[1]-cy)
+                    edge_d = _min_edge_distance(gc[0], gc[1], o.world_verts()); edge_factor = min(1.0, edge_d/12.0)
+                    stability = (1.0 - off/(o.radius+12.0))*edge_factor
+                    _px2 = -math.sin(_a3); _py2 = math.cos(_a3)
+                    _proj = [v[0]*_px2 + v[1]*_py2 for v in o.world_verts()]; _w = max(_proj)-min(_proj)
+                    if arm.gripper_type == 'adaptive':
+                        stability = (1.0 - off/(o.radius+18.0))*(0.55+0.45*edge_factor)+0.10
+                        if stability > 1.0: stability = 1.0
+                        if _w > 65.0: stability = 0.0; self.last_grasp_msg='GRASP FAIL — %.0f px wide > 65 px adaptive caging' % _w
                     else:
-                        # Off-COM grasp: object twists, slips — the learning signal.
-                        o.slip = 1.0
-                        o.vrot += (random.random() - 0.5) * 0.08
-                        reward -= 0.6
-                        info['slip'] = 1.0
-                        app_ctx.grasp_attempts += 1
+                        if _w > arm.GAP_MAX + 8.0: stability = 0.0; self.last_grasp_msg='GRASP FAIL — %.0f px wide > %.0f px max opening, orient to narrow side' % (_w, arm.GAP_MAX)
+                    if stability > 0.30:
+                        arm.held = o; o.held=True; o.grasp_offset=(gc[0]-o.x, gc[1]-o.y); o.grasp_stability=max(0.15, stability); o.slip=0.0
+                        reward+=2.0; info['grasped']=True; self.last_grasp_msg='GRASP %.2f stab' % stability; app_ctx.grasp_attempts+=1; app_ctx.grasp_success+=1
+                    else:
+                        o.slip=1.0; o.vrot+=(random.random()-0.5)*0.08; reward-=0.6; info['slip']=1.0; app_ctx.grasp_attempts+=1
                     break
-        # --- held follow + wobble / slip ---
         if arm.held is not None:
-            o = arm.held
-            o.x = gc[0] - o.grasp_offset[0]
-            o.y = gc[1] - o.grasp_offset[1]
-            # Low stability = torque the robot feels as slip/tilt.
-            wobble = (1.0 - o.grasp_stability) * 0.018
-            o.rot += (random.random() - 0.5) * wobble * 2.0
-            o.slip = min(1.0, o.slip + (1.0 - o.grasp_stability) * 0.012)
-            info['slip'] = o.slip
-            info['contact'] = 1.0
-            if o.slip > 0.95 and o.grasp_stability < 0.45:
-                # dropped
-                arm.held = None
-                o.held = False
-                o.vy = 1.5
-                reward -= 3.0
-                info['dropped'] = True
-                self.last_grasp_msg = 'DROPPED — off-COM slip'
-            # lift bonus
-            if o.y < FLOOR_Y - 55:
-                reward += 0.04
-        # --- release ---
+            o = arm.held; o.x = gc[0]-o.grasp_offset[0]; o.y = gc[1]-o.grasp_offset[1]
+            wobble=(1.0-o.grasp_stability)*0.018; o.rot+=(random.random()-0.5)*wobble*2.0
+            _slip_rate=0.008 if arm.gripper_type=='adaptive' else 0.012
+            o.slip=min(1.0, o.slip+(1.0-o.grasp_stability)*_slip_rate); info['slip']=o.slip; info['contact']=1.0
+            if o.slip>0.95 and o.grasp_stability<0.45:
+                arm.held=None; o.held=False; o.vy=1.5; reward-=3.0; info['dropped']=True; self.last_grasp_msg='DROPPED — off-COM slip'
+            if o.y < FLOOR_Y-55: reward+=0.04
         if arm.held is not None and arm.gripper > 0.62:
-            o = arm.held
-            arm.held = None
-            o.held = False
-            o.vy = 0.0
-            # placement check: in tower zone + stable?
-            cx, _ = o.com_world()
+            o=arm.held; arm.held=None; o.held=False; o.vy=0.0; cx,_=o.com_world()
             if TOWER_X0 <= cx <= TOWER_X1 and o.is_stable(self):
-                o.placed = True
-                o.resting = True
-                self.tower_count += 1
-                reward += 10.0
-                info['placed'] = True
-                self.last_grasp_msg = 'STACKED! tower=%d' % self.tower_count
+                o.placed=True; o.resting=True; self.tower_count+=1; reward+=10.0; info['placed']=True; self.last_grasp_msg='STACKED! tower=%d' % self.tower_count
             elif TOWER_X0 <= cx <= TOWER_X1 and not o.is_stable(self):
-                reward -= 2.5
-                self.last_grasp_msg = 'PLACED BUT TIPPED — COM off support'
-            else:
-                reward -= 0.2
-        # --- free physics ---
+                reward-=2.5; self.last_grasp_msg='PLACED BUT TIPPED — COM off support'
+            else: reward-=0.2
         for o in self.objects:
-            if not o.held and not o.placed:
-                self._free_update(o)
-        # --- contact info for context ---
-        c, f, s = self.contact_sensors()
-        info['contact'] = c
-        if arm.held is not None:
-            info['slip'] = arm.held.slip
-        self.step_count += 1
-        self.episode_reward += reward
-        done = False
-        timeout = False
-        if self.tower_count >= len(self.objects) and len(self.objects) > 0:
-            done = True
-            reward += 20.0
-        if self.step_count > 600:
-            done = True
-            timeout = True  # Timeout is NOT terminal: bootstrap V(s') (TD3 practice).
-        if reward > 10.0:
-            reward = 10.0
-        if reward < -10.0:
-            reward = -10.0
-        return reward, done, timeout, info
+            if not o.held and not o.placed: self._free_update(o)
+        c,f,s=self.contact_sensors(); info['contact']=c
+        if arm.held is not None: info['slip']=arm.held.slip
+        self.step_count+=1; self.episode_reward+=reward; done=False; timeout=False
+        if self.tower_count>=len(self.objects) and len(self.objects)>0: done=True; reward+=20.0
+        if self.step_count>600: done=True; timeout=True
+        reward=max(-10.0,min(10.0,reward)); return reward, done, timeout, info
 
-# ---------------------------------------------------------------------------
 # CONTROLLER — app state
 # ---------------------------------------------------------------------------
 def _make_button(x, y, w, h, label, action):
@@ -962,20 +848,21 @@ def onAppStart(app):
     app.stepsPerSecond = 30
     app.scs = {}  # single nested bundle for any future window/extension use
     app.env = Env()
-    # Input 34 = 26 sensors + 8 context. Actor 4 = joint deltas + gripper.
-    app.actor = MLP([34, 48, 32, 4], ['relu', 'relu', 'tanh'])
-    app.critic = MLP([34, 48, 32, 1], ['relu', 'relu', 'linear'])
-    app.target_critic = MLP([34, 48, 32, 1], ['relu', 'relu', 'linear'])
+    # Input 43 = 35 sensors + 8 context. Actor 4 = joint deltas + gripper.
+    app.actor = MLP([43, 48, 32, 4], ['relu', 'relu', 'tanh'])
+    app.critic = MLP([43, 48, 32, 1], ['relu', 'relu', 'linear'])
+    app.target_critic = MLP([43, 48, 32, 1], ['relu', 'relu', 'linear'])
     app.target_critic.copy_from(app.critic)
     app.ctx = TrainingContext()
     app.replay = ReplayBuffer(2000)
-    app.obs_norm = ObsNormalizer(34)
+    app.obs_norm = ObsNormalizer(43)
     app.actor_lr = 0.0008
     app.critic_lr = 0.001
     app.gamma = 0.99
     app.tau = 0.005
     app.eval_mode = False
     app.ou = OUNoise(4)
+    app.manual_open = False
     app.grad_norm_hist = [0.0]
     app.eval_reward_hist = [0.0]
     app.training = False
@@ -1023,6 +910,8 @@ def onAppStart(app):
     app.buttons['demo_stack'] = _make_button(868, 278, 158, 28, 'Demo Stack x3', 'demo_stack')
     app.buttons['close_shape'] = _make_button(710, 312, 150, 28, 'Close Shape', 'close_shape')
     app.buttons['cancel_draw'] = _make_button(868, 312, 158, 28, 'Cancel Draw', 'cancel_draw')
+    app.buttons['gripper'] = _make_button(710, 345, 316, 26, 'Gripper: PARALLEL', 'gripper')
+    app.buttons['manual'] = _make_button(710, 378, 316, 26, 'INSTRUCTION MANUAL', 'manual')
 
 def _sensor_vector(app):
     env = app.env
@@ -1040,11 +929,15 @@ def _sensor_vector(app):
     tilt = arm.held.slip if arm.held is not None else 0.0
     remaining = len([o for o in env.objects if not o.placed]) / 6.0
     floor_clear = max(0.0, min(1.0, (FLOOR_Y - gc[1]) / 200.0))
+    _gtype = 1.0 if arm.gripper_type == 'adaptive' else 0.0
     sensors = [arm.angles[0] / 2.5, arm.angles[1] / 2.5, arm.angles[2] / 1.8,
                arm.gripper, gc[0] / 700.0, gc[1] / 700.0]
     sensors = sensors + rays
-    sensors = sensors + [contact, force, slip, dx, dy, tdx, tdy, held, tilt, remaining, floor_clear]
-    # sensors = 26, context = 8 → 34, then Welford-normalised.
+    sensors = sensors + [contact, force, slip, dx, dy, tdx, tdy, held, tilt, remaining, floor_clear, _gtype]
+    sensors = sensors + [env.accel_forward, env.accel_perp, env.down_alignment,
+                         env.joint_vel[0]/0.07, env.joint_vel[1]/0.07, env.joint_vel[2]/0.07,
+                         env.gripper_vel[0]/10.0, env.gripper_vel[1]/10.0]
+    # sensors = 35, context = 8 → 43, then Welford-normalised.
     raw = sensors + app.ctx.vector()
     # Normalise with PRIOR stats, then update — never normalise a sample
     # with itself (that would zero the first sample and leak the current
@@ -1194,6 +1087,22 @@ def _handle_button(app, action):
         env.tower_count = 0
         app.selected_obj = None
         app.status = 'All objects removed. Add new ones.'
+    elif action == 'gripper':
+        if env.arm.held is not None:
+            _held = env.arm.held; _held.held = False; _held.vy = 0.0; env.arm.held = None
+        env.arm.gripper_type = 'adaptive' if env.arm.gripper_type == 'parallel' else 'parallel'
+        env.arm.gripper = 1.0
+        app.buttons['gripper']['label'] = 'Gripper: ' + env.arm.gripper_type.upper()
+        if env.arm.gripper_type == 'adaptive':
+            app.status = 'Gripper: ADAPTIVE — curved C-fingers, wraps + cages. Fits 65px, forgiving grasp, slower slip.'
+        else:
+            app.status = 'Gripper: PARALLEL — straight fingers, 88mm opening. Must grasp narrow side.'
+    elif action == 'manual':
+        app.manual_open = True
+        app.status = 'Instruction Manual open — X to close.'
+    elif action == 'manual_close':
+        app.manual_open = False
+        app.status = 'Manual closed.'
     elif action == 'train':
         app.training = not app.training
         app.teleop = False
@@ -1201,12 +1110,12 @@ def _handle_button(app, action):
         app.buttons['teleop']['label'] = 'Teleop: OFF'
         app.status = 'Training ON — MLP is acting + learning.' if app.training else 'Training paused. Brain kept.'
     elif action == 'reset_brain':
-        app.actor = MLP([34, 48, 32, 4], ['relu', 'relu', 'tanh'])
-        app.critic = MLP([34, 48, 32, 1], ['relu', 'relu', 'linear'])
-        app.target_critic = MLP([34, 48, 32, 1], ['relu', 'relu', 'linear'])
+        app.actor = MLP([43, 48, 32, 4], ['relu', 'relu', 'tanh'])
+        app.critic = MLP([43, 48, 32, 1], ['relu', 'relu', 'linear'])
+        app.target_critic = MLP([43, 48, 32, 1], ['relu', 'relu', 'linear'])
         app.target_critic.copy_from(app.critic)
         app.replay = ReplayBuffer(2000)
-        app.obs_norm = ObsNormalizer(34)
+        app.obs_norm = ObsNormalizer(43)
         app.ou = OUNoise(4)
         app.actor_lr = 0.0008
         app.critic_lr = 0.001
@@ -1277,6 +1186,11 @@ def _handle_button(app, action):
         app.status = 'Draw cancelled.'
 
 def onMousePress(app, mx, my):
+    # Manual overlay eats all clicks except its X.
+    if getattr(app, 'manual_open', False):
+        if 960 <= mx <= 1012 and 30 <= my <= 66:
+            _handle_button(app, 'manual_close')
+        return
     # Buttons first.
     for bid, b in app.buttons.items():
         if b['x'] <= mx <= b['x'] + b['w'] and b['y'] <= my <= b['y'] + b['h']:
@@ -1334,6 +1248,10 @@ def onMouseMove(app, mx, my):
 
 def onKeyPress(app, key):
     k = key.lower()
+    if getattr(app, 'manual_open', False):
+        if k in ('m', 'escape', 'esc'):
+            _handle_button(app, 'manual_close')
+        return
     if k == ' ':
         _handle_button(app, 'train')
         return
@@ -1398,11 +1316,7 @@ def _draw_arm(app):
     # Pedestal / base
     drawRect(78, FLOOR_Y - 125, 64, 125, fill=rgb(38, 42, 66), border=BORDER, roundness=8)
     drawLabel('OPENARM', 110, FLOOR_Y - 12, size=8, fill=DIM, bold=True, align='center-center')
-    # Rays (sensor viz) — MUST match cast_rays: hand-relative a3, not world-down.
-    # Length = true hit distance (rv * 240), clipped at floor so rays never
-    # draw below FLOOR_Y. Before this fix the viz pointed straight down
-    # while the sensors pointed along the hand, so the L-shape to the left
-    # of the gripper was invisible in the viz even though the rays sensed it.
+    # Rays (sensor viz) — MUST match cast_rays: hand-relative a3.
     gc = arm.gripper_center()
     rays = env.cast_rays()
     for k, rv in enumerate(rays):
@@ -1420,23 +1334,72 @@ def _draw_arm(app):
     drawCircle(sx, sy, 10, fill=ACC, border=rgb(255, 255, 255), borderWidth=1)
     drawCircle(ex, ey, 9, fill=ACC, border=rgb(255, 255, 255), borderWidth=1)
     drawCircle(wx, wy, 8, fill=ACC2, border=rgb(255, 255, 255), borderWidth=1)
-    # Gripper: parallel-jaw base + two straight fingers (photo topology).
-    # Fingers stay parallel — they slide, they do not converge to a point.
-    _bq = arm.base_rect()
-    _flat_b = []
-    for (qx, qy) in _bq:
-        _flat_b.append(qx)
-        _flat_b.append(qy)
+    _bq = arm.base_rect(); _flat_b=[]
+    for (qx, qy) in _bq: _flat_b.append(qx); _flat_b.append(qy)
     drawPolygon(*_flat_b, fill=rgb(58, 62, 88), border=rgb(255, 255, 255), borderWidth=0.8)
     for quad in arm.finger_rects():
-        _flat = []
-        for (qx, qy) in quad:
-            _flat.append(qx)
-            _flat.append(qy)
+        _flat=[]
+        for (qx, qy) in quad: _flat.append(qx); _flat.append(qy)
         drawPolygon(*_flat, fill=rgb(180, 188, 210), border=rgb(255, 255, 255), borderWidth=0.8)
+    if arm.gripper_type == 'adaptive':
+        _cam = (tx + math.cos(a3)*9, ty + math.sin(a3)*9)
+        drawCircle(_cam[0], _cam[1], 4, fill=rgb(30, 60, 140), border=rgb(255, 255, 255), borderWidth=0.8)
+        _rects = arm.finger_rects()
+        for _qi in (1, 3):
+            _q = _rects[_qi]; _mx = sum(p[0] for p in _q)/4.0; _my = sum(p[1] for p in _q)/4.0
+            drawCircle(_mx, _my, 2.5, fill=rgb(20, 20, 24), border=rgb(20, 20, 24), borderWidth=0.5)
+    drawLabel(arm.gripper_type.upper(), gc[0], gc[1] - 32, size=8, fill=WARN, bold=True, align='center-center')
+    _acc_txt = 'ACC %.2f,%.2f  DOWN %.2f' % (env.accel_forward, env.accel_perp, env.down_alignment)
+    drawLabel(_acc_txt, gc[0], gc[1] - 44, size=7, fill=rgb(45, 212, 191), bold=True, align='center-center')
     # Held object follows gripper (drawn in object pass, but highlight)
     if arm.held is not None:
         drawLabel('HOLDING', gc[0], gc[1] - 22, size=9, fill=WARN, bold=True, align='center-center')
+
+def _draw_manual(app):
+    drawRect(0, 0, WIDTH, HEIGHT, fill=rgb(10, 12, 24))
+    drawRect(24, 18, WIDTH - 48, HEIGHT - 36, fill=rgb(18, 20, 34), border=BORDER, roundness=14)
+    drawLabel('INSTRUCTION MANUAL', 48, 36, size=28, fill=TXT, bold=True, align='left-top')
+    drawLabel('OpenArm 2.0  •  MLP-RL Stacking Trainer  •  No IK  •  No grasp table  •  No shape library  •  No Computer Vision', 48, 72, size=14, fill=DIM, align='left-top')
+    drawRect(960, 30, 52, 36, fill=rgb(180, 40, 60), border=rgb(255, 255, 255), borderWidth=1, roundness=8)
+    drawLabel('X', 986, 48, size=20, fill=rgb(255, 255, 255), bold=True, align='center-center')
+    drawLabel('Press X or M or ESC to close. Clicking anywhere else does nothing while the manual is open.', 48, 94, size=14, fill=WARN, align='left-top')
+    LX = 48; RX = 548
+    y = 122
+    drawLabel('1 — GOAL', LX, y, size=16, fill=ACC2, bold=True, align='left-top'); y += 22
+    drawLabel('Stack every object in the TOWER ZONE (green, centre).', LX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('The robot gets +10 per stack, +20 for a full tower.', LX, y, size=14, fill=TXT, align='left-top'); y += 28
+    drawLabel('2 — HOW IT LEARNS (MLP-RL)', LX, y, size=16, fill=ACC2, bold=True, align='left-top'); y += 22
+    drawLabel('Actor 43 → 48 → 32 → 4 tanh outputs joint deltas + grip.', LX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('Critic learns value. OU noise explores. No IK, no script.', LX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('It must re-learn after you change shapes or grippers.', LX, y, size=14, fill=TXT, align='left-top'); y += 28
+    drawLabel('3 — SENSORS (WHAT IT SEES)', LX, y, size=16, fill=ACC2, bold=True, align='left-top'); y += 22
+    drawLabel('9 rays from the wrist, hand-relative. Floor is a ray hit.', LX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('Touch + force + slip. Red dot = true COM (teaching only).', LX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('ACCELEROMETER: accel + gyro + DOWN. DOWN=1 means', LX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('gripper points DOWN — where objects sit on the floor.', LX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('Joint vel + gripper vel = kinematics. It feels motion.', LX, y, size=14, fill=TXT, align='left-top'); y += 28
+    drawLabel('4 — GRASP + SLIP', LX, y, size=16, fill=ACC2, bold=True, align='left-top'); y += 22
+    drawLabel('Grasp needs COM close + edge distance + width fits.', LX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('Off-COM grasps twist, slip, and DROP. That is the lesson.', LX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('White X = bbox centre. NEVER grasp the X — grasp the dot.', LX, y, size=14, fill=TXT, align='left-top'); y += 20
+    y = 122
+    drawLabel('5 — TWO GRIPPERS', RX, y, size=16, fill=ACC2, bold=True, align='left-top'); y += 22
+    drawLabel('PARALLEL: straight fingers, 44px (88mm) opening.', RX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('Must grasp the NARROW side. Wide side will not fit.', RX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('ADAPTIVE: curved C-fingers, wraps + cages, fits 65px.', RX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('More forgiving, slower slip. Same 4th action drives both.', RX, y, size=14, fill=TXT, align='left-top'); y += 28
+    drawLabel('6 — HOW TO BREAK A SCRIPT', RX, y, size=16, fill=ACC2, bold=True, align='left-top'); y += 22
+    drawLabel('Draw Shape: click in arena to add vertices. Click near', RX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('start or Close Shape to finish. Concave is allowed.', RX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('Place: click arena to spawn that shape. Move: drag any', RX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('object. R rotates it. Delete / Clear All remove objects.', RX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('L, T, U, wedge punish bbox-centre grasping on purpose.', RX, y, size=14, fill=TXT, align='left-top'); y += 28
+    drawLabel('7 — CONTROLS + KEYS', RX, y, size=16, fill=ACC2, bold=True, align='left-top'); y += 22
+    drawLabel('TRAIN: MLP acts + learns. Eval: deterministic, no noise.', RX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('Teleop: W/S A/D Q/E move, G/O grip. Reset Brain = re-learn.', RX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('SPACE=train  •  R=rotate  •  DEL=delete  •  M/ESC=manual', RX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('Floor contact rejects the move. Stuck >60 steps = penalty.', RX, y, size=14, fill=TXT, align='left-top'); y += 20
+    drawLabel('NO fakes, NO fallbacks: MLP only.', RX, y, size=14, fill=WARN, bold=True, align='left-top')
 
 def redrawAll(app):
     drawRect(0, 0, WIDTH, HEIGHT, fill=BG)
@@ -1497,50 +1460,43 @@ def redrawAll(app):
         if bid == 'eval' and app.eval_mode:
             active = True
         _draw_button(app, b, active)
-    # MLP viz — every line kept < 52 chars so it fits the 296px panel.
-    py = 352
-    drawLabel('Actor 34 → 48 → 32 → 4 tanh', PANEL_X + 14, py, size=9, fill=DIM, align='left-top')
-    drawLabel('Critic 34 → 48 → 32 → 1', PANEL_X + 14, py + 13, size=9, fill=DIM, align='left-top')
-    drawLabel('Input: 26 sensors + 8 ctx', PANEL_X + 14, py + 26, size=8, fill=DIM, align='left-top')
-    drawLabel('Actor RMS %.3f  |  Critic RMS %.3f' % (app.actor.weight_norm(), app.critic.weight_norm()), PANEL_X + 14, py + 40, size=9, fill=ACC, align='left-top')
-    drawLabel('lr a=%.5f c=%.5f | Grad %.2f | Eval %.1f | g %.2f' % (app.actor_lr, app.critic_lr, app.grad_norm_hist[-1] if app.grad_norm_hist else 0.0, app.eval_reward_hist[-1] if app.eval_reward_hist else 0.0, app.gamma), PANEL_X + 14, py + 54, size=8, fill=DIM, align='left-top')
-    # Loss curve
-    gx, gy, gw, gh = PANEL_X + 14, py + 72, PANEL_W - 28, 62
+    # MLP viz — HOW TO moved to INSTRUCTION MANUAL overlay. Freed space
+    # goes to bigger loss/reward curves + a live sensor readout.
+    py = 418
+    drawLabel('Actor 43 → 48 → 32 → 4 tanh', PANEL_X + 14, py, size=9, fill=DIM, align='left-top')
+    drawLabel('Critic 43 → 48 → 32 → 1', PANEL_X + 14, py + 13, size=9, fill=DIM, align='left-top')
+    drawLabel('Input: 35 sensors + 8 ctx  (incl accel+gyro)', PANEL_X + 14, py + 26, size=8, fill=DIM, align='left-top')
+    drawLabel('Actor RMS %.3f  |  Critic RMS %.3f' % (app.actor.weight_norm(), app.critic.weight_norm()), PANEL_X + 14, py + 39, size=9, fill=ACC, align='left-top')
+    gx, gy, gw, gh = PANEL_X + 14, py + 52, PANEL_W - 28, 52
     drawRect(gx, gy, gw, gh, fill=PANEL2, border=BORDER, roundness=8)
-    mx = max(app.loss_hist)
-    mn = min(app.loss_hist)
-    rng = (mx - mn) if mx - mn > 0.01 else 1.0
+    mx = max(app.loss_hist); mn = min(app.loss_hist); rng = (mx - mn) if mx - mn > 0.01 else 1.0
     pts = []
     for i, v in enumerate(app.loss_hist):
         x = gx + 8 + (i / max(1, len(app.loss_hist) - 1)) * (gw - 16)
-        y = gy + gh - 8 - ((v - mn) / rng * (gh - 16))
-        pts.append((x, y))
+        y = gy + gh - 8 - ((v - mn) / rng * (gh - 16)); pts.append((x, y))
     for i in range(len(pts) - 1):
         drawLine(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], fill=ACC, lineWidth=1.6)
     drawLabel('loss ↓ as it learns', gx + gw - 8, gy + 8, size=8, fill=DIM, align='right-top')
-    # Reward curve
-    ry = gy + gh + 10
-    drawRect(gx, ry, gw, 52, fill=PANEL2, border=BORDER, roundness=8)
-    mx = max(app.reward_hist)
-    mn = min(app.reward_hist)
-    rng = (mx - mn) if mx - mn > 0.5 else 1.0
+    ry = gy + gh + 8
+    drawRect(gx, ry, gw, 42, fill=PANEL2, border=BORDER, roundness=8)
+    mx = max(app.reward_hist); mn = min(app.reward_hist); rng = (mx - mn) if mx - mn > 0.5 else 1.0
     pts = []
     for i, v in enumerate(app.reward_hist):
         x = gx + 8 + (i / max(1, len(app.reward_hist) - 1)) * (gw - 16)
-        y = ry + 52 - 8 - ((v - mn) / rng * (52 - 16))
-        pts.append((x, y))
+        y = ry + 42 - 8 - ((v - mn) / rng * (42 - 16)); pts.append((x, y))
     for i in range(len(pts) - 1):
         drawLine(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], fill=ACC2, lineWidth=1.6)
     drawLabel('episode reward', gx + 8, ry + 6, size=8, fill=DIM, align='left-top')
-    # How-to
-    hy = ry + 62
-    drawLabel('HOW TO BREAK A SCRIPT:', PANEL_X + 14, hy, size=10, fill=WARN, bold=True, align='left-top')
-    drawLabel('1. Draw Shape → click polygon → Close Shape', PANEL_X + 14, hy + 16, size=9, fill=TXT, align='left-top')
-    drawLabel('2. Place anywhere. Move drags / R rotates.', PANEL_X + 14, hy + 30, size=9, fill=TXT, align='left-top')
-    drawLabel('3. TRAIN. Loss falls, grasp % rises.', PANEL_X + 14, hy + 44, size=9, fill=TXT, align='left-top')
-    drawLabel('Red dot = true COM. White X = bbox centre.', PANEL_X + 14, hy + 58, size=9, fill=TXT, align='left-top')
-    drawLabel('NO fakes, NO fallbacks: MLP only.', PANEL_X + 14, hy + 72, size=9, fill=TXT, align='left-top')
-    drawLabel('Keys: SPACE train • W/S A/D Q/E G/O • R • DEL', PANEL_X + 14, hy + 88, size=8, fill=DIM, align='left-top')
+    sy = ry + 42 + 8
+    drawRect(gx, sy, gw, 60, fill=PANEL2, border=BORDER, roundness=8)
+    drawLabel('LIVE: ACC %.2f,%.2f  DOWN %.2f' % (env.accel_forward, env.accel_perp, env.down_alignment), gx + 8, sy + 6, size=8, fill=rgb(45, 212, 191), align='left-top')
+    drawLabel('JOINT VEL %.2f %.2f %.2f  |  GRIP VEL %.1f,%.1f' % (env.joint_vel[0], env.joint_vel[1], env.joint_vel[2], env.gripper_vel[0], env.gripper_vel[1]), gx + 8, sy + 20, size=8, fill=DIM, align='left-top')
+    drawLabel('GRIPPER %s  GAP %.0fpx  |  See INSTRUCTION MANUAL' % (env.arm.gripper_type.upper(), env.arm.gap()), gx + 8, sy + 34, size=8, fill=WARN, bold=True, align='left-top')
+    drawLabel('lr a=%.5f c=%.5f | Grad %.2f | Eval %.1f | g %.2f' % (app.actor_lr, app.critic_lr, app.grad_norm_hist[-1] if app.grad_norm_hist else 0.0, app.eval_reward_hist[-1] if app.eval_reward_hist else 0.0, app.gamma), PANEL_X + 14, sy + 48, size=8, fill=DIM, align='left-top')
+    # Manual overlay — completely overlays everything, drawn last.
+    if getattr(app, 'manual_open', False):
+        _draw_manual(app)
+        return
     # Footer
     drawRect(0, HEIGHT - 22, WIDTH, 22, fill=rgb(18, 20, 32))
     drawLabel('SCS robot_training.py — OpenArm 2.0 sim • MLP-RL', 12, HEIGHT - 11, size=9, fill=DIM, align='left-center')
