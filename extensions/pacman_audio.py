@@ -86,12 +86,12 @@ MODE_FACTORS = {'MN': 7 / 8, 'ML': 1.0, 'MS': 3 / 4}
 # Bass (Part B):   o2 c8. o3 c  o2 c8. o3 c  o2 d8. o3 d  o2 d8. o3 d
 #                   o2 c8. o3 c  o2 c8. o3 c  o2 f+8 a-8  b-8 b8
 # See music.txt for the full text format.
-INTRO_BASS_MML = "T110L16O2C8. O3C O2C8. O3C O2D8. O3D O2D8. O3D O2C8. O3C O2C8. O3C O2F+8 A-8 B-8 B8"
-INTRO_BASS_SHORT_MML = "T110O2L8E. B16 E. B16"
+INTRO_BASS_MML = "T110L16MSO3C8. G16 C4 O3D-8. A-16 D-4 O3C8. G16 C4 O3G8 A8 B8 O4C8"
+INTRO_BASS_SHORT_MML = "T110L16MSO3C8. G16 C4"
 PACMAN_MML = {
-    "intro": "T110L16O4B O5B F+ D+ B F+8. O5D8 C O6C O5G E O6C O5G8. E8 O4B O5B F+ D+ L32B F+16. D+8 D+ E F16 F F+ G16 G G+ A16 B8",
+    "intro": "T110L16MSO4C O5C O4G E O5C32 O4G16. E8 O4D- O5D- O4A- F O5D-32 O4A-16. F8 O4C O5C O4G E O5C32 O4G16. E8 O4E16 F32 F+32 G16 G+32 A32 B8 O5C8",
     "intro_bass": INTRO_BASS_MML,
-    "intro_short": "T110L16O4B O5B F+ D+ B F+8. O5D8 C O6C O5G E O6C O5G8. E8",
+    "intro_short": "T110L16MSO4C O5C O4G E O5C32 O4G16. E8",
     "intro_short_bass": INTRO_BASS_SHORT_MML,
     "level_clear": "T150O5L8C E G C E G C",
     "extra_life": "T180O6L16C E G C E G C E G",

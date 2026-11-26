@@ -180,7 +180,7 @@ DEATH_READY_TICKS = 120
 # Pregame / intro: Start Music is the opening jingle, Credit is one short waka.
 # INTRO_TICKS covers the Start Music + READY! hold before any motion.
 # FIX: 110 BPM, user's two-part text in music.txt. Treble as written = 41 16ths = 5.59 s = 335 ticks, bass = 32 16ths = 262 ticks. Use longer so intro does not cut off.
-INTRO_TICKS = 335
+INTRO_TICKS = 262
 DEAD_HOLD_TICKS = 180
 WON_HOLD_TICKS = 120
 CREDIT_MAX = 2
