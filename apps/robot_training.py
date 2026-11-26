@@ -1,4 +1,4 @@
-# robot_training_60.py — OpenArm 2.0 + MLP-RL Stacking Trainer (SCS, 1050x700)
+# robot_training_61.py — OpenArm 2.0 + MLP-RL Stacking Trainer (SCS, 1050x700)
 # ---------------------------------------------------------------------------
 # Maps the Anvil OpenArm 2.0 Quest Teleop Kit to a 2D SCS lab:
 #   Real kit: 7-DOF per arm, 633 mm reach, parallel gripper 88 mm opening,
@@ -36,6 +36,14 @@
 #     _update_held, _try_release, _finish_step) with bodies moved verbatim;
 #     step is now an orchestrator. Added FILE MAP + TUNABLES index below
 #     and section banners. Verified by step-by-step equivalence vs v52.
+    #   - v61: FIX _try_release NameError (critique of v60). gc was used
+    #     in EVT_PLACED / PLACED_TIPPED / RELEASE / TOWER_COMPLETE events
+    #     but never defined or passed into _try_release — NameError on
+    #     first successful release. Fix: pass gc from orchestrator like
+    #     every other phase (_try_grasp, _update_held, _finish_step),
+    #     not recompute inside. No reward, no event payload, no behaviour
+    #     changed except the crash is gone. Regression test: force a
+    #     grasp then release in tower -> PLACED emits, no NameError.
     #   - v60: PROPER EVENT SYSTEM, NO TIMEOUTS. Model emits semantic
     #     RobotEvents, Controller drains and handles them. No setTimeout,
     #     no sleep, no polling loop. Env.step still returns (r,done,trunc,
@@ -1354,7 +1362,7 @@ class Env:
         reward, info = self._shape_reward(action, reward, info, gc, prev_target, prev_dist, new_dist, prev_angles, _a3)
         reward, info = self._try_grasp(action, reward, info, gc, _a3, app_ctx)
         reward, info = self._update_held(reward, info, gc)
-        reward, info = self._try_release(reward, info)
+        reward, info = self._try_release(reward, info, gc)
         reward, done, timeout, info = self._finish_step(reward, info, gc, app_ctx)
         self._update_world_model()  # v54: tell only, never touches reward/physics
         return reward, done, timeout, info
@@ -1597,9 +1605,12 @@ class Env:
                 self.bus.emit(RobotEvent(EVT_LIFT, self.step_count, gripper=gc, object_index=self.objects.index(o), reward_delta=0.5, reason='first_lift_per_grasp'))
         return reward, info
 
-    def _try_release(self, reward, info):
+    def _try_release(self, reward, info, gc):
         # Phase 5 — gripper open while holding: release + placement check.
-        # Records steps-to-stack (v52).
+        # Records steps-to-stack (v52). v61: gc passed from orchestrator,
+        # same as _try_grasp/_update_held/_finish_step — never recomputed.
+        # Previously gc was referenced in events but not defined -> NameError
+        # on first release. This was the v60 critique blocker.
         arm = self.arm
         if arm.held is not None and arm.gripper > 0.62:
             o=arm.held; arm.held=None; o.held=False; o.vy=0.0; _clamp_to_floor(o); cx,_=o.com_world()
@@ -1999,6 +2010,8 @@ def _on_robot_event(event, app):
         app.env.last_grasp_msg = 'STACKED! tower=%d' % event.tower_count
     elif event.type == EVT_PLACED_TIPPED:
         app.env.last_grasp_msg = 'PLACED BUT TIPPED — COM off support'
+    elif event.type == EVT_RELEASE:
+        app.env.last_grasp_msg = 'RELEASED — outside tower'
     elif event.type == EVT_DROPPED:
         app.env.last_grasp_msg = 'DROPPED — off-COM slip'
     elif event.type == EVT_FLOOR_CONTACT:
