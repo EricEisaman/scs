@@ -1,4 +1,4 @@
-# robot_training_63.py — OpenArm 2.0 + MLP-RL Stacking Trainer (SCS, 1050x700)
+# robot_training_66.py — OpenArm 2.0 + MLP-RL Stacking Trainer (SCS, 1050x700)
 # ---------------------------------------------------------------------------
 # Maps the Anvil OpenArm 2.0 Quest Teleop Kit to a 2D SCS lab:
 #   Real kit: 7-DOF per arm, 633 mm reach, parallel gripper 88 mm opening,
@@ -36,6 +36,46 @@
 #     _update_held, _try_release, _finish_step) with bodies moved verbatim;
 #     step is now an orchestrator. Added FILE MAP + TUNABLES index below
 #     and section banners. Verified by step-by-step equivalence vs v52.
+    #   - v66: FIX grab-in-action but no grab recorded (screenshot).
+    #     Two bugs: (1) DistObj included the HELD object, so while
+    #     holding it read 5px (grasp offset) for every row. Now excludes
+    #     held: distance to nearest UNHELD, UNPLACED object. (2) GraspStab
+    #     was only set on the exact attempt step, so all HOLDING steps
+    #     showed — and a grasp at step 32 was out of the last-30 window
+    #     by step 100, so window said 0 attempts. Now: while holding,
+    #     GraspStab = held.grasp_stability every step. Plus app.grasp_log
+    #     (every attempt, success/fail) shown in overlay header, so a
+    #     grasp is never lost when the window slides past it.
+    #     Layout: CONTROLS title ARENA_Y0+14 -> ARENA_Y0+4 (raise 10px).
+    #     All right-panel buttons + contents below title shift -15px:
+    #     buttons 88->73, 122->107, 154->139, 188->173, 226->211,
+    #     258->243, 292->277, 325->310, 358->343, 390->375; py 425->410.
+    #     Frees bottom overflow (was sy+100=687, now 672, panel bottom 670).
+    #   - v65: METRICS LOG + INSTRUCTION MANUAL on same row (user
+    #     request). Was: MANUAL full-width at 358, RANDOM at 390, METRICS
+    #     full-width at 410 — METRICS (410+26=436) overlapped MLP viz at
+    #     425. Now: MANUAL 710,358,150x28 + METRICS 868,358,158x28 on
+    #     one row, same paired-row pattern as Train/Reset, Teleop/Eval,
+    #     etc. (150+158=308, 8px gap, 8px right margin). RANDOM stays
+    #     full-width at 390 (390+26=416), MLP viz at 425 keeps 9px gap.
+    #     No other buttons moved, no overlap.
+    #   - v64: FIX early-grasp + actor visibility (critique of v63) +
+    #     panels + metrics log overlay (user request).
+    #     (1) Easier first grasp, longer: stability 0.15->0.30 over 15k
+    #     steps (was 0.20->0.30 over 10k), halo 50->30 over 15k. Keeps
+    #     the 50px halo longer. Gripper boost x1.5 while grasp_success==0.
+    #     (2) Actor every batch when Pos%==0 but TD-std>0.001 (was every
+    #     5th). Gate 0.005->0.001. First positive must be visible.
+    #     (3) Novelty stronger early: +0.05/cell capped 0.25 for first 5k
+    #     steps, then +0.03 capped 0.15. Sweeps workspace, not parking.
+    #     (4) Panels: ARENA_Y0 72->52 (raise 20), ARENA_Y1 stays 670,
+    #     height 598->618 (+20). Top bar 68->48 to make room, buttons and
+    #     MLP viz shift -20 so layout inside panel is unchanged.
+    #     (5) Metrics log overlay: app.metrics_log appends one entry per
+    #     env step (dist to nearest object/tower, grasp stability on
+    #     attempts, action std, TD-std/Pos% from last train batch, novelty).
+    #     New METRICS LOG button + overlay panel with X, shows last 30
+    #     entries. Logging uses COM only for diagnostics, never for obs.
     #   - v63: FIX stuck 233 steps at 271px (critique of v62). Arm was
     #     parked, not exploring: shaping is 0 when it does not move, stuck
     #     penalty was flat -0.08, and novelty was never rewarded. Three
@@ -231,7 +271,7 @@ import math, random
 WIDTH = 1050
 HEIGHT = 700
 ARENA_X0 = 16
-ARENA_Y0 = 72
+ARENA_Y0 = 52  # v64: raised 20px (was 72), height 598->618 (+20), ARENA_Y1 stays 670
 ARENA_X1 = 694
 ARENA_Y1 = 670
 FLOOR_Y = 600
@@ -1121,6 +1161,8 @@ class Env:
         self.steps_to_grasp = None; self.steps_to_stack = None; self.steps_to_success = None; self.on_goal_steps = 0
         self.last_grasp_msg = ''  # v60: set only by Controller event handler, never by Model
         self._curr_prog = 1.0; self._curr_stab_thresh = 0.30; self._curr_halo = 30.0  # v62: full difficulty until first step sets curriculum
+        self.last_grasp_stability = None  # v64: diagnostics for metrics log, set on every grasp attempt
+        self.last_grasp_attempt_step = -1
         self.bus = EventBus()
         self._prev_contact = 0.0
         self._stuck_emitted = False
@@ -1385,12 +1427,14 @@ class Env:
         # pure time cost, dwarfing approach shaping and making Reward -9.8
         # look like failure even when the arm was approaching. -0.004 still
         # punishes dawdling (episode_len steps = -2.4) without dominating signal.
-        # v62: curriculum progress 0->1 over first 10k env steps. Stored on
-        # self so _shape_reward/_try_grasp can read it without new args.
-        # Baseline Dummy has no total_env_steps -> getattr default 10000
+        # v62 curriculum, v64 extended: progress 0->1 over first 15k
+        # env steps (was 10k), stability 0.15->0.30 (was 0.20->0.30).
+        # Keeps the 50px halo longer. Stored on self so
+        # _shape_reward/_try_grasp can read it without new args.
+        # Baseline Dummy has no total_env_steps -> getattr default 15000
         # = full difficulty, so baseline is never given easy curriculum.
-        self._curr_prog = min(1.0, getattr(app_ctx, 'total_env_steps', 10000) / 10000.0)
-        self._curr_stab_thresh = 0.20 + 0.10 * self._curr_prog  # 0.20 early -> 0.30 late
+        self._curr_prog = min(1.0, getattr(app_ctx, 'total_env_steps', 15000) / 15000.0)
+        self._curr_stab_thresh = 0.15 + 0.15 * self._curr_prog  # 0.15 early -> 0.30 late
         self._curr_halo = 50.0 - 20.0 * self._curr_prog  # 50px early -> 30px late
         reward = -0.004; info = {'slip':0.0,'contact':0.0,'grasped':False,'placed':False,'dropped':False,'collision':0.0,'stuck':0.0}
         reward, info, gc, prev_target, prev_dist, new_dist, prev_angles, _a3 = self._move_arm(action, reward, info)
@@ -1404,7 +1448,13 @@ class Env:
         # objects a few px, so WM tells are still sensor-accurate.
         _new_cells = self._update_world_model()
         if _new_cells > 0:
-            _nov = min(0.15, 0.03 * _new_cells)
+            # v64: stronger early. First 5k steps: +0.05/cell capped 0.25.
+            # After: +0.03/cell capped 0.15. Sweeps workspace early, then
+            # fades so novelty cannot be farmed by sweeping empty space.
+            if getattr(app_ctx, 'total_env_steps', 15000) < 5000:
+                _nov = min(0.25, 0.05 * _new_cells)
+            else:
+                _nov = min(0.15, 0.03 * _new_cells)
             reward += _nov; info['novelty'] = _nov; info['new_cells'] = _new_cells
         reward, done, timeout, info = self._finish_step(reward, info, gc, app_ctx)
         return reward, done, timeout, info
@@ -1611,6 +1661,7 @@ class Env:
                     # v60: attempt is a semantic event, not just a boolean.
                     self.bus.emit(RobotEvent(EVT_GRASP_ATTEMPT, self.step_count, gripper=gc, object_index=self.objects.index(o), dist=math.hypot(gc[0]-o.com_world()[0], gc[1]-o.com_world()[1]), reason='gripper_closed_inside_polygon'))
                     cx, cy = o.com_world(); off = math.hypot(gc[0]-cx, gc[1]-cy)
+                    self.last_grasp_attempt_step = self.step_count
                     edge_d = _min_edge_distance(gc[0], gc[1], o.world_verts()); edge_factor = min(1.0, edge_d/12.0)
                     stability = (1.0 - off/(o.radius+12.0))*edge_factor
                     _px2 = -math.sin(_a3); _py2 = math.cos(_a3)
@@ -1622,14 +1673,17 @@ class Env:
                         if _w > 65.0: stability = 0.0; _fail_reason = 'too_wide_%.0fpx_gt_65_adaptive' % _w
                     else:
                         if _w > arm.GAP_MAX + 8.0: stability = 0.0; _fail_reason = 'too_wide_%.0fpx_gt_%.0f_parallel' % (_w, arm.GAP_MAX)
+                    self.last_grasp_stability = stability  # v64: for metrics log, diagnostics only
                     if stability > self._curr_stab_thresh:
                         arm.held = o; o.held=True; o.grasp_offset=(gc[0]-o.x, gc[1]-o.y); o.grasp_stability=max(0.15, stability); o.slip=0.0
                         _gr = 0.5 + 1.5 * stability
                         reward += _gr; info['grasped']=True; app_ctx.grasp_attempts+=1; app_ctx.grasp_success+=1; self._lift_given = False; self._close_given = False; self.steps_to_grasp = self.step_count + 1 if self.steps_to_grasp is None else self.steps_to_grasp
+                        if hasattr(app_ctx, 'grasp_log'): app_ctx.grasp_log.append({'ep': self.episode, 'step': self.step_count, 'stability': round(stability, 2), 'off': round(off, 1), 'success': True})
                         self.bus.emit(RobotEvent(EVT_GRASP_SUCCESS, self.step_count, gripper=gc, object_index=self.objects.index(o), centred=max(0.0, 1.0 - off/(o.radius+12.0)), stability=stability, reward_delta=_gr, reason='centred_stable_grasp'))
                         self._slip_emitted = False
                     else:
                         o.slip=1.0; o.vrot+=(random.random()-0.5)*0.08; reward-=0.6; info['slip']=1.0; app_ctx.grasp_attempts+=1
+                        if hasattr(app_ctx, 'grasp_log'): app_ctx.grasp_log.append({'ep': self.episode, 'step': self.step_count, 'stability': round(stability, 2), 'off': round(off, 1), 'success': False})
                         self.bus.emit(RobotEvent(EVT_GRASP_FAIL, self.step_count, gripper=gc, object_index=self.objects.index(o), centred=max(0.0, 1.0 - off/(o.radius+12.0)), stability=stability, reward_delta=-0.6, reason=_fail_reason if _fail_reason else 'stability_%.2f_below_%.2f' % (stability, self._curr_stab_thresh)))
                     break
         return reward, info
@@ -1750,6 +1804,10 @@ def onAppStart(app):
     app.scs = {}  # single nested bundle for any future window/extension use
     app.env = Env()
     app.total_env_steps = 0  # v62: global step count drives curriculum, never resets per episode
+    app.metrics_log = []  # v64: one entry per env step, capped 200, shown in METRICS LOG overlay
+    app.grasp_log = []  # v66: every grasp attempt, never windowed — so a grasp at step 32 is still visible at step 100
+    app.metrics_open = False  # v64: metrics overlay toggle
+    app.last_td_std = 0.0; app.last_pos_frac = 0.0  # v64: last _train_batch values for metrics log
     _subscribe_robot_events(app)  # v60: events, not polling
     # Input 69 = 61 sensors (37 + 24 memory rays) + 8 context. Actor 4 = joint deltas + gripper.
     # v50: actions stay joint deltas. They are already incremental (relative
@@ -1835,29 +1893,30 @@ def onAppStart(app):
     app.env.add_object('wedge', 380, 450)
     app.buttons = {}
     # Mode row
-    app.buttons['mode_move'] = _make_button(710, 108, 100, 28, 'Move', 'mode_move')
-    app.buttons['mode_draw'] = _make_button(818, 108, 100, 28, 'Draw Shape', 'mode_draw')
-    app.buttons['mode_place'] = _make_button(926, 108, 100, 28, 'Place', 'mode_place')
+    app.buttons['mode_move'] = _make_button(710, 73, 100, 28, 'Move', 'mode_move')
+    app.buttons['mode_draw'] = _make_button(818, 73, 100, 28, 'Draw Shape', 'mode_draw')
+    app.buttons['mode_place'] = _make_button(926, 73, 100, 28, 'Place', 'mode_place')
     # Template row
     tx = 710
     for i, key in enumerate(['block', 'L', 'T', 'wedge', 'U', 'custom']):
-        app.buttons['tpl_' + key] = _make_button(tx + i * 54, 142, 50, 26, key[:4].upper(), 'tpl_' + key)
+        app.buttons['tpl_' + key] = _make_button(tx + i * 54, 107, 50, 26, key[:4].upper(), 'tpl_' + key)
     # Object actions
-    app.buttons['add_here'] = _make_button(710, 174, 100, 28, 'Add Here', 'add_here')
-    app.buttons['del_sel'] = _make_button(818, 174, 100, 28, 'Delete Sel', 'del_sel')
-    app.buttons['clear_all'] = _make_button(926, 174, 100, 28, 'Clear All', 'clear_all')
+    app.buttons['add_here'] = _make_button(710, 139, 100, 28, 'Add Here', 'add_here')
+    app.buttons['del_sel'] = _make_button(818, 139, 100, 28, 'Delete Sel', 'del_sel')
+    app.buttons['clear_all'] = _make_button(926, 139, 100, 28, 'Clear All', 'clear_all')
     # Training
-    app.buttons['train'] = _make_button(710, 208, 150, 32, 'TRAIN: OFF', 'train')
-    app.buttons['reset_brain'] = _make_button(868, 208, 158, 32, 'Reset Brain', 'reset_brain')
-    app.buttons['teleop'] = _make_button(710, 246, 150, 28, 'Teleop: OFF', 'teleop')
-    app.buttons['eval'] = _make_button(868, 246, 158, 28, 'Eval: OFF', 'eval')
-    app.buttons['reset_scene'] = _make_button(710, 278, 150, 28, 'Reset Scene', 'reset_scene')
-    app.buttons['demo_stack'] = _make_button(868, 278, 158, 28, 'Demo Stack x3', 'demo_stack')
-    app.buttons['random_baseline'] = _make_button(710, 410, 316, 26, 'Random Baseline', 'random_baseline')
-    app.buttons['close_shape'] = _make_button(710, 312, 150, 28, 'Close Shape', 'close_shape')
-    app.buttons['cancel_draw'] = _make_button(868, 312, 158, 28, 'Cancel Draw', 'cancel_draw')
-    app.buttons['gripper'] = _make_button(710, 345, 316, 26, 'Gripper: PARALLEL', 'gripper')
-    app.buttons['manual'] = _make_button(710, 378, 316, 26, 'INSTRUCTION MANUAL', 'manual')
+    app.buttons['train'] = _make_button(710, 173, 150, 32, 'TRAIN: OFF', 'train')
+    app.buttons['reset_brain'] = _make_button(868, 173, 158, 32, 'Reset Brain', 'reset_brain')
+    app.buttons['teleop'] = _make_button(710, 211, 150, 28, 'Teleop: OFF', 'teleop')
+    app.buttons['eval'] = _make_button(868, 211, 158, 28, 'Eval: OFF', 'eval')
+    app.buttons['reset_scene'] = _make_button(710, 243, 150, 28, 'Reset Scene', 'reset_scene')
+    app.buttons['demo_stack'] = _make_button(868, 243, 158, 28, 'Demo Stack x3', 'demo_stack')
+    app.buttons['random_baseline'] = _make_button(710, 375, 316, 26, 'Random Baseline', 'random_baseline')
+    app.buttons['metrics'] = _make_button(868, 343, 158, 28, 'METRICS LOG', 'metrics')  # v65: same row as MANUAL
+    app.buttons['close_shape'] = _make_button(710, 277, 150, 28, 'Close Shape', 'close_shape')
+    app.buttons['cancel_draw'] = _make_button(868, 277, 158, 28, 'Cancel Draw', 'cancel_draw')
+    app.buttons['gripper'] = _make_button(710, 310, 316, 26, 'Gripper: PARALLEL', 'gripper')
+    app.buttons['manual'] = _make_button(710, 343, 150, 28, 'INSTRUCTION MANUAL', 'manual')  # v65: same row as METRICS
 
 def _sensor_vector(app):
     env = app.env
@@ -1978,18 +2037,22 @@ def _train_batch(app):
     # update. TD-std = std of raw TD errors. They must differ.
     pos_frac = sum(1 for (_s, _a, _n, _r, _s2, _d, _t) in batch if _r >= 0.4) / len(batch)
     # Gate: no positives AND essentially zero TD surprise -> critic still
-    # learns, actor does NOT update. v62: threshold 0.02 -> 0.005. Old 0.02
-    # gated every shaping-only batch: shaping rewards are 0.01-0.30, so
-    # TD-std 0.01-0.02 IS the shaping gradient, not noise. Std floor 0.08
-    # already prevents noise blow-up (the original reason for the gate),
-    # so the gate only needs to catch truly flat batches (<0.005).
-    actor_gated = (pos_frac == 0.0 and td_std < 0.005)
+    # learns, actor does NOT update. v62: 0.02->0.005. v64: 0.005->0.001.
+    # Shaping + novelty batches have TD-std 0.01-0.05, so 0.001 only
+    # catches truly flat batches. First positive must be visible.
+    actor_gated = (pos_frac == 0.0 and td_std < 0.001)
     # v48 asymmetric: critic every batch, actor every 5th batch. v62
-    # adaptive: when Pos%>0 there is positive signal to learn from, so
-    # actor every 2nd batch; when Pos%==0, keep 5th to avoid chasing
-    # failures. app.actor_update_every is set here per batch, not in
-    # onAppStart, so it adapts as Pos% changes.
-    app.actor_update_every = 2 if pos_frac > 0.0 else 5
+    # adaptive: Pos%>0 -> every 2nd. v64: Pos%==0 but TD-std>0.001
+    # (shaping/novelty signal, no positives yet) -> every batch. The
+    # first positive is more visible when the actor updates on every
+    # shaping batch, not every 5th. Only truly flat batches (gate above)
+    # skip the actor.
+    if pos_frac > 0.0:
+        app.actor_update_every = 2
+    elif td_std > 0.001:
+        app.actor_update_every = 1
+    else:
+        app.actor_update_every = 5
     actor_due = (app.critic_updates % app.actor_update_every == 0)
     actor_skip = actor_gated or not actor_due
     _adv_ns = []
@@ -1998,6 +2061,7 @@ def _train_batch(app):
         _adv_ns.append(max(-1.0, min(1.0, _an)))
     _adv_mean = sum(_adv_ns) / len(_adv_ns)
     _adv_var = sum((x - _adv_mean) * (x - _adv_mean) for x in _adv_ns) / len(_adv_ns)
+    app.last_td_std = td_std; app.last_pos_frac = pos_frac  # v64: for metrics log
     app.td_std_hist.append(td_std)
     app.adv_std_hist.append(math.sqrt(_adv_var))
     app.pos_frac_hist.append(pos_frac)
@@ -2184,8 +2248,12 @@ def onStep(app):
             # v62: gripper boost is curriculum: 2.5x early -> 1.8x late.
             # Same sensor trigger (contact or 50px halo), just stronger
             # while the first grasp is still undiscovered.
-            _prog = min(1.0, getattr(app, 'total_env_steps', 10000) / 10000.0)
+            _prog = min(1.0, getattr(app, 'total_env_steps', 15000) / 15000.0)
             _boost = 2.5 - 0.7 * _prog
+            # v64: while no grasp yet, boost 1.5x more. Once the first
+            # grasp lands, back to curriculum boost. No direction scripted.
+            if getattr(app, 'grasp_success', 0) == 0:
+                _boost = _boost * 1.5
             if (_c > 0.5 or _near_sensor) and app.env.arm.gripper > 0.38:
                 noise[3] = noise[3] * _boost
             # v63: stuck recovery. Still random, just larger variance.
@@ -2196,6 +2264,27 @@ def onStep(app):
             executed = [max(-1.0, min(1.0, clean[i] + noise[i])) for i in range(4)]
         app.total_env_steps = getattr(app, 'total_env_steps', 0) + 1  # v62: drives curriculum
         reward, done, timeout, info = app.env.step(executed, app)
+        # v64: metrics log — one entry per step. Distances use COM only
+        # for DIAGNOSTICS, never for obs. Action std = std of executed.
+        # v66: DistObj excludes HELD object — old code measured the held
+        # block (5px grasp offset) and hid the distance to the NEXT target.
+        _gc = app.env.arm.gripper_center()
+        _held_obj = app.env.arm.held
+        _d_obj = min((math.hypot(_gc[0]-o.com_world()[0], _gc[1]-o.com_world()[1]) for o in app.env.objects if not o.placed and o is not _held_obj), default=999.0)
+        _d_tower = 0.0 if TOWER_X0 <= _gc[0] <= TOWER_X1 else min(abs(_gc[0]-TOWER_X0), abs(_gc[0]-TOWER_X1))
+        _act_std = math.sqrt(sum((x - sum(executed)/4.0)**2 for x in executed)/4.0)
+        # v66: GraspStab = held stability while HOLDING, else attempt
+        # stability on the attempt step, else None. Old code showed —
+        # on every holding step, so HOLDING in main view looked like no
+        # grasp in the log.
+        if _held_obj is not None:
+            _stab = round(_held_obj.grasp_stability, 2)
+        elif app.env.last_grasp_attempt_step == app.env.step_count:
+            _stab = round(app.env.last_grasp_stability, 2) if app.env.last_grasp_stability is not None else None
+        else:
+            _stab = None
+        app.metrics_log.append({'ep': app.env.episode, 'step': app.env.step_count, 'rew': round(reward, 3), 'td': round(getattr(app, 'last_td_std', 0.0), 3), 'pos': round(getattr(app, 'last_pos_frac', 0.0)*100.0), 'd_obj': round(_d_obj), 'd_tower': round(_d_tower), 'stab': _stab, 'act_std': round(_act_std, 3), 'nov': round(info.get('novelty', 0.0), 3), 'tower': app.env.tower_count, 'holding': (_held_obj is not None)})
+        if len(app.metrics_log) > 200: app.metrics_log.pop(0)
         # Per-step epsilon decay: old code decayed epsilon only at episode
         # END (0.985/episode), so after 515 steps eps was still 0.35 and
         # OU noise dominated the whole first episode. Now 0.9995/step:
@@ -2306,6 +2395,12 @@ def _handle_button(app, action):
             app.status = 'Gripper: PARALLEL — straight fingers, 88mm opening. Must grasp narrow side.'
     elif action == 'random_baseline':
         _random_baseline(app, 3)
+    elif action == 'metrics':
+        app.metrics_open = not getattr(app, 'metrics_open', False)
+        app.status = 'Metrics Log open — X to close.' if app.metrics_open else 'Metrics Log closed.'
+    elif action == 'metrics_close':
+        app.metrics_open = False
+        app.status = 'Metrics Log closed.'
     elif action == 'manual':
         app.manual_open = True
         app.status = 'Instruction Manual open — X to close.'
@@ -2415,6 +2510,11 @@ def onMousePress(app, mx, my):
         if 960 <= mx <= 1012 and 30 <= my <= 66:
             _handle_button(app, 'manual_close')
         return
+    # v64: Metrics overlay eats all clicks except its X.
+    if getattr(app, 'metrics_open', False):
+        if 960 <= mx <= 1012 and 30 <= my <= 66:
+            _handle_button(app, 'metrics_close')
+        return
     # Buttons first.
     for bid, b in app.buttons.items():
         if b['x'] <= mx <= b['x'] + b['w'] and b['y'] <= my <= b['y'] + b['h']:
@@ -2475,6 +2575,13 @@ def onKeyPress(app, key):
     if getattr(app, 'manual_open', False):
         if k in ('m', 'escape', 'esc'):
             _handle_button(app, 'manual_close')
+        return
+    if getattr(app, 'metrics_open', False):
+        if k in ('l', 'm', 'escape', 'esc'):
+            _handle_button(app, 'metrics_close')
+        return
+    if k == 'l':
+        _handle_button(app, 'metrics')
         return
     if k == ' ':
         _handle_button(app, 'train')
@@ -2589,6 +2696,51 @@ def _draw_arm(app):
     if arm.held is not None:
         drawLabel('HOLDING', gc[0], gc[1] - 22, size=9, fill=WARN, bold=True, align='center-center')
 
+def _draw_metrics_overlay(app):
+    # v64: Metrics Log overlay — full-screen, like manual. Shows last 30
+    # entries from app.metrics_log. COM distances are DIAGNOSTICS only,
+    # never fed to the policy. X (960,30) closes, L/ESC/M also close.
+    drawRect(0, 0, WIDTH, HEIGHT, fill=rgb(10, 12, 24))
+    drawRect(24, 18, WIDTH - 48, HEIGHT - 36, fill=rgb(18, 20, 34), border=BORDER, roundness=14)
+    drawLabel('METRICS LOG — last 30 steps', 48, 36, size=28, fill=TXT, bold=True, align='left-top')
+    drawLabel('Diagnostics only — COM distances never enter the 69-dim observation. Press L / ESC / X to close.', 48, 72, size=14, fill=DIM, align='left-top')
+    # v66: holding + grasp history — never windowed, so a grasp at step 32 is still visible at step 100.
+    _held = app.env.arm.held if hasattr(app, 'env') else None
+    _glog = getattr(app, 'grasp_log', [])
+    if _held is not None:
+        drawLabel('HOLDING: %s  stability %.2f  (grasped, not just attempting)' % (_held.name, _held.grasp_stability), 48, 94, size=14, fill=ACC2, bold=True, align='left-top')
+    else:
+        drawLabel('HOLDING: —  (not holding)', 48, 94, size=14, fill=DIM, align='left-top')
+    if _glog:
+        _last = _glog[-1]
+        drawLabel('Last grasp: Ep %d Step %d  stability %.2f  off %.1fpx  %s  |  Total grasps %d (%d success)' % (_last['ep'], _last['step'], _last['stability'], _last['off'], 'SUCCESS' if _last['success'] else 'FAIL', len(_glog), sum(1 for g in _glog if g['success'])), 48, 112, size=12, fill=WARN, align='left-top')
+    else:
+        drawLabel('Last grasp: —  (no attempts yet)', 48, 112, size=12, fill=DIM, align='left-top')
+    drawRect(960, 30, 52, 36, fill=rgb(180, 40, 60), border=rgb(255, 255, 255), borderWidth=1, roundness=8)
+    drawLabel('X', 986, 48, size=20, fill=rgb(255, 255, 255), bold=True, align='center-center')
+    # Header — v66: y 110->132 to clear HOLDING / Last grasp lines.
+    y = 132
+    drawLabel('Ep  Step   Rew    TD     Pos%  DistObj DistTower  GraspStab  ActStd  Nov   Tower', 48, y, size=12, fill=ACC2, bold=True, align='left-top')
+    y += 20
+    drawLabel('—'*110, 48, y, size=10, fill=DIM, align='left-top')
+    y += 16
+    _log = app.metrics_log[-30:] if getattr(app, 'metrics_log', []) else []
+    if not _log:
+        drawLabel('No metrics yet — press TRAIN and let it run a few steps.', 48, y, size=14, fill=TXT, align='left-top')
+    else:
+        for e in _log:
+            _stab = ('%.2f' % e['stab']) if e['stab'] is not None else '  —  '
+            drawLabel('%2d  %4d  %+.3f  %.3f  %3d%%  %5.0fpx  %5.0fpx    %s     %.3f  %.3f  %d' % (e['ep'], e['step'], e['rew'], e['td'], e['pos'], e['d_obj'], e['d_tower'], _stab, e['act_std'], e['nov'], e['tower']), 48, y, size=11, fill=TXT, align='left-top')
+            y += 16
+            if y > 620:
+                break
+    # Footer summary
+    if _log:
+        _avg_d = sum(e['d_obj'] for e in _log)/len(_log)
+        _avg_act = sum(e['act_std'] for e in _log)/len(_log)
+        _n_grasp = sum(1 for e in _log if e['stab'] is not None)  # v66: holding steps now count (stab = held stability)
+        drawLabel('Avg DistObj %.0fpx  |  Avg ActStd %.3f  |  Grasp attempts in window %d  |  Total logged %d' % (_avg_d, _avg_act, _n_grasp, len(app.metrics_log)), 48, 640, size=12, fill=WARN, bold=True, align='left-top')
+
 def _draw_manual(app):
     drawRect(0, 0, WIDTH, HEIGHT, fill=rgb(10, 12, 24))
     drawRect(24, 18, WIDTH - 48, HEIGHT - 36, fill=rgb(18, 20, 34), border=BORDER, roundness=14)
@@ -2659,13 +2811,13 @@ def _draw_worldmodel(app):
 
 def redrawAll(app):
     drawRect(0, 0, WIDTH, HEIGHT, fill=BG)
-    # Top bar
-    drawRect(0, 0, WIDTH, 68, fill=rgb(18, 20, 32))
-    drawLabel('OpenArm 2.0  🤖  MLP-RL Stacking Trainer', 20, 16, size=20, fill=TXT, bold=True, align='left-top')
-    drawLabel('No IK  •  No grasp table  •  No shape library  •  No Computer Vision', 20, 42, size=11, fill=DIM, align='left-top')
+    # Top bar — v64: 68->48 tall to make room for raised panels (ARENA_Y0 52).
+    drawRect(0, 0, WIDTH, 48, fill=rgb(18, 20, 32))
+    drawLabel('OpenArm 2.0  🤖  MLP-RL Stacking Trainer', 20, 8, size=20, fill=TXT, bold=True, align='left-top')
+    drawLabel('No IK  •  No grasp table  •  No shape library  •  No Computer Vision', 20, 32, size=11, fill=DIM, align='left-top')
     env = app.env
     drawLabel(('EVAL  |  ' if app.eval_mode else '') + 'Ep %d  |  Step %d  |  Reward %.1f  |  Tower %d/%d' % (env.episode, env.step_count, env.episode_reward, env.tower_count, len(env.objects)),
-              1020, 16, size=11, fill=TXT, bold=True, align='right-top')
+              1020, 8, size=11, fill=TXT, bold=True, align='right-top')
     grasp_rate = (app.grasp_success / max(1, app.grasp_attempts) * 100)
     # Loss alone lies (see manual §8): low loss + 0 grasps = collapse.
     # TD-std = surprise in the batch, Pos% = share of batch with r>=0.4.
@@ -2673,7 +2825,7 @@ def redrawAll(app):
     _td = app.td_std_hist[-1] if app.td_std_hist else 0.0
     _pos = app.pos_frac_hist[-1] if app.pos_frac_hist else 0.0
     drawLabel('Eps %.2f  |  Grasp %.0f%% (%d/%d)  |  Loss %.3f  |  TD-std %.3f  Pos %.0f%%' % (app.epsilon, grasp_rate, app.grasp_success, app.grasp_attempts, app.loss_hist[-1] if app.loss_hist else 0.0, _td, _pos * 100.0),
-              1020, 38, size=10, fill=ACC2 if app.training else DIM, align='right-top')
+              1020, 28, size=10, fill=ACC2 if app.training else DIM, align='right-top')
     # Arena
     drawRect(ARENA_X0, ARENA_Y0, ARENA_X1 - ARENA_X0, ARENA_Y1 - ARENA_Y0, fill=rgb(16, 18, 32), border=BORDER, roundness=12)
     for gx in range(ARENA_X0 + 40, ARENA_X1, 40):
@@ -2707,7 +2859,7 @@ def redrawAll(app):
     drawLabel(((env.last_grasp_msg + '  |  ' + app.status) if env.last_grasp_msg else app.status)[:92], ARENA_X0 + 10, ARENA_Y1 - 13, size=9, fill=DIM, align='left-center')
     # Right panel
     drawRect(PANEL_X, ARENA_Y0, PANEL_W, ARENA_Y1 - ARENA_Y0, fill=PANEL, border=BORDER, roundness=12)
-    drawLabel('CONTROLS', PANEL_X + 14, ARENA_Y0 + 14, size=12, fill=TXT, bold=True, align='left-top')
+    drawLabel('CONTROLS', PANEL_X + 14, ARENA_Y0 + 4, size=12, fill=TXT, bold=True, align='left-top')  # v66: raised 10px (was ARENA_Y0+14)
     # Buttons
     for bid, b in app.buttons.items():
         active = False
@@ -2724,7 +2876,7 @@ def redrawAll(app):
         _draw_button(app, b, active)
     # MLP viz — HOW TO moved to INSTRUCTION MANUAL overlay. Freed space
     # goes to bigger loss/reward curves + a live sensor readout.
-    py = 445  # v59: shifted down for random-baseline button
+    py = 410  # v66: shifted -15 with buttons (was 425), all panel contents below title up 15
     drawLabel('Actor 69 → 48 → 32 → 4 tanh | V-critic AWR, seed 0, gamma 0.999', PANEL_X + 14, py, size=9, fill=DIM, align='left-top')
     drawLabel('Critic 69 → 48 → 32 → 1', PANEL_X + 14, py + 13, size=9, fill=DIM, align='left-top')
     drawLabel('Input: 61 sensors + 8 ctx  (incl 24 memory rays + ultra)', PANEL_X + 14, py + 26, size=8, fill=DIM, align='left-top')
@@ -2778,6 +2930,10 @@ def redrawAll(app):
     # Manual overlay — completely overlays everything, drawn last.
     if getattr(app, 'manual_open', False):
         _draw_manual(app)
+        return
+    # v64: Metrics overlay — same pattern, drawn last.
+    if getattr(app, 'metrics_open', False):
+        _draw_metrics_overlay(app)
         return
     # Footer
     drawRect(0, HEIGHT - 22, WIDTH, 22, fill=rgb(18, 20, 32))
