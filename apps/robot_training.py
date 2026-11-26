@@ -34,6 +34,14 @@
 #     exist), TD-std floor 0.08 + actor gating when Pos==0 and TD-std<0.02,
 #     close-on-object shaping, gripper-noise boost on contact, TD-std /
 #     Adv-std / Pos% diagnostics. Loss alone is never trusted.
+#   - Top-tier fixes for 0-positives (Fig.2 audit): potential-based
+#     approach shaping (Ng et al, preserves optimal policy), proximity +
+#     down-alignment shaping, expanded close zone (30px, not just inside
+#     polygon), persistent gripper OU, faster gripper step, spawn
+#     curriculum (objects start near gripper, not top of arena), per-step
+#     epsilon decay, live episode-reward curve, true Adv-std (std of
+#     normalized advantages, not a copy of TD-std), loss-split display
+#     instead of weight-RMS. No IK, no grasp table, no scripted direction.
 #   - Adam from scratch per-weight (Kingma & Ba 2014), bias-corrected,
 #     gradient clipping, Huber loss for critic TD (robust to outliers).
 #   - Observation normalisation (Welford running mean/var, clipped +-5),
@@ -322,12 +330,18 @@ class ObsNormalizer:
 
 class OUNoise:
     def __init__(self, dim, theta=0.15, sigma=0.25):
-        self.dim = dim; self.theta = theta; self.sigma = sigma; self.state = [0.0]*dim
+        self.dim = dim; self.sigma = sigma; self.state = [0.0]*dim
+        # Per-dim mean-reversion: gripper (dim 3) reverts 3x slower so a
+        # close intent persists ~20 steps. Closing needs ~5 sustained
+        # +1 gripper actions; zero-mean white noise almost never sustains
+        # that, so uniform OU made closing a lottery. This is variance
+        # shaping, not direction: sign still comes from noise.
+        self.thetas = [theta, theta, theta, 0.05] if dim == 4 else [theta]*dim
     def reset(self): self.state = [0.0]*self.dim
     def sample(self):
         common = random.gauss(0, self.sigma*0.5); out=[]
         for i in range(self.dim):
-            dx = self.theta*(0.0-self.state[i]) + random.gauss(0, self.sigma)
+            dx = self.thetas[i]*(0.0-self.state[i]) + random.gauss(0, self.sigma)
             self.state[i]+=dx; v=self.state[i]*0.7+common*0.3
             out.append(max(-1.0,min(1.0,v)))
         return out
@@ -712,18 +726,24 @@ class Env:
         self.objects.append(o)
         return o
     def reset_scene(self, keep_brain=True):
-        _gt = self.arm.gripper_type if hasattr(self.arm, 'gripper_type') else 'parallel'
+        _gt = self.arm.gripper_type
         self.arm = RobotArm(); self.arm.gripper_type = _gt
         self.tower_count = 0; self.still_steps = 0; self.last_gripper_pos = None; self._lift_given = False; self._close_given = False
         self.prev_gripper_vel = (0.0, 0.0); self.joint_vel = [0.0,0.0,0.0]
         self.gripper_vel = (0.0, 0.0); self.gripper_acc = (0.0, 0.0)
         self.step_count = 0; self.episode_reward = 0.0
-        base_xs = [130, 190, 250, 160, 220, 280]
+        # Spawn curriculum: objects start NEAR the gripper (gripper starts
+        # ~(374,457)), not at the top of the arena (y=170, ~280px away).
+        # Random approach from 280px with 0 positives is a lottery; starting
+        # within ~150px makes the first inside/proximity bonuses reachable
+        # by exploration, then later episodes can spawn farther. Still no
+        # script: position is randomised, the MLP still has to find them.
+        base_xs = [190, 280, 360, 230, 320, 400]
         random.shuffle(base_xs)
         xs = [float(base_xs[i % len(base_xs)] + random.uniform(-40, 40)) for i in range(len(self.objects))]
         for i, o in enumerate(self.objects):
             o.x = float(xs[i % len(xs)])
-            o.y = 170.0 + (i // 3) * 70.0 + random.uniform(-20, 20)
+            o.y = 430.0 + (i // 3) * 60.0 + random.uniform(-20, 20)
             o.rot = random.uniform(-0.25, 0.25)
             o.vx = 0.0
             o.vy = 0.0
@@ -802,13 +822,22 @@ class Env:
         arm.angles[0] = max(-2.4, min(0.45, arm.angles[0] + action[0]*0.055))
         arm.angles[1] = max(-0.15, min(2.6, arm.angles[1] + action[1]*0.065))
         arm.angles[2] = max(-1.8, min(1.8, arm.angles[2] + action[2]*0.065))
-        arm.gripper = max(0.0, min(1.0, arm.gripper - action[3]*0.085))
+        # Gripper step 0.085 -> 0.12: closing from 1.0 to 0.38 needed 8
+        # sustained +1 actions; OU noise almost never sustains that. 5 steps
+        # is reachable by the persistent gripper OU (theta 0.05). Still no
+        # script: the MLP must choose to close, the step only makes the
+        # action effective when it does.
+        arm.gripper = max(0.0, min(1.0, arm.gripper - action[3]*0.12))
         _ft_try = arm.finger_tip(); _a3_old = prev_angles[0]+prev_angles[1]+prev_angles[2]
         _ft_prev_y = gc0[1] + math.sin(_a3_old)*(arm.FINGER_LEN/2.0) if arm.gripper_type=='parallel' else gc0[1]
         collision = False
         if _ft_try[1] > FLOOR_Y-5 and _ft_try[1] >= _ft_prev_y:
             arm.angles = prev_angles; collision = True
-        reward = -0.012; info = {'slip':0.0,'contact':0.0,'grasped':False,'placed':False,'dropped':False,'collision':0.0,'stuck':0.0}
+        # Time penalty -0.012 -> -0.004: at -0.012, 515 steps = -6.2 of
+        # pure time cost, dwarfing approach shaping and making Reward -9.8
+        # look like failure even when the arm was approaching. -0.004 still
+        # punishes dawdling (600 steps = -2.4) without dominating signal.
+        reward = -0.004; info = {'slip':0.0,'contact':0.0,'grasped':False,'placed':False,'dropped':False,'collision':0.0,'stuck':0.0}
         if collision:
             # Was -2.0: dwarfed grasp (+2) and taught the robot to fear the
             # floor — where every object sits. Now -0.5, and only -0.1 when
@@ -831,7 +860,28 @@ class Env:
             moved = math.hypot(gc[0]-self.last_gripper_pos[0], gc[1]-self.last_gripper_pos[1])
             self.still_steps = self.still_steps+1 if moved < 1.5 else 0
             if self.still_steps > 60 and new_dist > 40: reward -= 0.08; info['stuck']=1.0
-        self.last_gripper_pos = gc; reward += (prev_dist - new_dist)*0.015
+        self.last_gripper_pos = gc
+        # --- Potential-based approach shaping (Ng et al, 1999) ---
+        # Was: (prev_dist - new_dist)*0.015. Same idea, but unprincipled
+        # scale and no orientation term: the arm could approach sideways
+        # (DOWN -0.46 in Fig.2) forever and still collect approach reward,
+        # then arrive unable to grasp. Now Phi(s) = -dist/50 + 0.5*down,
+        # reward += gamma*Phi(s') - Phi(s). This preserves the optimal
+        # policy (potential shaping) while teaching approach AND pointing
+        # down together. down = sin(a3): -1 = up, +1 = straight down.
+        _prev_down = math.sin(prev_angles[0] + prev_angles[1] + prev_angles[2])
+        _new_down = math.sin(_a3)
+        _phi_prev = -prev_dist / 50.0 + 0.5 * _prev_down
+        _phi_new = -new_dist / 50.0 + 0.5 * _new_down
+        reward += 0.99 * _phi_new - _phi_prev
+        # Proximity shaping: within 60px of target, pay for being close
+        # AND pointing down. This fills the gap between approach (far) and
+        # inside-polygon (rare): the arm now gets graded signal in the
+        # 60px halo where a grasp is actually learnable.
+        if new_dist < 60.0 and arm.held is None:
+            _prox = 1.0 - new_dist / 60.0
+            _down01 = 0.5 + 0.5 * _new_down
+            reward += 0.02 * _prox * _down01
         # --- Close-on-object shaping (fixes 0 grasp attempts) ---
         # The old reward gave +0 for being centred inside an object with the
         # gripper open, and +0 for closing on it unless a grasp succeeded.
@@ -865,7 +915,30 @@ class Env:
                     self._close_given = True
                     self.last_grasp_msg = 'CLOSE ON OBJECT — centred %.2f' % _centred
             else:
-                self._close_given = False
+                # Close-attempt zone: within 30px of an object's COM, a
+                # close action earns +0.10 even though the gripper is not
+                # yet inside the polygon. Old code paid +0 only inside, so
+                # the gripper had to randomly land inside (~0.5% of arena)
+                # AND close there. The 30px halo is ~10x larger and teaches
+                # the close action where it matters, without farming: it is
+                # one-time per approach (gated by _close_given) and requires
+                # action[3] > 0.30, not just hovering.
+                _near = None
+                _near_d = 1e9
+                for _o in self.objects:
+                    if _o.placed:
+                        continue
+                    _cx, _cy = _o.com_world()
+                    _d = math.hypot(gc[0] - _cx, gc[1] - _cy)
+                    if _d < _near_d:
+                        _near_d = _d
+                        _near = _o
+                if _near is not None and _near_d < 30.0 and action[3] > 0.30 and not self._close_given:
+                    reward += 0.10
+                    self._close_given = True
+                    self.last_grasp_msg = 'CLOSE ATTEMPT — %.0fpx from COM' % _near_d
+                elif _near is None or _near_d >= 30.0:
+                    self._close_given = False
         if arm.held is None and arm.gripper < 0.38:
             for o in self.objects:
                 if o.placed: continue
@@ -976,15 +1049,22 @@ def onAppStart(app):
     app.epsilon = 0.35
     app.loss_hist = [0.0]
     app.reward_hist = [0.0]
+    # Live episode-reward curve: reward_hist only grows at episode END
+    # (600 steps), so for the whole first episode the panel showed a flat
+    # 0.0 line and looked empty (Fig.2). live_reward_hist grows every 20
+    # steps with the RUNNING episode reward, so the curve moves live.
+    app.live_reward_hist = [0.0]
     app.episode_reward = 0.0
     app.grasp_attempts = 0
     app.grasp_success = 0
     app.status = 'PAUSED — press TRAIN to let the MLP learn. DRAW a custom shape to break scripts.'
     app.teleop_action = [0.0, 0.0, 0.0, 0.0]
     # Seed scene: 3 objects that already punish bbox-centre grasping.
-    app.env.add_object('L', 150, 220)
-    app.env.add_object('block', 220, 220)
-    app.env.add_object('wedge', 290, 230)
+    # Spawn near the gripper start ~(374,457), not at the top (y=220) -
+    # see reset_scene spawn curriculum for why.
+    app.env.add_object('L', 220, 450)
+    app.env.add_object('block', 300, 460)
+    app.env.add_object('wedge', 380, 450)
     app.buttons = {}
     # Mode row
     app.buttons['mode_move'] = _make_button(710, 108, 100, 28, 'Move', 'mode_move')
@@ -1079,14 +1159,25 @@ def _train_batch(app):
     raw_std_adv = math.sqrt(var_adv)
     std_adv = max(raw_std_adv, 0.08)
     td_std = raw_std_adv
+    # Adv-std was a copy of TD-std (both appended raw_std_adv), so the
+    # panel showed TD-std == Adv-std = 0.066 in Fig.2 and hid whether
+    # normalisation was doing anything. Now Adv-std = std of the
+    # NORMALISED advantages adv_n in [-1,1] actually used for the actor
+    # update. TD-std = std of raw TD errors. They must differ.
     pos_frac = sum(1 for (_s, _a, _n, _r, _s2, _d, _t) in batch if _r >= 0.4) / len(batch)
     # Gate: no positives AND no TD surprise -> critic still learns (it is
     # fitting the failure distribution), but the actor does NOT update.
     # Exploration (OU noise) keeps running, so the actor still explores;
     # it just does not collapse toward its own noise.
     actor_gated = (pos_frac == 0.0 and td_std < 0.02)
+    _adv_ns = []
+    for _a in advs:
+        _an = (_a - mean_adv) / std_adv
+        _adv_ns.append(max(-1.0, min(1.0, _an)))
+    _adv_mean = sum(_adv_ns) / len(_adv_ns)
+    _adv_var = sum((x - _adv_mean) * (x - _adv_mean) for x in _adv_ns) / len(_adv_ns)
     app.td_std_hist.append(td_std)
-    app.adv_std_hist.append(raw_std_adv)
+    app.adv_std_hist.append(math.sqrt(_adv_var))
     app.pos_frac_hist.append(pos_frac)
     if len(app.td_std_hist) > 120: app.td_std_hist.pop(0)
     if len(app.adv_std_hist) > 120: app.adv_std_hist.pop(0)
@@ -1149,6 +1240,8 @@ def _end_episode(app):
     if not app.eval_mode:
         app.actor_lr = max(0.00008, app.actor_lr * 0.995)
         app.critic_lr = max(0.00025, app.critic_lr * 0.995)
+        # Epsilon also decays per-step in onStep (0.9995/step); this
+        # episode-end 0.985 is the slower anneal on top, not the only decay.
         app.epsilon = max(0.05, app.epsilon * 0.985)
         app.ou.reset()
     app.env.episode += 1
@@ -1177,11 +1270,30 @@ def onStep(app):
             # tries closing more often there. No direction is scripted: the
             # sign still comes from OU noise, the MLP still has to learn that
             # closing pays. Uses contact_sensors() — a sensor, not ground truth.
+            # Gripper boost: old code boosted only on CONTACT (>0.5). The
+            # gripper never contacts anything until it is already inside
+            # an object, so the boost never fired in Fig.2. Now boost in
+            # the 50px approach halo too: trying to close near an object
+            # is the behaviour to explore, not just closing after contact.
             _c, _f, _sl = app.env.contact_sensors()
-            if _c > 0.5 and app.env.arm.gripper > 0.38:
+            _gc = app.env.arm.gripper_center()
+            _tgt = app.env.current_target_pos()
+            _d_tgt = math.hypot(_tgt[0] - _gc[0], _tgt[1] - _gc[1])
+            if (_c > 0.5 or _d_tgt < 50.0) and app.env.arm.gripper > 0.38:
                 noise[3] = noise[3] * 1.8
             executed = [max(-1.0, min(1.0, clean[i] + noise[i])) for i in range(4)]
         reward, done, timeout, info = app.env.step(executed, app)
+        # Per-step epsilon decay: old code decayed epsilon only at episode
+        # END (0.985/episode), so after 515 steps eps was still 0.35 and
+        # OU noise dominated the whole first episode. Now 0.9995/step:
+        # eps 0.35 -> 0.27 at step 515, -> 0.05 floor by ~3900 steps.
+        # Episode-end decay in _end_episode is kept as a second, slower
+        # anneal; the floor 0.05 stops exploration collapsing to zero.
+        app.epsilon = max(0.05, app.epsilon * 0.9995)
+        # Live episode-reward curve (see onAppStart note).
+        if app.env.step_count % 20 == 0:
+            app.live_reward_hist.append(app.env.episode_reward)
+            if len(app.live_reward_hist) > 120: app.live_reward_hist.pop(0)
         # Do NOT also do app.episode_reward += reward: Env.step already adds
         # to env.episode_reward. Double-counting + _end_episode only reset
         # env.episode_reward, so the displayed Reward grew across episodes.
@@ -1283,6 +1395,7 @@ def _handle_button(app, action):
         app.critic_lr = 0.001
         app.loss_hist = [0.0]
         app.reward_hist = [0.0]
+        app.live_reward_hist = [0.0]
         app.grad_norm_hist = [0.0]
         app.critic_loss_hist = [0.0]
         app.actor_loss_hist = [0.0]
@@ -1644,7 +1757,12 @@ def redrawAll(app):
     drawLabel('Actor 43 → 48 → 32 → 4 tanh', PANEL_X + 14, py, size=9, fill=DIM, align='left-top')
     drawLabel('Critic 43 → 48 → 32 → 1', PANEL_X + 14, py + 13, size=9, fill=DIM, align='left-top')
     drawLabel('Input: 35 sensors + 8 ctx  (incl accel+gyro)', PANEL_X + 14, py + 26, size=8, fill=DIM, align='left-top')
-    drawLabel('Actor RMS %.3f  |  Critic RMS %.3f' % (app.actor.weight_norm(), app.critic.weight_norm()), PANEL_X + 14, py + 39, size=9, fill=ACC, align='left-top')
+    # Was: 'Actor RMS / Critic RMS' (weight RMS). Both nets init with the
+    # same He/Xavier scale and train at similar LRs, so RMS 0.210/0.208
+    # looked identical and hid everything. Weight RMS is not learning.
+    # Now: critic loss / actor loss (the split that actually diverges),
+    # with weight RMS kept as small second-line context.
+    drawLabel('Critic loss %.4f  |  Actor loss %.4f  |  RMS %.3f/%.3f' % (app.critic_loss_hist[-1] if app.critic_loss_hist else 0.0, app.actor_loss_hist[-1] if app.actor_loss_hist else 0.0, app.actor.weight_norm(), app.critic.weight_norm()), PANEL_X + 14, py + 39, size=8, fill=ACC, align='left-top')
     gx, gy, gw, gh = PANEL_X + 14, py + 52, PANEL_W - 28, 52
     drawRect(gx, gy, gw, gh, fill=PANEL2, border=BORDER, roundness=8)
     mx = max(app.loss_hist); mn = min(app.loss_hist); rng = (mx - mn) if mx - mn > 0.01 else 1.0
@@ -1657,14 +1775,18 @@ def redrawAll(app):
     drawLabel('loss ↓ as it learns', gx + gw - 8, gy + 8, size=8, fill=DIM, align='right-top')
     ry = gy + gh + 8
     drawRect(gx, ry, gw, 42, fill=PANEL2, border=BORDER, roundness=8)
-    mx = max(app.reward_hist); mn = min(app.reward_hist); rng = (mx - mn) if mx - mn > 0.5 else 1.0
+    # Live curve: use live_reward_hist (running episode reward, updated
+    # every 20 steps) when the episode has not ended yet; reward_hist
+    # only has episode-END totals and stays [0.0] for 600 steps.
+    _rh = app.live_reward_hist if len(app.live_reward_hist) > 1 else app.reward_hist
+    mx = max(_rh); mn = min(_rh); rng = (mx - mn) if mx - mn > 0.5 else 1.0
     pts = []
-    for i, v in enumerate(app.reward_hist):
+    for i, v in enumerate(_rh):
         x = gx + 8 + (i / max(1, len(app.reward_hist) - 1)) * (gw - 16)
         y = ry + 42 - 8 - ((v - mn) / rng * (42 - 16)); pts.append((x, y))
     for i in range(len(pts) - 1):
         drawLine(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], fill=ACC2, lineWidth=1.6)
-    drawLabel('episode reward', gx + 8, ry + 6, size=8, fill=DIM, align='left-top')
+    drawLabel('episode reward (live, current ep %.1f)' % app.env.episode_reward, gx + 8, ry + 6, size=8, fill=DIM, align='left-top')
     sy = ry + 42 + 8
     drawRect(gx, sy, gw, 73, fill=PANEL2, border=BORDER, roundness=8)
     drawLabel('LIVE: ACC %.2f,%.2f  DOWN %.2f' % (env.accel_forward, env.accel_perp, env.down_alignment), gx + 8, sy + 6, size=8, fill=rgb(45, 212, 191), align='left-top')
