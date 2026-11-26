@@ -1,4 +1,4 @@
-# robot_training_58.py — OpenArm 2.0 + MLP-RL Stacking Trainer (SCS, 1050x700)
+# robot_training_59.py — OpenArm 2.0 + MLP-RL Stacking Trainer (SCS, 1050x700)
 # ---------------------------------------------------------------------------
 # Maps the Anvil OpenArm 2.0 Quest Teleop Kit to a 2D SCS lab:
 #   Real kit: 7-DOF per arm, 633 mm reach, parallel gripper 88 mm opening,
@@ -36,6 +36,24 @@
 #     _update_held, _try_release, _finish_step) with bodies moved verbatim;
 #     step is now an orchestrator. Added FILE MAP + TUNABLES index below
 #     and section banners. Verified by step-by-step equivalence vs v52.
+    #   - v59: FIXES IN PRIORITY ORDER, SECOND REVIEW. (1) ORACLE REMOVED:
+    #     _sensor_vector no longer feeds dx,dy from com_world() or tdx,tdy
+    #     from tower_slot(). Replaced with sensor-derived nearest live ray
+    #     dist+angle and nearest memory ray dist+angle, obs dim stays 69.
+    #     onStep gripper boost no longer uses COM distance, it uses
+    #     ultrasonic / nearest ray <50px. Reward shaping still uses COM,
+    #     reward is allowed privileged info, observation is not. (2) SHAPING
+    #     LEAK: shaping uses gamma=1 (zero at rest) + Phi zeroed at
+    #     terminal/timeout via -Phi_last correction
+    #     in _finish_step. Centred bonus capped to one-time per approach
+    #     via _centred_given, same as close bonus, no more +60 farming.
+    #     Shaped vs unshaped returns logged separately. (3) HONEST NAME +
+    #     BASELINE: algorithm renamed to V-critic advantage-weighted
+    #     regression, fixed seed 0, random-baseline button. (4) SPAWN +
+    #     SAMPLING: spawn avoids tower zone and overlaps, start pose
+    #     randomized so v50 relative frame is not cosmetic, stratified
+    #     50% positives removed, uniform sampling within each half to
+    #     stop V(s) upward bias. Header gamma fixed 0.97 -> 0.99.
     #   - v58: RESTORE LIVE DATA. v56 deleted the EMA but left the loss
     #     chart reading _lh, which was defined from the EMA hist. redrawAll
     #     raised NameError at the loss chart rect, so the reward chart,
@@ -575,7 +593,12 @@ class ReplayBuffer:
         if len(self.buf) > self.capacity:
             self.buf.pop(0)
     def sample(self, k):
-        return self.sample_stratified(k)
+        # v59: uniform. Was sample_stratified, which forced 50% positives
+        # and biased V(s) upward with no importance weighting.
+        n = min(k, len(self.buf))
+        if n <= 0:
+            return []
+        return random.sample(self.buf, n)
     def sample_stratified(self, k, pos_thresh=0.4, min_pos_frac=0.5):
         n = min(k, len(self.buf))
         if n <= 0:
@@ -988,7 +1011,7 @@ class Env:
         self.steps_to_grasp = None; self.steps_to_stack = None; self.steps_to_success = None; self.on_goal_steps = 0
         self.last_grasp_msg = ''
         self._custom_verts = None
-        self.last_gripper_pos = None; self.still_steps = 0; self._lift_given = False; self._close_given = False
+        self.last_gripper_pos = None; self.still_steps = 0; self._lift_given = False; self._close_given = False; self._centred_given = False; self._last_phi = 0.0; self.episode_shaped = 0.0; self.episode_unshaped = 0.0
         self.prev_gripper_vel = (0.0, 0.0); self.joint_vel = [0.0,0.0,0.0]
         self.gripper_vel = (0.0, 0.0); self.gripper_acc = (0.0, 0.0)
         self.ultrasonic_dist = ULTRA_MAX; self.ultrasonic_close = 0.0; self.ultrasonic_hit = (0.0, 0.0)
@@ -1134,8 +1157,12 @@ class Env:
     def reset_scene(self, keep_brain=True):
         _gt = self.arm.gripper_type
         self.arm = RobotArm(); self.arm.gripper_type = _gt
+        # v59: randomise start pose so v50 relative frame is not cosmetic.
+        self.arm.angles = [-0.85 + random.uniform(-0.15, 0.15), 1.15 + random.uniform(-0.15, 0.15), 0.35 + random.uniform(-0.15, 0.15)]
+        if self.arm.finger_tip()[1] > FLOOR_Y - 5:
+            self.arm.angles = [-0.85, 1.15, 0.35]
         self._set_frame_anchor()  # v50: new episode, new anchor
-        self.tower_count = 0; self.still_steps = 0; self.last_gripper_pos = None; self._lift_given = False; self._close_given = False
+        self.tower_count = 0; self.still_steps = 0; self.last_gripper_pos = None; self._lift_given = False; self._close_given = False; self._centred_given = False; self._last_phi = 0.0; self.episode_shaped = 0.0; self.episode_unshaped = 0.0
         self.steps_to_grasp = None; self.steps_to_stack = None; self.steps_to_success = None; self.on_goal_steps = 0  # v52
         self.wm.clear()  # v54: new scene = new world, old beliefs are stale
         self.prev_gripper_vel = (0.0, 0.0); self.joint_vel = [0.0,0.0,0.0]
@@ -1147,9 +1174,11 @@ class Env:
         # within ~150px makes the first inside/proximity bonuses reachable
         # by exploration, then later episodes can spawn farther. Still no
         # script: position is randomised, the MLP still has to find them.
-        base_xs = [190, 280, 360, 230, 320, 400]
-        random.shuffle(base_xs)
-        xs = [float(base_xs[i % len(base_xs)] + random.uniform(-40, 40)) for i in range(len(self.objects))]
+        # v59: spawn avoids tower zone 320-420 and overlaps. Fixed slots
+        # left of tower, 60px apart, small jitter. No resample loop: slots
+        # already guarantee separation and tower avoidance.
+        base_xs = [175, 235, 295, 205, 265, 320]
+        xs = [float(base_xs[i % 3] + random.uniform(-8, 8)) for i in range(len(self.objects))]
         for i, o in enumerate(self.objects):
             o.x = float(xs[i % len(xs)])
             o.y = 430.0 + (i // 3) * 60.0 + random.uniform(-20, 20)
@@ -1334,7 +1363,13 @@ class Env:
         _new_down = math.sin(_a3)
         _phi_prev = -prev_dist / 50.0 + 0.5 * _prev_down
         _phi_new = -new_dist / 50.0 + 0.5 * _new_down
-        reward += 0.99 * _phi_new - _phi_prev
+        # v59: shaping uses gamma=1, not 0.99. With gamma=0.99, a motionless
+        # arm earns (1-gamma)*-Phi = +0.06/step leak, +20 over 321 steps.
+        # With gamma=1, shaping at rest is 0, total is -Phi_0, policy-invariant.
+        _shaping = _phi_new - _phi_prev
+        reward += _shaping
+        self._last_phi = _phi_new
+        info['shaping'] = info.get('shaping', 0.0) + _shaping
         # Proximity shaping: within 60px of target, pay for being close
         # AND pointing down. This fills the gap between approach (far) and
         # inside-polygon (rare): the arm now gets graded signal in the
@@ -1342,7 +1377,9 @@ class Env:
         if new_dist < 60.0 and arm.held is None:
             _prox = 1.0 - new_dist / 60.0
             _down01 = 0.5 + 0.5 * _new_down
-            reward += 0.02 * _prox * _down01
+            _sh2 = 0.02 * _prox * _down01
+            reward += _sh2
+            info['shaping'] = info.get('shaping', 0.0) + _sh2
         # --- Close-on-object shaping (fixes 0 grasp attempts) ---
         # The old reward gave +0 for being centred inside an object with the
         # gripper open, and +0 for closing on it unless a grasp succeeded.
@@ -1368,14 +1405,23 @@ class Env:
                     break
             if _inside_any is not None:
                 _centred = max(0.0, 1.0 - _inside_off / (_inside_any.radius + 12.0))
-                reward += 0.10 * _centred
+                # v59: one-time per approach, not per-step. Was +0.10*centred
+                # every step, up to +60 per episode vs +10 for a stack.
+                if not self._centred_given:
+                    _sh3 = 0.10 * _centred
+                    reward += _sh3
+                    info['shaping'] = info.get('shaping', 0.0) + _sh3
+                    self._centred_given = True
                 # Closing = gripper value decreasing (action[3] > 0 drives
                 # arm.gripper down in step()). Detect a close this step.
                 if action[3] > 0.30 and not self._close_given:
-                    reward += 0.30 * _centred
+                    _sh4 = 0.30 * _centred
+                    reward += _sh4
+                    info['shaping'] = info.get('shaping', 0.0) + _sh4
                     self._close_given = True
                     self.last_grasp_msg = 'CLOSE ON OBJECT — centred %.2f' % _centred
             else:
+                self._centred_given = False
                 # Close-attempt zone: within 30px of an object's COM, a
                 # close action earns +0.10 even though the gripper is not
                 # yet inside the polygon. Old code paid +0 only inside, so
@@ -1396,6 +1442,7 @@ class Env:
                         _near = _o
                 if _near is not None and _near_d < 30.0 and action[3] > 0.30 and not self._close_given:
                     reward += 0.10
+                    info['shaping'] = info.get('shaping', 0.0) + 0.10
                     self._close_given = True
                     self.last_grasp_msg = 'CLOSE ATTEMPT — %.0fpx from COM' % _near_d
                 elif _near is None or _near_d >= 30.0:
@@ -1491,6 +1538,15 @@ class Env:
             done=True; _step_r += 20.0
             self.steps_to_success = self.step_count + 1  # v52: steps-to-goal, full task
         if self.step_count+1 > app_ctx.episode_len: done=True; timeout=True  # v52: timeout is a tunable parameter, not a magic 600
+        # v59: zero Phi at terminal/timeout. Shaping added Phi_new,
+        # correct is 0 at terminal, so correction is -Phi_last.
+        if done:
+            _corr = -1.0 * self._last_phi
+            _step_r = max(-5.0, min(5.0, _step_r + _corr))
+            info['shaping'] = info.get('shaping', 0.0) + _corr
+        _sh = info.get('shaping', 0.0)
+        self.episode_shaped += _sh
+        self.episode_unshaped += (_step_r - _sh)
         reward = max(-25.0, min(25.0, _step_r))
         self.step_count+=1; self.episode_reward+=reward; return reward, done, timeout, info
 
@@ -1509,6 +1565,8 @@ def _make_button(x, y, w, h, label, action):
     return {'x': x, 'y': y, 'w': w, 'h': h, 'label': label, 'action': action, 'enabled': True}
 
 def onAppStart(app):
+    random.seed(0)  # v59: fixed seed for reproducibility
+    app.seed = 0
     app.width = WIDTH
     app.height = HEIGHT
     app.stepsPerSecond = 30
@@ -1550,6 +1608,9 @@ def onAppStart(app):
     app.adv_std_hist = [0.0]
     app.pos_frac_hist = [0.0]
     app.actor_gated_count = 0
+    app.shaped_hist = [0.0]  # v59: shaped return per episode
+    app.unshaped_hist = [0.0]  # v59: unshaped return per episode
+    app.random_baseline = None  # v59: random-policy mean reward, computed on demand
     app.critic_updates = 0  # v48: counts _train_batch calls (critic updates)
     app.actor_updates = 0  # v48: counts actor updates actually run
     app.actor_update_every = 5  # v48: critic:actor = 5:1 in _train_batch units, see _train_batch
@@ -1613,6 +1674,7 @@ def onAppStart(app):
     app.buttons['eval'] = _make_button(868, 246, 158, 28, 'Eval: OFF', 'eval')
     app.buttons['reset_scene'] = _make_button(710, 278, 150, 28, 'Reset Scene', 'reset_scene')
     app.buttons['demo_stack'] = _make_button(868, 278, 158, 28, 'Demo Stack x3', 'demo_stack')
+    app.buttons['random_baseline'] = _make_button(710, 410, 316, 26, 'Random Baseline', 'random_baseline')
     app.buttons['close_shape'] = _make_button(710, 312, 150, 28, 'Close Shape', 'close_shape')
     app.buttons['cancel_draw'] = _make_button(868, 312, 158, 28, 'Cancel Draw', 'cancel_draw')
     app.buttons['gripper'] = _make_button(710, 345, 316, 26, 'Gripper: PARALLEL', 'gripper')
@@ -1633,8 +1695,8 @@ def _sensor_vector(app):
     _ultra_d, _ultra_close = env.ultrasonic()
     _ultra_norm = max(0.0, min(1.0, _ultra_d / ULTRA_MAX))
     contact, force, slip = env.contact_sensors()
-    target = env.current_target_pos()
-    tower = env.tower_slot()
+    # v59: NO ORACLE. target/tower COM removed. Reward shaping still uses
+    # COM (privileged reward is allowed), observation does not.
     # v50 relative frame: rotate every vector by -frame_a3 (episode-start
     # EE orientation) and translate by the episode-start gripper position.
     # At episode start the gripper obs is (0,0) and the joint obs is
@@ -1646,10 +1708,19 @@ def _sensor_vector(app):
     def _rot(_dx, _dy):
         return (_dx * _ca - _dy * _sa, _dx * _sa + _dy * _ca)
     _gdx, _gdy = _rot(gc[0] - env.frame_ox, gc[1] - env.frame_oy)
-    dx, dy = _rot(target[0] - gc[0], target[1] - gc[1])
-    dx /= 600.0; dy /= 600.0
-    tdx, tdy = _rot(tower[0] - gc[0], tower[1] - gc[1])
-    tdx /= 600.0; tdy /= 600.0
+    # v59: sensor-derived target cue, not COM. Nearest live ray + nearest
+    # memory ray. Both are sensor readings.
+    _mem_rays = env.wm.ask_polar(gc, _a3)
+    _ray_k = min(range(len(rays)), key=lambda _k: rays[_k])
+    _ray_min = rays[_ray_k]
+    _ray_ang = ((_ray_k - 4) * 0.22) / 0.88
+    _mem_k = min(range(len(_mem_rays)), key=lambda _k: _mem_rays[_k])
+    _mem_min = _mem_rays[_mem_k]
+    _mem_off = _mem_k * (2.0 * math.pi / 24.0)
+    _mem_off = ((_mem_off + math.pi) % (2.0 * math.pi)) - math.pi
+    _mem_ang = _mem_off / math.pi
+    dx, dy = _ray_min, _ray_ang
+    tdx, tdy = _mem_min, _mem_ang
     _gvx, _gvy = _rot(env.gripper_vel[0], env.gripper_vel[1])
     held = 1.0 if arm.held is not None else 0.0
     tilt = arm.held.slip if arm.held is not None else 0.0
@@ -1667,12 +1738,12 @@ def _sensor_vector(app):
                (arm.angles[2] - env.frame_angles[2]) / 1.8,
                arm.gripper, _gdx / 700.0, _gdy / 700.0]
     sensors = sensors + rays
-    sensors = sensors + [contact, force, slip, dx, dy, tdx, tdy, held, tilt, remaining, floor_clear, _gtype]
+    sensors = sensors + [contact, force, slip, dx, dy, tdx, tdy, held, tilt, remaining, floor_clear, _gtype]  # v59: dx,dy=nearest ray, tdx,tdy=nearest mem ray
     sensors = sensors + [env.accel_forward, env.accel_perp, env.down_alignment,
                          env.joint_vel[0]/0.07, env.joint_vel[1]/0.07, env.joint_vel[2]/0.07,
                          _gvx/10.0, _gvy/10.0]  # v50: gripper vel in start-EE frame
     sensors = sensors + [_ultra_norm, _ultra_close]
-    sensors = sensors + env.wm.ask_polar(gc, _a3)  # v54: 24 memory rays, EE-frame like live rays
+    sensors = sensors + _mem_rays  # v54: 24 memory rays, reused, no second cast
     # sensors = 61 (37 + 24 memory rays), context = 8 → 69, then Welford-normalised.
     raw = sensors + app.ctx.vector()
     # Normalise with PRIOR stats, then update — never normalise a sample
@@ -1686,10 +1757,9 @@ def _train_batch(app):
     if len(app.replay) + len(app.demo_replay) < 16:
         return
     app.critic_updates = app.critic_updates + 1
-    # v48 50/50 demo/online (RLPD symmetric sampling): 16 demo + 16 online
-    # when both have >=16. Each half is itself stratified (>=50% positives
-    # when any exist), so neither half collapses to all-failures. Falls back
-    # to whatever exists early on (demo empty -> 32 online, old behaviour).
+    # v59: 50/50 demo/online kept (RLPD-style demo ratio), but stratified
+    # 50% positives REMOVED. Forcing positives biased V(s) upward with no
+    # importance weighting. Now uniform within each half.
     _n_demo = min(16, len(app.demo_replay))
     batch = app.demo_replay.sample(_n_demo) + app.replay.sample(32 - _n_demo)
     random.shuffle(batch)
@@ -1796,6 +1866,24 @@ def _train_batch(app):
     for _h in (app.loss_hist, app.grad_norm_hist, app.critic_loss_hist, app.actor_loss_hist):
         if len(_h) > 120: _h.pop(0)
 
+def _random_baseline(app, n_episodes=3):
+    # v59: random-policy baseline. Runs n episodes with uniform random
+    # actions in a fresh Env, no learning, returns mean shaped reward.
+    # Lets you tell learning from reward leakage: MLP must beat this.
+    _tot = 0.0
+    for _ in range(n_episodes):
+        _e = Env()
+        _e.reset_scene()
+        for _ in range(app.episode_len):
+            _a = [random.uniform(-1.0, 1.0) for _ in range(4)]
+            _r, _d, _t, _info = _e.step(_a, app)
+            if _d:
+                break
+        _tot += _e.episode_reward
+    app.random_baseline = _tot / max(1, n_episodes)
+    app.status = 'Random baseline %.1f over %d eps (seed %d).' % (app.random_baseline, n_episodes, app.seed)
+    return app.random_baseline
+
 def _end_episode(app):
     app.reward_hist.append(app.env.episode_reward)
     if len(app.reward_hist) > 120:
@@ -1833,6 +1921,11 @@ def _end_episode(app):
     app.env.reset_scene()
     app.ctx = TrainingContext()
     app.status = 'Ep %d done R %.1f | grasp %s stack %s done %s goal %d | brain kept.' % (app.env.episode - 1, app.env.episode_reward, _tg if _tg is not None else '—', _ts if _ts is not None else '—', _td if _td is not None else '—', _og)
+    app.shaped_hist.append(app.env.episode_shaped)
+    app.unshaped_hist.append(app.env.episode_unshaped)
+    if len(app.shaped_hist) > 120: app.shaped_hist.pop(0)
+    if len(app.unshaped_hist) > 120: app.unshaped_hist.pop(0)
+    app.status = app.status + ' | shaped %.1f unshaped %.1f' % (app.env.episode_shaped, app.env.episode_unshaped)
     app.env.episode_reward = 0.0
     app.episode_reward = 0.0  # keep the (now unused) display var in sync
 
@@ -1859,10 +1952,13 @@ def onStep(app):
             # the 50px approach halo too: trying to close near an object
             # is the behaviour to explore, not just closing after contact.
             _c, _f, _sl = app.env.contact_sensors()
-            _gc = app.env.arm.gripper_center()
-            _tgt = app.env.current_target_pos()
-            _d_tgt = math.hypot(_tgt[0] - _gc[0], _tgt[1] - _gc[1])
-            if (_c > 0.5 or _d_tgt < 50.0) and app.env.arm.gripper > 0.38:
+            # v59: sensor-based boost, not COM. Was _d_tgt from
+            # current_target_pos() (COM). Now ultrasonic <50 or nearest
+            # ray <50px. Same 50px halo, no oracle.
+            _ultra_d2, _ = app.env.ultrasonic()
+            _rays2 = app.env.cast_rays()
+            _near_sensor = (_ultra_d2 < 50.0) or (min(_rays2) * 240.0 < 50.0)
+            if (_c > 0.5 or _near_sensor) and app.env.arm.gripper > 0.38:
                 noise[3] = noise[3] * 1.8
             executed = [max(-1.0, min(1.0, clean[i] + noise[i])) for i in range(4)]
         reward, done, timeout, info = app.env.step(executed, app)
@@ -1969,6 +2065,8 @@ def _handle_button(app, action):
             app.status = 'Gripper: ADAPTIVE — curved C-fingers, wraps + cages. Fits 65px, forgiving grasp, slower slip.'
         else:
             app.status = 'Gripper: PARALLEL — straight fingers, 88mm opening. Must grasp narrow side.'
+    elif action == 'random_baseline':
+        _random_baseline(app, 3)
     elif action == 'manual':
         app.manual_open = True
         app.status = 'Instruction Manual open — X to close.'
@@ -2002,6 +2100,9 @@ def _handle_button(app, action):
         app.adv_std_hist = [0.0]
         app.pos_frac_hist = [0.0]
         app.actor_gated_count = 0
+        app.shaped_hist = [0.0]
+        app.unshaped_hist = [0.0]
+        app.random_baseline = None
         app.critic_updates = 0  # v48
         app.actor_updates = 0  # v48
         app.t_grasp_hist = []  # v52
@@ -2387,8 +2488,8 @@ def redrawAll(app):
         _draw_button(app, b, active)
     # MLP viz — HOW TO moved to INSTRUCTION MANUAL overlay. Freed space
     # goes to bigger loss/reward curves + a live sensor readout.
-    py = 418
-    drawLabel('Actor 69 → 48 → 32 → 4 tanh', PANEL_X + 14, py, size=9, fill=DIM, align='left-top')
+    py = 445  # v59: shifted down for random-baseline button
+    drawLabel('Actor 69 → 48 → 32 → 4 tanh | V-critic AWR, seed 0', PANEL_X + 14, py, size=9, fill=DIM, align='left-top')
     drawLabel('Critic 69 → 48 → 32 → 1', PANEL_X + 14, py + 13, size=9, fill=DIM, align='left-top')
     drawLabel('Input: 61 sensors + 8 ctx  (incl 24 memory rays + ultra)', PANEL_X + 14, py + 26, size=8, fill=DIM, align='left-top')
     # Was: 'Actor RMS / Critic RMS' (weight RMS). Both nets init with the
@@ -2427,7 +2528,7 @@ def redrawAll(app):
         drawLine(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], fill=ACC2, lineWidth=1.6)
     drawLabel('episode reward (live, current ep %.1f)' % app.env.episode_reward, gx + 8, ry + 6, size=8, fill=DIM, align='left-top')
     sy = ry + 42 + 8
-    drawRect(gx, sy, gw, 87, fill=PANEL2, border=BORDER, roundness=8)  # v52: 73 -> 87 for TIME line
+    drawRect(gx, sy, gw, 100, fill=PANEL2, border=BORDER, roundness=8)  # v59: 87 -> 100 for shaped line
     drawLabel('LIVE: ACC %.2f,%.2f  DOWN %.2f  |  ULTRA %.0fpx %s' % (env.accel_forward, env.accel_perp, env.down_alignment, env.ultrasonic_dist, 'IN RANGE' if env.ultrasonic_close > 0.5 else 'FAR'), gx + 8, sy + 6, size=8, fill=rgb(45, 212, 191), align='left-top')
     drawLabel('JOINT VEL %.2f %.2f %.2f  |  GRIP VEL %.1f,%.1f' % (env.joint_vel[0], env.joint_vel[1], env.joint_vel[2], env.gripper_vel[0], env.gripper_vel[1]), gx + 8, sy + 20, size=8, fill=DIM, align='left-top')
     drawLabel('GRIPPER %s  GAP %.0fpx  |  WM %d cells' % (env.arm.gripper_type.upper(), env.arm.gap(), env.wm.occupied_count()), gx + 8, sy + 34, size=8, fill=WARN, bold=True, align='left-top')
@@ -2437,6 +2538,7 @@ def redrawAll(app):
     _cg = env.steps_to_grasp if env.steps_to_grasp is not None else '—'
     _cs = env.steps_to_stack if env.steps_to_stack is not None else '—'
     drawLabel('TIME lim %d: grasp %s/%s | stack %s/%s | on-goal %d/%s' % (app.episode_len, _cg, _med(app.t_grasp_hist), _cs, _med(app.t_stack_hist), env.on_goal_steps, _med(app.on_goal_hist)), gx + 8, sy + 74, size=8, fill=DIM, align='left-top')
+    drawLabel('SHAPED %.1f UNSHAPED %.1f | RAND BASE %s' % (env.episode_shaped, env.episode_unshaped, ('%.1f' % app.random_baseline) if app.random_baseline is not None else '—'), gx + 8, sy + 86, size=8, fill=DIM, align='left-top')
     # Manual overlay — completely overlays everything, drawn last.
     if getattr(app, 'manual_open', False):
         _draw_manual(app)
