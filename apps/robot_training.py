@@ -35,7 +35,7 @@
 #   - Observation normalisation (Welford running mean/var, clipped +-5),
 #     advantage normalisation per batch, reward clipping, LR decay.
 #   - He init for ReLU, Xavier for tanh/sigmoid/linear, zero bias init.
-#   - Uniform replay buffer (capacity 2000), batch 32, gamma=0.97.
+#   - Uniform replay buffer (capacity 2000), batch 32, gamma=0.99.
 #   - Deterministic eval mode (noise=0, no training) to measure true policy.
 #   - No try/except, no getattr/hasattr, no .get() defaults, no scripted
 #     controller, no IK, no grasp table. Every line is explicit.
@@ -312,6 +312,30 @@ class ObsNormalizer:
             out.append(v)
         return out
 
+class OUNoise:
+    """OU correlated noise + common-mode. Independent Gaussian noise explores
+    one joint at a time and can never discover a coordinated multi-joint
+    escape from a wedge. OU keeps pushing one direction for a while and has
+    a shared component across shoulder+elbow so coordinated escapes are sampled."""
+    def __init__(self, dim, theta=0.15, sigma=0.25):
+        self.dim = dim
+        self.theta = theta
+        self.sigma = sigma
+        self.state = [0.0] * dim
+    def reset(self):
+        self.state = [0.0] * self.dim
+    def sample(self):
+        common = random.gauss(0, self.sigma * 0.5)
+        out = []
+        for i in range(self.dim):
+            dx = self.theta * (0.0 - self.state[i]) + random.gauss(0, self.sigma)
+            self.state[i] += dx
+            v = self.state[i] * 0.7 + common * 0.3
+            if v > 1.0: v = 1.0
+            if v < -1.0: v = -1.0
+            out.append(v)
+        return out
+
 class ReplayBuffer:
     """Uniform replay, capacity 2000. Stores (s, a, noise, r, s2, done, timeout)."""
     def __init__(self, capacity):
@@ -541,6 +565,8 @@ class Env:
         self.tower_count = 0
         self.last_grasp_msg = ''
         self._custom_verts = None
+        self.last_gripper_pos = None
+        self.still_steps = 0
     def tower_slot(self):
         # Next stable slot in tower zone. Stack height grows with placed count.
         return (592.0, FLOOR_Y - self.tower_count * 38.0 - 20.0)
@@ -562,11 +588,13 @@ class Env:
             return self.tower_slot()
         return best
     def cast_rays(self):
-        # 9 depth rays fanning downward from wrist camera. Returns 0..1 (1 = far).
+        # 9 rays from wrist camera, HAND-RELATIVE. Centre is a3 = cumulative
+        # wrist angle = direction open hand points. World-down gave free vision.
         gc = self.arm.gripper_center()
+        _, _, _, _, a3 = self.arm.fk()
         out = []
         for k in range(9):
-            ang = math.pi / 2 + (k - 4) * 0.22  # down +/- ~50 deg
+            ang = a3 + (k - 4) * 0.22  # hand forward +/- ~50 deg
             dx = math.cos(ang)
             dy = math.sin(ang)
             best = None
@@ -576,6 +604,10 @@ class Env:
                 d = _ray_hit(gc[0], gc[1], dx, dy, o.world_verts())
                 if d is not None and (best is None or d < best):
                     best = d
+            if dy > 0.05:
+                d_floor = (FLOOR_Y - gc[1]) / dy
+                if d_floor >= 0 and (best is None or d_floor < best):
+                    best = d_floor
             if best is None:
                 out.append(1.0)
             else:
@@ -620,16 +652,21 @@ class Env:
         self.objects.append(o)
         return o
     def reset_scene(self, keep_brain=True):
-        # Keep objects, drop them back to start spread. Tower count resets.
+        # Episode reset: KEEP brain, re-drop SAME objects at RANDOM positions.
+        # Fixed drop let the MLP memorise one layout. Random drop forces
+        # generalisation: every episode is a new layout it must sense.
         self.arm = RobotArm()
         self.tower_count = 0
+        self.still_steps = 0
+        self.last_gripper_pos = None
         self.step_count = 0
         self.episode_reward = 0.0
-        xs = [180, 300, 420, 240, 360, 470]
+        base_xs = [180, 300, 420, 240, 360, 470]
+        random.shuffle(base_xs)
         for i, o in enumerate(self.objects):
-            o.x = float(xs[i % len(xs)])
-            o.y = 180.0 + (i // 3) * 70.0
-            o.rot = 0.0
+            o.x = float(base_xs[i % len(base_xs)] + random.uniform(-40, 40))
+            o.y = 170.0 + (i // 3) * 70.0 + random.uniform(-20, 20)
+            o.rot = random.uniform(-0.25, 0.25)
             o.vx = 0.0
             o.vy = 0.0
             o.vrot = 0.0
@@ -708,16 +745,39 @@ class Env:
         gc0 = arm.gripper_center()
         prev_dist = math.hypot(prev_target[0] - gc0[0], prev_target[1] - gc0[1])
         # --- apply joint deltas (NO IK — MLP drives joints directly) ---
+        prev_angles = list(arm.angles)
         arm.angles[0] = max(-2.4, min(0.45, arm.angles[0] + action[0] * 0.055))
         arm.angles[1] = max(-0.15, min(2.6, arm.angles[1] + action[1] * 0.065))
         arm.angles[2] = max(-1.8, min(1.8, arm.angles[2] + action[2] * 0.065))
+        # Floor contact: reject only moves pushing FURTHER into floor. Moves
+        # lifting back toward floor are allowed even while still below it,
+        # otherwise a below-floor pose is permanently trapped. No teleport.
+        _gc_try = arm.gripper_center()
+        collision = False
+        if _gc_try[1] > FLOOR_Y - 5 and _gc_try[1] >= gc0[1]:
+            arm.angles = prev_angles
+            collision = True
         # gripper: +1 = close, -1 = open
         arm.gripper = max(0.0, min(1.0, arm.gripper - action[3] * 0.085))
         reward = -0.012
-        info = {'slip': 0.0, 'contact': 0.0, 'grasped': False, 'placed': False, 'dropped': False}
+        info = {'slip': 0.0, 'contact': 0.0, 'grasped': False, 'placed': False, 'dropped': False, 'collision': 0.0, 'stuck': 0.0}
+        if collision:
+            reward -= 2.0
+            info['collision'] = 1.0
+            self.last_grasp_msg = 'FLOOR CONTACT — gripper hit floor, move rejected'
         gc = arm.gripper_center()
         new_dist = math.hypot(prev_target[0] - gc[0], prev_target[1] - gc[1])
-        reward += (prev_dist - new_dist) * 0.028
+        if self.last_gripper_pos is not None:
+            moved = math.hypot(gc[0] - self.last_gripper_pos[0], gc[1] - self.last_gripper_pos[1])
+            if moved < 1.5:
+                self.still_steps += 1
+            else:
+                self.still_steps = 0
+            if self.still_steps > 60 and new_dist > 40:
+                reward -= 0.08
+                info['stuck'] = 1.0
+        self.last_gripper_pos = gc
+        reward += (prev_dist - new_dist) * 0.015
         # --- grasp attempt ---
         if arm.held is None and arm.gripper < 0.38:
             for o in self.objects:
@@ -811,7 +871,7 @@ class Env:
         if self.tower_count >= len(self.objects) and len(self.objects) > 0:
             done = True
             reward += 20.0
-        if self.step_count > 1400:
+        if self.step_count > 600:
             done = True
             timeout = True  # Timeout is NOT terminal: bootstrap V(s') (TD3 practice).
         if reward > 10.0:
@@ -832,19 +892,20 @@ def onAppStart(app):
     app.stepsPerSecond = 30
     app.scs = {}  # single nested bundle for any future window/extension use
     app.env = Env()
-    # Input 33 = 25 sensors + 8 context. Actor 4 = joint deltas + gripper.
-    app.actor = MLP([33, 48, 32, 4], ['relu', 'relu', 'tanh'])
-    app.critic = MLP([33, 48, 32, 1], ['relu', 'relu', 'linear'])
-    app.target_critic = MLP([33, 48, 32, 1], ['relu', 'relu', 'linear'])
+    # Input 34 = 26 sensors + 8 context. Actor 4 = joint deltas + gripper.
+    app.actor = MLP([34, 48, 32, 4], ['relu', 'relu', 'tanh'])
+    app.critic = MLP([34, 48, 32, 1], ['relu', 'relu', 'linear'])
+    app.target_critic = MLP([34, 48, 32, 1], ['relu', 'relu', 'linear'])
     app.target_critic.copy_from(app.critic)
     app.ctx = TrainingContext()
     app.replay = ReplayBuffer(2000)
-    app.obs_norm = ObsNormalizer(33)
-    app.actor_lr = 0.00035
+    app.obs_norm = ObsNormalizer(34)
+    app.actor_lr = 0.0008
     app.critic_lr = 0.001
-    app.gamma = 0.97
+    app.gamma = 0.99
     app.tau = 0.005
     app.eval_mode = False
+    app.ou = OUNoise(4)
     app.grad_norm_hist = [0.0]
     app.eval_reward_hist = [0.0]
     app.training = False
@@ -908,11 +969,12 @@ def _sensor_vector(app):
     held = 1.0 if arm.held is not None else 0.0
     tilt = arm.held.slip if arm.held is not None else 0.0
     remaining = len([o for o in env.objects if not o.placed]) / 6.0
+    floor_clear = max(0.0, min(1.0, (FLOOR_Y - gc[1]) / 200.0))
     sensors = [arm.angles[0] / 2.5, arm.angles[1] / 2.5, arm.angles[2] / 1.8,
                arm.gripper, gc[0] / 700.0, gc[1] / 700.0]
     sensors = sensors + rays
-    sensors = sensors + [contact, force, slip, dx, dy, tdx, tdy, held, tilt, remaining]
-    # sensors = 25, context = 8 → 33, then Welford-normalised.
+    sensors = sensors + [contact, force, slip, dx, dy, tdx, tdy, held, tilt, remaining, floor_clear]
+    # sensors = 26, context = 8 → 34, then Welford-normalised.
     raw = sensors + app.ctx.vector()
     # Normalise with PRIOR stats, then update — never normalise a sample
     # with itself (that would zero the first sample and leak the current
@@ -976,6 +1038,7 @@ def _end_episode(app):
     app.actor_lr = max(0.00008, app.actor_lr * 0.995)
     app.critic_lr = max(0.00025, app.critic_lr * 0.995)
     app.epsilon = max(0.05, app.epsilon * 0.985)
+    app.ou.reset()
     app.env.episode += 1
     # Reset scene but KEEP weights — learning persists across episodes.
     objs = list(app.env.objects)
@@ -992,7 +1055,8 @@ def onStep(app):
             noise = [0.0, 0.0, 0.0, 0.0]
             executed = list(clean)
         else:
-            noise = [random.gauss(0, app.epsilon * 0.6) for _ in range(4)]
+            ou = app.ou.sample()
+            noise = [ou[i] * app.epsilon * 1.4 for i in range(4)]
             executed = [max(-1.0, min(1.0, clean[i] + noise[i])) for i in range(4)]
         reward, done, timeout, info = app.env.step(executed, app)
         app.episode_reward += reward
@@ -1000,7 +1064,7 @@ def onStep(app):
         if not app.eval_mode:
             app.replay.add((s, executed, noise, reward, s2, done, timeout))
             app.ctx.update(reward, info['slip'], info['contact'], executed, info['grasped'])
-            if app.env.step_count % 8 == 0:
+            if app.env.step_count % 4 == 0:
                 _train_batch(app)
         if done:
             _end_episode(app)
@@ -1067,13 +1131,14 @@ def _handle_button(app, action):
         app.buttons['teleop']['label'] = 'Teleop: OFF'
         app.status = 'Training ON — MLP is acting + learning.' if app.training else 'Training paused. Brain kept.'
     elif action == 'reset_brain':
-        app.actor = MLP([33, 48, 32, 4], ['relu', 'relu', 'tanh'])
-        app.critic = MLP([33, 48, 32, 1], ['relu', 'relu', 'linear'])
-        app.target_critic = MLP([33, 48, 32, 1], ['relu', 'relu', 'linear'])
+        app.actor = MLP([34, 48, 32, 4], ['relu', 'relu', 'tanh'])
+        app.critic = MLP([34, 48, 32, 1], ['relu', 'relu', 'linear'])
+        app.target_critic = MLP([34, 48, 32, 1], ['relu', 'relu', 'linear'])
         app.target_critic.copy_from(app.critic)
         app.replay = ReplayBuffer(2000)
-        app.obs_norm = ObsNormalizer(33)
-        app.actor_lr = 0.00035
+        app.obs_norm = ObsNormalizer(34)
+        app.ou = OUNoise(4)
+        app.actor_lr = 0.0008
         app.critic_lr = 0.001
         app.loss_hist = [0.0]
         app.reward_hist = [0.0]
@@ -1293,7 +1358,7 @@ def redrawAll(app):
     # Top bar
     drawRect(0, 0, WIDTH, 68, fill=rgb(18, 20, 32))
     drawLabel('OpenArm 2.0  —  MLP-RL Stacking Trainer', 20, 16, size=20, fill=TXT, bold=True, align='left-top')
-    drawLabel('No IK  •  No grasp table  •  No shape library  •  MLP learns COM + support from rays + touch + torque', 20, 42, size=11, fill=DIM, align='left-top')
+    drawLabel('No IK  •  No grasp table  •  No shape library  •  No Computer Vision', 20, 42, size=11, fill=DIM, align='left-top')
     env = app.env
     drawLabel(('EVAL  |  ' if app.eval_mode else '') + 'Ep %d  |  Step %d  |  Reward %.1f  |  Tower %d/%d' % (env.episode, env.step_count, app.episode_reward, env.tower_count, len(env.objects)),
               1020, 16, size=11, fill=TXT, bold=True, align='right-top')
@@ -1329,7 +1394,7 @@ def redrawAll(app):
     _draw_arm(app)
     # Status
     drawRect(ARENA_X0, ARENA_Y1 - 26, ARENA_X1 - ARENA_X0, 26, fill=rgb(18, 20, 32), border=BORDER, roundness=8)
-    drawLabel(env.last_grasp_msg + '  |  ' + app.status, ARENA_X0 + 10, ARENA_Y1 - 13, size=9, fill=DIM, align='left-center')
+    drawLabel((env.last_grasp_msg + '  |  ' + app.status)[:92], ARENA_X0 + 10, ARENA_Y1 - 13, size=9, fill=DIM, align='left-center')
     # Right panel
     drawRect(PANEL_X, ARENA_Y0, PANEL_W, ARENA_Y1 - ARENA_Y0, fill=PANEL, border=BORDER, roundness=12)
     drawLabel('CONTROLS', PANEL_X + 14, ARENA_Y0 + 14, size=12, fill=TXT, bold=True, align='left-top')
@@ -1348,14 +1413,15 @@ def redrawAll(app):
         if bid == 'eval' and app.eval_mode:
             active = True
         _draw_button(app, b, active)
-    # MLP viz
+    # MLP viz — every line kept < 52 chars so it fits the 296px panel.
     py = 352
-    drawLabel('MLP  33 → 48 ReLU → 32 ReLU → 4 tanh  |  Critic + Target 33 → 48 → 32 → 1', PANEL_X + 14, py, size=9, fill=DIM, align='left-top')
-    drawLabel('Input = 25 sensors + 8 context (prev reward, slip, contact, grasp age, grasps/drops, prev actions)', PANEL_X + 14, py + 16, size=8, fill=DIM, align='left-top')
-    drawLabel('Actor RMS %.3f  |  Critic RMS %.3f  |  Target RMS %.3f' % (app.actor.weight_norm(), app.critic.weight_norm(), app.target_critic.weight_norm()), PANEL_X + 14, py + 30, size=9, fill=ACC, align='left-top')
-    drawLabel('Adam lr a=%.5f c=%.5f  |  Grad %.3f  |  Eval R %.1f  |  gamma %.2f tau %.3f' % (app.actor_lr, app.critic_lr, app.grad_norm_hist[-1] if app.grad_norm_hist else 0.0, app.eval_reward_hist[-1] if app.eval_reward_hist else 0.0, app.gamma, app.tau), PANEL_X + 14, py + 44, size=8, fill=DIM, align='left-top')
+    drawLabel('Actor 34 → 48 → 32 → 4 tanh', PANEL_X + 14, py, size=9, fill=DIM, align='left-top')
+    drawLabel('Critic 34 → 48 → 32 → 1', PANEL_X + 14, py + 13, size=9, fill=DIM, align='left-top')
+    drawLabel('Input: 26 sensors + 8 ctx', PANEL_X + 14, py + 26, size=8, fill=DIM, align='left-top')
+    drawLabel('Actor RMS %.3f  |  Critic RMS %.3f' % (app.actor.weight_norm(), app.critic.weight_norm()), PANEL_X + 14, py + 40, size=9, fill=ACC, align='left-top')
+    drawLabel('lr a=%.5f c=%.5f | Grad %.2f | Eval %.1f | g %.2f' % (app.actor_lr, app.critic_lr, app.grad_norm_hist[-1] if app.grad_norm_hist else 0.0, app.eval_reward_hist[-1] if app.eval_reward_hist else 0.0, app.gamma), PANEL_X + 14, py + 54, size=8, fill=DIM, align='left-top')
     # Loss curve
-    gx, gy, gw, gh = PANEL_X + 14, py + 62, PANEL_W - 28, 62
+    gx, gy, gw, gh = PANEL_X + 14, py + 72, PANEL_W - 28, 62
     drawRect(gx, gy, gw, gh, fill=PANEL2, border=BORDER, roundness=8)
     mx = max(app.loss_hist)
     mn = min(app.loss_hist)
@@ -1385,12 +1451,12 @@ def redrawAll(app):
     # How-to
     hy = ry + 62
     drawLabel('HOW TO BREAK A SCRIPT:', PANEL_X + 14, hy, size=10, fill=WARN, bold=True, align='left-top')
-    drawLabel('1. Draw Shape → click any polygon (concave!) → Close Shape', PANEL_X + 14, hy + 16, size=9, fill=TXT, align='left-top')
-    drawLabel('2. Place it anywhere. Move mode drags / R rotates.', PANEL_X + 14, hy + 30, size=9, fill=TXT, align='left-top')
-    drawLabel('3. TRAIN. Watch loss fall, grasp % rise. Reset Brain = re-learn.', PANEL_X + 14, hy + 44, size=9, fill=TXT, align='left-top')
-    drawLabel('Red dot = true COM (teaching only). White X = bbox centre.', PANEL_X + 14, hy + 58, size=9, fill=TXT, align='left-top')
-    drawLabel('NO fakes, NO fallbacks: MLP only. No IK, no grasp table, no script.', PANEL_X + 14, hy + 72, size=9, fill=TXT, align='left-top')
-    drawLabel('Keys: SPACE train • W/S A/D Q/E + G/O manual teleop • R rotate • DEL delete', PANEL_X + 14, hy + 88, size=8, fill=DIM, align='left-top')
+    drawLabel('1. Draw Shape → click polygon → Close Shape', PANEL_X + 14, hy + 16, size=9, fill=TXT, align='left-top')
+    drawLabel('2. Place anywhere. Move drags / R rotates.', PANEL_X + 14, hy + 30, size=9, fill=TXT, align='left-top')
+    drawLabel('3. TRAIN. Loss falls, grasp % rises.', PANEL_X + 14, hy + 44, size=9, fill=TXT, align='left-top')
+    drawLabel('Red dot = true COM. White X = bbox centre.', PANEL_X + 14, hy + 58, size=9, fill=TXT, align='left-top')
+    drawLabel('NO fakes, NO fallbacks: MLP only.', PANEL_X + 14, hy + 72, size=9, fill=TXT, align='left-top')
+    drawLabel('Keys: SPACE train • W/S A/D Q/E G/O • R • DEL', PANEL_X + 14, hy + 88, size=8, fill=DIM, align='left-top')
     # Footer
     drawRect(0, HEIGHT - 22, WIDTH, 22, fill=rgb(18, 20, 32))
     drawLabel('SCS robot_training.py — OpenArm 2.0 sim • MLP-RL', 12, HEIGHT - 11, size=9, fill=DIM, align='left-center')
