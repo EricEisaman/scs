@@ -1398,7 +1398,6 @@ def redrawAll(app):
     # Right panel
     drawRect(PANEL_X, ARENA_Y0, PANEL_W, ARENA_Y1 - ARENA_Y0, fill=PANEL, border=BORDER, roundness=12)
     drawLabel('CONTROLS', PANEL_X + 14, ARENA_Y0 + 14, size=12, fill=TXT, bold=True, align='left-top')
-    drawLabel('Mode: %s  •  Template: %s' % (app.mode.upper(), app.selected_template), PANEL_X + 14, ARENA_Y0 + 32, size=10, fill=DIM, align='left-top')
     # Buttons
     for bid, b in app.buttons.items():
         active = False
