@@ -1,7 +1,7 @@
 # apps/home.py
 # SCS home shell. Full viewport width and height.
 # Run as: ?app=home
-# Optional initial app override: ?app=home&module=grapher
+# Optional initial app override: ?app=home&initial_app=grapher
 # The shell is DOM plus one iframe. The SCS canvas stays behind the shell
 # and only carries the theme background. Each child app runs in its own
 # SCS runtime inside the iframe, so child state never collides with home.
@@ -43,7 +43,7 @@ APPS = [
     {"id": "pacman", "label": "Pac-Man",
      "description": "Pac-Man clone",
      "app": "pacman"},
-     {"id": "spatial_audio", "label": "Spatial Audio",
+    {"id": "spatial_audio", "label": "Spatial Audio",
      "description": "3D Spatial Audio",
      "app": "spatial_audio"},
 ]
@@ -87,8 +87,8 @@ from extensions.widgets import (
     AppFrame,
     FullscreenController,
     IconButton,
+    FloatingImageButton,
     StatusBar,
-    ScsFullscreenSuppressor,
 )
 
 # Document comes from the one window object, never from a second import.
@@ -155,25 +155,31 @@ class HomeView:
         self.topbar.right <= self.fullscreen_button.element
         self.app_frame = AppFrame()
         self.status = StatusBar("Ready")
+        # Floating 96x96 image button, bottom right, above the status bar.
+        # Image is /scs_logo_512.png at the repo root.
+        # Href is updated by the controller to sandbox.html?app=<current app>.
+        self.sandbox_button = FloatingImageButton(
+            "/scs_logo_512.png",
+            "Open source in sandbox.",
+            href="#",
+        )
         self.shell.appendChild(self.topbar.element)
         self.shell.appendChild(self.app_frame.element)
         self.shell.appendChild(self.status.element)
+        self.shell.appendChild(self.sandbox_button.element)
         DOCUMENT.body.appendChild(self.shell)
-        # Hide the SCS runtime button for the home canvas. Home keeps only
-        # the top bar button. The suppressor excludes the shell, so home's
-        # own button is never hidden.
-        self.scs_suppressor = ScsFullscreenSuppressor(DOCUMENT, exclude_root=self.shell)
         # Fullscreen target is resolved at click time from the app frame,
         # so it always acts on the currently loaded app.
-        # Fullscreen delegates to the child module's own wrapper, not to the
-        # AppFrame wrapper. That is what makes the child's own fullscreen
-        # handler run and scale its canvas. See AppFrame.request_module_fullscreen.
+        # Delegate to the child module wrapper, not the AppFrame wrapper,
+        # so the child's own fullscreen handler scales its canvas.
+        # This is what the restored ScsFullscreenSuppressor / ChildCanvasScaler
+        # code in widgets.py is for. Fallback inside AppFrame handles non SCS modules.
         self.fullscreen = FullscreenController(
             lambda: self.app_frame.fullscreen_target,
             button=self.fullscreen_button,
-            request_callback=lambda: self.app_frame.request_module_fullscreen(),
-            exit_callback=lambda: self.app_frame.exit_module_fullscreen(),
-            is_fullscreen_callback=lambda: self.app_frame.is_module_fullscreen(),
+            request_callback=self.app_frame.request_module_fullscreen,
+            exit_callback=self.app_frame.exit_module_fullscreen,
+            is_fullscreen_callback=self.app_frame.is_module_fullscreen,
         )
 
     def set_active(self, app_id):
@@ -186,16 +192,16 @@ class HomeView:
         self.status.set_text(text, is_error=is_error)
         return self
 
+    def set_sandbox_url(self, sandbox_url, logo_url=None):
+        self.sandbox_button.set_href(sandbox_url)
+        if logo_url:
+            self.sandbox_button.set_image(logo_url)
+        return self
+
     def destroy(self):
-        if getattr(self, 'scs_suppressor', None) is not None:
-            self.scs_suppressor.destroy()
-        if getattr(self, 'app_frame', None) is not None:
-            try:
-                self.app_frame.destroy()
-            except Exception:
-                pass
         self.fullscreen.destroy()
         self.hamburger.destroy()
+        self.app_frame.destroy()
         if self.shell.parentNode is not None:
             self.shell.parentNode.removeChild(self.shell)
         return self
@@ -238,24 +244,61 @@ class HomeController:
             url = url + "&renderer=" + renderer
         return url
 
-    def _module_from_url(self):
+    def _base_dir(self):
+        # Directory containing this page, with trailing slash.
+        # Used only for child app URLs, which load through this same page.
+        # Sandbox and logo are NOT here, they are at the repo root.
+        path = SCS_WINDOW.location.pathname
+        if path.endswith("/"):
+            return path
+        last = path.rsplit("/", 1)[-1]
+        if "." in last:
+            return path[: path.rfind("/") + 1]
+        return path + "/"
+
+    def _sandbox_url(self, app_id):
+        # sandbox.html lives at the repo root, same place as scs_logo_512.png.
+        # Leading slash, not _base_dir, so it stays at the repo root even
+        # if Home is served from a subpath.
+        entry = self.model.get(app_id)
         params = self._params()
-        wanted = params.get("module")
+        renderer = params.get("renderer")
+        url = "/sandbox.html?app=" + entry["app"]
+        if renderer:
+            url = url + "&renderer=" + renderer
+        return url
+
+    def _logo_url(self):
+        # scs_logo_512.png is at the repo root.
+        return "/scs_logo_512.png"
+
+    def _sync_sandbox_button(self):
+        # Href must follow the current app, so the button always opens
+        # the source of the app currently shown in the frame.
+        self.view.set_sandbox_url(
+            self._sandbox_url(self.model.current_app_id),
+            logo_url=self._logo_url(),
+        )
+        return self
+
+    def _initial_app_from_url(self):
+        params = self._params()
+        wanted = params.get("initial_app")
         if wanted is None or wanted == "":
             return self.model.default_app
         if wanted not in self.model.by_id:
-            raise ValueError("module %r is not in APPS" % wanted)
+            raise ValueError("initial_app %r is not in APPS" % wanted)
         return wanted
 
     def sync_from_url(self):
-        wanted = self._module_from_url()
+        wanted = self._initial_app_from_url()
         if wanted != self.model.current_app_id:
             self.model.current_app_id = wanted
         return self
 
     def sync_url_to_current(self):
         params = self._params()
-        params.set("module", self.model.current_app_id)
+        params.set("initial_app", self.model.current_app_id)
         query = "?" + params.toString()
         SCS_WINDOW.history.replaceState(None, "", self._base_path() + query)
         return self
@@ -265,6 +308,7 @@ class HomeController:
         entry = self.model.get(app_id)
         self.view.set_active(app_id)
         self.view.app_frame.load(self._child_url(app_id), app_id, title=entry["label"])
+        self._sync_sandbox_button()
         self.sync_url_to_current()
         return self
 
@@ -276,6 +320,7 @@ class HomeController:
         self.model.current_app_id = app_id
         self.view.set_active(app_id)
         self.view.app_frame.load(self._child_url(app_id), app_id, title=entry["label"])
+        self._sync_sandbox_button()
         self.sync_url_to_current()
         return self
 

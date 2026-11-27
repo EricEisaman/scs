@@ -15,15 +15,80 @@ canvas:fullscreen{margin:auto !important;padding:0 !important;background:black;}
 </head>
 <body onload="brython({debug:1, pythonpath:['.']})">
 <canvas id="canvas" width="400" height="400" tabindex="0"></canvas>
-<div id="sandbox-toolbar"><button id="run-btn">▶ Run</button><button id="stop-btn">■ Stop</button><button id="clear-log-btn">Clear Log</button></div>
+<div id="sandbox-toolbar"><button id="run-btn">\u25b6 Run</button><button id="stop-btn">\u25a0 Stop</button><button id="clear-log-btn">Clear Log</button></div>
 <!-- Sandbox: just enter app code here. Paste CMU-style code, it auto-runs. -->
+<!-- With ?app=<name>, the source of apps/<name>.py is loaded into the editor and auto-runs. -->
 <textarea id="code-input" placeholder="Just enter app code here..."></textarea>
 <div id="log" style="margin-top:10px;background:#1a1d24;border:1px solid #3a3f4b;border-radius:6px;padding:10px;min-height:80px;white-space:pre-wrap;font-size:11px;max-height:300px;overflow:auto;color:#e6e6e6;width:1050px;max-width:98vw;"></div>
 <script type="text/python">
 # Thin shell only. No loop, no events, no renderer, no shape drawing here.
 # All of that is baked into the package (scs_entrypoint.py).
 # Users just import from npm or load from CDN.
+# ?app= support: ?app=spatial_audio loads apps/spatial_audio.py into the
+# editor and auto-runs it. No ?app= means the previous behavior: the
+# editor starts empty and boot_sandbox runs its default example.
+from browser import document, window
+from browser import ajax
 import scs_entrypoint as ep
-ep.boot_sandbox()
+
+
+def _log(msg):
+    try:
+        log = document["log"]
+        log.text = (log.text + "\n" + msg) if log.text else msg
+    except Exception:
+        pass
+
+
+def _app_param():
+    try:
+        params = window.URLSearchParams.new(window.location.search)
+        return params.get("app")
+    except Exception:
+        return None
+
+
+def _is_safe_app(name):
+    # Only a bare app name, no path, no traversal, no extension.
+    if not name:
+        return False
+    for ch in name:
+        if not (ch.isalnum() or ch == "_"):
+            return False
+    return True
+
+
+_app = _app_param()
+if _app and _is_safe_app(_app):
+    _url = "/apps/" + _app + ".py"  # apps/ is at the repo root, same as sandbox.html
+
+    def _on_complete(req):
+        if req.status == 200:
+            try:
+                document["code-input"].value = req.text
+            except Exception:
+                pass
+            try:
+                document.title = "SCS Sandbox - " + _app
+            except Exception:
+                pass
+            _log("Loaded " + _app + " source into sandbox. Edit and press Run.")
+        else:
+            _log("Could not load app " + _app + " (HTTP " + str(req.status) + "). Showing default example.")
+        ep.boot_sandbox()
+
+    def _on_error(req):
+        _log("Could not load app " + _app + ". Showing default example.")
+        ep.boot_sandbox()
+
+    _req = ajax.ajax()
+    _req.bind("complete", _on_complete)
+    _req.bind("error", _on_error)
+    _req.open("GET", _url, True)
+    _req.send()
+else:
+    if _app:
+        _log("Invalid app name: " + str(_app))
+    ep.boot_sandbox()
 </script>
 </body></html>

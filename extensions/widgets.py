@@ -20,6 +20,7 @@ __all__ = [
     "Widget",
     "Button",
     "IconButton",
+    "FloatingImageButton",
     "Menu",
     "HamburgerMenu",
     "TopBar",
@@ -81,6 +82,9 @@ WIDGETS_CSS = """
 .widgets-app-loading.is-hidden{display:none}
 .widgets-statusbar{flex:0 0 28px;height:28px;width:100%;min-width:0;display:flex;align-items:center;padding:0 12px;font-size:12px;background:var(--widgets-bar-bg);color:var(--widgets-bar-fg);border-top:1px solid var(--widgets-border);box-sizing:border-box;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .widgets-statusbar.is-error{color:var(--widgets-error)}
+.widgets-sandbox-button{position:fixed;right:16px;bottom:44px;width:96px;height:96px;display:flex;align-items:center;justify-content:center;border-radius:50%;background:var(--widgets-panel-bg);border:1px solid var(--widgets-border);box-shadow:0 8px 24px rgba(0,0,0,0.35);z-index:60;cursor:pointer;text-decoration:none;overflow:hidden}
+.widgets-sandbox-button:hover{transform:translateY(-1px);box-shadow:0 12px 28px rgba(0,0,0,0.4)}
+.widgets-sandbox-button-img{width:100%;height:100%;object-fit:cover;display:block;border-radius:50%}
 /* SCS runtime fullscreen button: the runtime creates its own button for the SCS canvas. Home keeps only its top bar button, so hide any id or class with fullscreen in this document. Home's own button has no fullscreen in id or class, only in aria-label, so this rule leaves it alone. The JS suppressor below covers glyph only buttons and iframe documents. */
 [id*="fullscreen"],[class*="fullscreen"]{display:none !important}
 .widgets-dialog-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:100}
@@ -294,6 +298,44 @@ class IconButton(Widget):
     def set_glyph(self, glyph):
         self.glyph = glyph
         self.element.text = glyph
+        return self
+
+
+class FloatingImageButton(Widget):
+    """Floating 96x96 image button, bottom right, opens a URL in a new tab.
+
+    Implemented as an anchor with target _blank, so a click opens a new
+    tab without going through window.open and without popup blocker issues.
+    The href is updated when the current app changes, so it always points
+    at the currently loaded app.
+    """
+
+    def __init__(self, image_src, title, href="#"):
+        element = html.A(Class="widgets-sandbox-button")
+        element.attrs["href"] = href
+        element.attrs["target"] = "_blank"
+        element.attrs["rel"] = "noopener"
+        element.attrs["title"] = title
+        element.attrs["aria-label"] = title
+        img = html.IMG(Class="widgets-sandbox-button-img")
+        img.attrs["src"] = image_src
+        img.attrs["alt"] = title
+        element <= img
+        Widget.__init__(self, element)
+        self._img = img
+
+    def set_href(self, href):
+        self.element.attrs["href"] = href
+        return self
+
+    def set_image(self, src):
+        self._img.attrs["src"] = src
+        return self
+
+    def set_title(self, title):
+        self.element.attrs["title"] = title
+        self.element.attrs["aria-label"] = title
+        self._img.attrs["alt"] = title
         return self
 
 
