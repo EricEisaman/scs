@@ -1,7 +1,7 @@
 # apps/home.py
 # SCS home shell. Full viewport width and height.
 # Run as: ?app=home
-# Optional module override: ?app=home&module=grapher
+# Optional initial app override: ?app=home&module=grapher
 # The shell is DOM plus one iframe. The SCS canvas stays behind the shell
 # and only carries the theme background. Each child app runs in its own
 # SCS runtime inside the iframe, so child state never collides with home.
@@ -162,9 +162,15 @@ class HomeView:
         self.scs_suppressor = ScsFullscreenSuppressor(DOCUMENT, exclude_root=self.shell)
         # Fullscreen target is resolved at click time from the app frame,
         # so it always acts on the currently loaded app.
+        # Fullscreen delegates to the child module's own wrapper, not to the
+        # AppFrame wrapper. That is what makes the child's own fullscreen
+        # handler run and scale its canvas. See AppFrame.request_module_fullscreen.
         self.fullscreen = FullscreenController(
             lambda: self.app_frame.fullscreen_target,
             button=self.fullscreen_button,
+            request_callback=lambda: self.app_frame.request_module_fullscreen(),
+            exit_callback=lambda: self.app_frame.exit_module_fullscreen(),
+            is_fullscreen_callback=lambda: self.app_frame.is_module_fullscreen(),
         )
 
     def set_active(self, app_id):
@@ -180,6 +186,11 @@ class HomeView:
     def destroy(self):
         if getattr(self, 'scs_suppressor', None) is not None:
             self.scs_suppressor.destroy()
+        if getattr(self, 'app_frame', None) is not None:
+            try:
+                self.app_frame.destroy()
+            except Exception:
+                pass
         self.fullscreen.destroy()
         self.hamburger.destroy()
         if self.shell.parentNode is not None:

@@ -27,6 +27,7 @@ __all__ = [
     "FullscreenController",
     "ScsFullscreenSuppressor",
     "hide_scs_fullscreen_buttons",
+    "ChildCanvasScaler",
     "Dialog",
     "InfoDialog",
     "EntryDialog",
@@ -551,6 +552,7 @@ class TopBar(Widget):
         return self
 
 
+
 # ---------------------------------------------------------------------------
 # SCS fullscreen button suppression
 # ---------------------------------------------------------------------------
@@ -723,12 +725,280 @@ class ScsFullscreenSuppressor:
         return self
 
 
+# ---------------------------------------------------------------------------
+# Child canvas fullscreen scaling - FALLBACK ONLY
+# ---------------------------------------------------------------------------
+# Primary path is AppFrame.request_module_fullscreen: the child's own
+# wrapper goes fullscreen, so the child's own handler scales its canvas.
+# This scaler runs only when that delegation was unavailable and the
+# AppFrame wrapper itself is the fullscreen element (non SCS module, or
+# child wrapper not yet loaded). Then it sets each child canvas CSS size
+# to fit the iframe viewport, preserving aspect. On exit it restores the
+# exact original CSS sizes. It runs on fullscreenchange, on the iframe
+# window resize, and on canvas mutations. No polling, no timeouts. It never
+# changes canvas buffer size or app logical size, only CSS display size.
+# When the child wrapper is fullscreen, top fullscreenElement is the iframe,
+# not the AppFrame wrapper, so is_fullscreen() is False and this scaler stays
+# idle and never fights the child's own scaling.
+
+def _parse_px(value):
+    try:
+        text = str(value).strip().lower()
+        if text.endswith("px"):
+            text = text[:-2]
+        return float(text)
+    except Exception:
+        return 0.0
+
+
+class ChildCanvasScaler:
+    def __init__(self, iframe, fullscreen_target_resolver):
+        self.iframe = iframe
+        if callable(fullscreen_target_resolver):
+            self._resolver = fullscreen_target_resolver
+        else:
+            self._resolver = lambda: fullscreen_target_resolver
+        self._originals = []
+        self._observer = None
+        self._child_window = None
+        self._child_doc = None
+        _DOCUMENT.bind("fullscreenchange", self._on_fullscreen_change)
+
+    def is_fullscreen(self):
+        try:
+            return _DOCUMENT.fullscreenElement is self._resolver()
+        except Exception:
+            return False
+
+    def _child_document(self):
+        try:
+            doc = self.iframe.contentDocument
+            if doc is not None:
+                return doc
+        except Exception:
+            pass
+        try:
+            return self.iframe.contentWindow.document
+        except Exception:
+            return None
+
+    def _find_canvases(self, doc):
+        try:
+            nodes = doc.querySelectorAll("canvas")
+        except Exception:
+            return []
+        out = []
+        try:
+            count = len(nodes)
+        except Exception:
+            return []
+        for i in range(count):
+            try:
+                out.append(nodes[i])
+            except Exception:
+                continue
+        return out
+
+    def _logical_size(self, canvas):
+        try:
+            w = float(canvas.width)
+            h = float(canvas.height)
+        except Exception:
+            w = 0.0
+            h = 0.0
+        if w <= 0 or h <= 0:
+            try:
+                w = float(canvas.clientWidth)
+                h = float(canvas.clientHeight)
+            except Exception:
+                w = 0.0
+                h = 0.0
+        if w <= 0 or h <= 0:
+            try:
+                w = _parse_px(canvas.style.width)
+                h = _parse_px(canvas.style.height)
+            except Exception:
+                w = 0.0
+                h = 0.0
+        return w, h
+
+    def _stored_original(self, canvas):
+        for entry in self._originals:
+            if entry[0] is canvas:
+                return entry
+        return None
+
+    def apply(self):
+        if not self.is_fullscreen():
+            self.restore()
+            return self
+        try:
+            fw = float(self.iframe.clientWidth)
+            fh = float(self.iframe.clientHeight)
+        except Exception:
+            fw = 0.0
+            fh = 0.0
+        if fw <= 0 or fh <= 0:
+            try:
+                rect = self.iframe.getBoundingClientRect()
+                fw = float(rect.width)
+                fh = float(rect.height)
+            except Exception:
+                return self
+        if fw <= 0 or fh <= 0:
+            return self
+        doc = self._child_document()
+        if doc is None:
+            return self
+        for canvas in self._find_canvases(doc):
+            lw, lh = self._logical_size(canvas)
+            if lw <= 0 or lh <= 0:
+                continue
+            scale = min(fw / lw, fh / lh)
+            if scale <= 0:
+                continue
+            tw = int(lw * scale)
+            th = int(lh * scale)
+            if self._stored_original(canvas) is None:
+                try:
+                    ow = str(canvas.style.width)
+                except Exception:
+                    ow = ""
+                try:
+                    oh = str(canvas.style.height)
+                except Exception:
+                    oh = ""
+                self._originals.append([canvas, ow, oh])
+            try:
+                cw = _parse_px(canvas.style.width)
+                ch = _parse_px(canvas.style.height)
+            except Exception:
+                cw = 0.0
+                ch = 0.0
+            if abs(cw - tw) > 1 or abs(ch - th) > 1:
+                try:
+                    canvas.style.width = str(tw) + "px"
+                    canvas.style.height = str(th) + "px"
+                except Exception:
+                    continue
+        try:
+            wrapper = doc.querySelector("#scs-app-wrapper")
+            if wrapper is not None:
+                wrapper.style.width = "100%"
+                wrapper.style.height = "100%"
+        except Exception:
+            pass
+        return self
+
+    def restore(self):
+        for entry in list(self._originals):
+            canvas = entry[0]
+            ow = entry[1]
+            oh = entry[2]
+            try:
+                canvas.style.width = ow
+                canvas.style.height = oh
+            except Exception:
+                continue
+        self._originals = []
+        return self
+
+    def attach_to_new_document(self):
+        if self._observer is not None:
+            try:
+                self._observer.disconnect()
+            except Exception:
+                pass
+            self._observer = None
+        if self._child_window is not None:
+            try:
+                self._child_window.removeEventListener("resize", self._on_child_resize)
+            except Exception:
+                pass
+            self._child_window = None
+        doc = self._child_document()
+        self._child_doc = doc
+        if doc is None:
+            return self
+        try:
+            self._child_window = self.iframe.contentWindow
+        except Exception:
+            self._child_window = None
+        if self._child_window is not None:
+            try:
+                self._child_window.addEventListener("resize", self._on_child_resize)
+            except Exception:
+                pass
+        try:
+            observer_cls = _WINDOW.MutationObserver
+        except Exception:
+            observer_cls = None
+        if observer_cls is not None:
+            try:
+                self._observer = observer_cls.new(self._on_mutations)
+                target = None
+                try:
+                    target = doc.body
+                except Exception:
+                    target = None
+                if target is None:
+                    try:
+                        target = doc.documentElement
+                    except Exception:
+                        target = None
+                if target is not None:
+                    self._observer.observe(target, {"childList": True, "subtree": True, "attributes": True, "attributeFilter": ["style"]})
+            except Exception:
+                self._observer = None
+        if self.is_fullscreen():
+            self.apply()
+        return self
+
+    def _on_fullscreen_change(self, event):
+        if self.is_fullscreen():
+            self.attach_to_new_document()
+            self.apply()
+        else:
+            self.restore()
+
+    def _on_child_resize(self, event):
+        if self.is_fullscreen():
+            self.apply()
+
+    def _on_mutations(self, mutations, observer):
+        if self.is_fullscreen():
+            self.apply()
+
+    def destroy(self):
+        try:
+            _DOCUMENT.unbind("fullscreenchange", self._on_fullscreen_change)
+        except Exception:
+            pass
+        if self._observer is not None:
+            try:
+                self._observer.disconnect()
+            except Exception:
+                pass
+            self._observer = None
+        if self._child_window is not None:
+            try:
+                self._child_window.removeEventListener("resize", self._on_child_resize)
+            except Exception:
+                pass
+            self._child_window = None
+        self.restore()
+        return self
+
+
 class AppFrame(Widget):
     """Single iframe that hosts one loaded app at a time.
 
     The iframe is same origin SCS content, so load is a real DOM event.
-    No polling, no timeout. Fullscreen acts on the wrapper, not on the
-    shell, so the loaded app fills the screen by itself.
+    No polling, no timeout. Fullscreen delegates to the child module's
+    own wrapper (see request_module_fullscreen), so the child's own
+    fullscreen handler runs and scales its canvas. Fullscreening this
+    wrapper instead would never fire the child's handler, so the child
+    would stay at its runApp size centered in black bars.
     """
 
     def __init__(self, container=None):
@@ -746,11 +1016,91 @@ class AppFrame(Widget):
         self._current_app_id = None
         self._current_url = None
         self._child_suppressor = None
+        self._canvas_scaler = ChildCanvasScaler(self.iframe, lambda: self.element)
         self.iframe.bind("load", self._on_load)
 
     @property
     def fullscreen_target(self):
         return self.element
+
+    def child_document(self):
+        try:
+            doc = self.iframe.contentDocument
+            if doc is not None:
+                return doc
+        except Exception:
+            pass
+        try:
+            return self.iframe.contentWindow.document
+        except Exception:
+            return None
+
+    def child_wrapper(self):
+        doc = self.child_document()
+        if doc is None:
+            return None
+        try:
+            return doc.querySelector("#scs-app-wrapper")
+        except Exception:
+            return None
+
+    def request_module_fullscreen(self):
+        # Delegate to the child SCS wrapper, not to this AppFrame wrapper.
+        # The child's entrypoint binds fullscreenchange on its own document
+        # and, when its wrapper is the fullscreen element, scales its canvas
+        # CSS to fit the wrapper while keeping logical size at runApp size,
+        # so mouse mapping stays in runApp coordinates. Requesting fullscreen
+        # on the AppFrame wrapper never fires the child's handler, so the
+        # child stays at runApp size in black bars. Fallback to the AppFrame
+        # wrapper only when the child wrapper is unavailable (non SCS module
+        # or iframe not yet loaded), and then the ChildCanvasScaler below
+        # scales the canvas as a fallback.
+        wrapper = self.child_wrapper()
+        if wrapper is not None:
+            try:
+                wrapper.requestFullscreen()
+                return True
+            except Exception:
+                pass
+        try:
+            self.element.requestFullscreen()
+            return True
+        except Exception:
+            return False
+
+    def exit_module_fullscreen(self):
+        if self.is_module_fullscreen():
+            try:
+                _DOCUMENT.exitFullscreen()
+            except Exception:
+                pass
+        return self
+
+    def is_module_fullscreen(self):
+        # Child wrapper fullscreen shows as the iframe in the top document
+        # and as the wrapper in the child document. AppFrame fallback shows
+        # as the AppFrame wrapper in the top document. Either counts.
+        try:
+            top_fs = _DOCUMENT.fullscreenElement
+        except Exception:
+            top_fs = None
+        if top_fs is self.element or top_fs is self.iframe:
+            return True
+        try:
+            child_doc = self.child_document()
+            if child_doc is not None:
+                child_fs = child_doc.fullscreenElement
+                if child_fs is not None:
+                    try:
+                        if child_fs is self.child_wrapper():
+                            return True
+                    except Exception:
+                        pass
+                    # Any fullscreen element inside the child means the module is fullscreen.
+                    return True
+        except Exception:
+            pass
+        return False
 
     @property
     def current_app_id(self):
@@ -822,9 +1172,21 @@ class AppFrame(Widget):
             self.emit("child-fullscreen-suppression-unavailable", self._current_app_id)
         return self
 
+    def destroy(self):
+        if getattr(self, "_child_suppressor", None) is not None:
+            self._child_suppressor.destroy()
+            self._child_suppressor = None
+        if getattr(self, "_canvas_scaler", None) is not None:
+            self._canvas_scaler.destroy()
+        return self
+
     def _on_load(self, event):
         self.loading.classList.add("is-hidden")
         self.suppress_child_fullscreen()
+        try:
+            self._canvas_scaler.attach_to_new_document()
+        except Exception:
+            pass
         self.emit("loaded", self._current_app_id, self._current_url)
 
 
@@ -836,12 +1198,15 @@ class FullscreenController(EventEmitter):
     button act on the currently loaded app after a menu switch.
     """
 
-    def __init__(self, target_resolver, button=None):
+    def __init__(self, target_resolver, button=None, request_callback=None, exit_callback=None, is_fullscreen_callback=None):
         EventEmitter.__init__(self)
         if callable(target_resolver):
             self._resolver = target_resolver
         else:
             self._resolver = lambda: target_resolver
+        self._request_callback = request_callback
+        self._exit_callback = exit_callback
+        self._is_fullscreen_callback = is_fullscreen_callback
         self.button = button
         if button is not None:
             button.on("click", self._on_button_click)
@@ -854,22 +1219,35 @@ class FullscreenController(EventEmitter):
         return target
 
     def is_supported(self):
+        if self._request_callback is not None:
+            return _DOCUMENT.fullscreenEnabled is not False
         target = self.resolve_target()
         return hasattr(target, "requestFullscreen") and _DOCUMENT.fullscreenEnabled is not False
 
     def is_fullscreen(self):
+        if self._is_fullscreen_callback is not None:
+            try:
+                return bool(self._is_fullscreen_callback())
+            except Exception:
+                return False
         return _DOCUMENT.fullscreenElement is not None
 
     def request(self):
         if not self.is_supported():
             raise RuntimeError("Fullscreen API is not supported for this target")
+        if self._request_callback is not None:
+            self._request_callback()
+            return self
         target = self.resolve_target()
         target.requestFullscreen()
         return self
 
     def exit(self):
         if self.is_fullscreen():
-            _DOCUMENT.exitFullscreen()
+            if self._exit_callback is not None:
+                self._exit_callback()
+            else:
+                _DOCUMENT.exitFullscreen()
         return self
 
     def toggle(self):
