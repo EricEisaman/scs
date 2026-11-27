@@ -1,7 +1,7 @@
 # apps/home.py
 # SCS home shell. Full viewport width and height.
 # Run as: ?app=home
-# Optional initial app override: ?app=home&initial_app=grapher
+# Optional module override: ?app=home&module=grapher
 # The shell is DOM plus one iframe. The SCS canvas stays behind the shell
 # and only carries the theme background. Each child app runs in its own
 # SCS runtime inside the iframe, so child state never collides with home.
@@ -85,6 +85,7 @@ from extensions.widgets import (
     FullscreenController,
     IconButton,
     StatusBar,
+    ScsFullscreenSuppressor,
 )
 
 # Document comes from the one window object, never from a second import.
@@ -155,6 +156,10 @@ class HomeView:
         self.shell.appendChild(self.app_frame.element)
         self.shell.appendChild(self.status.element)
         DOCUMENT.body.appendChild(self.shell)
+        # Hide the SCS runtime button for the home canvas. Home keeps only
+        # the top bar button. The suppressor excludes the shell, so home's
+        # own button is never hidden.
+        self.scs_suppressor = ScsFullscreenSuppressor(DOCUMENT, exclude_root=self.shell)
         # Fullscreen target is resolved at click time from the app frame,
         # so it always acts on the currently loaded app.
         self.fullscreen = FullscreenController(
@@ -173,6 +178,8 @@ class HomeView:
         return self
 
     def destroy(self):
+        if getattr(self, 'scs_suppressor', None) is not None:
+            self.scs_suppressor.destroy()
         self.fullscreen.destroy()
         self.hamburger.destroy()
         if self.shell.parentNode is not None:
@@ -217,24 +224,24 @@ class HomeController:
             url = url + "&renderer=" + renderer
         return url
 
-    def _initial_app_from_url(self):
+    def _module_from_url(self):
         params = self._params()
-        wanted = params.get("initial_app")
+        wanted = params.get("module")
         if wanted is None or wanted == "":
             return self.model.default_app
         if wanted not in self.model.by_id:
-            raise ValueError("initial_app %r is not in APPS" % wanted)
+            raise ValueError("module %r is not in APPS" % wanted)
         return wanted
 
     def sync_from_url(self):
-        wanted = self._initial_app_from_url()
+        wanted = self._module_from_url()
         if wanted != self.model.current_app_id:
             self.model.current_app_id = wanted
         return self
 
     def sync_url_to_current(self):
         params = self._params()
-        params.set("initial_app", self.model.current_app_id)
+        params.set("module", self.model.current_app_id)
         query = "?" + params.toString()
         SCS_WINDOW.history.replaceState(None, "", self._base_path() + query)
         return self

@@ -25,6 +25,8 @@ __all__ = [
     "TopBar",
     "AppFrame",
     "FullscreenController",
+    "ScsFullscreenSuppressor",
+    "hide_scs_fullscreen_buttons",
     "Dialog",
     "InfoDialog",
     "EntryDialog",
@@ -49,8 +51,8 @@ _DOCUMENT = document
 # ---------------------------------------------------------------------------
 
 WIDGETS_CSS = """
-.widgets-shell{position:fixed;inset:0;width:100vw;height:100vh;width:100dvh;height:100dvh;display:flex;flex-direction:column;overflow:hidden;background:var(--widgets-bg);color:var(--widgets-fg);font-family:var(--widgets-font);z-index:10}
-.widgets-topbar{flex:0 0 48px;height:48px;display:flex;align-items:center;gap:12px;padding:0 12px;background:var(--widgets-bar-bg);color:var(--widgets-bar-fg);border-bottom:1px solid var(--widgets-border);box-sizing:border-box}
+.widgets-shell{position:fixed;inset:0;left:0;top:0;right:0;bottom:0;width:100vw;width:100dvw;height:100vh;height:100dvh;max-width:100vw;max-width:100dvw;display:flex;flex-direction:column;overflow:hidden;background:var(--widgets-bg);color:var(--widgets-fg);font-family:var(--widgets-font);z-index:10;box-sizing:border-box}
+.widgets-topbar{flex:0 0 48px;height:48px;width:100%;min-width:0;display:flex;align-items:center;gap:12px;padding:0 12px;background:var(--widgets-bar-bg);color:var(--widgets-bar-fg);border-bottom:1px solid var(--widgets-border);box-sizing:border-box}
 .widgets-topbar-left{display:flex;align-items:center;gap:8px;min-width:48px}
 .widgets-topbar-center{flex:1;display:flex;align-items:center;min-width:0}
 .widgets-topbar-title{font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -72,12 +74,14 @@ WIDGETS_CSS = """
 .widgets-menu-item-desc{font-size:12px;opacity:0.75;font-weight:400}
 .widgets-menu-submenu{margin:4px 0 4px 12px;padding-left:8px;border-left:1px solid var(--widgets-border);display:none}
 .widgets-menu-submenu.is-open{display:block}
-.widgets-app-frame{flex:1;min-height:0;position:relative;background:var(--widgets-frame-bg);overflow:hidden}
-.widgets-app-frame iframe{width:100%;height:100%;border:0;display:block;background:var(--widgets-frame-bg)}
+.widgets-app-frame{flex:1 1 auto;min-height:0;min-width:0;width:100%;position:relative;background:var(--widgets-frame-bg);overflow:hidden}
+.widgets-app-frame iframe{width:100%;height:100%;min-width:0;min-height:0;border:0;display:block;background:var(--widgets-frame-bg)}
 .widgets-app-loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:var(--widgets-frame-bg);color:var(--widgets-fg);font-size:14px;pointer-events:none}
 .widgets-app-loading.is-hidden{display:none}
-.widgets-statusbar{flex:0 0 28px;height:28px;display:flex;align-items:center;padding:0 12px;font-size:12px;background:var(--widgets-bar-bg);color:var(--widgets-bar-fg);border-top:1px solid var(--widgets-border);box-sizing:border-box;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.widgets-statusbar{flex:0 0 28px;height:28px;width:100%;min-width:0;display:flex;align-items:center;padding:0 12px;font-size:12px;background:var(--widgets-bar-bg);color:var(--widgets-bar-fg);border-top:1px solid var(--widgets-border);box-sizing:border-box;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .widgets-statusbar.is-error{color:var(--widgets-error)}
+/* SCS runtime fullscreen button: the runtime creates its own button for the SCS canvas. Home keeps only its top bar button, so hide any id or class with fullscreen in this document. Home's own button has no fullscreen in id or class, only in aria-label, so this rule leaves it alone. The JS suppressor below covers glyph only buttons and iframe documents. */
+[id*="fullscreen"],[class*="fullscreen"]{display:none !important}
 .widgets-dialog-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:100}
 .widgets-dialog{position:fixed;min-width:280px;max-width:min(92vw,480px);background:var(--widgets-panel-bg);color:var(--widgets-panel-fg);border:1px solid var(--widgets-border);border-radius:var(--widgets-radius);box-shadow:0 16px 48px rgba(0,0,0,0.4);z-index:101}
 .widgets-dialog-title{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border-bottom:1px solid var(--widgets-border);cursor:move;font-weight:600}
@@ -547,6 +551,178 @@ class TopBar(Widget):
         return self
 
 
+# ---------------------------------------------------------------------------
+# SCS fullscreen button suppression
+# ---------------------------------------------------------------------------
+# The SCS runtime creates its own fullscreen button for the SCS canvas,
+# fixed at the bottom right. Home keeps only its top bar button, so the
+# runtime button must be hidden, both in the top document and inside the
+# loaded module iframe, which is same origin. This is done with a sweep
+# plus a MutationObserver, so buttons created after home starts are also
+# hidden. No polling, no timeouts. Home's own button is inside the shell,
+# so it is excluded by exclude_root and never hidden.
+
+_SCS_FULLSCREEN_GLYPHS = ("\u26f6", "\u2922", "\u26f6\ufe0f", "\u2197")
+
+
+def _suppressor_attr(element, name):
+    try:
+        value = element.getAttribute(name)
+        if value is not None:
+            return str(value)
+    except Exception:
+        pass
+    try:
+        attrs = element.attrs
+        if attrs is not None and name in attrs:
+            return str(attrs[name])
+    except Exception:
+        pass
+    try:
+        value = getattr(element, name, None)
+        if value is not None:
+            return str(value)
+    except Exception:
+        pass
+    return ""
+
+
+def _suppressor_text(element):
+    try:
+        value = element.textContent
+        if value is not None:
+            return str(value).strip()
+    except Exception:
+        pass
+    try:
+        return str(element.text).strip()
+    except Exception:
+        return ""
+
+
+def _is_inside(element, root):
+    if root is None:
+        return False
+    node = element
+    while node is not None:
+        if node is root:
+            return True
+        try:
+            node = node.parent
+        except Exception:
+            try:
+                node = node.parentNode
+            except Exception:
+                return False
+    return False
+
+
+def _is_scs_fullscreen_button(element, exclude_root):
+    if element is None or exclude_root is not None and _is_inside(element, exclude_root):
+        return False
+    try:
+        tag = str(element.tagName).lower()
+    except Exception:
+        tag = ""
+    if tag in ("script", "style", "link", "meta", "title", "head", "html", "body"):
+        return False
+    hay = " ".join([
+        _suppressor_attr(element, "id"),
+        _suppressor_attr(element, "class"),
+        _suppressor_attr(element, "title"),
+        _suppressor_attr(element, "aria-label"),
+    ]).lower()
+    if "fullscreen" in hay:
+        return True
+    text = _suppressor_text(element)
+    if text in _SCS_FULLSCREEN_GLYPHS:
+        if tag in ("button", "div", "span", "a"):
+            return True
+    return False
+
+
+def hide_scs_fullscreen_buttons(doc, exclude_root=None):
+    """Hide SCS runtime fullscreen buttons in doc. Returns hidden count."""
+    if doc is None:
+        return 0
+    try:
+        nodes = doc.querySelectorAll("*")
+    except Exception:
+        try:
+            nodes = doc.select("*")
+        except Exception:
+            return 0
+    hidden = 0
+    try:
+        count = len(nodes)
+    except Exception:
+        count = 0
+    for i in range(count):
+        try:
+            element = nodes[i]
+        except Exception:
+            continue
+        if _is_scs_fullscreen_button(element, exclude_root):
+            try:
+                element.style.display = "none"
+                try:
+                    element.setAttribute("data-widgets-hidden-scs-fullscreen", "true")
+                except Exception:
+                    pass
+                hidden += 1
+            except Exception:
+                continue
+    return hidden
+
+
+class ScsFullscreenSuppressor:
+    """Sweep plus MutationObserver that hides SCS runtime fullscreen buttons."""
+
+    def __init__(self, doc, exclude_root=None):
+        if doc is None:
+            raise ValueError("ScsFullscreenSuppressor needs a document")
+        self.doc = doc
+        self.exclude_root = exclude_root
+        self._observer = None
+        self.sweep()
+        try:
+            observer_cls = _WINDOW.MutationObserver
+        except Exception:
+            observer_cls = None
+        if observer_cls is not None:
+            try:
+                self._observer = observer_cls.new(self._on_mutations)
+                target = None
+                try:
+                    target = doc.body
+                except Exception:
+                    target = None
+                if target is None:
+                    try:
+                        target = doc.documentElement
+                    except Exception:
+                        target = None
+                if target is not None:
+                    self._observer.observe(target, {"childList": True, "subtree": True, "attributes": True, "attributeFilter": ["id", "class", "title", "aria-label"]})
+            except Exception:
+                self._observer = None
+
+    def sweep(self):
+        return hide_scs_fullscreen_buttons(self.doc, self.exclude_root)
+
+    def _on_mutations(self, mutations, observer):
+        self.sweep()
+
+    def destroy(self):
+        if self._observer is not None:
+            try:
+                self._observer.disconnect()
+            except Exception:
+                pass
+            self._observer = None
+        return self
+
+
 class AppFrame(Widget):
     """Single iframe that hosts one loaded app at a time.
 
@@ -569,6 +745,7 @@ class AppFrame(Widget):
             container <= self.element
         self._current_app_id = None
         self._current_url = None
+        self._child_suppressor = None
         self.iframe.bind("load", self._on_load)
 
     @property
@@ -605,6 +782,9 @@ class AppFrame(Widget):
         return self
 
     def clear(self):
+        if self._child_suppressor is not None:
+            self._child_suppressor.destroy()
+            self._child_suppressor = None
         self._current_app_id = None
         self._current_url = None
         if "src" in self.iframe.attrs:
@@ -614,8 +794,37 @@ class AppFrame(Widget):
         self.emit("cleared")
         return self
 
+    def suppress_child_fullscreen(self):
+        """Hide the child SCS runtime button inside the iframe.
+
+        Same origin only. If the iframe document cannot be read, emit
+        child-fullscreen-suppression-unavailable and leave the child alone,
+        never crash home.
+        """
+        if self._child_suppressor is not None:
+            self._child_suppressor.destroy()
+            self._child_suppressor = None
+        try:
+            child_doc = self.iframe.contentDocument
+            if child_doc is None:
+                try:
+                    child_doc = self.iframe.contentWindow.document
+                except Exception:
+                    child_doc = None
+        except Exception:
+            child_doc = None
+        if child_doc is None:
+            self.emit("child-fullscreen-suppression-unavailable", self._current_app_id)
+            return self
+        try:
+            self._child_suppressor = ScsFullscreenSuppressor(child_doc, exclude_root=None)
+        except Exception:
+            self.emit("child-fullscreen-suppression-unavailable", self._current_app_id)
+        return self
+
     def _on_load(self, event):
         self.loading.classList.add("is-hidden")
+        self.suppress_child_fullscreen()
         self.emit("loaded", self._current_app_id, self._current_url)
 
 
