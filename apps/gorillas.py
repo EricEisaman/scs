@@ -1,3 +1,4 @@
+
 from scs import *
 import math
 import random
@@ -17,8 +18,11 @@ WINDOW_OFF = rgb(64,64,74)
 GORILLA_COLOR = rgb(255,165,90)
 SUN_COLOR = rgb(255,255,0)
 
-GRAVITY = 0.185
+GRAVITY = 0.185  # per-step gravity for Earth 9.8 (9.8 * 0.0189)
 BLAST_R = 36
+# Velocity: 1 unit = VELOCITY_SCALE px/step. Range R = V^2 * SCALE^2 * sin(2a) / g
+# SCALE=0.12 -> V=100 @45deg, g=9.8 -> ~800px, V=50 -> ~200px
+VELOCITY_SCALE = 0.12
 
 # ---- 8bit audio integration - built ON TOP of proc_audio.py ----
 try:
@@ -40,7 +44,6 @@ def play_sound(app, name, on_complete=None):
     except:
         pass
     try:
-        # resume player ctx if present
         if hasattr(app, 'player') and app.player:
             try:
                 app.player.resume()
@@ -55,6 +58,25 @@ def play_sound(app, name, on_complete=None):
 
 def Scl(n):
     return n * (HEIGHT / 350.0)
+
+# --- NEW draw_arc adaptation ---
+# SCS draw_arc now does: moveTo(cx,cy) + ellipse(start, start+sweep) + closePath
+# That draws a pie wedge: stroking it adds 2 spoke lines to the center.
+# For gorilla limbs / sun smile we want ONLY the curve, no spokes.
+# So draw stroked arcs as a polyline of small line segments.
+# Same signature semantics as before: startAngle, sweepAngle (not endAngle).
+def drawArcOutline(cx, cy, w, h, startAngle, sweepAngle, color, width):
+    steps = max(6, int(abs(sweepAngle) / 5))
+    prevX = None
+    prevY = None
+    for i in range(steps + 1):
+        a = math.radians(startAngle + sweepAngle * i / steps)
+        px = cx + math.cos(a) * w / 2
+        py = cy + math.sin(a) * h / 2
+        if prevX is not None:
+            drawLine(prevX, prevY, px, py, fill=color, lineWidth=width)
+        prevX = px
+        prevY = py
 
 class Hole:
     def __init__(self,x,y,r): self.x=x; self.y=y; self.r=r
@@ -190,32 +212,36 @@ def drawGorilla(x,y,arm='down',facing=1):
     drawLine(x - Scl(3), y + Scl(7), x + Scl(2), y + Scl(7), fill=GORILLA_COLOR, lineWidth=max(1,int(Scl(1))))
     drawRect(x - Scl(8), y + Scl(8), Scl(14.9), Scl(6), fill=GORILLA_COLOR)
     drawRect(x - Scl(6), y + Scl(15), Scl(10.9), Scl(5), fill=GORILLA_COLOR)
+    # Feet - same start/sweep as before, now outline-only (no pie spokes)
     for i in range(5):
-        drawArc(x + Scl(i), y + Scl(25), Scl(20), Scl(20), 135, 67, fill=None, border=GORILLA_COLOR, borderWidth=int(Scl(1.8)))
-        drawArc(x + Scl(-6) + Scl(i-0.1), y + Scl(25), Scl(20), Scl(20), 337, 68, fill=None, border=GORILLA_COLOR, borderWidth=int(Scl(1.8)))
-    drawArc(x - Scl(4.9), y + Scl(10), Scl(9.8), Scl(9.8), 270, 90, fill=None, border=rgb(0,0,0), borderWidth=1)
-    drawArc(x + Scl(4.9), y + Scl(10), Scl(9.8), Scl(9.8), 180, 90, fill=None, border=rgb(0,0,0), borderWidth=1)
+        drawArcOutline(x + Scl(i), y + Scl(25), Scl(20), Scl(20), 135, 67, GORILLA_COLOR, int(Scl(1.8)))
+        drawArcOutline(x + Scl(-6) + Scl(i-0.1), y + Scl(25), Scl(20), Scl(20), 337, 68, GORILLA_COLOR, int(Scl(1.8)))
+    drawArcOutline(x - Scl(4.9), y + Scl(10), Scl(9.8), Scl(9.8), 270, 90, rgb(0,0,0), 1)
+    drawArcOutline(x + Scl(4.9), y + Scl(10), Scl(9.8), Scl(9.8), 180, 90, rgb(0,0,0), 1)
     if arm=='down':
         for i in range(-5,0):
-            drawArc(x + Scl(i-0.1), y + Scl(14), Scl(18), Scl(18), 135, 90, fill=None, border=GORILLA_COLOR, borderWidth=int(Scl(2)))
-            drawArc(x + Scl(4.9)+ Scl(i), y + Scl(14), Scl(18), Scl(18), 315, 90, fill=None, border=GORILLA_COLOR, borderWidth=int(Scl(2)))
+            drawArcOutline(x + Scl(i-0.1), y + Scl(14), Scl(18), Scl(18), 135, 90, GORILLA_COLOR, int(Scl(2)))
+            drawArcOutline(x + Scl(4.9)+ Scl(i), y + Scl(14), Scl(18), Scl(18), 315, 90, GORILLA_COLOR, int(Scl(2)))
     elif arm=='rightUp':
         for i in range(-5,0):
-            drawArc(x + Scl(i-0.1), y + Scl(14), Scl(18), Scl(18), 135, 90, fill=None, border=GORILLA_COLOR, borderWidth=int(Scl(2)))
-            drawArc(x + Scl(4.9)+ Scl(i), y + Scl(4), Scl(18), Scl(18), 315, 90, fill=None, border=GORILLA_COLOR, borderWidth=int(Scl(2)))
+            drawArcOutline(x + Scl(i-0.1), y + Scl(14), Scl(18), Scl(18), 135, 90, GORILLA_COLOR, int(Scl(2)))
+            drawArcOutline(x + Scl(4.9)+ Scl(i), y + Scl(4), Scl(18), Scl(18), 315, 90, GORILLA_COLOR, int(Scl(2)))
     elif arm=='leftUp':
         for i in range(-5,0):
-            drawArc(x + Scl(i-0.1), y + Scl(4), Scl(18), Scl(18), 135, 90, fill=None, border=GORILLA_COLOR, borderWidth=int(Scl(2)))
-            drawArc(x + Scl(4.9)+ Scl(i), y + Scl(14), Scl(18), Scl(18), 315, 90, fill=None, border=GORILLA_COLOR, borderWidth=int(Scl(2)))
+            drawArcOutline(x + Scl(i-0.1), y + Scl(4), Scl(18), Scl(18), 135, 90, GORILLA_COLOR, int(Scl(2)))
+            drawArcOutline(x + Scl(4.9)+ Scl(i), y + Scl(14), Scl(18), Scl(18), 315, 90, GORILLA_COLOR, int(Scl(2)))
     elif arm=='victory':
         for i in range(-5,0):
-            drawArc(x + Scl(i-0.1), y + Scl(4), Scl(18), Scl(18), 135, 90, fill=None, border=GORILLA_COLOR, borderWidth=int(Scl(2)))
-            drawArc(x + Scl(4.9)+ Scl(i), y + Scl(4), Scl(18), Scl(18), 315, 90, fill=None, border=GORILLA_COLOR, borderWidth=int(Scl(2)))
+            drawArcOutline(x + Scl(i-0.1), y + Scl(4), Scl(18), Scl(18), 135, 90, GORILLA_COLOR, int(Scl(2)))
+            drawArcOutline(x + Scl(4.9)+ Scl(i), y + Scl(4), Scl(18), Scl(18), 315, 90, GORILLA_COLOR, int(Scl(2)))
 
 def drawBanana(x,y,rot):
+    # x,y is CENTER (same point trail stores) - draw rect centered on it
+    # Before: drawRect(x,y,...) treated x,y as top-left, so banana sat
+    # down-right of trail and trail looked like it came from top-left corner.
     w=Scl(6); h=Scl(3)
-    if rot%2==0: drawRect(x, y, w, h, fill=rgb(255,255,0), border=rgb(0,0,0), borderWidth=1, roundness=1)
-    else: drawRect(x, y, h, w, fill=rgb(255,255,0), border=rgb(0,0,0), borderWidth=1, roundness=1)
+    if rot%2==0: drawRect(x - w/2, y - h/2, w, h, fill=rgb(255,255,0), border=rgb(0,0,0), borderWidth=1, roundness=1)
+    else: drawRect(x - h/2, y - w/2, h, w, fill=rgb(255,255,0), border=rgb(0,0,0), borderWidth=1, roundness=1)
 
 def drawSun(x,y,shocked=False):
     drawCircle(x, y, Scl(12), fill=SUN_COLOR, border=SUN_COLOR)
@@ -231,14 +257,15 @@ def drawSun(x,y,shocked=False):
         drawCircle(x, y + Scl(5), Scl(2.9), fill=rgb(0,0,0), border=rgb(0,0,0))
         drawCircle(x, y + Scl(5), Scl(1.2), fill=BACK_COLOR, border=BACK_COLOR)
     else:
-        drawArc(x, y, Scl(16), Scl(16), 20, 140, fill=None, border=rgb(0,0,0), borderWidth=1)
+        # Smile: start 20, sweep 140 -> arc through bottom (90deg), no chord / no spokes
+        drawArcOutline(x, y, Scl(16), Scl(16), 20, 140, rgb(0,0,0), 1)
     drawCircle(x - Scl(3), y - Scl(2), Scl(1), fill=rgb(0,0,0), border=rgb(0,0,0))
     drawCircle(x + Scl(3), y - Scl(2), Scl(1), fill=rgb(0,0,0), border=rgb(0,0,0))
 
 def isReturnKey(key):
     if key is None: return False
     k=str(key).lower()
-    return k in ('enter','return','\r','\n','\x0d') or key in (chr(13),chr(10))
+    return k in ('enter','return','\\r','\\n','\\x0d') or key in (chr(13),chr(10))
 
 def onAppStart(app):
     app.width=WIDTH; app.height=HEIGHT; app.stepsPerSecond=60
@@ -252,7 +279,7 @@ def onAppStart(app):
     app.playerNames=["Player 1","Player 2"]
     app.numGames=3; app.gravity=GRAVITY
     app.J=1; app.currentPlayer=0
-    app.angle=[45,135]; app.power=[18,18]
+    app.angle=[45,135]; app.power=[80,80]
     app.awaiting='angle'; app.victoryTimer=0; app.winner=None
 
     # --- Audio engine init (does not touch graphics) ---
@@ -286,7 +313,7 @@ def fireBanana(app):
         sx=gx - Scl(10)
         sy=gy - Scl(6)
     ang=math.radians(app.angle[idx] if idx==0 else 180 - app.angle[idx]); p=app.power[idx]
-    vx=math.cos(ang)*p*0.38; vy=-math.sin(ang)*p*0.38
+    vx=math.cos(ang)*p*VELOCITY_SCALE; vy=-math.sin(ang)*p*VELOCITY_SCALE
     app.banana={'x':sx,'y':sy,'vx':vx,'vy':vy,'rot':0,'trail':[],'age':0}
     app.state='flying'
     # SOUND: throw MBo0L32A-L64CL16BL64A+ - ascending throw
@@ -322,7 +349,7 @@ def onStep(app):
         app.sunTimer-=1
         if app.sunTimer==0: app.sunShocked=False
     if app.state=='flying' and app.banana:
-        b=app.banana; b['vy']+=GRAVITY; b['x']+=b['vx']; b['y']+=b['vy']; b['rot']+=18; b['age']=b.get('age',0)+1; b['trail'].append((b['x'],b['y']))
+        b=app.banana; b['vy']+=app.gravity; b['x']+=b['vx']; b['y']+=b['vy']; b['rot']+=18; b['age']=b.get('age',0)+1; b['trail'].append((b['x'],b['y']))
         if len(b['trail'])>16: b['trail'].pop(0)
         x,y=b['x'],b['y']
         if x<-30 or x>WIDTH+30 or y>BOTTOM_LINE+30:
@@ -399,7 +426,7 @@ def onKeyPress(app, key):
                 except: app.numGames=3
                 app.inputStage=3; app.inputText=""
             elif app.inputStage==3:
-                try: g=float(app.inputText.strip()); app.gravity=g*0.018 if g>0 else GRAVITY
+                try: g=float(app.inputText.strip()); app.gravity=g*0.0189 if g>0 else GRAVITY
                 except: app.gravity=GRAVITY
                 app.scores=[0,0]; app.totalWins=[0,0,0]; app.J=1; startNewRound(app)
                 # SOUND: intro fanfare after setup
@@ -439,7 +466,7 @@ def onKeyPress(app, key):
                 if val>360: app.inputText=""; return
                 app.angle[app.currentPlayer]=val; app.inputText=""; app.awaiting='velocity'
             else:
-                app.power[app.currentPlayer]=max(3,min(32,val))
+                app.power[app.currentPlayer]=max(1,min(200,val))
                 fireBanana(app); app.inputText=""; app.awaiting='angle'
             return
         if key=='Backspace': app.inputText=app.inputText[:-1]; return
@@ -469,7 +496,7 @@ def redrawAll(app):
     if app.state=='intro':
         drawRect(0,0,WIDTH,HEIGHT,fill=BLACK_BG)
         a=app.sparkle
-        starLine="*    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *"
+        starLine="*    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *    *"
         drawLabel(starLine[a-1:a+105], WIDTH//2, 10, fill=rgb(255,255,0), size=13, align='center')
         drawLabel(starLine[5-a:5-a+105], WIDTH//2, HEIGHT-10, fill=rgb(255,255,0), size=13, align='center')
         for b in range(2,24):
@@ -509,12 +536,19 @@ def redrawAll(app):
         elif app.state=='dancing' and app.winner==i: arm='victory' if (app.victoryTimer//10)%2==0 else 'rightUp'
         drawGorilla(gx,gy,arm=arm,facing=1 if i==0 else -1)
     if app.banana:
-        for j,(tx,ty) in enumerate(app.banana['trail']): drawCircle(tx,ty,2.5,fill=rgb(255,230,30),opacity=40+j*3)
+        # Trail fade: lerp yellow -> sky (0,0,170) + shrink, no opacity/rgb 4-arg
+        _n = len(app.banana['trail'])
+        for j,(tx,ty) in enumerate(app.banana['trail']):
+            _f = (j+1)/max(1,_n)  # 0=oldest/faded, 1=newest/bright
+            _r = int(255*_f)
+            _g = int(230*_f)
+            _b = int(170 - 140*_f)
+            _rad = 1.0 + 1.5*_f
+            drawCircle(tx,ty,_rad,fill=rgb(_r,_g,_b))
         drawBanana(app.banana['x'],app.banana['y'],app.banana['rot'])
     if app.explosion:
         e=app.explosion; drawCircle(e['x'],e['y'],e['r'],fill=rgb(255,120,20)); drawCircle(e['x'],e['y'],e['r']*0.6,fill=rgb(255,220,100))
     for p in app.particles: drawCircle(p['x'],p['y'],p['r']*p['life'],fill=p['col'])
-    # HUD - fixed layout: names at top, angle/velocity BELOW names to avoid overlap
     if app.state in ('aiming','flying','exploding','dancing'):
         try:
             drawLabel(app.playerNames[0], 24, 20, fill=rgb(255,255,255), size=24, align='left', bold=True, font='Orbitron')
