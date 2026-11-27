@@ -267,6 +267,17 @@ def isReturnKey(key):
     k=str(key).lower()
     return k in ('enter','return','\\r','\\n','\\x0d') or key in (chr(13),chr(10))
 
+def isDeleteKey(key):
+    # Backspace AND Delete, in every form SCS/Brython can send:
+    # 'Backspace' / 'backspace' / 'Delete' / 'Del' / backspace-char / del-char
+    # Before: only exact 'Backspace' matched, so Delete and control-char forms did nothing.
+    if key is None: return False
+    if key in (chr(8), chr(127)): return True
+    k=str(key).lower()
+    if k in ('backspace','delete','del','back_space','back'): return True
+    if len(str(key))==1 and ord(str(key)) in (8,127): return True
+    return False
+
 def onAppStart(app):
     app.width=WIDTH; app.height=HEIGHT; app.stepsPerSecond=60
     app.buildings=[]; app.gorillaPos=[]; app.scores=[0,0]; app.totalWins=[0,0,0]
@@ -432,7 +443,7 @@ def onKeyPress(app, key):
                 # SOUND: intro fanfare after setup
                 play_sound(app, 'intro_fanfare_8x')
             return
-        if key=='Backspace': app.inputText=app.inputText[:-1]; return
+        if isDeleteKey(key): app.inputText=app.inputText[:-1]; return
         if key=='Escape': app.inputText=""; return
         if key==' ' or low=='space':
             if app.inputStage in (0,1) and len(app.inputText)<10: app.inputText+=' '
@@ -469,7 +480,7 @@ def onKeyPress(app, key):
                 app.power[app.currentPlayer]=max(1,min(200,val))
                 fireBanana(app); app.inputText=""; app.awaiting='angle'
             return
-        if key=='Backspace': app.inputText=app.inputText[:-1]; return
+        if isDeleteKey(key): app.inputText=app.inputText[:-1]; return
         if len(key)==1 and key in "0123456789.":
             if len(app.inputText)<7:
                 if key=="." and "." in app.inputText: pass
