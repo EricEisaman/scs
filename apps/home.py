@@ -43,6 +43,9 @@ APPS = [
     {"id": "pacman", "label": "Pac-Man",
      "description": "Pac-Man clone",
      "app": "pacman"},
+     {"id": "spatial_audio", "label": "Spatial Audio",
+     "description": "3D Spatial Audio",
+     "app": "spatial_audio"},
 ]
 
 THEME_CONFIG = {
