@@ -60,7 +60,7 @@ def _is_safe_app(name):
 
 _app = _app_param()
 if _app and _is_safe_app(_app):
-    _url = "/apps/" + _app + ".py"  # apps/ is at the repo root, same as sandbox.html
+    _url = "apps/" + _app + ".py"  # apps/ is at the repo root, same dir as sandbox.html
 
     def _on_complete(req):
         if req.status == 200:

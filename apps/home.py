@@ -156,10 +156,10 @@ class HomeView:
         self.app_frame = AppFrame()
         self.status = StatusBar("Ready")
         # Floating 96x96 image button, bottom right, above the status bar.
-        # Image is /scs_logo_512.png at the repo root.
+        # Image is scs_logo_512.png at the repo root, resolved via _base_dir.
         # Href is updated by the controller to sandbox.html?app=<current app>.
         self.sandbox_button = FloatingImageButton(
-            "/scs_logo_512.png",
+            "scs_logo_512.png",
             "Open source in sandbox.",
             href="#",
         )
@@ -246,8 +246,9 @@ class HomeController:
 
     def _base_dir(self):
         # Directory containing this page, with trailing slash.
-        # Used only for child app URLs, which load through this same page.
-        # Sandbox and logo are NOT here, they are at the repo root.
+        # This page lives at the repo root, so this is also the repo root:
+        # /scs/ on GitHub Pages, / on Netlify. Child URLs, sandbox.html,
+        # and scs_logo_512.png all resolve from here.
         path = SCS_WINDOW.location.pathname
         if path.endswith("/"):
             return path
@@ -258,19 +259,20 @@ class HomeController:
 
     def _sandbox_url(self, app_id):
         # sandbox.html lives at the repo root, same place as scs_logo_512.png.
-        # Leading slash, not _base_dir, so it stays at the repo root even
-        # if Home is served from a subpath.
+        # Repo root is _base_dir, the directory containing this page.
+        # On GitHub Pages that is /scs/, on Netlify it is /.
+        # A leading slash would point at the origin root and 404 on /scs/.
         entry = self.model.get(app_id)
         params = self._params()
         renderer = params.get("renderer")
-        url = "/sandbox.html?app=" + entry["app"]
+        url = self._base_dir() + "sandbox.html?app=" + entry["app"]
         if renderer:
             url = url + "&renderer=" + renderer
         return url
 
     def _logo_url(self):
-        # scs_logo_512.png is at the repo root.
-        return "/scs_logo_512.png"
+        # scs_logo_512.png is at the repo root, which is _base_dir.
+        return self._base_dir() + "scs_logo_512.png"
 
     def _sync_sandbox_button(self):
         # Href must follow the current app, so the button always opens
