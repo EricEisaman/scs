@@ -1,26 +1,100 @@
 <!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>SCS Sandbox</title>
-<style>
-body{margin:0;padding:10px;background:#0f1115;color:#e6e6e6;font-family:monospace;display:flex;flex-direction:column;align-items:center;}
-canvas:fullscreen{margin:auto !important;padding:0 !important;background:black;}
-:fullscreen canvas{margin:auto !important;}
-#sandbox-toolbar{display:flex;flex-direction:row;gap:10px;justify-content:center;align-items:center;margin:12px 0 10px 0;width:1050px;max-width:98vw;}
-#sandbox-toolbar button{flex:0 0 auto;padding:10px 22px;border-radius:6px;border:0;cursor:pointer;font-weight:600;font-size:14px;}
-#run-btn{background:#22c55e;color:white;} #stop-btn{background:#64748b;color:white;} #clear-log-btn{background:transparent;color:#94a3b8;border:1px solid #3a3f4b !important;}
-#code-input{width:1050px;max-width:98vw;height:400px;background:#1a1d24;color:#d6deeb;border:1px solid #3a3f4b;border-radius:6px;padding:12px;font-family:monospace;font-size:11px;}
-</style>
-<link rel="icon" href="favicon.ico">
-<script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython_stdlib.js"></script>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <title>SCS Sandbox</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 10px;
+            background: #0f1115;
+            color: #e6e6e6;
+            font-family: monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        canvas:fullscreen {
+            margin: auto !important;
+            padding: 0 !important;
+            background: black;
+        }
+
+        :fullscreen canvas {
+            margin: auto !important;
+        }
+
+        #sandbox-toolbar {
+            display: flex;
+            flex-direction: row;
+            gap: 10px;
+            justify-content: center;
+            align-items: center;
+            margin: 12px 0 10px 0;
+            width: 1050px;
+            max-width: 98vw;
+        }
+
+        #sandbox-toolbar button {
+            flex: 0 0 auto;
+            padding: 10px 22px;
+            border-radius: 6px;
+            border: 0;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        #run-btn {
+            background: #22c55e;
+            color: white;
+        }
+
+        #stop-btn {
+            background: #64748b;
+            color: white;
+        }
+
+        #clear-log-btn {
+            background: transparent;
+            color: #94a3b8;
+            border: 1px solid #3a3f4b !important;
+        }
+
+        #code-input {
+            width: 1050px;
+            max-width: 98vw;
+            height: 400px;
+            background: #1a1d24;
+            color: #d6deeb;
+            border: 1px solid #3a3f4b;
+            border-radius: 6px;
+            padding: 12px;
+            font-family: monospace;
+            font-size: 11px;
+        }
+    </style>
+    <link rel="icon" href="favicon.ico">
+    <script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/brython@3.11.3/brython_stdlib.js"></script>
 </head>
+
 <body onload="brython({debug:1, pythonpath:['.']})">
-<canvas id="canvas" width="400" height="400" tabindex="0"></canvas>
-<div id="sandbox-toolbar"><button id="run-btn">\u25b6 Run</button><button id="stop-btn">\u25a0 Stop</button><button id="clear-log-btn">Clear Log</button></div>
-<!-- Sandbox: just enter app code here. Paste CMU-style code, it auto-runs. -->
-<!-- With ?app=<name>, the source of apps/<name>.py is loaded into the editor and auto-runs. -->
-<textarea id="code-input" placeholder="Just enter app code here..."></textarea>
-<div id="log" style="margin-top:10px;background:#1a1d24;border:1px solid #3a3f4b;border-radius:6px;padding:10px;min-height:80px;white-space:pre-wrap;font-size:11px;max-height:300px;overflow:auto;color:#e6e6e6;width:1050px;max-width:98vw;"></div>
-<script type="text/python">
+    <canvas id="canvas" width="400" height="400" tabindex="0"></canvas>
+    <div id="sandbox-toolbar">
+        <button id="run-btn">▶ Run</button>
+        <button id="stop-btn">■ Stop</button>
+        <button id="clear-log-btn">Clear Log</button>
+    </div>
+    <!-- Sandbox: just enter app code here. Paste CMU-style code, it auto-runs. -->
+    <!-- With ?app=<name>, the source of apps/<name>.py is loaded into the editor and auto-runs. -->
+    <textarea id="code-input" placeholder="Just enter app code here..."></textarea>
+    <div id="log"
+        style="margin-top:10px;background:#1a1d24;border:1px solid #3a3f4b;border-radius:6px;padding:10px;min-height:80px;white-space:pre-wrap;font-size:11px;max-height:300px;overflow:auto;color:#e6e6e6;width:1050px;max-width:98vw;">
+    </div>
+    <script type="text/python">
 # Thin shell only. No loop, no events, no renderer, no shape drawing here.
 # All of that is baked into the package (scs_entrypoint.py).
 # Users just import from npm or load from CDN.
@@ -91,4 +165,6 @@ else:
         _log("Invalid app name: " + str(_app))
     ep.boot_sandbox()
 </script>
-</body></html>
+</body>
+
+</html>
